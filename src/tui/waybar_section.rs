@@ -3,15 +3,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct WaybarState {
@@ -86,7 +85,10 @@ impl WaybarState {
         let mut ed = match ConfigEditor::load() {
             Ok(e) => e,
             Err(e) => {
-                self.feedback = Some((FeedbackLevel::Err, format!("load: {}", e)));
+                self.feedback = Some((
+                    FeedbackLevel::Err,
+                    format!("Couldn't read the config: {}", e),
+                ));
                 return Action::None;
             }
         };
@@ -110,7 +112,7 @@ impl WaybarState {
                     format!("Saved to {}", ed.path().display()),
                 ));
             }
-            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
+            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("Not saved: {}", e))),
         }
         Action::None
     }
@@ -120,7 +122,7 @@ impl WaybarState {
             let field = self.field;
             *self = fresh;
             self.field = field;
-            self.feedback = Some((FeedbackLevel::Ok, "Reverted".to_string()));
+            self.feedback = Some((FeedbackLevel::Ok, "Put back the saved settings".to_string()));
         }
     }
 
@@ -200,165 +202,83 @@ impl WaybarState {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.waybar {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Waybar");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-    };
-
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &WaybarState) -> Vec<FormRowSpec> {
     let icon_value = |field: Field, value: &Option<String>| -> String {
         match state.editing.as_ref() {
             Some(e) if e.field == field => e.input.caret_string(),
             _ => value
                 .clone()
-                .unwrap_or_else(|| "(theme default)".to_string()),
+                .unwrap_or_else(|| "From the theme".to_string()),
         }
     };
-
-    let rows = vec![
+    vec![
         FormRowSpec::new(state.field == Field::Theme, "Icon theme", &state.icon_theme),
         FormRowSpec::new(
             state.field == Field::IconIdle,
-            "Override · idle",
+            "Idle icon",
             icon_value(Field::IconIdle, &state.icon_idle),
         ),
         FormRowSpec::new(
             state.field == Field::IconRecording,
-            "Override · recording",
+            "Recording icon",
             icon_value(Field::IconRecording, &state.icon_recording),
         ),
         FormRowSpec::new(
             state.field == Field::IconTranscribing,
-            "Override · transcribing",
+            "Transcribing icon",
             icon_value(Field::IconTranscribing, &state.icon_transcribing),
         ),
         FormRowSpec::new(
             state.field == Field::IconStopped,
-            "Override · stopped",
+            "Stopped icon",
             icon_value(Field::IconStopped, &state.icon_stopped),
         ),
-    ];
+    ]
+}
 
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.waybar else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state
         .feedback
         .as_ref()
         .map(|(lvl, msg)| (*lvl, msg.as_str()));
-
-    common::render_form_with_guidance(
-        f,
-        area,
-        "Waybar / Status",
-        state.dirty_since_load,
-        feedback_pair,
-        &rows,
-        guidance(state),
-    );
-}
-
-fn heading(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    common::render_form_with_guidance(f, area, app, feedback_pair, &rows(state), guidance(state));
 }
 
 fn guidance(state: &WaybarState) -> Vec<Line<'static>> {
+    let icon = |when: &str| {
+        vec![
+            Line::from(format!(
+                "The icon Waybar shows {}. Enter types any character or emoji.",
+                when
+            )),
+            Line::from(Span::styled(
+                format!("Leave it empty to use the {} theme's.", state.icon_theme),
+                theme::muted(),
+            )),
+        ]
+    };
     match state.field {
         Field::Theme => vec![
-            heading("Icon theme"),
-            Line::from(""),
             Line::from(
-                "The glyph set `voxtype status --follow` emits to your status \
-                 bar. Match it to whatever your bar's font supports.",
+                "The icons voxtype gives Waybar. emoji works with any font; \
+                 nerd-font, material and phosphor need that font; text uses \
+                 no symbols.",
             ),
-            Line::from(""),
             Line::from(Span::styled(
-                "Common picks:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  • emoji — works everywhere, no special font needed."),
-            Line::from("  • nerd-font — for users on a Nerd Font."),
-            Line::from("  • phosphor — Phosphor icon font."),
-            Line::from("  • omarchy — matches Omarchy's stock ricing."),
-            Line::from("  • text — plain ASCII, no glyphs at all."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Run `voxtype setup waybar` for ready-to-paste Waybar config.",
-                Style::default().fg(Color::Gray),
+                "For a ready-made Waybar module, run: voxtype setup waybar",
+                theme::muted(),
             )),
         ],
-        Field::IconIdle => icon_guidance(
-            state,
-            "idle",
-            "Shown when voxtype is loaded but not actively recording or \
-             transcribing.",
-        ),
-        Field::IconRecording => icon_guidance(
-            state,
-            "recording",
-            "Shown while voxtype is capturing audio.",
-        ),
-        Field::IconTranscribing => icon_guidance(
-            state,
-            "transcribing",
-            "Shown while voxtype is running inference on a captured clip.",
-        ),
-        Field::IconStopped => icon_guidance(
-            state,
-            "stopped",
-            "Shown when the daemon isn't running. Useful for spotting that \
-             voxtype crashed or wasn't started.",
-        ),
+        Field::IconIdle => icon("while voxtype waits"),
+        Field::IconRecording => icon("while it records"),
+        Field::IconTranscribing => icon("while it transcribes"),
+        Field::IconStopped => icon("when voxtype isn't running"),
     }
-}
-
-fn icon_guidance(state: &WaybarState, label: &str, purpose: &str) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        heading(format!("Override · {}", label)),
-        Line::from(""),
-        Line::from(purpose.to_string()),
-        Line::from(""),
-        Line::from(format!(
-            "Set a glyph here to override the {} theme's choice for this \
-             state. Leave empty to fall back to the theme default.",
-            state.icon_theme
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Enter or i to edit. Type any unicode glyph (emoji, Nerd \
-             Font glyph, ASCII). Esc cancels.",
-            Style::default().fg(Color::Gray),
-        )),
-    ];
-    if state
-        .editing
-        .as_ref()
-        .map(|e| e.field == state.field)
-        .unwrap_or(false)
-    {
-        lines.insert(
-            0,
-            Line::from(Span::styled(
-                "✎ Editing — Enter to commit, Esc to cancel",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        );
-        lines.insert(1, Line::from(""));
-    }
-    lines
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {

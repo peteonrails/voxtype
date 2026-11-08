@@ -8,9 +8,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -19,6 +18,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 use crate::config::TranscriptionEngine;
 use crate::model_catalog::{default_model, installed_models_for, model_catalog};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
@@ -39,7 +39,7 @@ pub struct EngineState {
     /// True when we wanted to switch but couldn't (source build, no
     /// installed variant supports the new engine, …). Surfaced as a warning
     /// on the screen.
-    pub binary_switch_blocked: Option<&'static str>,
+    pub binary_switch_blocked: Option<String>,
     /// Active inline text edit. While `Some`, all keypresses route to the
     /// TextInput; navigation and cycle are suspended.
     pub editing: Option<TextEdit>,
@@ -312,7 +312,7 @@ impl EngineState {
                 .unwrap_or_else(|| "local".to_string()),
             w_language: ed
                 .get_string("whisper", "language")
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
             w_translate: ed.get_bool("whisper", "translate").unwrap_or(false),
             w_threads: ed.get_int("whisper", "threads"),
             w_initial_prompt: ed.get_string("whisper", "initial_prompt"),
@@ -350,7 +350,7 @@ impl EngineState {
                 .unwrap_or_else(|| default_model("sensevoice").to_string()),
             sv_language: ed
                 .get_string("sensevoice", "language")
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
             sv_use_itn: ed.get_bool("sensevoice", "use_itn").unwrap_or(true),
             sv_threads: ed.get_int("sensevoice", "threads"),
             sv_on_demand_loading: ed
@@ -453,8 +453,9 @@ impl EngineState {
         if self.engine == "openvino" {
             if !inv.compiled_features.contains(&"openvino") {
                 self.binary_switch_blocked = Some(
-                    "OpenVINO isn't available in prebuilt voxtype binaries. \
-                     Build from source with --features openvino.",
+                    "No prebuilt voxtype includes OpenVINO. Build it from source: \
+                     cargo build --release --features openvino"
+                        .to_string(),
                 );
             }
             return;
@@ -470,10 +471,12 @@ impl EngineState {
                 _ => inv.compiled_features.contains(&self.engine.as_str()),
             };
             if !supported {
-                self.binary_switch_blocked = Some(
-                    "Source build: rebuild voxtype with the corresponding \
-                     Cargo feature for this engine.",
-                );
+                self.binary_switch_blocked = Some(format!(
+                    "This voxtype was built without {}. Rebuild it with: \
+                     cargo build --release --features {}",
+                    display_engine(&self.engine),
+                    self.engine
+                ));
             }
             return;
         }
@@ -510,10 +513,11 @@ impl EngineState {
             match fallback {
                 Some(s) => self.pending_variant_switch = Some(s.variant),
                 None => {
-                    self.binary_switch_blocked = Some(
-                        "No installed binary supports this engine on this \
-                         hardware. Install the matching voxtype variant first.",
-                    );
+                    self.binary_switch_blocked = Some(format!(
+                        "No installed voxtype build can run {} on this machine. \
+                         See the Build page.",
+                        display_engine(&self.engine)
+                    ));
                 }
             }
         }
@@ -525,7 +529,7 @@ impl EngineState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("load: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
                 return Action::None;
             }
@@ -702,7 +706,7 @@ impl EngineState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("save: {}", e),
+                    message: format!("Not saved: {}", e),
                 });
             }
         }
@@ -719,13 +723,13 @@ impl EngineState {
                 self.refresh_binary_match();
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Ok,
-                    message: "Reverted unsaved changes".to_string(),
+                    message: "Put back the saved settings".to_string(),
                 });
             }
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("reload: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
             }
         }
@@ -909,13 +913,15 @@ impl EngineState {
 
 /// The model name for the active engine — what the daemon will try to load
 /// at startup. Used to decide whether the engine save needs to trigger a
-/// model download alongside (or instead of) a binary swap. Whisper is
-/// special-cased: the daemon resolves shorthand model names like `tiny.en`
-/// against built-in download URLs rather than a directory on disk, so we
-/// skip the on-disk check for Whisper. Returns None for unknown engines.
+/// model download alongside (or instead of) a binary swap. The daemon
+/// doesn't download a missing Whisper model either, so Whisper is checked
+/// like the rest. Returns None for unknown engines.
 fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
     match engine {
-        "whisper" => None,
+        // A path names a file the user manages; a remote Whisper has no
+        // local model at all.
+        "whisper" if f.w_mode == "remote" || f.w_model.contains('/') => None,
+        "whisper" => Some(f.w_model.clone()),
         "parakeet" => Some(f.pk_model.clone()),
         "moonshine" => Some(f.mn_model.clone()),
         "sensevoice" => Some(f.sv_model.clone()),
@@ -1054,32 +1060,37 @@ fn cycle_threads(current: Option<i64>, delta: i32) -> Option<i64> {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.engine {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Engine");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-    };
-
-    let rows: Vec<FormRowSpec> = state
+/// The page's rows: the engine, then the active engine's own settings.
+pub fn rows(state: &EngineState) -> Vec<FormRowSpec> {
+    state
         .rows()
         .iter()
         .enumerate()
         .map(|(i, fid)| {
             let (label, value) = field_label_value(state, *fid);
-            FormRowSpec::new(i == state.cursor, label, value)
+            let row = FormRowSpec::new(i == state.cursor, label, value);
+            match fid {
+                FieldId::WMode => row.choices(&["Local", "Remote", "CLI"]),
+                FieldId::PkModelType => row.choices(&["Automatic", "TDT", "CTC"]),
+                FieldId::OvDevice => row.choices(OV_DEVICE_CHOICES),
+                _ => row,
+            }
         })
-        .collect();
+        .collect()
+}
 
+/// Put the cursor on the row labelled `label`, for Basics.
+pub fn focus_label(state: &mut EngineState, label: &str) {
+    if let Some(i) = rows(state).iter().position(|r| r.label == label) {
+        state.cursor = i;
+    }
+}
+
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.engine else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state.feedback.as_ref().map(|fb| {
         (
             match fb.level {
@@ -1089,16 +1100,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             fb.message.as_str(),
         )
     });
-
-    common::render_form_with_guidance(
-        f,
-        area,
-        "Engine",
-        state.dirty_since_load,
-        feedback_pair,
-        &rows,
-        guidance(state),
-    );
+    common::render_form_with_guidance(f, area, app, feedback_pair, &rows(state), guidance(state));
 }
 
 /// Engines whose ONNX graphs MIGraphX 7.2 can't compile cleanly. On the
@@ -1118,9 +1120,9 @@ const AMD_CPU_ONLY_ENGINES: &[&str] = &[
 
 fn engine_value_for_display(engine: &str) -> String {
     if cfg!(feature = "onnx-migraphx-enabled") && AMD_CPU_ONLY_ENGINES.contains(&engine) {
-        format!("{}  (CPU on AMD GPU)", engine)
+        format!("{}  (CPU on AMD GPU)", display_engine(engine))
     } else {
-        engine.to_string()
+        display_engine(engine).to_string()
     }
 }
 
@@ -1129,18 +1131,18 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
     match fid {
         FieldId::Engine => ("Engine", engine_value_for_display(&state.engine)),
 
-        FieldId::WModel => ("Whisper · model", f.w_model.clone()),
-        FieldId::WMode => ("Whisper · execution mode", f.w_mode.clone()),
-        FieldId::WLanguage => ("Whisper · language", f.w_language.clone()),
-        FieldId::WTranslate => ("Whisper · translate to English", yesno(f.w_translate)),
+        FieldId::WModel => ("Model", f.w_model.clone()),
+        FieldId::WMode => ("Runs", capitalize_mode(&f.w_mode)),
+        FieldId::WLanguage => ("Language", language_name(&f.w_language)),
+        FieldId::WTranslate => ("Translate to English", yesno(f.w_translate)),
         FieldId::WThreads => (
-            "Whisper · threads",
+            "Threads",
             f.w_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
         FieldId::WPrompt => (
-            "Whisper · initial prompt",
+            "Initial prompt",
             match state.editing.as_ref() {
                 Some(e) if e.field == FieldId::WPrompt => e.input.caret_string(),
                 _ => f
@@ -1153,43 +1155,40 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                             s.to_string()
                         }
                     })
-                    .unwrap_or_else(|| "(none)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
-        FieldId::WFlashAttention => ("Whisper · flash attention", yesno(f.w_flash_attention)),
-        FieldId::WOnDemandLoading => (
-            "Whisper · on-demand model load",
-            yesno(f.w_on_demand_loading),
-        ),
-        FieldId::WGpuIsolation => ("Whisper · GPU isolation", yesno(f.w_gpu_isolation)),
+        FieldId::WFlashAttention => ("Flash attention", yesno(f.w_flash_attention)),
+        FieldId::WOnDemandLoading => ("Load model on demand", yesno(f.w_on_demand_loading)),
+        FieldId::WGpuIsolation => ("GPU isolation", yesno(f.w_gpu_isolation)),
         FieldId::WRemoteEndpoint => (
-            "Whisper · remote endpoint",
+            "Remote endpoint",
             match state.editing.as_ref() {
                 Some(e) if e.field == FieldId::WRemoteEndpoint => e.input.caret_string(),
                 _ => f
                     .w_remote_endpoint
                     .clone()
-                    .unwrap_or_else(|| "(unset)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
         FieldId::WRemoteApiKey => (
-            "Whisper · remote API key",
+            "Remote API key",
             match state.editing.as_ref() {
                 Some(e) if e.field == FieldId::WRemoteApiKey => mask(&e.input.caret_string()),
                 _ => match f.w_remote_api_key.as_deref() {
-                    None | Some("") => "(unset)".to_string(),
-                    Some(_) => "•••••• (set; press Enter to edit)".to_string(),
+                    None | Some("") => common::NOT_SET.to_string(),
+                    Some(_) => "••••••".to_string(),
                 },
             },
         ),
         FieldId::WRemoteModel => (
-            "Whisper · remote model",
+            "Remote model",
             match state.editing.as_ref() {
                 Some(e) if e.field == FieldId::WRemoteModel => e.input.caret_string(),
                 _ => f
                     .w_remote_model
                     .clone()
-                    .unwrap_or_else(|| "(unset)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
 
@@ -1199,122 +1198,92 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             // ParakeetUnified needs tokenizer.model to be present; only a
             // subset of registered Parakeet models ship it. See model::is_streaming_compatible_parakeet
             // and src/setup/model.rs's PARAKEET_MODELS for the source of truth.
-            let value = if model::is_streaming_compatible_parakeet(&f.pk_model) {
-                format!("{}  (streaming compatible)", f.pk_model)
-            } else {
-                f.pk_model.clone()
-            };
-            ("Parakeet · model", value)
+            ("Model", f.pk_model.clone())
         }
         FieldId::PkModelType => (
-            "Parakeet · model architecture",
-            f.pk_model_type
-                .as_deref()
-                .unwrap_or("auto-detect")
-                .to_string(),
+            "Model type",
+            match f.pk_model_type.as_deref() {
+                Some("tdt") => "TDT".to_string(),
+                Some("ctc") => "CTC".to_string(),
+                Some(other) => other.to_string(),
+                None => "Automatic".to_string(),
+            },
         ),
-        FieldId::PkOnDemandLoading => (
-            "Parakeet · on-demand model load",
-            yesno(f.pk_on_demand_loading),
-        ),
+        FieldId::PkOnDemandLoading => ("Load model on demand", yesno(f.pk_on_demand_loading)),
 
-        FieldId::MnModel => ("Moonshine · model", f.mn_model.clone()),
-        FieldId::MnQuantized => ("Moonshine · use quantized model", yesno(f.mn_quantized)),
+        FieldId::MnModel => ("Model", f.mn_model.clone()),
+        FieldId::MnQuantized => ("Quantized model", yesno(f.mn_quantized)),
         FieldId::MnThreads => (
-            "Moonshine · threads",
+            "Threads",
             f.mn_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::MnOnDemandLoading => (
-            "Moonshine · on-demand model load",
-            yesno(f.mn_on_demand_loading),
-        ),
+        FieldId::MnOnDemandLoading => ("Load model on demand", yesno(f.mn_on_demand_loading)),
 
-        FieldId::SvModel => ("SenseVoice · model", f.sv_model.clone()),
-        FieldId::SvLanguage => ("SenseVoice · language", f.sv_language.clone()),
-        FieldId::SvUseItn => (
-            "SenseVoice · inverse text normalization",
-            yesno(f.sv_use_itn),
-        ),
+        FieldId::SvModel => ("Model", f.sv_model.clone()),
+        FieldId::SvLanguage => ("Language", language_name(&f.sv_language)),
+        FieldId::SvUseItn => ("Write numbers as digits", yesno(f.sv_use_itn)),
         FieldId::SvThreads => (
-            "SenseVoice · threads",
+            "Threads",
             f.sv_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::SvOnDemandLoading => (
-            "SenseVoice · on-demand model load",
-            yesno(f.sv_on_demand_loading),
-        ),
+        FieldId::SvOnDemandLoading => ("Load model on demand", yesno(f.sv_on_demand_loading)),
 
-        FieldId::PfModel => ("Paraformer · model", f.pf_model.clone()),
+        FieldId::PfModel => ("Model", f.pf_model.clone()),
         FieldId::PfThreads => (
-            "Paraformer · threads",
+            "Threads",
             f.pf_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::PfOnDemandLoading => (
-            "Paraformer · on-demand model load",
-            yesno(f.pf_on_demand_loading),
-        ),
+        FieldId::PfOnDemandLoading => ("Load model on demand", yesno(f.pf_on_demand_loading)),
 
-        FieldId::DolModel => ("Dolphin · model", f.dol_model.clone()),
+        FieldId::DolModel => ("Model", f.dol_model.clone()),
         FieldId::DolThreads => (
-            "Dolphin · threads",
+            "Threads",
             f.dol_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::DolOnDemandLoading => (
-            "Dolphin · on-demand model load",
-            yesno(f.dol_on_demand_loading),
-        ),
+        FieldId::DolOnDemandLoading => ("Load model on demand", yesno(f.dol_on_demand_loading)),
 
-        FieldId::OmModel => ("Omnilingual · model", f.om_model.clone()),
+        FieldId::OmModel => ("Model", f.om_model.clone()),
         FieldId::OmThreads => (
-            "Omnilingual · threads",
+            "Threads",
             f.om_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::OmOnDemandLoading => (
-            "Omnilingual · on-demand model load",
-            yesno(f.om_on_demand_loading),
-        ),
+        FieldId::OmOnDemandLoading => ("Load model on demand", yesno(f.om_on_demand_loading)),
 
-        FieldId::CoModel => ("Cohere · model", f.co_model.clone()),
-        FieldId::CoLanguage => ("Cohere · language", f.co_language.clone()),
+        FieldId::CoModel => ("Model", f.co_model.clone()),
+        FieldId::CoLanguage => ("Language", language_name(&f.co_language)),
         FieldId::CoThreads => (
-            "Cohere · threads",
+            "Threads",
             f.co_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::CoOnDemandLoading => (
-            "Cohere · on-demand model load",
-            yesno(f.co_on_demand_loading),
-        ),
+        FieldId::CoOnDemandLoading => ("Load model on demand", yesno(f.co_on_demand_loading)),
 
-        FieldId::OvModel => ("OpenVINO · model", f.ov_model.clone()),
-        FieldId::OvDevice => ("OpenVINO · device", f.ov_device.clone()),
-        FieldId::OvLanguage => ("OpenVINO · language", f.ov_language.clone()),
+        FieldId::OvModel => ("Model", f.ov_model.clone()),
+        FieldId::OvDevice => ("Device", f.ov_device.clone()),
+        FieldId::OvLanguage => ("Language", language_name(&f.ov_language)),
         FieldId::OvThreads => (
-            "OpenVINO · threads",
+            "Threads",
             f.ov_threads
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
-        FieldId::OvOnDemandLoading => (
-            "OpenVINO · on-demand model load",
-            yesno(f.ov_on_demand_loading),
-        ),
+        FieldId::OvOnDemandLoading => ("Load model on demand", yesno(f.ov_on_demand_loading)),
     }
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 /// Mask a secret value for on-screen display while editing — show only the
@@ -1329,113 +1298,65 @@ fn mask(s: &str) -> String {
     format!("{}{}", bullets, last)
 }
 
-fn heading(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+/// One sentence on what an engine is good at.
+pub fn engine_summary(engine: &str) -> &'static str {
+    match engine {
+        "whisper" => "Whisper is the default: 99 languages and good accuracy everywhere.",
+        "parakeet" => {
+            "Parakeet is fast and among the most accurate for English and 25 European languages."
+        }
+        "moonshine" => "Moonshine is small and quick, made for English dictation.",
+        "sensevoice" => "SenseVoice is strong on Chinese, Japanese, Korean, Cantonese and English.",
+        "paraformer" => "Paraformer is made for Chinese.",
+        "dolphin" => "Dolphin is tuned for dictation in Eastern languages.",
+        "omnilingual" => "Omnilingual covers more than 1,600 languages.",
+        "cohere" => "Cohere Transcribe is very accurate in 14 languages, and large (about 3 GB).",
+        "openvino" => "OpenVINO runs Whisper on Intel NPUs, GPUs and CPUs.",
+        _ => "",
+    }
+}
+
+/// What saving this engine will also do: switch build, or why it can't.
+pub fn engine_switch_note(state: &EngineState) -> Option<(bool, String)> {
+    if let Some(target) = state.pending_variant_switch {
+        Some((
+            false,
+            format!(
+                "Saving also switches voxtype to the {} build. It asks for your password.",
+                super::build::variant_name(target)
+            ),
+        ))
+    } else {
+        state
+            .binary_switch_blocked
+            .clone()
+            .map(|reason| (true, reason))
+    }
 }
 
 fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Banner about a pending binary switch (or a blocked one) goes first so
-    // the user sees it without scrolling.
-    if let Some(target) = state.pending_variant_switch {
+    let mut lines = vec![Line::from(engine_summary(&state.engine).to_string())];
+    if let Some((blocked, note)) = engine_switch_note(state) {
         lines.push(Line::from(Span::styled(
-            "⚠ Binary switch required",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            note,
+            if blocked {
+                theme::error()
+            } else {
+                theme::warn()
+            },
         )));
-        lines.push(Line::from(format!(
-            "This engine needs the {} family. Saving will also switch the binary to:",
-            family_name(EngineState::required_family(&state.engine))
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("    {} ({})", target.display(), target.binary_name()),
-            Style::default().fg(Color::Cyan),
-        )));
-        lines.push(Line::from(Span::styled(
-            "    Press s to save; pkexec will prompt for sudo.",
-            Style::default().fg(Color::Gray),
-        )));
-        lines.push(Line::from(""));
-    } else if let Some(reason) = state.binary_switch_blocked {
-        lines.push(Line::from(Span::styled(
-            "⚠ Cannot switch binary",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(reason.to_string()));
-        lines.push(Line::from(""));
-    }
-
-    lines.push(heading("Active engine"));
-    lines.push(Line::from(""));
-    for (name, desc) in [
-        (
-            "whisper",
-            "OpenAI Whisper via whisper.cpp. Default. Multilingual; best \
-             general-purpose accuracy.",
-        ),
-        (
-            "parakeet",
-            "NVIDIA Parakeet TDT/CTC via ONNX Runtime. Tops the Open ASR \
-             Leaderboard for English.",
-        ),
-        (
-            "moonshine",
-            "Useful Sensors Moonshine. Encoder-decoder, low-latency, small \
-             footprint. Good for English dictation.",
-        ),
-        (
-            "sensevoice",
-            "Alibaba SenseVoice-Small. Strong on Chinese / Japanese / Korean \
-             / Cantonese / English in one model.",
-        ),
-        (
-            "paraformer / dolphin / omnilingual",
-            "Specialized FunASR models. Paraformer focuses on Chinese, \
-             Dolphin is dictation-tuned, Omnilingual covers 1600 languages.",
-        ),
-        (
-            "cohere",
-            "Cohere Transcribe (Cohere Labs). #1 on the Open ASR Leaderboard \
-             for English (5.42 WER). 14 languages. ~3 GB on disk.",
-        ),
-        (
-            "openvino",
-            "OpenVINO GenAI Whisper (Intel NPU/GPU/CPU). Included in the \
-             x86_64 ONNX release binaries; its runtime and device drivers \
-             are loaded only when this engine is selected.",
-        ),
-    ] {
-        lines.push(Line::from(Span::styled(
-            format!("{}: ", name),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(desc.to_string()));
-        lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
-        "Engine choice and binary family are linked. The TUI will swap \
-         the binary for you when needed.",
-        Style::default().fg(Color::Gray),
+        "←→ goes through the engines this install can run.",
+        theme::muted(),
     )));
     lines
 }
 
-fn family_name(family: EngineFamily) -> &'static str {
-    match family {
-        EngineFamily::Whisper => "Whisper",
-        EngineFamily::Onnx => "ONNX",
-    }
-}
-
 fn guidance(state: &EngineState) -> Vec<Line<'_>> {
     let f = &state.fields;
+    let text = |s: &'static str| Line::from(s);
+    let dim = |s: &'static str| Line::from(Span::styled(s, theme::muted()));
     match state.current_field() {
         FieldId::Engine => engine_guidance(state),
 
@@ -1449,368 +1370,94 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::CoModel => model_guidance("cohere", &f.co_model),
         FieldId::OvModel => model_guidance("openvino", &f.ov_model),
 
-        FieldId::WMode => vec![
-            heading("Whisper · execution mode"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "local: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Transcribe in-process via whisper-rs. Default; offline."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "remote: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "Send audio to an OpenAI-compatible Whisper API. Set \
-                 [whisper] remote_endpoint and remote_api_key first.",
+        FieldId::WMode => vec![text(
+            "Local runs Whisper on this computer. Remote sends audio to an \
+             OpenAI-compatible server, set below. CLI runs a whisper-cli program \
+             instead of the built-in one.",
+        )],
+        FieldId::WLanguage | FieldId::OvLanguage => vec![
+            text(
+                "The language you dictate in. Automatic detects it each time; \
+                 choosing one is a little faster and more reliable.",
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "cli: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "Shell out to a `whisper` CLI binary. Useful for testing \
-                 custom builds without rebuilding voxtype.",
-            ),
+            dim("Models ending in .en only do English."),
         ],
-        FieldId::WLanguage => vec![
-            heading("Whisper · language"),
-            Line::from(""),
-            Line::from(
-                "Two-letter language code or `auto`. Auto-detect costs ~50ms \
-                 on the first chunk; lock to a code when you only ever \
-                 dictate in one language.",
+        FieldId::WTranslate => vec![text("Writes English whatever language you speak.")],
+        FieldId::WThreads
+        | FieldId::MnThreads
+        | FieldId::SvThreads
+        | FieldId::PfThreads
+        | FieldId::DolThreads
+        | FieldId::OmThreads
+        | FieldId::CoThreads => vec![text(
+            "How many CPU threads transcription uses. Automatic picks your core \
+             count; lower it to leave room for other work.",
+        )],
+        FieldId::OvThreads => vec![text("OpenVINO ignores this for now.")],
+        FieldId::WPrompt => vec![
+            text(
+                "Words and style Whisper should expect, such as names and terms \
+                 you use: \"Voxtype, Hyprland, Claude.\"",
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Multi-language allowlists (e.g. \"en,fr,de\") can be set in \
-                 config.toml as an array.",
-                Style::default().fg(Color::Gray),
-            )),
+            dim("Enter types it."),
         ],
-        FieldId::WTranslate => vec![
-            heading("Whisper · translate to English"),
-            Line::from(""),
-            Line::from(
-                "When on, Whisper translates non-English speech to English in \
-                 the transcript.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Useful for multilingual meetings where you want a single \
-                 English transcript.",
-            ),
-        ],
-        FieldId::WThreads => vec![
-            heading("Whisper · threads"),
-            Line::from(""),
-            Line::from(
-                "Number of CPU threads Whisper uses. `auto` lets voxtype \
-                 pick (typically your physical-core count).",
-            ),
-            Line::from(""),
-            Line::from(
-                "Lower this to leave headroom for other work. Bump it for max \
-                 throughput on a CPU-only setup.",
-            ),
-        ],
-        FieldId::WPrompt => {
-            let mut lines = vec![
-                heading("Whisper · initial prompt"),
-                Line::from(""),
-                Line::from(
-                    "Hints Whisper about terminology, capitalization, or formatting. \
-                     Whisper biases its output toward what the prompt establishes.",
-                ),
-                Line::from(""),
-                Line::from(
-                    "Useful for proper nouns and technical terms. Examples: \
-                     \"Voxtype, Hyprland, Claude.\" or \"Transcribe with proper \
-                     capitalization and punctuation.\"",
-                ),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press Enter or i to edit. While editing: type to insert, \
-                     Backspace/Delete to remove, Enter commits, Esc cancels. \
-                     Ctrl-W deletes the previous word; Ctrl-U clears the line.",
-                    Style::default().fg(Color::Gray),
-                )),
-            ];
-            if state
-                .editing
-                .as_ref()
-                .is_some_and(|e| e.field == FieldId::WPrompt)
-            {
-                lines.insert(
-                    0,
-                    Line::from(Span::styled(
-                        "✎ Editing — Enter to commit, Esc to cancel",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                );
-                lines.insert(1, Line::from(""));
-            }
-            lines
-        }
-        FieldId::WFlashAttention => vec![
-            heading("Whisper · flash attention"),
-            Line::from(""),
-            Line::from(
-                "GPU optimization that reduces attention-layer memory \
-                 bandwidth. Faster on capable cards, especially on large-v3.",
-            ),
-            Line::from(""),
-            Line::from(
-                "No effect on CPU runs. A few older driver combos crash with \
-                 it on; turn it off if Whisper hangs.",
-            ),
-        ],
-        FieldId::WOnDemandLoading => vec![
-            heading("Whisper · on-demand model loading"),
-            Line::from(""),
-            Line::from(
-                "Loads the model only when recording starts; unloads at idle. \
-                 Frees ~1-2 GB of RAM between dictations.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Adds a one-shot delay on the first key press of each \
-                 dictation. Worth it for sporadic dictation; not worth it \
-                 for constant use.",
-            ),
-        ],
-        FieldId::WGpuIsolation => vec![
-            heading("Whisper · GPU isolation"),
-            Line::from(""),
-            Line::from(
-                "Each transcription runs in a short-lived subprocess that \
-                 exits afterward, releasing all VRAM.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Useful on hybrid-graphics laptops to let the discrete GPU \
-                 power down between dictations. Adds ~100-300ms of subprocess \
-                 startup per transcription.",
-            ),
-        ],
-
-        FieldId::PkModelType => vec![
-            heading("Parakeet · model architecture"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "auto-detect: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "voxtype inspects the model directory and picks tdt or ctc \
-                 based on which ONNX files are present.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "tdt: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "Token-and-Duration Transducer. Recommended; what Parakeet's \
-                 reference checkpoints use.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "ctc: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "CTC encoder-only models. Smaller, faster, slightly lower \
-                 accuracy.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Leave at auto-detect unless you have reason to override.",
-                Style::default().fg(Color::Gray),
-            )),
-        ],
-        FieldId::PkOnDemandLoading => vec![
-            heading("Parakeet · on-demand model loading"),
-            Line::from(""),
-            Line::from(
-                "Loads the Parakeet model only when recording starts; unloads \
-                 at idle.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Same trade-off as Whisper: frees memory between dictations \
-                 at the cost of first-keystroke latency.",
-            ),
-        ],
-
-        FieldId::MnQuantized => vec![
-            heading("Moonshine · use quantized model"),
-            Line::from(""),
-            Line::from(
-                "Moonshine ships int8-quantized weights alongside full \
-                 precision. Quantized is ~2-3x faster on CPU at a small \
-                 accuracy cost.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Falls back to full precision if the quantized files aren't \
-                 present in the model directory.",
-            ),
-        ],
-        FieldId::MnThreads => threads_guidance("Moonshine"),
-        FieldId::MnOnDemandLoading => on_demand_guidance("Moonshine"),
-
-        FieldId::SvLanguage => vec![
-            heading("SenseVoice · language"),
-            Line::from(""),
-            Line::from(
-                "SenseVoice is multilingual across CJK + English. Pick a \
-                 specific language to skip the language-detection step.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "auto: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Detect per-recording (default)."),
-            Line::from(Span::styled(
-                "zh / yue: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Mandarin / Cantonese."),
-            Line::from(Span::styled(
-                "ja / ko: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Japanese / Korean."),
-            Line::from(Span::styled(
-                "en: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("English."),
-        ],
-        FieldId::SvUseItn => vec![
-            heading("SenseVoice · inverse text normalization"),
-            Line::from(""),
-            Line::from(
-                "Adds punctuation and converts spoken numbers/dates to their \
-                 written form (\"twenty twenty-six\" → \"2026\").",
-            ),
-            Line::from(""),
-            Line::from(
-                "Recommended on. Turn off if you want raw token output for \
-                 your own post-processing.",
-            ),
-        ],
-        FieldId::SvThreads => threads_guidance("SenseVoice"),
-        FieldId::SvOnDemandLoading => on_demand_guidance("SenseVoice"),
-
-        FieldId::PfThreads => threads_guidance("Paraformer"),
-        FieldId::PfOnDemandLoading => on_demand_guidance("Paraformer"),
-
-        FieldId::DolThreads => threads_guidance("Dolphin"),
-        FieldId::DolOnDemandLoading => on_demand_guidance("Dolphin"),
-
-        FieldId::OmThreads => threads_guidance("Omnilingual"),
-        FieldId::OmOnDemandLoading => on_demand_guidance("Omnilingual"),
-
-        FieldId::CoLanguage => vec![
-            heading("Cohere · language"),
-            Line::from(""),
-            Line::from(
-                "Cohere Transcribe officially supports 14 languages. Pick the \
-                 one you'll be dictating in; Cohere does not auto-detect.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Supported codes:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  ar (Arabic), de (German), en (English), es (Spanish), \
-                 fr (French), hi (Hindi), it (Italian), ja (Japanese), \
-                 ko (Korean), nl (Dutch), pt (Portuguese), ru (Russian), \
-                 tr (Turkish), zh (Chinese)",
-            ),
-        ],
-        FieldId::CoThreads => threads_guidance("Cohere"),
-        FieldId::CoOnDemandLoading => on_demand_guidance("Cohere"),
-
+        FieldId::WFlashAttention => vec![text(
+            "Faster on a graphics card, especially with large models. Turn it \
+             off if Whisper hangs on an older driver.",
+        )],
+        FieldId::WOnDemandLoading
+        | FieldId::PkOnDemandLoading
+        | FieldId::MnOnDemandLoading
+        | FieldId::SvOnDemandLoading
+        | FieldId::PfOnDemandLoading
+        | FieldId::DolOnDemandLoading
+        | FieldId::OmOnDemandLoading
+        | FieldId::CoOnDemandLoading
+        | FieldId::OvOnDemandLoading => vec![text(
+            "Loads the model when you start recording and frees the memory \
+             after. Saves memory if you dictate now and then; the first words \
+             take a moment longer.",
+        )],
+        FieldId::WGpuIsolation => vec![text(
+            "Transcribes in a separate process that exits afterwards, so the \
+             graphics card's memory is freed and a laptop's GPU can sleep. Adds \
+             a fraction of a second.",
+        )],
+        FieldId::PkModelType => vec![text(
+            "Automatic reads it from the model's files. Leave it unless a custom \
+             model is detected wrongly.",
+        )],
+        FieldId::MnQuantized => vec![text(
+            "A smaller version of the model, two to three times faster on a CPU \
+             and slightly less accurate.",
+        )],
+        FieldId::SvLanguage => vec![text(
+            "Automatic detects it each time; zh Mandarin, yue Cantonese, ja \
+             Japanese, ko Korean, en English.",
+        )],
+        FieldId::SvUseItn => vec![text(
+            "Adds punctuation and writes numbers and dates as digits: \
+             \"twenty twenty-six\" becomes \"2026\".",
+        )],
+        FieldId::CoLanguage => vec![text(
+            "Cohere doesn't detect the language, so pick the one you speak. It \
+             knows ar, de, en, es, fr, hi, it, ja, ko, nl, pt, ru, tr and zh.",
+        )],
         FieldId::OvDevice => openvino_device_guidance(&f.ov_device),
-        FieldId::OvLanguage => vec![
-            heading("OpenVINO · language"),
-            Line::from(""),
-            Line::from("Two-letter language code passed to Whisper."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "English-only .en models ignore this setting. Choose a multilingual model for other languages.",
-                Style::default().fg(Color::Gray),
-            )),
-        ],
-        FieldId::OvThreads => vec![
-            heading("OpenVINO · threads"),
-            Line::from(""),
-            Line::from(
-                "CPU thread count. It is ignored by the current OpenVINO GenAI Whisper pipeline API.",
-            ),
-        ],
-        FieldId::OvOnDemandLoading => on_demand_guidance("OpenVINO"),
-
         FieldId::WRemoteEndpoint => vec![
-            heading("Whisper · remote endpoint"),
-            Line::from(""),
-            Line::from(
-                "OpenAI-compatible Whisper API base URL. voxtype POSTs audio \
-                 multipart/form-data to <endpoint>/audio/transcriptions.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Examples: https://api.openai.com/v1, http://localhost:9000/v1 \
-                 (whisper.cpp server), https://api.groq.com/openai/v1.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press Enter to edit. Esc cancels.",
-                Style::default().fg(Color::Gray),
-            )),
+            text("The server's address, such as https://api.openai.com/v1."),
+            dim("Enter types it."),
         ],
         FieldId::WRemoteApiKey => vec![
-            heading("Whisper · remote API key"),
-            Line::from(""),
-            Line::from(
-                "Bearer token for the remote endpoint. Stored as plain text \
-                 in config.toml — protect that file accordingly.",
+            text(
+                "The server's key, saved as plain text in the config file. To \
+                 keep it out of the file, set VOXTYPE_WHISPER_API_KEY instead.",
             ),
-            Line::from(""),
-            Line::from(
-                "If you'd rather not have it on disk, set the \
-                 VOXTYPE_WHISPER_API_KEY environment variable instead and \
-                 leave this unset.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press Enter to edit. Display is masked while not editing.",
-                Style::default().fg(Color::Gray),
-            )),
+            dim("Enter types it; it stays hidden."),
         ],
         FieldId::WRemoteModel => vec![
-            heading("Whisper · remote model"),
-            Line::from(""),
-            Line::from(
-                "Model name to send with each request (the `model` field in \
-                 the multipart form). Defaults to whisper-1 if unset.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Common values: whisper-1 (OpenAI), whisper-large-v3 \
-                 (Groq, Together), whisper.cpp (whisper.cpp server). Check \
-                 your provider's docs.",
-            ),
+            text("The model name the server expects. Empty means whisper-1."),
+            dim("Enter types it."),
         ],
     }
 }
@@ -1841,8 +1488,6 @@ fn openvino_device_guidance(device: &str) -> Vec<Line<'static>> {
     };
 
     vec![
-        heading(format!("OpenVINO · {} device", device)),
-        Line::from(""),
         Line::from(summary),
         Line::from(""),
         Line::from(Span::styled(
@@ -1861,69 +1506,62 @@ fn openvino_device_guidance(device: &str) -> Vec<Line<'static>> {
         ),
         Line::from(Span::styled(
             "The pip wheel and openvino-genai-bin do not ship the required libopenvino_genai_c.so C API library.",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )),
     ]
 }
 
-fn model_guidance(engine: &str, current: &str) -> Vec<Line<'static>> {
-    let catalog = model_catalog(engine);
-    let installed = installed_models_for(engine);
-    let mut lines = vec![
-        heading(format!("{} · model", display_engine(engine))),
-        Line::from(""),
-        Line::from(format!(
-            "Inference checkpoint voxtype loads for {}. ←→ cycles through \
-             the models voxtype knows about; pick whichever balances accuracy \
-             and speed for your hardware.",
-            display_engine(engine)
-        )),
-        Line::from(""),
-    ];
-    if !catalog.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Available  ( ● = installed,  · = not downloaded )",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        for name in &catalog {
-            let active = *name == current;
-            let inst = installed.iter().any(|i| i == name);
-            let cursor = if active { "▸ " } else { "  " };
-            let marker = if inst { "●" } else { "·" };
-            let suffix = if inst { "" } else { "  (not downloaded)" };
-            let style = if !inst {
-                Style::default().fg(Color::Gray)
-            } else if active {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(
-                format!("  {}{} {}{}", cursor, marker, name, suffix),
-                style,
-            )));
-        }
-        lines.push(Line::from(""));
+/// Whether the chosen model is on disk, and what saving does about it.
+pub fn model_note(engine: &str, current: &str) -> String {
+    let installed = installed_models_for(engine).iter().any(|i| i == current);
+    let mut note = if installed {
+        "Downloaded.".to_string()
+    } else {
+        "Not downloaded yet; saving downloads it.".to_string()
+    };
+    if engine == "parakeet" && model::is_streaming_compatible_parakeet(current) {
+        note.push_str(" Works with streaming output.");
     }
-    lines.push(Line::from(Span::styled(
-        "Models you haven't downloaded yet show up here too. Switch to one, \
-         save, then run `voxtype setup model` to fetch the weights.",
-        Style::default().fg(Color::Gray),
-    )));
     if engine == "cohere" {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "⚠ Cohere's int8 model is ~3 GB on disk — heaviest of the bundled \
-             engines. Make sure you've got the space before downloading.",
-            Style::default().fg(Color::Yellow),
-        )));
+        note.push_str(" About 3 GB on disk.");
     }
-    lines
+    note
 }
 
-fn display_engine(engine: &str) -> &'static str {
+fn model_guidance(engine: &str, current: &str) -> Vec<Line<'static>> {
+    let count = model_catalog(engine).len();
+    vec![
+        Line::from(model_note(engine, current)),
+        Line::from(Span::styled(
+            format!(
+                "Larger models are more accurate and slower. ←→ goes through all {}.",
+                count
+            ),
+            theme::muted(),
+        )),
+    ]
+}
+
+/// `local` reads as `Local`, `cli` as `CLI`.
+fn capitalize_mode(mode: &str) -> String {
+    match mode {
+        "local" => "Local".to_string(),
+        "remote" => "Remote".to_string(),
+        "cli" => "CLI".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `auto` reads as `Automatic`; language codes stay as they are written.
+fn language_name(code: &str) -> String {
+    if code == "auto" {
+        "Automatic".to_string()
+    } else {
+        code.to_string()
+    }
+}
+
+pub fn display_engine(engine: &str) -> &'static str {
     match engine {
         "whisper" => "Whisper",
         "parakeet" => "Parakeet",
@@ -1934,41 +1572,9 @@ fn display_engine(engine: &str) -> &'static str {
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
         "openvino" => "OpenVINO",
+        "soniox" => "Soniox",
         _ => "Engine",
     }
-}
-
-fn threads_guidance(engine: &str) -> Vec<Line<'static>> {
-    vec![
-        heading(format!("{} · threads", engine)),
-        Line::from(""),
-        Line::from(format!(
-            "Number of CPU threads ONNX Runtime uses for {} inference. \
-             `auto` lets voxtype pick (typically physical-core count).",
-            engine
-        )),
-        Line::from(""),
-        Line::from(
-            "Lower it to leave CPU headroom for other tasks. Bump to your \
-             core count for max throughput.",
-        ),
-    ]
-}
-
-fn on_demand_guidance(engine: &str) -> Vec<Line<'static>> {
-    vec![
-        heading(format!("{} · on-demand model loading", engine)),
-        Line::from(""),
-        Line::from(format!(
-            "Load the {} model only when recording starts; unload at idle.",
-            engine
-        )),
-        Line::from(""),
-        Line::from(
-            "Frees memory between dictations at the cost of first-keystroke \
-             latency. Worth it for sporadic dictation.",
-        ),
-    ]
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {

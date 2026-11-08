@@ -3735,7 +3735,7 @@ impl Daemon {
         let body = match &mismatch.remediation {
             crate::setup::variant_check::Remediation::SwitchToVariant { target } => format!(
                 "{} was built without --features {}. \
-                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press Enter on the Build row) \
                  to switch to {}.",
                 active,
                 mismatch.required_feature,

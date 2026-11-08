@@ -1,189 +1,132 @@
-//! Advanced settings: less-common knobs the TUI surfaces in one place.
+//! Advanced: eager processing, the GPU to use, and streaming output.
+//!
+//! Whisper's GPU isolation, flash attention and on-demand loading live on
+//! the Engine page with the rest of Whisper's settings. They used to be
+//! here as well, and two pages holding the same setting could each save
+//! over the other's edit.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct AdvancedState {
-    pub gpu_isolation: bool,
-    pub on_demand_loading: bool,
-    pub flash_attention: bool,
     pub eager_processing: bool,
     pub gpu_device: Option<i64>,
     pub streaming: bool,
     pub field: Field,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
-    /// Name of a Parakeet model the user just auto-switched into via the
-    /// streaming-toggle save handler, waiting for the user to confirm with
-    /// `d` that they want voxtype to fork the download in the background.
-    /// `None` when no prompt is pending. See #423.
-    pub pending_download: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
-    GpuIsolation,
-    OnDemand,
-    FlashAttention,
     Eager,
     GpuDevice,
     Streaming,
 }
+
 impl Field {
-    const ALL: &'static [Field] = &[
-        Field::GpuIsolation,
-        Field::OnDemand,
-        Field::FlashAttention,
-        Field::Eager,
-        Field::GpuDevice,
-        Field::Streaming,
-    ];
+    const ALL: &'static [Field] = &[Field::Eager, Field::GpuDevice, Field::Streaming];
 }
 
 impl AdvancedState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
         Ok(Self {
-            gpu_isolation: ed.get_bool("whisper", "gpu_isolation").unwrap_or(false),
-            on_demand_loading: ed.get_bool("whisper", "on_demand_loading").unwrap_or(false),
-            flash_attention: ed.get_bool("whisper", "flash_attention").unwrap_or(false),
             eager_processing: ed.get_bool("whisper", "eager_processing").unwrap_or(false),
             gpu_device: ed.get_int("whisper", "gpu_device"),
             streaming: ed.get_bool("parakeet", "streaming").unwrap_or(false),
-            field: Field::GpuIsolation,
+            field: Field::Eager,
             feedback: None,
             dirty_since_load: false,
-            pending_download: None,
         })
     }
+
+    /// Save. Turning streaming on also makes the hotkey toggle and, when
+    /// the Parakeet model can't stream, switches to one that can and asks
+    /// for it to be downloaded, so voxtype works after the restart.
     pub fn save(&mut self) -> Action {
         let mut ed = match ConfigEditor::load() {
             Ok(e) => e,
             Err(e) => {
-                self.feedback = Some((FeedbackLevel::Err, format!("load: {}", e)));
+                self.feedback = Some((
+                    FeedbackLevel::Err,
+                    format!("Couldn't read the config: {}", e),
+                ));
                 return Action::None;
             }
         };
-        ed.set_bool("whisper", "gpu_isolation", self.gpu_isolation);
-        ed.set_bool("whisper", "on_demand_loading", self.on_demand_loading);
-        ed.set_bool("whisper", "flash_attention", self.flash_attention);
         ed.set_bool("whisper", "eager_processing", self.eager_processing);
         match self.gpu_device {
             Some(n) if n >= 0 => ed.set_int("whisper", "gpu_device", n),
             _ => ed.unset("whisper", "gpu_device"),
         }
-        // Read the previous streaming value BEFORE we overwrite it so we can
-        // detect the "just turned on" transition. Used below to decide whether
-        // to auto-switch the configured Parakeet model to a streaming-capable
-        // one.
         let was_streaming = ed.get_bool("parakeet", "streaming").unwrap_or(false);
         ed.set_bool("parakeet", "streaming", self.streaming);
 
-        // Streaming dictation requires toggle activation: typing at the cursor
-        // while a PTT key is held confuses libinput's held-key tracker on
-        // Hyprland/Sway/River, so the key-release event never reaches voxtype.
-        // Rewrite the user's hotkey mode rather than silently letting the
-        // daemon fight it at startup.
-        let promoted_hotkey_mode = if self.streaming
+        // Streaming types while the key would still be held, which confuses
+        // the held-key tracking of Hyprland, Sway and River, so it needs
+        // toggle activation.
+        if self.streaming
             && ed
                 .get_string("hotkey", "mode")
-                .map(|m| m == "push_to_talk")
-                .unwrap_or(false)
+                .is_some_and(|m| m == "push_to_talk")
         {
             ed.set_string("hotkey", "mode", "toggle");
-            true
-        } else {
-            false
-        };
+        }
 
-        // Streaming dictation also requires a model that ships
-        // tokenizer.model (parakeet-rs::ParakeetUnified::load fails without
-        // it). When the user flips streaming on from off, check the active
-        // Parakeet model and auto-switch to the canonical streaming-capable
-        // one if needed. Tell them clearly so they know to run
-        // the model download next — it isn't blocking on the
-        // TUI save action (it's ~2.7 GB). #423.
-        let auto_switched_model: Option<(String, &'static str)> =
-            if self.streaming && !was_streaming {
-                let current = ed
-                    .get_string("parakeet", "model")
-                    .unwrap_or_else(|| "parakeet-tdt-0.6b-v3".to_string());
-                if !crate::setup::model::is_streaming_compatible_parakeet(&current) {
-                    ed.set_string(
-                        "parakeet",
-                        "model",
-                        crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
-                    );
-                    Some((
-                        current,
-                        crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
-                    ))
-                } else {
-                    None
+        // Streaming needs a model that ships tokenizer.model (#423).
+        let mut download = None;
+        if self.streaming && !was_streaming {
+            let current = ed
+                .get_string("parakeet", "model")
+                .unwrap_or_else(|| "parakeet-tdt-0.6b-v3".to_string());
+            if !crate::setup::model::is_streaming_compatible_parakeet(&current) {
+                let model = crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL;
+                ed.set_string("parakeet", "model", model);
+                if !crate::model_catalog::model_installed("parakeet", model) {
+                    download = Some(model.to_string());
                 }
-            } else {
-                None
-            };
+            }
+        }
 
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
-                // Compose feedback from whichever auto-fixes fired this save.
-                // Both can fire on the same save (PTT→toggle and model swap),
-                // so combine them rather than picking one.
-                let mut parts: Vec<String> = Vec::new();
-                parts.push(format!("Saved to {}", ed.path().display()));
-                if promoted_hotkey_mode {
-                    parts.push(
-                        "Streaming requires toggle mode: hotkey activation \
-                         auto-promoted from push_to_talk to toggle."
-                            .to_string(),
-                    );
+                self.feedback = None;
+                match download {
+                    Some(model) => Action::DownloadModel {
+                        engine: "parakeet".to_string(),
+                        model,
+                    },
+                    None => Action::None,
                 }
-                let did_auto_switch = auto_switched_model.is_some();
-                if let Some((from, to)) = auto_switched_model {
-                    parts.push(format!(
-                        "Streaming requires a model with tokenizer.model. \
-                         Switched [parakeet] model from '{from}' to '{to}'. \
-                         Press 'd' to download in the background (~2.7 GB), \
-                         any other key to skip."
-                    ));
-                    // Park the model name on state so the next 'd' keypress
-                    // can fork the download. Any other key is treated as
-                    // "skip"; the user can re-trigger by running
-                    // `voxtype setup --download --model <NAME>` directly.
-                    self.pending_download = Some(to.to_string());
-                }
-                let level = if promoted_hotkey_mode || did_auto_switch {
-                    FeedbackLevel::Warn
-                } else {
-                    FeedbackLevel::Ok
-                };
-                self.feedback = Some((level, parts.join(" ")));
             }
-            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
+            Err(e) => {
+                self.feedback = Some((FeedbackLevel::Err, format!("Not saved: {}", e)));
+                Action::None
+            }
         }
-        Action::None
     }
+
     pub fn reset(&mut self) {
         if let Ok(fresh) = Self::load() {
             let field = self.field;
             *self = fresh;
             self.field = field;
-            self.feedback = Some((FeedbackLevel::Ok, "Reverted".to_string()));
+            self.feedback = Some((FeedbackLevel::Ok, "Put back the saved settings".to_string()));
         }
     }
+
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
         let cur = Field::ALL
@@ -192,11 +135,9 @@ impl AdvancedState {
             .unwrap_or(0) as i32;
         self.field = Field::ALL[((cur + delta).rem_euclid(len)) as usize];
     }
+
     fn cycle(&mut self, delta: i32) {
         match self.field {
-            Field::GpuIsolation => self.gpu_isolation = !self.gpu_isolation,
-            Field::OnDemand => self.on_demand_loading = !self.on_demand_loading,
-            Field::FlashAttention => self.flash_attention = !self.flash_attention,
             Field::Eager => self.eager_processing = !self.eager_processing,
             Field::GpuDevice => {
                 let cur = self.gpu_device.unwrap_or(-1);
@@ -210,394 +151,84 @@ impl AdvancedState {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.advanced {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Advanced");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-    };
-
-    let rows = vec![
-        FormRowSpec::new(
-            state.field == Field::GpuIsolation,
-            "GPU isolation (subprocess)",
-            yesno(state.gpu_isolation),
-        ),
-        FormRowSpec::new(
-            state.field == Field::OnDemand,
-            "On-demand model loading",
-            yesno(state.on_demand_loading),
-        ),
-        FormRowSpec::new(
-            state.field == Field::FlashAttention,
-            "Flash attention",
-            yesno(state.flash_attention),
-        ),
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &AdvancedState) -> Vec<FormRowSpec> {
+    vec![
         FormRowSpec::new(
             state.field == Field::Eager,
-            "Eager input processing",
-            yesno(state.eager_processing),
+            "Transcribe while recording",
+            common::on_off(state.eager_processing),
         ),
         FormRowSpec::new(
             state.field == Field::GpuDevice,
-            "GPU device index",
+            "GPU",
             state
                 .gpu_device
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .map(|n| format!("Number {}", n))
+                .unwrap_or_else(|| "Automatic".to_string()),
         ),
         FormRowSpec::new(
             state.field == Field::Streaming,
-            "Streaming output (experimental, Parakeet)",
-            yesno(state.streaming),
+            "Streaming output",
+            common::on_off(state.streaming),
         ),
-    ];
+    ]
+}
 
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.advanced else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state
         .feedback
         .as_ref()
         .map(|(lvl, msg)| (*lvl, msg.as_str()));
-
-    common::render_form_with_guidance(
-        f,
-        area,
-        "Advanced",
-        state.dirty_since_load,
-        feedback_pair,
-        &rows,
-        guidance_for_field(state),
-    );
+    common::render_form_with_guidance(f, area, app, feedback_pair, &rows(state), guidance(state));
 }
 
-fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
-}
-
-fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
+fn guidance(state: &AdvancedState) -> Vec<Line<'static>> {
+    let text = |s: &'static str| Line::from(s);
+    let dim = |s: &'static str| Line::from(Span::styled(s, theme::muted()));
     match state.field {
-        Field::GpuIsolation => vec![
-            heading("GPU isolation"),
-            Line::from(""),
-            Line::from(
-                "Runs each transcription in a short-lived subprocess that \
-                 exits afterward. The GPU releases all VRAM between recordings \
-                 instead of holding the model resident.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Turn it on if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You're on a laptop with hybrid graphics and want the \
-                 discrete GPU to power down between dictations.",
-            ),
-            Line::from(
-                "  • You see VRAM use creep upward over a long voxtype \
-                 session.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Leave it off if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • Latency matters more than VRAM. Subprocess startup adds \
-                 ~100-300 ms per recording.",
-            ),
-        ],
-        Field::OnDemand => vec![
-            heading("On-demand model loading"),
-            Line::from(""),
-            Line::from(
-                "When on, voxtype loads the model only when recording starts \
-                 (and unloads at idle). When off, the model stays resident \
-                 from daemon start.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Turn it on if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You only dictate occasionally and don't want the daemon \
-                 holding ~1-2 GB of RAM in the background.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Leave it off if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You dictate frequently. Resident-mode transcription \
-                 starts instantly; on-demand loads add a one-shot delay on \
-                 the first key press.",
-            ),
-        ],
-        Field::FlashAttention => vec![
-            heading("Flash attention"),
-            Line::from(""),
-            Line::from(
-                "A GPU-only inference optimization that reduces memory \
-                 bandwidth pressure in the attention layers. Speeds up \
-                 transcription on capable cards.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Turn it on if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You're on Vulkan or CUDA with a recent GPU. \
-                 Particularly noticeable on large-v3 and large-v3-turbo.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Leave it off if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You're CPU-only or on older hardware (no benefit, may \
-                 cause crashes on a few drivers).",
-            ),
-        ],
         Field::Eager => vec![
-            heading("Eager input processing"),
-            Line::from(""),
-            Line::from(
-                "Voxtype starts transcribing audio chunks while you're still \
-                 recording, instead of waiting until you release the PTT key. \
-                 The final transcript stitches the chunks together.",
+            text(
+                "Starts transcribing chunks while you are still talking, so long \
+                 recordings finish sooner. Short ones gain nothing.",
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Turn it on if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You record long-form (>10 sec) and the post-recording \
-                 wait feels like dead time.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Leave it off if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You record short bursts (a few seconds). The chunked \
-                 transcripts can occasionally split a sentence awkwardly.",
-            ),
-            Line::from(
-                "  • You're on a laptop and CPU/GPU heat matters. Eager \
-                 mode keeps the inference engine busy during recording.",
-            ),
+            dim("Keeps the CPU or GPU busy while recording."),
         ],
         Field::GpuDevice => vec![
-            heading("GPU device index"),
-            Line::from(""),
-            Line::from(
-                "Picks which GPU voxtype targets on multi-GPU systems. The \
-                 default (auto) leaves the choice to the driver, which often \
-                 picks the integrated GPU on hybrid laptops.",
+            text(
+                "Which graphics card to use when there are several. Automatic \
+                 often picks the built-in one on laptops; try 1 for the other.",
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Set a specific index if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • Transcription is slower than expected and you suspect \
-                 the iGPU is being used. Try 1 (or 2) to target the \
-                 discrete card.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Run `vulkaninfo --summary` or `nvidia-smi -L` to see your \
-                 device numbering.",
-                Style::default().fg(Color::Gray),
-            )),
+            dim("vulkaninfo --summary or nvidia-smi -L lists them."),
         ],
         Field::Streaming => vec![
-            heading("Streaming output (experimental)"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "EXPERIMENTAL in 0.7.2 — Parakeet only.",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(
-                "Voxtype types text incrementally while you're still speaking \
-                 instead of waiting for hotkey release. Uses the parakeet-rs \
-                 ParakeetUnified cache-aware streaming API; sub-second first \
-                 token on most hardware.",
+            text(
+                "Types words as you speak instead of after you stop. Parakeet \
+                 only, and experimental.",
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Turn it on if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You're on Parakeet TDT v3 and want a live feel rather \
-                 than waiting for the final stitched transcript.",
+            dim(
+                "Saving with it on sets the hotkey to toggle and, if needed, \
+                 switches to a Parakeet model that can stream and downloads it.",
             ),
-            Line::from(
-                "  • You record long-form and want partials to appear as \
-                 you speak.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Leave it off if:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "  • You're on Whisper or another batch engine. Streaming \
-                 returns an error rather than silently shimming — switch \
-                 engine first via the Engine section.",
-            ),
-            Line::from(
-                "  • You use heavy text post-processing (LLM cleanup). \
-                 Streaming types partials before post_process can see the \
-                 final transcript.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Requires a streaming-capable model (TDT v3 family with \
-                 tokenizer.model). Voxtype prints a clear error at daemon \
-                 start if the active model can't stream.",
-                Style::default().fg(Color::Gray),
-            )),
         ],
     }
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
-    let state = match app.advanced.as_mut() {
-        Some(s) => s,
-        None => return Action::None,
+    let Some(state) = app.advanced.as_mut() else {
+        return Action::None;
     };
-
-    // When a streaming-model auto-switch fires during save, `d` confirms the
-    // background download. Any other key dismisses the prompt — including
-    // navigation and re-save. Handle this BEFORE the regular key dispatch so
-    // a stale prompt can't bleed into a later edit.
-    if state.pending_download.is_some() {
-        if let KeyCode::Char(c) = key.code {
-            if c.eq_ignore_ascii_case(&'d') {
-                let model_name = state.pending_download.take().expect("checked above");
-                spawn_background_model_download(model_name.clone());
-                state.feedback = Some((
-                    FeedbackLevel::Ok,
-                    format!(
-                        "Downloading {} in the background. Watch for a desktop notification when it completes.",
-                        model_name
-                    ),
-                ));
-                return Action::None;
-            }
-        }
-        // Any other key dismisses the prompt and falls through to normal handling.
-        state.pending_download = None;
-    }
-
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            state.move_field(-1);
-            Action::None
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            state.move_field(1);
-            Action::None
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            state.cycle(-1);
-            Action::None
-        }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-            state.cycle(1);
-            Action::None
-        }
-        KeyCode::Char('s') => state.save(),
-        KeyCode::Char('r') => {
-            state.reset();
-            Action::None
-        }
-        _ => Action::None,
+        KeyCode::Up | KeyCode::Char('k') => state.move_field(-1),
+        KeyCode::Down | KeyCode::Char('j') => state.move_field(1),
+        KeyCode::Left | KeyCode::Char('h') => state.cycle(-1),
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => state.cycle(1),
+        KeyCode::Char('r') => state.reset(),
+        _ => {}
     }
-}
-
-/// Fork a detached worker thread that downloads the named Parakeet model and
-/// sends desktop notifications around the start, success, and failure
-/// transitions. The thread is fire-and-forget — voxtype's TUI doesn't
-/// supervise it, doesn't join on it, and survives a TUI exit (`std::thread`
-/// is detached, and `download_parakeet_model` writes to the on-disk models
-/// dir which the daemon picks up on next start).
-///
-/// All three notifications go through `notification::send_status_sync`, which
-/// owns the `--replace-id` bookkeeping keeping every voxtype notification in
-/// one slot that replaces in place (#679). Shelling out to `notify-send`
-/// directly here got a fresh server ID each time, so these stacked on KDE
-/// while real dictation notifications replaced each other — the one place a
-/// user watches notifications to judge their setup behaved unlike actual use.
-///
-/// Urgency levels:
-/// - `low` for the "starting" notification (informational, just letting the
-///   user know background work began)
-/// - `normal` for "complete" (user should see it but it's not urgent)
-/// - `critical` for "failed" (the user took an explicit action and it didn't
-///   succeed; they need to know to retry)
-fn spawn_background_model_download(model_name: String) {
-    std::thread::spawn(move || {
-        // Starting notification — low urgency, just informational.
-        crate::notification::send_status_sync(
-            "Voxtype",
-            &format!("Downloading model {} in the background…", model_name),
-            "low",
-        );
-
-        // Synchronous download in this worker thread. `download_parakeet_model`
-        // is `fn` (not `async fn`), so no tokio runtime is required here.
-        let result = crate::setup::model::download_parakeet_model(&model_name);
-
-        match result {
-            Ok(()) => {
-                crate::notification::send_status_sync(
-                    "Voxtype",
-                    &format!(
-                        "Model download complete: {}. Restart voxtype to use it.",
-                        model_name
-                    ),
-                    "normal",
-                );
-            }
-            Err(e) => {
-                crate::notification::send_status_sync(
-                    "Voxtype",
-                    &format!(
-                        "Model download failed: {}. Run `voxtype setup --download --model {}` to retry.",
-                        e, model_name
-                    ),
-                    "critical",
-                );
-            }
-        }
-    });
+    Action::None
 }

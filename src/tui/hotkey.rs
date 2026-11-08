@@ -3,9 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -15,6 +14,7 @@ use super::common::{
 };
 use super::compositor_bindings;
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 /// In-memory copy of the hotkey state, owned by `App`. Edits mutate this; `s`
 /// commits via [`ConfigEditor`] and rolls back on validation error.
@@ -138,7 +138,7 @@ impl HotkeyState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("load: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
                 return Action::None;
             }
@@ -173,7 +173,7 @@ impl HotkeyState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("save: {}", e),
+                    message: format!("Not saved: {}", e),
                 });
             }
         }
@@ -188,13 +188,13 @@ impl HotkeyState {
                 self.field = field;
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Ok,
-                    message: "Reverted unsaved changes".to_string(),
+                    message: "Put back the saved settings".to_string(),
                 });
             }
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("reload: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
             }
         }
@@ -323,22 +323,8 @@ fn cycle_opt(
     choices[new as usize].map(|s| s.to_string())
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.hotkey {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Hotkey");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-    };
-
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &HotkeyState) -> Vec<FormRowSpec> {
     // Greyout fields after Enabled when the evdev listener is off — those
     // controls don't affect anything until the listener turns back on.
     let greyout = !state.enabled;
@@ -346,12 +332,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let rows = vec![
         FormRowSpec::new(
             state.field == Field::Enabled,
-            "Built-in evdev listener",
-            if state.enabled { "enabled" } else { "disabled" },
+            "Built-in listener",
+            if state.enabled { "On" } else { "Off" },
         ),
         FormRowSpec::new(
             state.field == Field::Key,
-            "Push-to-talk key",
+            "Hotkey",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::Key => e.input.caret_string(),
                 _ => display_key(&state.key),
@@ -360,33 +346,56 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .dimmed(greyout),
         FormRowSpec::new(
             state.field == Field::Mode,
-            "Mode",
+            "Hotkey mode",
             match state.mode {
-                Mode::PushToTalk => "Push-to-talk (hold)",
-                Mode::Toggle => "Toggle (press to start/stop)",
+                Mode::PushToTalk => "Hold to talk",
+                Mode::Toggle => "Toggle",
             },
         )
+        .choices(&["Hold to talk", "Toggle"])
         .dimmed(greyout),
         FormRowSpec::new(
             state.field == Field::CancelKey,
             "Cancel key",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::CancelKey => e.input.caret_string(),
-                _ => state.cancel_key.as_deref().unwrap_or("(none)").to_string(),
+                _ => state
+                    .cancel_key
+                    .as_deref()
+                    .unwrap_or(common::NOT_SET)
+                    .to_string(),
             },
         )
         .dimmed(greyout),
         FormRowSpec::new(
             state.field == Field::Modifier,
-            "Modifier (secondary model)",
+            "Second model key",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::Modifier => e.input.caret_string(),
-                _ => state.modifier.as_deref().unwrap_or("(none)").to_string(),
+                _ => state
+                    .modifier
+                    .as_deref()
+                    .unwrap_or(common::NOT_SET)
+                    .to_string(),
             },
         )
         .dimmed(greyout),
     ];
+    rows
+}
 
+/// Put the cursor on the row labelled `label`, for Basics.
+pub fn focus_label(state: &mut HotkeyState, label: &str) {
+    if let Some(i) = rows(state).iter().position(|r| r.label == label) {
+        state.field = Field::ALL[i];
+    }
+}
+
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.hotkey else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state
         .feedback
         .as_ref()
@@ -394,15 +403,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let guidance = guidance_for_field(state);
 
-    common::render_form_with_guidance(
-        f,
-        area,
-        "Hotkey",
-        state.dirty_since_load,
-        feedback_pair,
-        &rows,
-        guidance,
-    );
+    common::render_form_with_guidance(f, area, app, feedback_pair, &rows(state), guidance);
 }
 
 fn to_common_level(level: FeedbackLevel) -> CommonFeedback {
@@ -423,47 +424,31 @@ fn guidance_for_field(state: &HotkeyState) -> Vec<Line<'_>> {
     }
 }
 
-fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+/// A dim note that the setting does nothing while the listener is off.
+fn ignored_note(state: &HotkeyState) -> Option<Line<'static>> {
+    (!state.enabled).then(|| {
+        Line::from(Span::styled(
+            "The built-in listener is off, so this does nothing.",
+            theme::muted(),
+        ))
+    })
 }
 
 fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     let mut lines = vec![
-        heading("Built-in evdev listener"),
-        Line::from(""),
         Line::from(
-            "When enabled, voxtype reads keyboard events directly from \
-             /dev/input/event* (your user must be in the `input` group). It \
-             owns the chosen PTT key globally — no compositor binding needed.",
+            "On: voxtype watches the keyboard for the hotkey itself (you must be \
+             in the input group). Off: your desktop's shortcuts run voxtype \
+             record start, stop or toggle.",
         ),
-        Line::from(""),
-        Line::from(
-            "When disabled, voxtype reads no keys. Bind your compositor (\
-             Hyprland, Sway, Niri, KDE shortcuts) to call:",
-        ),
-        Line::from(Span::styled(
-            "    voxtype record start    voxtype record stop",
-            Style::default().fg(Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "    voxtype record toggle   voxtype record cancel",
-            Style::default().fg(Color::Gray),
-        )),
         Line::from(""),
     ];
 
     let bindings = compositor_bindings::detect();
     if !bindings.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Compositor bindings detected",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            "Shortcuts found in your desktop's config",
+            theme::heading(),
         )));
         for b in &bindings {
             let file = b.source.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -473,15 +458,15 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
             )));
             lines.push(Line::from(Span::styled(
                 format!("      from {}", file),
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )));
         }
         lines.push(Line::from(""));
     } else if !state.enabled {
         lines.push(Line::from(Span::styled(
-            "No compositor bindings detected — voxtype will not receive any \
-             PTT key events.",
-            Style::default().fg(Color::Red),
+            "No desktop shortcut for voxtype was found, so nothing will start a \
+             recording. Add one of these:",
+            theme::error(),
         )));
         lines.push(Line::from(""));
     }
@@ -511,10 +496,8 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     if !suggestions.is_empty() {
         let comp = compositor_bindings::dominant_compositor(&bindings);
         lines.push(Line::from(Span::styled(
-            format!("Suggested additions ({} format)", comp.name()),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            format!("Shortcuts to add ({} format)", comp.name()),
+            theme::heading(),
         )));
         lines.push(Line::from(""));
         for s in &suggestions {
@@ -526,152 +509,72 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
             for cfg in &s.config_lines {
                 lines.push(Line::from(Span::styled(
                     format!("    {}", cfg),
-                    Style::default().fg(Color::Gray),
+                    theme::muted(),
                 )));
             }
             lines.push(Line::from(""));
         }
     }
 
-    if !state.enabled {
-        lines.push(Line::from(Span::styled(
-            "Compositor mode active: the rest of this section is ignored.",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
     lines
 }
 
-fn guidance_key<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
+fn guidance_key(state: &HotkeyState) -> Vec<Line<'static>> {
     let mut lines = vec![
-        heading("Push-to-talk key"),
-        Line::from(""),
         Line::from(
-            "Pick a key your fingers reach for without thinking. HOME, PAUSE, \
-             SCROLLLOCK, F13 are popular because they don't conflict with \
-             editor shortcuts.",
+            "Pick a key you can reach without looking that nothing else uses, \
+             such as SCROLLLOCK, PAUSE, F13 or a right-hand modifier.",
         ),
-        Line::from(""),
-        Line::from(
-            "RIGHT* keys (RIGHTCTRL, RIGHTALT, RIGHTMETA) work well if you \
-             touch-type with your left hand on the home row.",
-        ),
-        Line::from(""),
         Line::from(Span::styled(
-            "Custom keys can be set in config.toml directly using KEY_* \
-             names from <linux/input-event-codes.h>.",
-            Style::default().fg(Color::Gray),
+            "←→ goes through common keys; Enter types any key name.",
+            theme::muted(),
         )),
     ];
-    if !state.enabled {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
+    lines.extend(ignored_note(state));
     lines
 }
 
-fn guidance_mode<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
-    let mut lines = vec![
-        heading("Activation mode"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Push-to-talk: ",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(
-            "Hold the key while you speak; release to transcribe. Most \
-             responsive — voice never starts running while you're thinking.",
-        ),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Toggle: ",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(
-            "Press once to start, press again to stop. Friendlier for long \
-             dictation sessions but easy to leave running by accident.",
-        ),
-    ];
-    if !state.enabled {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
+fn guidance_mode(state: &HotkeyState) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(
+        "Hold to talk records while the key is down. Toggle starts on one press \
+         and stops on the next, which suits long dictation.",
+    )];
+    lines.extend(ignored_note(state));
     lines
 }
 
-fn guidance_cancel<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
+fn guidance_cancel(state: &HotkeyState) -> Vec<Line<'static>> {
     let mut lines = vec![
-        heading("Cancel key"),
-        Line::from(""),
         Line::from(
-            "Aborts an in-progress recording or transcription and discards \
-             audio without typing anything. Useful when you trip the PTT key \
-             by accident or the wrong window is focused.",
+            "Throws away the recording in progress without typing anything. \
+             ESC is the usual choice.",
         ),
-        Line::from(""),
-        Line::from(
-            "ESC is the obvious pick. F12 / DELETE / END are good alternatives \
-             if ESC is bound to something else in the foreground app.",
-        ),
-        Line::from(""),
         Line::from(Span::styled(
-            "(none) leaves cancellation off — kill the recording with \
-             `voxtype record cancel` instead.",
-            Style::default().fg(Color::Gray),
+            "Not set: cancel with voxtype record cancel.",
+            theme::muted(),
         )),
     ];
-    if !state.enabled {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
+    lines.extend(ignored_note(state));
     lines
 }
 
-fn guidance_modifier<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
+fn guidance_modifier(state: &HotkeyState) -> Vec<Line<'static>> {
     let mut lines = vec![
-        heading("Secondary-model modifier"),
-        Line::from(""),
         Line::from(
-            "When this key is held alongside the PTT key, voxtype switches to \
-             the [whisper] secondary_model for that recording.",
+            "Hold this together with the hotkey to use Whisper's secondary model \
+             for that recording, for example a small fast one for quick notes.",
         ),
-        Line::from(""),
-        Line::from(
-            "Common usage: large-v3 as your main model for accuracy, \
-             small.en under the modifier for instant short notes.",
-        ),
-        Line::from(""),
         Line::from(Span::styled(
-            "(none) disables the modifier behavior; the PTT key always uses \
-             the primary model.",
-            Style::default().fg(Color::Gray),
+            "Not set: always the main model.",
+            theme::muted(),
         )),
     ];
-    if !state.enabled {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
+    lines.extend(ignored_note(state));
     lines
 }
 
 fn display_key(key: &str) -> String {
-    if KEY_CHOICES.contains(&key) {
-        key.to_string()
-    } else {
-        format!("{}  (custom)", key)
-    }
+    key.to_string()
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {

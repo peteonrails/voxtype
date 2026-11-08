@@ -3,19 +3,20 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct OutputState {
     pub mode: String,
+    /// Where `file` mode appends; `None` when unset.
+    pub file_path: Option<String>,
     pub fallback_to_clipboard: bool,
     pub auto_submit: bool,
     pub shift_enter_newlines: bool,
@@ -48,6 +49,7 @@ pub enum FeedbackLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Mode,
+    FilePath,
     Fallback,
     AutoSubmit,
     ShiftEnterNewlines,
@@ -59,6 +61,7 @@ pub enum Field {
 impl Field {
     const ALL: &'static [Field] = &[
         Field::Mode,
+        Field::FilePath,
         Field::Fallback,
         Field::AutoSubmit,
         Field::ShiftEnterNewlines,
@@ -84,6 +87,7 @@ impl OutputState {
             mode: ed
                 .get_string("output", "mode")
                 .unwrap_or_else(|| "type".to_string()),
+            file_path: ed.get_string("output", "file_path"),
             fallback_to_clipboard: ed
                 .get_bool("output", "fallback_to_clipboard")
                 .unwrap_or(true),
@@ -102,7 +106,10 @@ impl OutputState {
     }
 
     fn is_text_field(field: Field) -> bool {
-        matches!(field, Field::AppendText | Field::PostProcess)
+        matches!(
+            field,
+            Field::FilePath | Field::AppendText | Field::PostProcess
+        )
     }
 
     fn start_edit_if_text_field(&mut self) -> bool {
@@ -110,6 +117,7 @@ impl OutputState {
             return false;
         }
         let initial = match self.field {
+            Field::FilePath => self.file_path.clone().unwrap_or_default(),
             Field::AppendText => self.append_text.clone().unwrap_or_default(),
             Field::PostProcess => self.post_process_command.clone().unwrap_or_default(),
             _ => String::new(),
@@ -123,6 +131,10 @@ impl OutputState {
 
     fn commit_text_edit(&mut self, field: Field, buffer: String) {
         match field {
+            Field::FilePath => {
+                let trimmed = buffer.trim();
+                self.file_path = (!trimmed.is_empty()).then(|| trimmed.to_string());
+            }
             Field::AppendText => {
                 self.append_text = if buffer.is_empty() {
                     None
@@ -149,12 +161,16 @@ impl OutputState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("load: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
                 return Action::None;
             }
         };
         ed.set_string("output", "mode", &self.mode);
+        match &self.file_path {
+            Some(path) => ed.set_string("output", "file_path", path),
+            None => ed.unset("output", "file_path"),
+        }
         ed.set_bool(
             "output",
             "fallback_to_clipboard",
@@ -182,7 +198,7 @@ impl OutputState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("save: {}", e),
+                    message: format!("Not saved: {}", e),
                 });
             }
         }
@@ -197,13 +213,13 @@ impl OutputState {
                 self.field = field;
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Ok,
-                    message: "Reverted unsaved changes".to_string(),
+                    message: "Put back the saved settings".to_string(),
                 });
             }
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("reload: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
             }
         }
@@ -229,6 +245,11 @@ impl OutputState {
                     .unwrap_or(0);
                 let n = (idx + delta).rem_euclid(MODE_CHOICES.len() as i32);
                 self.mode = MODE_CHOICES[n as usize].to_string();
+            }
+            // Typed only; Enter opens it.
+            Field::FilePath => {
+                self.start_edit_if_text_field();
+                return;
             }
             Field::Fallback => self.fallback_to_clipboard = !self.fallback_to_clipboard,
             Field::AutoSubmit => self.auto_submit = !self.auto_submit,
@@ -261,72 +282,78 @@ impl OutputState {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.output {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Output");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &OutputState) -> Vec<FormRowSpec> {
+    let typed = |field: Field| match state.editing.as_ref() {
+        Some(e) if e.field == field => Some(e.input.caret_string()),
+        _ => None,
     };
-
-    let rows = vec![
-        FormRowSpec::new(state.field == Field::Mode, "Output mode", &state.mode),
+    let modes: Vec<String> = MODE_CHOICES.iter().map(|m| mode_name(m)).collect();
+    vec![
+        FormRowSpec::new(state.field == Field::Mode, "Output", mode_name(&state.mode))
+            .choices(&modes),
+        FormRowSpec::new(
+            state.field == Field::FilePath,
+            "File",
+            typed(Field::FilePath).unwrap_or_else(|| {
+                state
+                    .file_path
+                    .clone()
+                    .unwrap_or_else(|| common::NOT_SET.to_string())
+            }),
+        )
+        .dimmed(state.mode != "file"),
         FormRowSpec::new(
             state.field == Field::Fallback,
-            "Fallback to clipboard",
+            "Fall back to clipboard",
             yesno(state.fallback_to_clipboard),
         ),
         FormRowSpec::new(
             state.field == Field::AutoSubmit,
-            "Auto-submit (press Enter)",
+            "Press Enter after",
             yesno(state.auto_submit),
         ),
         FormRowSpec::new(
             state.field == Field::ShiftEnterNewlines,
-            "Newlines as Shift+Enter",
+            "Line breaks as Shift+Enter",
             yesno(state.shift_enter_newlines),
         ),
         FormRowSpec::new(
             state.field == Field::PreTypeDelay,
-            "Pre-type delay (ms)",
-            state.pre_type_delay_ms.to_string(),
+            "Delay before typing",
+            format!("{} ms", state.pre_type_delay_ms),
         ),
         FormRowSpec::new(
             state.field == Field::AppendText,
-            "Append after each",
-            match state.editing.as_ref() {
-                Some(e) if e.field == Field::AppendText => e.input.caret_string(),
-                _ => display_append(state.append_text.as_deref()),
-            },
+            "Add after the text",
+            typed(Field::AppendText)
+                .unwrap_or_else(|| display_append(state.append_text.as_deref())),
         ),
         FormRowSpec::new(
             state.field == Field::PostProcess,
             "Post-process command",
-            match state.editing.as_ref() {
-                Some(e) if e.field == Field::PostProcess => e.input.caret_string(),
-                _ => state
+            typed(Field::PostProcess).unwrap_or_else(|| {
+                state
                     .post_process_command
-                    .as_deref()
-                    .map(|s| {
-                        if s.len() > 30 {
-                            format!("{}…", &s[..30])
-                        } else {
-                            s.to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| "(none)".to_string()),
-            },
+                    .clone()
+                    .unwrap_or_else(|| common::NOT_SET.to_string())
+            }),
         ),
-    ];
+    ]
+}
 
+/// Put the cursor on the row labelled `label`, for Basics.
+pub fn focus_label(state: &mut OutputState, label: &str) {
+    if let Some(i) = rows(state).iter().position(|r| r.label == label) {
+        state.field = Field::ALL[i];
+    }
+}
+
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.output else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state.feedback.as_ref().map(|fb| {
         (
             match fb.level {
@@ -340,160 +367,80 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
-        "Output",
-        state.dirty_since_load,
+        app,
         feedback_pair,
-        &rows,
+        &rows(state),
         guidance_for_field(state),
     );
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 fn display_append(s: Option<&str>) -> String {
     match s {
-        None => "(none)".to_string(),
-        Some(" ") => "space".to_string(),
-        Some("\n") => "newline".to_string(),
+        None => "Nothing".to_string(),
+        Some(" ") => "A space".to_string(),
+        Some("\n") => "A new line".to_string(),
         Some(other) => format!("{:?}", other),
     }
 }
 
-fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+/// `type` reads as `Type`.
+fn mode_name(mode: &str) -> String {
+    match mode {
+        "type" => "Type".to_string(),
+        "clipboard" => "Clipboard".to_string(),
+        "paste" => "Paste".to_string(),
+        "file" => "File".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
+    let text = |s: &'static str| Line::from(s);
+    let dim = |s: &'static str| Line::from(Span::styled(s, theme::muted()));
     match state.field {
         Field::Mode => vec![
-            heading("Output mode"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "type: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(
-                "Simulates keyboard typing via wtype → dotool → ydotool fallback. \
-                 Default; works in most apps.",
+            text(
+                "Type sends keystrokes to the focused window. Clipboard only copies \
+                 the text. Paste copies it and presses the paste keys, which is \
+                 faster for long text. File appends it to a file.",
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "clipboard: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Puts text on the clipboard only — you paste it yourself."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "paste: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Clipboard + Ctrl+V. Faster than typing for long transcripts."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "file: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Appends to a file. Set [output] file_path before using."),
+            dim("Typing tries wtype, then dotool, then ydotool."),
         ],
-        Field::Fallback => vec![
-            heading("Fallback to clipboard"),
-            Line::from(""),
-            Line::from(
-                "When the active output method fails (no compositor support, \
-                 no daemon running, etc.), drop the transcript on the \
-                 clipboard so you don't lose it.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Recommend keeping this on. The only reason to disable is if \
-                 you want voxtype to fail loudly when typing breaks — useful \
-                 in scripted setups.",
-            ),
+        Field::FilePath => vec![
+            text("The file that File output appends to."),
+            dim("Enter types a path."),
         ],
-        Field::AutoSubmit => vec![
-            heading("Auto-submit"),
-            Line::from(""),
-            Line::from("After typing the transcript, press Enter automatically."),
-            Line::from(""),
-            Line::from(
-                "Useful for chat boxes (Slack, Discord, terminal prompts) \
-                 where you'd hit Enter anyway. Skip if you typically want to \
-                 review/edit before sending.",
-            ),
-        ],
-        Field::ShiftEnterNewlines => vec![
-            heading("Newlines as Shift+Enter"),
-            Line::from(""),
-            Line::from(
-                "Convert any newline in the transcript to Shift+Enter \
-                 instead of regular Enter.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Match this to apps where Enter submits and Shift+Enter \
-                 inserts a newline (Cursor, Slack, Discord, ChatGPT, …). \
-                 Otherwise multi-line dictations submit prematurely.",
-            ),
-        ],
-        Field::PreTypeDelay => vec![
-            heading("Pre-type delay"),
-            Line::from(""),
-            Line::from(
-                "Milliseconds to wait before voxtype starts typing. Helps \
-                 some compositors that drop the first character if the \
-                 virtual keyboard hasn't fully initialized.",
-            ),
-            Line::from(""),
-            Line::from(
-                "0 is the default. If you see the first character of \
-                 transcripts dropped, bump to 50-100ms.",
-            ),
-        ],
-        Field::AppendText => vec![
-            heading("Append after each transcription"),
-            Line::from(""),
-            Line::from(
-                "Adds a fixed string after every transcription, before \
-                 auto-submit fires. Lets you tack on a separator without \
-                 saying it.",
-            ),
-            Line::from(""),
-            Line::from(
-                "space: dictate sentences incrementally and end up with \
-                 \"Sentence one. Sentence two.\" without manual spacing.",
-            ),
-            Line::from(""),
-            Line::from(
-                "newline: list-style notes where each PTT press should \
-                 start a new line.",
-            ),
-        ],
+        Field::Fallback => vec![text(
+            "If typing fails, the text goes to the clipboard so it isn't lost. \
+             Turn off only if you want failures to be loud.",
+        )],
+        Field::AutoSubmit => vec![text(
+            "Presses Enter after the text, for chat boxes and prompts you would \
+             send anyway.",
+        )],
+        Field::ShiftEnterNewlines => vec![text(
+            "Types line breaks as Shift+Enter, for apps where Enter sends the \
+             message (Slack, Discord, ChatGPT).",
+        )],
+        Field::PreTypeDelay => vec![text(
+            "Waits before typing. Raise it to 50 or 100 ms if the first letter \
+             goes missing.",
+        )],
+        Field::AppendText => vec![text(
+            "Added after every transcription. A space lets sentences dictated one \
+             at a time run on; a new line puts each on its own line.",
+        )],
         Field::PostProcess => vec![
-            heading("Post-process command"),
-            Line::from(""),
-            Line::from(
-                "Pipes the transcript through an external command before \
-                 output. The transcript goes in via stdin; the command's \
-                 stdout is what gets typed.",
+            text(
+                "A command the text passes through before output: it reads the \
+                 text on stdin and prints the result, for example a local LLM \
+                 cleanup.",
             ),
-            Line::from(""),
-            Line::from(
-                "Common uses: local LLM cleanup (Ollama), filler-word \
-                 stripping (sed), markdown formatting.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "TUI cycles a few presets. Edit the command body in \
-                 [post_process] command in config.toml directly.",
-                Style::default().fg(Color::Gray),
-            )),
+            dim("←→ goes through examples; Enter types your own."),
         ],
     }
 }

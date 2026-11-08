@@ -4,15 +4,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct TextState {
@@ -88,7 +87,10 @@ impl TextState {
         let mut ed = match ConfigEditor::load() {
             Ok(e) => e,
             Err(e) => {
-                self.feedback = Some((FeedbackLevel::Err, format!("load: {}", e)));
+                self.feedback = Some((
+                    FeedbackLevel::Err,
+                    format!("Couldn't read the config: {}", e),
+                ));
                 return Action::None;
             }
         };
@@ -117,7 +119,7 @@ impl TextState {
                     format!("Saved to {}", ed.path().display()),
                 ));
             }
-            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
+            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("Not saved: {}", e))),
         }
         Action::None
     }
@@ -129,7 +131,7 @@ impl TextState {
                 .min(total_rows(&fresh.replacements).saturating_sub(1));
             *self = fresh;
             self.cursor = cursor;
-            self.feedback = Some((FeedbackLevel::Ok, "Reverted unsaved changes".to_string()));
+            self.feedback = Some((FeedbackLevel::Ok, "Put back the saved settings".to_string()));
         }
     }
 
@@ -239,36 +241,16 @@ impl TextState {
 }
 
 fn read_replacements(ed: &ConfigEditor) -> Vec<(String, String)> {
-    // Walk the [text.replacements] table directly via toml_edit, since the
-    // ConfigEditor accessor only returns single keyed values.
-    let mut out: Vec<(String, String)> = Vec::new();
-    if let Some(table) = ed.raw_table("text.replacements") {
-        for (k, v) in table.iter() {
-            if let Some(s) = v.as_value().and_then(|v| v.as_str()) {
-                out.push((k.to_string(), s.to_string()));
-            }
-        }
-    }
+    // Both `[text.replacements]` and `replacements = { ... }` under [text]
+    // are valid; reading only the first hid inline entries, and the next
+    // save then wiped them.
+    let mut out = ed.string_entries("text.replacements");
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.text {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Text");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-    };
-
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &TextState) -> Vec<FormRowSpec> {
     let editing_idx = state.editing.as_ref().and_then(|e| match e.target {
         EditTarget::Existing(i) => Some(i),
         EditTarget::New => None,
@@ -282,57 +264,56 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     rows.push(FormRowSpec::new(
         state.cursor == 0,
-        "Spoken punctuation conversion",
+        "Spoken punctuation",
         yesno(state.spoken_punctuation),
     ));
     rows.push(FormRowSpec::new(
         state.cursor == 1,
-        "Smart auto-submit on \"submit\"",
+        "Say \"submit\" to send",
         yesno(state.smart_auto_submit),
     ));
 
     for (i, (k, v)) in state.replacements.iter().enumerate() {
         let row_idx = toggle_count() + i;
-        let label = format!("\"{}\"", k);
+        let label = k.clone();
         let value = if editing_idx == Some(i) {
             replacement_edit_value(state)
         } else {
-            format!("→ \"{}\"", v)
+            format!("→ {}", v)
         };
         rows.push(FormRowSpec::new(state.cursor == row_idx, label, value));
     }
 
     let add_idx = add_row_index(&state.replacements);
     let add_label = if editing_new {
-        "(new entry)".to_string()
+        "New replacement".to_string()
     } else {
-        "+ Add new replacement".to_string()
+        "Add a replacement".to_string()
     };
     let add_value = if editing_new {
         replacement_edit_value(state)
     } else {
-        "press Enter".to_string()
+        String::new()
     };
     rows.push(FormRowSpec::new(
         state.cursor == add_idx,
         add_label,
         add_value,
     ));
+    rows
+}
 
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.text else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state
         .feedback
         .as_ref()
         .map(|(lvl, msg)| (*lvl, msg.as_str()));
 
-    common::render_form_with_guidance(
-        f,
-        area,
-        "Text",
-        state.dirty_since_load,
-        feedback_pair,
-        &rows,
-        guidance(state),
-    );
+    common::render_form_with_guidance(f, area, app, feedback_pair, &rows(state), guidance(state));
 }
 
 fn replacement_edit_value(state: &TextState) -> String {
@@ -340,132 +321,45 @@ fn replacement_edit_value(state: &TextState) -> String {
         return String::new();
     };
     match edit.phase {
-        EditPhase::Key => format!("editing key: {}", edit.input.caret_string()),
-        EditPhase::Value => format!("\"{}\" → {}", edit.key_buffer, edit.input.caret_string()),
+        EditPhase::Key => format!("When I say: {}", edit.input.caret_string()),
+        EditPhase::Value => format!("{} → {}", edit.key_buffer, edit.input.caret_string()),
     }
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
-}
-
-fn heading(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    common::on_off(b)
 }
 
 fn guidance(state: &TextState) -> Vec<Line<'static>> {
     let total = total_rows(&state.replacements);
-    let on_replacement_row = state.cursor >= toggle_count() && state.cursor < total - 1;
-    let on_add_row = state.cursor == total - 1;
-
+    let dim = |s: &'static str| Line::from(Span::styled(s, theme::muted()));
     if let Some(edit) = state.editing.as_ref() {
-        let header = match edit.phase {
-            EditPhase::Key => "✎ Editing key — Enter for value, Esc to cancel",
-            EditPhase::Value => "✎ Editing value — Enter to commit, Esc to cancel",
-        };
         return vec![
-            Line::from(Span::styled(
-                header,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(
-                "Replacements run as a case-insensitive substring match \
-                 across the transcript before output. The dictated word goes \
-                 on the left, the replacement on the right.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Examples:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  \"vox type\"  →  \"voxtype\""),
-            Line::from("  \"a i\"       →  \"AI\""),
-            Line::from("  \"slack\"     →  \"Slack\""),
+            Line::from(match edit.phase {
+                EditPhase::Key => "Type the words as you say them, then Enter.",
+                EditPhase::Value => "Type what to write instead, then Enter.",
+            }),
+            dim("For example: vox type → voxtype, hyperland → Hyprland."),
         ];
     }
-
-    if state.cursor == 0 {
-        return vec![
-            heading("Spoken punctuation"),
-            Line::from(""),
-            Line::from(
-                "Maps words like \"period\", \"comma\", \"question mark\", \
-                 \"new line\" to their symbol equivalents in the transcript.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Useful when the model can't reliably punctuate from prosody \
-                 (smaller Whisper models, accented speech).",
-            ),
-        ];
+    match state.cursor {
+        0 => vec![Line::from(
+            "Turns spoken words like \"period\", \"comma\" and \"new line\" into \
+             the marks themselves. Helps smaller models that don't punctuate.",
+        )],
+        1 => vec![Line::from(
+            "Ending a recording with \"submit\" removes the word and presses \
+             Enter, so you choose when to send.",
+        )],
+        c if c == total - 1 => vec![
+            Line::from("Fix words voxtype gets wrong, such as names. Enter adds one."),
+            dim("Matches ignore case."),
+        ],
+        _ => vec![
+            Line::from("Enter edits this replacement; d removes it."),
+            dim("Matches ignore case."),
+        ],
     }
-
-    if state.cursor == 1 {
-        return vec![
-            heading("Smart auto-submit"),
-            Line::from(""),
-            Line::from(
-                "Watches for \"submit\" at the end of a recording. If found, \
-                 voxtype strips it and presses Enter for you.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Pair with [output] auto_submit = false: most dictations \
-                 don't auto-send, but ending with \"submit\" explicitly fires \
-                 Enter.",
-            ),
-        ];
-    }
-
-    if on_replacement_row {
-        let idx = state.cursor - toggle_count();
-        let (k, v) = &state.replacements[idx];
-        return vec![
-            heading("Custom replacement"),
-            Line::from(""),
-            Line::from(format!("  \"{}\"  →  \"{}\"", k, v)),
-            Line::from(""),
-            Line::from(
-                "Press Enter to edit (key first, then value). Press d to \
-                 delete this entry.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Replacements run before output. Match is case-insensitive \
-                 and operates on the whole transcript text.",
-                Style::default().fg(Color::Gray),
-            )),
-        ];
-    }
-
-    if on_add_row {
-        return vec![
-            heading("Add a replacement"),
-            Line::from(""),
-            Line::from(
-                "Press Enter to start a new entry. You'll be prompted for the \
-                 key first, then the value.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Examples:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  \"vox type\"  →  \"voxtype\""),
-            Line::from("  \"hyperland\" →  \"Hyprland\""),
-            Line::from("  \"github\"    →  \"GitHub\""),
-        ];
-    }
-
-    Vec::new()
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {

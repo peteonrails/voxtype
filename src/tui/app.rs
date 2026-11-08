@@ -1,44 +1,49 @@
 //! TUI application state.
 
-use crate::setup::binary::{self, Acceleration, EngineFamily, InstallKind, Inventory, Variant};
+use crate::setup::binary::{self, InstallKind, Inventory, Variant};
 use crate::setup::variant_check::{self, VariantMismatch};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
-use super::advanced_section::AdvancedState;
-use super::audio::AudioState;
-use super::engine::EngineState;
-use super::hotkey::HotkeyState;
-use super::meeting_section::MeetingState;
-use super::notifications_section::NotificationsState;
-use super::osd_section::OsdState;
-use super::output_section::OutputState;
+use super::advanced_section::{self, AdvancedState};
+use super::audio::{self, AudioState};
+use super::common::{FeedbackLevel, FormRowSpec, CARET};
+use super::engine::{self, EngineState};
+use super::hotkey::{self, HotkeyState};
+use super::meeting_section::{self, MeetingState};
+use super::notifications_section::{self, NotificationsState};
+use super::osd_section::{self, OsdState};
+use super::output_section::{self, OutputState};
 use super::section::Section;
-use super::text_section::TextState;
-use super::vad_section::VadState;
-use super::waybar_section::WaybarState;
+use super::text_section::{self, TextState};
+use super::vad_section::{self, VadState};
+use super::waybar_section::{self, WaybarState};
 
 /// What the event handler asks the run-loop to do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
-    /// User pressed q / Ctrl-C / Esc-from-sidebar. The run-loop checks
-    /// whether any section was visited and routes through the save-on-exit
-    /// prompt before terminating.
+    /// q / Ctrl-C / Esc from the page list. Asks first when anything is
+    /// unsaved.
     Quit,
-    /// User has already answered the save-on-exit prompt (Save or Discard);
-    /// terminate immediately without re-prompting.
+    /// The quit question was answered; leave without asking again.
     ForceQuit,
-    /// Move /usr/bin/voxtype to the named variant via pkexec.
+    /// `s`: save every page, then do whatever the saves need, then restart
+    /// voxtype so it uses them.
+    Save,
+    /// The quit question's "save": save and apply, then quit if every page
+    /// saved.
+    SaveAndQuit,
+    /// Switch the installed build via pkexec, then restart voxtype.
     SwitchVariant(Variant),
-    /// Run `voxtype setup --download --model <model>` to download a missing
-    /// model. The
-    /// engine name is included only for human-readable feedback.
+    /// Run `voxtype setup --download --model <model>`, then restart voxtype.
     DownloadModel {
         engine: String,
         model: String,
     },
-    /// Engine save needed BOTH a binary swap and a model download. Run them
-    /// in order — the symlink swap first so the post-download daemon
-    /// restart picks the right binary.
+    /// An engine change needs both a different build and a model download.
+    /// The build switches first so the restart afterwards uses it.
     SwitchVariantAndDownload {
         variant: Variant,
         engine: String,
@@ -46,69 +51,42 @@ pub enum Action {
     },
 }
 
-/// Result of the most recent variant-switch attempt, displayed as a banner.
-pub struct SwitchOutcome {
-    pub success: bool,
-    pub message: String,
-}
-
-/// Layout of the variant matrix: rows = engine family, columns = acceleration.
-pub const ROWS: &[EngineFamily] = &[EngineFamily::Whisper, EngineFamily::Onnx];
-pub const COLS: &[Acceleration] = &[
-    Acceleration::Avx2,
-    Acceleration::Avx512,
-    Acceleration::Vulkan,
-    Acceleration::Cuda,
-    Acceleration::Migraphx,
-];
-
 pub struct App {
     pub inventory: Inventory,
-    /// Cursor position in the variant matrix (row, col).
-    pub cursor: (usize, usize),
-    /// True after the active variant changes; daemon should be restarted.
-    pub restart_needed: bool,
-    /// Result of the last switch attempt, if any.
-    pub last_switch: Option<SwitchOutcome>,
-    pub daemon_running: bool,
+    /// Row under the cursor on the Build page.
+    pub build_cursor: usize,
+    /// Row under the cursor on the Basics page.
+    pub basics_cursor: usize,
     /// Hidden testing flag: render as Package install even when running from a
-    /// source build, so the variant matrix can be exercised in dev.
+    /// source build, so the Build page can be exercised in dev.
     pub force_package_mode: bool,
-    /// Section currently rendered in the right pane.
+    /// Page shown on the right.
     pub current_section: Section,
-    /// Index into Section::ALL of the section being hovered in the sidebar.
-    /// Independent of `current_section` so the user can scroll the sidebar
-    /// without committing.
+    /// Index into Section::ALL of the page under the cursor in the list.
     pub sidebar_cursor: usize,
-    /// True when keyboard input is steered at the sidebar (Tab toggles).
+    /// True when keys go to the page list rather than the open page.
     pub sidebar_focused: bool,
-    /// `?` toggles a centered help overlay listing every keybinding.
     pub help_open: bool,
-    /// True while the save-on-exit prompt is showing. Cleared when the user
-    /// picks Save (s), Discard (d), or Cancel (Esc/c).
+    /// First visible line of the help overlay.
+    pub help_scroll: std::cell::Cell<u16>,
+    /// First visible line of the explanation under the settings.
+    pub guidance_scroll: std::cell::Cell<u16>,
+    /// Each page's values as last saved (or loaded), keyed by row label, so
+    /// a row that differs can carry the unsaved marker.
+    baselines: RefCell<HashMap<&'static str, HashMap<String, String>>>,
+    /// The open page's own message, handed over while it renders so the
+    /// status line can show it.
+    page_message: RefCell<Option<(FeedbackLevel, String)>>,
+    /// True while the quit question is showing.
     pub quit_pending: bool,
-    /// If the configured engine's model isn't downloaded, this holds the
-    /// model name so the General banner can prompt the user to fetch it.
-    /// Computed at load time and on `refresh_inventory()`.
+    /// Result of the last save, switch, download or restart. Stays until
+    /// something changes again.
+    pub notice: Option<(FeedbackLevel, String)>,
+    /// The configured engine's model when it isn't downloaded.
     pub missing_model: Option<MissingModel>,
-    /// `Some` when the configured engine isn't available in the running
-    /// binary's compiled features (e.g. config says `engine = "parakeet"`
-    /// but `/usr/bin/voxtype` dispatches to the CPU Whisper variant). When
-    /// present, every section renders a persistent red banner above its
-    /// content pointing the user at the recovery path. Computed at load
-    /// time and on `refresh_inventory()`. See #450.
+    /// `Some` when the installed build can't run the configured engine
+    /// (#450).
     pub variant_mismatch: Option<VariantMismatch>,
-    /// Modification time of config.toml as of the last moment the daemon
-    /// was known to be in sync with it: TUI startup, or the most recent
-    /// `restart_voxtype_daemon` call. Compared on quit — a newer mtime
-    /// means a save landed that the running daemon has not loaded, so the
-    /// TUI restarts it on the way out. Without this, a config-only change
-    /// (e.g. switching engine on a binary that supports both) saved and
-    /// quit cleanly but never took effect, while variant switches and
-    /// model downloads restarted immediately.
-    pub config_synced_mtime: Option<std::time::SystemTime>,
-    /// Lazily loaded Hotkey section state. None until the user opens Hotkey
-    /// for the first time (or load fails).
     pub hotkey: Option<HotkeyState>,
     pub audio: Option<AudioState>,
     pub engine: Option<EngineState>,
@@ -126,12 +104,11 @@ pub struct App {
 pub struct MissingModel {
     pub engine: String,
     pub model: String,
-    pub setup_command: &'static str,
 }
 
 /// Build the inventory and, if `force_package_mode` is set, override the
-/// install_kind so the TUI exercises the variant-matrix code path during
-/// development without needing to install the binary.
+/// install_kind so the TUI exercises the Build page during development
+/// without needing to install the binary.
 fn build_inventory(force_package_mode: bool) -> Inventory {
     let mut inv = binary::inventory();
     if force_package_mode && inv.install_kind == InstallKind::Source {
@@ -139,8 +116,6 @@ fn build_inventory(force_package_mode: bool) -> Inventory {
         if inv.package_lib_dir.is_none() {
             inv.package_lib_dir = Some(Path::new(binary::LIB_DIR).to_path_buf());
         }
-        // Source resolution skips the variant matrix; build it from what is
-        // on disk so the cells render real state.
         if inv.variants.is_empty() {
             inv.variants = binary::variant_statuses(
                 Path::new(binary::LIB_DIR),
@@ -153,26 +128,67 @@ fn build_inventory(force_package_mode: bool) -> Inventory {
     inv
 }
 
+/// Run `$body` with `$state` bound to each loaded section's state.
+macro_rules! for_each_loaded {
+    ($app:expr, |$state:ident| $body:expr) => {{
+        if let Some($state) = $app.engine.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.hotkey.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.audio.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.vad.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.output.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.text.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.notifications.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.osd.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.waybar.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.meeting.as_mut() {
+            $body
+        }
+        if let Some($state) = $app.advanced.as_mut() {
+            $body
+        }
+    }};
+}
+
 impl App {
     pub fn new(force_package_mode: bool) -> Self {
         let inventory = build_inventory(force_package_mode);
-        let cursor = initial_cursor(&inventory);
+        let build_cursor = super::build::initial_cursor(&inventory);
         let variant_mismatch = detect_variant_mismatch(&inventory);
-        Self {
+        let mut app = Self {
             inventory,
-            cursor,
-            restart_needed: false,
-            last_switch: None,
-            daemon_running: is_daemon_running(),
+            build_cursor,
+            basics_cursor: 0,
             force_package_mode,
-            current_section: Section::General,
+            current_section: Section::Basics,
             sidebar_cursor: 0,
-            sidebar_focused: true,
+            sidebar_focused: false,
             help_open: false,
+            help_scroll: std::cell::Cell::new(0),
+            guidance_scroll: std::cell::Cell::new(0),
+            baselines: RefCell::new(HashMap::new()),
+            page_message: RefCell::new(None),
             quit_pending: false,
+            notice: None,
             missing_model: detect_missing_model(),
             variant_mismatch,
-            config_synced_mtime: config_file_mtime(),
             hotkey: None,
             audio: None,
             engine: None,
@@ -184,44 +200,56 @@ impl App {
             osd: None,
             waybar: None,
             advanced: None,
+        };
+        app.ensure_section_loaded();
+        app.capture_baselines();
+        app
+    }
+
+    /// Load a page's settings the first time it opens. Basics shows settings
+    /// from four pages, so it loads all four.
+    pub fn ensure_section_loaded(&mut self) {
+        let wanted: &[Section] = match self.current_section {
+            Section::Basics => &[
+                Section::Engine,
+                Section::Hotkey,
+                Section::Output,
+                Section::Osd,
+            ],
+            Section::Engine => &[Section::Engine],
+            Section::Hotkey => &[Section::Hotkey],
+            Section::Audio => &[Section::Audio],
+            Section::Output => &[Section::Output],
+            Section::Text => &[Section::Text],
+            Section::Vad => &[Section::Vad],
+            Section::Meeting => &[Section::Meeting],
+            Section::Notifications => &[Section::Notifications],
+            Section::Osd => &[Section::Osd],
+            Section::Waybar => &[Section::Waybar],
+            Section::Advanced => &[Section::Advanced],
+            Section::Build => &[],
+        };
+        for section in wanted {
+            self.load_section(*section);
         }
     }
 
-    /// Ensure section-specific state is loaded the first time a section opens.
-    pub fn ensure_section_loaded(&mut self) {
-        match self.current_section {
-            Section::Hotkey if self.hotkey.is_none() => {
-                self.hotkey = HotkeyState::load().ok();
-            }
-            Section::Audio if self.audio.is_none() => {
-                self.audio = AudioState::load().ok();
-            }
-            Section::Engine if self.engine.is_none() => {
-                self.engine = EngineState::load().ok();
-            }
-            Section::Output if self.output.is_none() => {
-                self.output = OutputState::load().ok();
-            }
-            Section::Text if self.text.is_none() => {
-                self.text = TextState::load().ok();
-            }
-            Section::Vad if self.vad.is_none() => {
-                self.vad = VadState::load().ok();
-            }
-            Section::Meeting if self.meeting.is_none() => {
-                self.meeting = MeetingState::load().ok();
-            }
+    fn load_section(&mut self, section: Section) {
+        match section {
+            Section::Hotkey if self.hotkey.is_none() => self.hotkey = HotkeyState::load().ok(),
+            Section::Audio if self.audio.is_none() => self.audio = AudioState::load().ok(),
+            Section::Engine if self.engine.is_none() => self.engine = EngineState::load().ok(),
+            Section::Output if self.output.is_none() => self.output = OutputState::load().ok(),
+            Section::Text if self.text.is_none() => self.text = TextState::load().ok(),
+            Section::Vad if self.vad.is_none() => self.vad = VadState::load().ok(),
+            Section::Meeting if self.meeting.is_none() => self.meeting = MeetingState::load().ok(),
             Section::Notifications if self.notifications.is_none() => {
-                self.notifications = NotificationsState::load().ok();
+                self.notifications = NotificationsState::load().ok()
             }
-            Section::Osd if self.osd.is_none() => {
-                self.osd = OsdState::load().ok();
-            }
-            Section::Waybar if self.waybar.is_none() => {
-                self.waybar = WaybarState::load().ok();
-            }
+            Section::Osd if self.osd.is_none() => self.osd = OsdState::load().ok(),
+            Section::Waybar if self.waybar.is_none() => self.waybar = WaybarState::load().ok(),
             Section::Advanced if self.advanced.is_none() => {
-                self.advanced = AdvancedState::load().ok();
+                self.advanced = AdvancedState::load().ok()
             }
             _ => {}
         }
@@ -229,24 +257,22 @@ impl App {
 
     pub fn move_sidebar(&mut self, delta: i32) {
         let len = Section::ALL.len() as i32;
-        if len == 0 {
-            return;
-        }
         let new = (self.sidebar_cursor as i32 + delta).clamp(0, len - 1);
         self.sidebar_cursor = new as usize;
     }
 
     pub fn open_hovered_section(&mut self) {
         if let Some(section) = Section::ALL.get(self.sidebar_cursor).copied() {
+            if section != self.current_section {
+                self.notice = None;
+            }
             self.current_section = section;
             self.ensure_section_loaded();
+            self.capture_baselines();
         }
     }
 
-    /// Direct-navigate to a specific section, bypassing the sidebar cursor.
-    /// Used by F2 (jump to General to fix a variant mismatch), and a fine
-    /// hook for future "Press X to fix" cross-section affordances. Focuses
-    /// the content pane so the user can act immediately on arrival.
+    /// Open a page and put the keys on it.
     pub fn jump_to_section(&mut self, section: Section) {
         self.current_section = section;
         if let Some(idx) = Section::ALL.iter().position(|s| *s == section) {
@@ -254,12 +280,11 @@ impl App {
         }
         self.sidebar_focused = false;
         self.ensure_section_loaded();
+        self.capture_baselines();
     }
 
     pub fn focus_sidebar(&mut self) {
         self.sidebar_focused = true;
-        // Keep cursor in sync with the active section so the user lands on the
-        // currently-open section when they Tab back to the sidebar.
         if let Some(idx) = Section::ALL.iter().position(|s| *s == self.current_section) {
             self.sidebar_cursor = idx;
         }
@@ -269,22 +294,183 @@ impl App {
         self.sidebar_focused = false;
     }
 
-    /// True when a section is in inline-edit mode and should swallow keys
-    /// instead of letting global shortcuts (Esc, Tab, q) act on them.
+    /// True when keys go to the open page rather than the list.
+    pub fn content_focused(&self) -> bool {
+        !self.sidebar_focused
+    }
+
+    /// True when `section` holds edits that are not in the config file yet.
+    pub fn section_dirty(&self, section: Section) -> bool {
+        match section {
+            Section::Basics => [
+                Section::Engine,
+                Section::Hotkey,
+                Section::Output,
+                Section::Osd,
+            ]
+            .iter()
+            .any(|s| self.section_dirty(*s)),
+            Section::Build => false,
+            Section::Engine => self.engine.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Audio => self.audio.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Output => self.output.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Text => self.text.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Vad => self.vad.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Meeting => self.meeting.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Notifications => self
+                .notifications
+                .as_ref()
+                .is_some_and(|s| s.dirty_since_load),
+            Section::Osd => self.osd.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Advanced => self.advanced.as_ref().is_some_and(|s| s.dirty_since_load),
+        }
+    }
+
+    /// Pages holding unsaved edits, in list order. Basics is left out: its
+    /// settings belong to other pages, which are counted instead.
+    pub fn dirty_sections(&self) -> Vec<Section> {
+        Section::ALL
+            .iter()
+            .copied()
+            .filter(|s| *s != Section::Basics && self.section_dirty(*s))
+            .collect()
+    }
+
+    /// How many settings differ from the file, across every page.
+    pub fn unsaved_count(&self) -> usize {
+        self.dirty_sections()
+            .into_iter()
+            .map(|s| {
+                let rows = self.section_rows(s).unwrap_or_default();
+                let changed = self
+                    .modified_rows(s, &rows)
+                    .into_iter()
+                    .filter(|m| *m)
+                    .count();
+                // An edit with no row of its own (a removed replacement)
+                // still counts; one undone by hand doesn't.
+                match changed {
+                    0 if self.matches_baseline(s, &rows) => 0,
+                    0 => 1,
+                    n => n,
+                }
+            })
+            .sum()
+    }
+
+    /// True when `rows` are exactly what `section` had when last saved.
+    fn matches_baseline(&self, section: Section, rows: &[FormRowSpec]) -> bool {
+        let baselines = self.baselines.borrow();
+        let Some(saved) = baselines.get(section.label()) else {
+            return false;
+        };
+        rows.len() == saved.len()
+            && rows
+                .iter()
+                .all(|r| saved.get(&r.label).is_some_and(|v| *v == r.value))
+    }
+
+    /// The rows a page shows, from its current in-memory settings.
+    pub fn section_rows(&self, section: Section) -> Option<Vec<FormRowSpec>> {
+        match section {
+            Section::Basics => Some(super::basics::rows(self)),
+            Section::Build => None,
+            Section::Engine => self.engine.as_ref().map(engine::rows),
+            Section::Hotkey => self.hotkey.as_ref().map(hotkey::rows),
+            Section::Audio => self.audio.as_ref().map(audio::rows),
+            Section::Output => self.output.as_ref().map(output_section::rows),
+            Section::Text => self.text.as_ref().map(text_section::rows),
+            Section::Vad => self.vad.as_ref().map(vad_section::rows),
+            Section::Meeting => self.meeting.as_ref().map(meeting_section::rows),
+            Section::Notifications => self.notifications.as_ref().map(notifications_section::rows),
+            Section::Osd => self.osd.as_ref().map(osd_section::rows),
+            Section::Waybar => self.waybar.as_ref().map(waybar_section::rows),
+            Section::Advanced => self.advanced.as_ref().map(advanced_section::rows),
+        }
+    }
+
+    /// Remember the rows of every loaded page that has nothing unsaved, as
+    /// the values a later edit is compared against. Called after every key,
+    /// so a save, a revert or a reload resets the markers.
+    pub fn capture_baselines(&self) {
+        for section in Section::ALL {
+            if *section == Section::Basics || self.section_dirty(*section) {
+                continue;
+            }
+            let Some(rows) = self.section_rows(*section) else {
+                continue;
+            };
+            let values: HashMap<String, String> = rows
+                .into_iter()
+                .filter(|r| !r.value.contains(CARET))
+                .map(|r| (r.label, r.value))
+                .collect();
+            self.baselines.borrow_mut().insert(section.label(), values);
+        }
+    }
+
+    /// Which of `rows` on `section` differ from what is saved.
+    pub fn modified_rows(&self, section: Section, rows: &[FormRowSpec]) -> Vec<bool> {
+        if section == Section::Basics {
+            return super::basics::modified(self, rows);
+        }
+        if !self.section_dirty(section) {
+            return vec![false; rows.len()];
+        }
+        let baselines = self.baselines.borrow();
+        let saved = baselines.get(section.label());
+        rows.iter()
+            .map(|row| {
+                !row.value.contains(CARET)
+                    && saved
+                        .and_then(|s| s.get(&row.label))
+                        .is_some_and(|before| *before != row.value)
+            })
+            .collect()
+    }
+
+    /// Whether the row labelled `label` on `section` differs from the file.
+    pub fn row_modified(&self, section: Section, label: &str, value: &str) -> bool {
+        self.section_dirty(section)
+            && !value.contains(CARET)
+            && self
+                .baselines
+                .borrow()
+                .get(section.label())
+                .and_then(|s| s.get(label))
+                .is_some_and(|before| before != value)
+    }
+
+    pub fn set_page_message(&self, message: Option<(FeedbackLevel, &str)>) {
+        *self.page_message.borrow_mut() = message.map(|(l, m)| (l, m.to_string()));
+    }
+
+    pub fn page_message(&self) -> Option<(FeedbackLevel, String)> {
+        self.page_message.borrow().clone()
+    }
+
+    /// True when a field on the open page is being typed into, so every key
+    /// goes to it.
     pub fn is_editing(&self) -> bool {
-        match self.current_section {
+        let section = match self.current_section {
+            Section::Basics => super::basics::target_section(self),
+            other => other,
+        };
+        match section {
             Section::Engine => self.engine.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Osd => self.osd.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Text => self.text.as_ref().is_some_and(|s| s.editing.is_some()),
             _ => false,
         }
     }
 
-    /// Give sections with background work a chance to fold results in.
-    /// Called once per event-loop tick (so at least every poll interval).
+    /// Give pages with background work a chance to fold results in.
     pub fn poll_background(&mut self) {
         if let Some(audio) = self.audio.as_mut() {
             audio.poll_device_scan();
@@ -293,183 +479,176 @@ impl App {
 
     pub fn refresh_inventory(&mut self) {
         self.inventory = build_inventory(self.force_package_mode);
-        self.daemon_running = is_daemon_running();
         self.missing_model = detect_missing_model();
         self.variant_mismatch = detect_variant_mismatch(&self.inventory);
     }
 
-    /// True when at least one section state has been loaded — the user has
-    /// visited that section, so it might hold unsaved field edits. Used to
-    /// gate the save-on-exit prompt so users who only browse don't get
-    /// asked.
-    pub fn any_section_loaded(&self) -> bool {
-        self.hotkey.is_some()
-            || self.audio.is_some()
-            || self.engine.is_some()
-            || self.output.is_some()
-            || self.text.is_some()
-            || self.vad.is_some()
-            || self.meeting.is_some()
-            || self.notifications.is_some()
-            || self.osd.is_some()
-            || self.waybar.is_some()
-            || self.advanced.is_some()
+    /// Save every page with unsaved edits. Each save reloads the file,
+    /// applies its page and validates before renaming, so the saves
+    /// compose. Returns the pages that failed (they keep their error and
+    /// their edits) and the follow-up work the saves asked for, such as a
+    /// model download.
+    pub fn save_all(&mut self) -> (Vec<Section>, Vec<Action>) {
+        let mut actions = Vec::new();
+        for section in self.dirty_sections() {
+            let action = match section {
+                Section::Engine => self.engine.as_mut().map(|s| s.save()),
+                Section::Hotkey => self.hotkey.as_mut().map(|s| s.save()),
+                Section::Audio => self.audio.as_mut().map(|s| s.save()),
+                Section::Output => self.output.as_mut().map(|s| s.save()),
+                Section::Text => self.text.as_mut().map(|s| s.save()),
+                Section::Vad => self.vad.as_mut().map(|s| s.save()),
+                Section::Meeting => self.meeting.as_mut().map(|s| s.save()),
+                Section::Notifications => self.notifications.as_mut().map(|s| s.save()),
+                Section::Osd => self.osd.as_mut().map(|s| s.save()),
+                Section::Waybar => self.waybar.as_mut().map(|s| s.save()),
+                Section::Advanced => self.advanced.as_mut().map(|s| s.save()),
+                Section::Basics | Section::Build => None,
+            };
+            if let Some(action) = action.filter(|a| *a != Action::None) {
+                actions.push(action);
+            }
+        }
+        let failed = self.dirty_sections();
+        // One save can write another page's setting (streaming switches the
+        // hotkey mode and the Parakeet model), so every clean page re-reads
+        // the file. Their per-save messages give way to the one result line.
+        for_each_loaded!(self, |state| {
+            if !state.dirty_since_load {
+                state.reset();
+                state.feedback = None;
+            }
+        });
+        self.refresh_inventory();
+        self.capture_baselines();
+        (failed, actions)
     }
 
-    /// Save every loaded section to disk. Walks each Option<State> and calls
-    /// the same `save()` path the `s` keybinding uses. Each section reloads
-    /// the on-disk config, applies its current field values, validates, and
-    /// atomically renames — sequential calls compose because each reload sees
-    /// the prior save's output. Returns the count of sections saved so the
-    /// caller can show a feedback line.
-    pub fn save_all_loaded_sections(&mut self) -> usize {
-        let mut count = 0;
-        if let Some(s) = self.hotkey.as_mut() {
-            s.save();
-            count += 1;
+    /// Make voxtype use what was just saved: restart it when it runs from
+    /// the file this TUI edits. Sets the result line.
+    pub fn apply_saved(&mut self) {
+        let path = super::common::display_config_path();
+        if !edits_daemon_config() {
+            self.notice = Some((FeedbackLevel::Ok, format!("Saved to {}", path)));
+            return;
         }
-        if let Some(s) = self.audio.as_mut() {
-            s.save();
-            count += 1;
+        if !crate::daemon_status::is_daemon_running() {
+            self.notice = Some((
+                FeedbackLevel::Ok,
+                "Saved. voxtype isn't running; it uses these settings when it starts".to_string(),
+            ));
+            return;
         }
-        if let Some(s) = self.engine.as_mut() {
-            s.save();
-            count += 1;
+        if self.restart_daemon() {
+            self.notice = Some((
+                FeedbackLevel::Ok,
+                "Saved and applied: voxtype restarted with your changes".to_string(),
+            ));
         }
-        if let Some(s) = self.output.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.text.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.vad.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.meeting.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.notifications.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.osd.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.waybar.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.advanced.as_mut() {
-            s.save();
-            count += 1;
-        }
-        count
     }
 
-    /// Map a (row, col) cell to a Variant if one exists for that combination.
-    /// Returns None for invalid pairs (e.g. Whisper × CUDA).
-    pub fn variant_at(&self, row: usize, col: usize) -> Option<Variant> {
-        let family = *ROWS.get(row)?;
-        let accel = *COLS.get(col)?;
-        Variant::ALL
-            .iter()
-            .copied()
-            .find(|v| v.family() == family && v.acceleration() == accel)
-    }
-
-    pub fn move_cursor(&mut self, drow: i32, dcol: i32) {
-        let (r, c) = self.cursor;
-        let new_r = clamp_signed(r as i32 + drow, ROWS.len());
-        let new_c = clamp_signed(c as i32 + dcol, COLS.len());
-        self.cursor = (new_r, new_c);
+    /// Restart the voxtype service, which restarts the on-screen display it
+    /// runs too. On failure the result line says what went wrong and how to
+    /// do it by hand.
+    pub fn restart_daemon(&mut self) -> bool {
+        let result = std::process::Command::new("systemctl")
+            .args(["--user", "restart", "voxtype"])
+            .output();
+        match result {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let detail = stderr.lines().next().unwrap_or("no error output");
+                // voxtype started by hand or by the desktop isn't a unit
+                // systemd can restart; only its owner can.
+                let not_a_service = detail.contains("not found") || detail.contains("not loaded");
+                self.notice = Some((
+                    FeedbackLevel::Err,
+                    if not_a_service {
+                        "Saved. voxtype isn't a systemd service here: quit and start it again \
+                         the way you started it"
+                            .to_string()
+                    } else {
+                        format!(
+                            "Saved, but voxtype didn't restart ({}). Run: systemctl --user restart voxtype",
+                            detail
+                        )
+                    },
+                ));
+                false
+            }
+            Err(_) => {
+                self.notice = Some((
+                    FeedbackLevel::Err,
+                    "Saved, but systemctl isn't available. Restart voxtype the way you started it"
+                        .to_string(),
+                ));
+                false
+            }
+        }
     }
 
     pub fn record_switch_attempt(&mut self, variant: Variant, result: Result<(), String>) {
-        let (success, message) = match result {
-            Ok(()) => (true, format!("Switched to {}.", variant.display())),
-            Err(e) => (false, e),
-        };
-        if success {
-            self.restart_needed = true;
-        }
-        self.last_switch = Some(SwitchOutcome { success, message });
-        let _ = variant;
+        self.notice = Some(match result {
+            Ok(()) => (
+                FeedbackLevel::Ok,
+                format!("Switched to {}", super::build::variant_name(variant)),
+            ),
+            Err(e) => (FeedbackLevel::Err, format!("Build not switched: {}", e)),
+        });
         self.refresh_inventory();
     }
 
-    /// Record the outcome of a model download invocation onto the
-    /// same banner the variant-switch reuses, so the user sees it on the
-    /// General screen the next time they focus it.
-    pub fn record_download_attempt(
-        &mut self,
-        engine: &str,
-        model: &str,
-        result: Result<(), String>,
+    pub fn record_download_attempt(&mut self, model: &str, result: Result<(), String>) {
+        self.notice = Some(match result {
+            Ok(()) => (FeedbackLevel::Ok, format!("Downloaded {}", model)),
+            Err(e) => (
+                FeedbackLevel::Err,
+                format!("{} not downloaded: {}", model, e),
+            ),
+        });
+        self.refresh_inventory();
+    }
+}
+
+/// True when the file being edited is the one the voxtype service reads,
+/// so restarting the service applies it. With `--config` pointing anywhere
+/// else, a restart would only reload the old settings.
+pub fn edits_daemon_config() -> bool {
+    match (
+        super::config_editor::tui_config_path(),
+        crate::config::Config::default_path(),
     ) {
-        let (success, message) = match result {
-            Ok(()) => (true, format!("Downloaded {} model `{}`.", engine, model)),
-            Err(e) => (false, format!("Download `{}`: {}", model, e)),
-        };
-        self.last_switch = Some(SwitchOutcome { success, message });
-        self.refresh_inventory();
+        (Some(editing), Some(default)) => editing == default,
+        _ => false,
     }
 }
 
-fn clamp_signed(v: i32, len: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    v.clamp(0, (len - 1) as i32) as usize
-}
-
-fn initial_cursor(inv: &Inventory) -> (usize, usize) {
-    if let Some(active) = inv.active_variant {
-        let row = ROWS.iter().position(|f| *f == active.family()).unwrap_or(0);
-        let col = COLS
-            .iter()
-            .position(|a| *a == active.acceleration())
-            .unwrap_or(0);
-        (row, col)
-    } else {
-        (0, 0)
-    }
-}
-
-/// Compute the engine-vs-running-binary mismatch (see #450). Loads the
-/// config from its default path; returns `None` if config can't be loaded
-/// (we don't want a config parse error to prevent the TUI from opening,
-/// since the user opened it specifically to fix configuration). The
-/// inventory is borrowed from `App` so the call doesn't re-walk
-/// `/usr/lib/voxtype/` on every refresh.
+/// Compute the engine-vs-installed-build mismatch (see #450). `None` when
+/// the config can't be read: the TUI must still open to fix it.
 fn detect_variant_mismatch(inventory: &Inventory) -> Option<VariantMismatch> {
-    let cfg = crate::config::load_config(None).ok()?;
+    let cfg = load_edited_config()?;
     variant_check::detect_mismatch(&cfg, inventory)
 }
 
-/// Detect whether the configured engine's active model file is on disk.
-/// Returns the engine + model name + a setup command hint when it's missing,
-/// or None when the model is present (or we can't determine it).
+/// The config this TUI edits, parsed.
+fn load_edited_config() -> Option<crate::config::Config> {
+    let path = super::config_editor::tui_config_path();
+    crate::config::load_config(path.as_deref()).ok()
+}
+
+/// The configured engine's model, when it isn't on disk.
 fn detect_missing_model() -> Option<MissingModel> {
     use crate::config;
-    let cfg = config::load_config(None).ok()?;
-    let (engine_name, model, setup_command) = match cfg.engine {
-        config::TranscriptionEngine::Whisper => (
-            "whisper",
-            cfg.whisper.model.clone(),
-            "voxtype setup --download",
-        ),
+    let cfg = load_edited_config()?;
+    let (engine_name, model) = match cfg.engine {
+        config::TranscriptionEngine::Whisper => ("whisper", cfg.whisper.model.clone()),
         config::TranscriptionEngine::Parakeet => (
             "parakeet",
             cfg.parakeet
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Moonshine => (
             "moonshine",
@@ -477,7 +656,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::SenseVoice => (
             "sensevoice",
@@ -485,7 +663,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Paraformer => (
             "paraformer",
@@ -493,7 +670,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Dolphin => (
             "dolphin",
@@ -501,7 +677,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Omnilingual => (
             "omnilingual",
@@ -509,18 +684,20 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
-        // Cohere — checked but model layout differs by rc/0.7.0; skip the
-        // disk probe rather than emit a false-positive missing warning.
+        // Cohere's model layout differs between releases; skip the disk
+        // probe rather than warn about a model that is there.
         config::TranscriptionEngine::Cohere => return None,
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
-        // OpenVINO models are stored as multi-file IR directories; skip the
-        // generic probe here until the TUI grows engine-specific validation.
+        // OpenVINO models are multi-file IR directories.
         config::TranscriptionEngine::OpenVino => return None,
     };
 
+    // A remote Whisper has no local model to download.
+    if engine_name == "whisper" && cfg.whisper.mode == Some(config::WhisperMode::Remote) {
+        return None;
+    }
     if model.is_empty() {
         return None;
     }
@@ -531,91 +708,6 @@ fn detect_missing_model() -> Option<MissingModel> {
         Some(MissingModel {
             engine: engine_name.to_string(),
             model,
-            setup_command,
         })
-    }
-}
-
-use crate::daemon_status::is_daemon_running;
-
-/// Modification time of the config file the TUI edits — the same file every
-/// section's `ConfigEditor::load()` writes to, which is the `-c/--config`
-/// override when one was given. Asking the editor rather than resolving the
-/// default keeps the quit-time restart decision (#614) pointed at the file
-/// actually being edited (#595). `None` when the path can't be resolved or
-/// the file doesn't exist.
-pub fn config_file_mtime() -> Option<std::time::SystemTime> {
-    let path = super::config_editor::tui_config_path()?;
-    std::fs::metadata(path).ok()?.modified().ok()
-}
-
-/// Should quitting the TUI restart the daemon?
-///
-/// Yes exactly when a daemon is alive and the config file changed after the
-/// last known daemon (re)start — the running process is stale with respect
-/// to what the user saved. A stopped daemon needs no restart (the next start
-/// reads the new config, and `systemctl restart` on a stopped service would
-/// start it, which the user didn't ask for). `current` being `None` means
-/// the config file doesn't exist, so there is nothing new to load.
-pub fn should_restart_on_quit(
-    daemon_running: bool,
-    synced: Option<std::time::SystemTime>,
-    current: Option<std::time::SystemTime>,
-) -> bool {
-    daemon_running && current.is_some() && current != synced
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression: an engine change saved through the TUI never took effect
-    /// because quitting didn't restart the daemon. Quit must restart exactly
-    /// when a daemon is alive and the config was saved after the daemon's
-    /// last known (re)start.
-    #[test]
-    fn quit_restarts_only_a_running_daemon_with_a_newer_config() {
-        use std::time::{Duration, SystemTime};
-        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-        let t1 = t0 + Duration::from_secs(60);
-
-        // Saved after startup, daemon running: restart.
-        assert!(should_restart_on_quit(true, Some(t0), Some(t1)));
-        // Config file created during the session (didn't exist at startup).
-        assert!(should_restart_on_quit(true, None, Some(t1)));
-        // Untouched config: no restart.
-        assert!(!should_restart_on_quit(true, Some(t0), Some(t0)));
-        // Daemon not running: never restart (it would *start* the service).
-        assert!(!should_restart_on_quit(false, Some(t0), Some(t1)));
-        // No config file at all: nothing new for a daemon to load.
-        assert!(!should_restart_on_quit(true, Some(t0), None));
-    }
-
-    #[test]
-    fn variant_at_finds_known_pairs() {
-        let app = App::new(false);
-        // Whisper × AVX2 = WhisperAvx2
-        assert_eq!(app.variant_at(0, 0), Some(Variant::WhisperAvx2));
-        // ONNX × CUDA = OnnxCuda
-        assert_eq!(app.variant_at(1, 3), Some(Variant::OnnxCuda));
-    }
-
-    #[test]
-    fn variant_at_returns_none_for_invalid_pairs() {
-        let app = App::new(false);
-        // Whisper × CUDA — no such variant
-        assert_eq!(app.variant_at(0, 3), None);
-        // ONNX × Vulkan — no such variant
-        assert_eq!(app.variant_at(1, 2), None);
-    }
-
-    #[test]
-    fn move_cursor_clamps_at_edges() {
-        let mut app = App::new(false);
-        app.cursor = (0, 0);
-        app.move_cursor(-1, -1);
-        assert_eq!(app.cursor, (0, 0));
-        app.move_cursor(10, 10);
-        assert_eq!(app.cursor, (ROWS.len() - 1, COLS.len() - 1));
     }
 }

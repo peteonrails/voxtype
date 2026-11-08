@@ -3,9 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use std::io::Read;
@@ -18,6 +16,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 use crate::audio::devices::enumerate_input_devices;
 use crate::config::AudioConfig;
 
@@ -206,7 +205,7 @@ impl AudioState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("load: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
                 return Action::None;
             }
@@ -240,7 +239,7 @@ impl AudioState {
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("save: {}", e),
+                    message: format!("Not saved: {}", e),
                 });
             }
         }
@@ -263,13 +262,13 @@ impl AudioState {
                 self.scan_rx = scan_rx;
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Ok,
-                    message: "Reverted unsaved changes".to_string(),
+                    message: "Put back the saved settings".to_string(),
                 });
             }
             Err(e) => {
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Err,
-                    message: format!("reload: {}", e),
+                    message: format!("Couldn't read the config: {}", e),
                 });
             }
         }
@@ -432,57 +431,64 @@ pub fn print_input_devices() {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.audio {
-        Some(s) => s,
-        None => {
-            let block = Block::default().borders(Borders::ALL).title("Audio");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-    };
+/// `300` seconds reads as `5 min`.
+fn duration_name(secs: u32) -> String {
+    if secs >= 60 && secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{} s", secs)
+    }
+}
 
-    let rows = vec![
+/// `default` reads as `Default`; a custom theme folder stays as written.
+fn theme_name(theme: &str) -> String {
+    match theme {
+        "default" => "Default".to_string(),
+        "subtle" => "Subtle".to_string(),
+        "mechanical" => "Mechanical".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &AudioState) -> Vec<FormRowSpec> {
+    let themes: Vec<String> = THEME_CHOICES.iter().map(|t| theme_name(t)).collect();
+    vec![
         FormRowSpec::new(
             state.field == Field::Device,
-            "Input device",
+            "Microphone",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::Device => e.input.caret_string(),
+                _ if state.device == "default" => "System default".to_string(),
                 _ => state.device.clone(),
             },
         ),
         FormRowSpec::new(
             state.field == Field::MaxDuration,
-            "Max recording (seconds)",
-            state.max_duration_secs.to_string(),
+            "Longest recording",
+            duration_name(state.max_duration_secs),
         ),
         FormRowSpec::new(
             state.field == Field::PauseMedia,
-            "Pause MPRIS media on record",
+            "Pause media",
             yesno(state.pause_media),
         ),
         FormRowSpec::new(
             state.field == Field::DuckMedia,
-            "Duck media volume on record",
+            "Lower media volume",
             yesno(state.duck_media),
         ),
         FormRowSpec::new(
             state.field == Field::DuckMediaVolume,
-            "Ducked media volume",
+            "Lowered to",
             format!("{}%", state.duck_media_volume_percent),
         )
         .dimmed(!state.duck_media),
         FormRowSpec::new(
             state.field == Field::DuckMediaFade,
-            "Duck fade",
+            "Fade",
             if state.duck_media_fade_ms == 0 {
-                "instant".to_string()
+                "Instant".to_string()
             } else {
                 format!("{} ms", state.duck_media_fade_ms)
             },
@@ -490,23 +496,30 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .dimmed(!state.duck_media),
         FormRowSpec::new(
             state.field == Field::FeedbackEnabled,
-            "Audio feedback sounds",
-            if state.feedback_enabled { "on" } else { "off" },
+            "Sounds",
+            yesno(state.feedback_enabled),
         ),
         FormRowSpec::new(
             state.field == Field::FeedbackTheme,
             "Sound theme",
-            &state.feedback_theme,
+            theme_name(&state.feedback_theme),
         )
+        .choices(&themes)
         .dimmed(!state.feedback_enabled),
         FormRowSpec::new(
             state.field == Field::FeedbackVolume,
-            "Volume",
+            "Sound volume",
             format!("{:.0}%", state.feedback_volume * 100.0),
         )
         .dimmed(!state.feedback_enabled),
-    ];
+    ]
+}
 
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.audio else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state.feedback.as_ref().map(|fb| {
         (
             match fb.level {
@@ -516,204 +529,83 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             fb.message.as_str(),
         )
     });
-
     common::render_form_with_guidance(
         f,
         area,
-        "Audio",
-        state.dirty_since_load,
+        app,
         feedback_pair,
-        &rows,
+        &rows(state),
         guidance_for_field(state),
     );
 }
 
 fn yesno(b: bool) -> &'static str {
     if b {
-        "yes"
+        "On"
     } else {
-        "no"
+        "Off"
     }
 }
 
-fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
 fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
+    let text = |s: &'static str| Line::from(s);
+    let dim = |s: &'static str| Line::from(Span::styled(s, theme::muted()));
     match state.field {
         Field::Device => {
             let count = state.device_choices.len().saturating_sub(1);
-            let scan_line = match state.scan_status {
-                ScanStatus::Scanning => Line::from(Span::styled(
-                    "Scanning audio devices…",
-                    Style::default().fg(Color::Gray),
-                )),
+            let scan = match state.scan_status {
+                ScanStatus::Scanning => dim("Looking for microphones…"),
                 ScanStatus::Failed => Line::from(Span::styled(
-                    "Device scan failed or timed out — type a device name \
-                     manually (Enter to edit).",
-                    Style::default().fg(Color::Yellow),
+                    "Couldn't list microphones. Enter types a device name.",
+                    theme::warn(),
                 )),
-                ScanStatus::Done => Line::from(format!(
-                    "Detected {} device{} via cpal.",
-                    count,
-                    if count == 1 { "" } else { "s" }
+                ScanStatus::Done => Line::from(Span::styled(
+                    format!(
+                        "{} microphone{} found. ←→ goes through them; Enter types a name.",
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    theme::muted(),
                 )),
             };
             vec![
-                heading("Input device"),
-                Line::from(""),
-                scan_line,
-                Line::from(""),
-                Line::from(
-                    "\"default\" follows whatever PipeWire/PulseAudio is set \
-                     to as the system default source. If you swap headsets or \
-                     plug in a USB mic, default will follow.",
+                text(
+                    "System default follows whatever your desktop uses, so it moves \
+                     with a headset you plug in. Pick one to stay on that microphone.",
                 ),
-                Line::from(""),
-                Line::from(
-                    "Pick a specific device if you want voxtype to ignore the \
-                     system default and stay locked to one mic — useful when \
-                     you stream and don't want voxtype to grab your stream mic.",
-                ),
+                scan,
             ]
         }
-        Field::MaxDuration => vec![
-            heading("Max recording duration"),
-            Line::from(""),
-            Line::from(
-                "Safety cap. If you accidentally lock the PTT key down (or \
-                 use toggle mode and forget), voxtype stops at this many \
-                 seconds and transcribes what it has.",
-            ),
-            Line::from(""),
-            Line::from(
-                "120-300 seconds is normal for dictation. Bump to 600+ for \
-                 meeting-mode-style long recordings.",
-            ),
-        ],
-        Field::PauseMedia => vec![
-            heading("Pause MPRIS media on record"),
-            Line::from(""),
-            Line::from(
-                "Pauses Spotify, MPV, browsers, and other MPRIS players \
-                 before recording begins, then resumes them as soon as \
-                 microphone capture stops.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Uses MPRIS over the session D-Bus.",
-                Style::default().fg(Color::Gray),
-            )),
-            Line::from(""),
-            Line::from(
-                "Useful if music in the background ever bleeds into your \
-                 mic, or if you'd rather hear yourself dictate without \
-                 lyrics in the way.",
-            ),
-        ],
-        Field::DuckMedia => vec![
-            heading("Duck media volume on record"),
-            Line::from(""),
-            Line::from(
-                "Lowers active PulseAudio/PipeWire sink-input volume while \
-                 you record, then restores the original volume as soon as \
-                 recording stops.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Use this instead of pause media when you want playback to \
-                 continue quietly during push-to-talk.",
-            ),
-        ],
-        Field::DuckMediaVolume => vec![
-            heading("Ducked media volume"),
-            Line::from(""),
-            Line::from(
-                "Relative volume for active media streams while recording. \
-                 50% keeps each stream at half its current level; original \
-                 per-channel volumes are restored when the mic closes.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "0% is silence; 34% is the default; values above 100% amplify.",
-                Style::default().fg(Color::Gray),
-            )),
-        ],
-        Field::DuckMediaFade => vec![
-            heading("Duck fade"),
-            Line::from(""),
-            Line::from(
-                "How long media takes to slide down when recording starts, \
-                 and back up when it stops. The same duration is used in both \
-                 directions, so music eases out of the way instead of jumping.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "0 restores the old instant behaviour. The fade runs alongside \
-                 capture, so it never delays the microphone.",
-                Style::default().fg(Color::Gray),
-            )),
-        ],
-        Field::FeedbackEnabled => vec![
-            heading("Audio feedback sounds"),
-            Line::from(""),
-            Line::from(
-                "Plays short cue sounds when recording starts, stops, and \
-                 (optionally) when transcription completes. Helpful when the \
-                 visual indicator isn't where you're looking.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Sound theme and volume are only used when this is on.",
-                Style::default().fg(Color::Gray),
-            )),
-        ],
+        Field::MaxDuration => vec![text(
+            "A recording left running stops here and is transcribed. A few \
+             minutes suits dictation; raise it for long notes.",
+        )],
+        Field::PauseMedia => vec![text(
+            "Pauses music and video players while you record and resumes them \
+             after.",
+        )],
+        Field::DuckMedia => vec![text(
+            "Turns playing media down while you record instead of pausing it, \
+             and back up after.",
+        )],
+        Field::DuckMediaVolume => vec![text(
+            "How loud media plays while you record, relative to its volume now.",
+        )],
+        Field::DuckMediaFade => vec![text(
+            "How long the volume takes to go down and come back. It never \
+             delays the microphone.",
+        )],
+        Field::FeedbackEnabled => vec![text(
+            "Short sounds when recording starts and stops, for when you aren't \
+             looking at the screen.",
+        )],
         Field::FeedbackTheme => vec![
-            heading("Sound theme"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "default: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Soft chime up / down. Most users keep this."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "subtle: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Quieter taps. Good in shared rooms."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "mechanical: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Sharp tactile clicks."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Custom themes can point at a directory of .wav files; \
-                 edit [audio.feedback] theme directly to use one.",
-                Style::default().fg(Color::Gray),
-            )),
+            text("Default is a soft chime, Subtle quiet taps, Mechanical sharp clicks."),
+            dim("A folder of .wav files also works; set it in the config file."),
         ],
-        Field::FeedbackVolume => vec![
-            heading("Feedback volume"),
-            Line::from(""),
-            Line::from(
-                "Volume of the feedback cues, 0-100%. Independent of system \
-                 volume — voxtype attenuates the sample at playback time.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Tuning tip: pick the lowest volume you can still hear over \
-                 your typing. The cue is a confirmation, not an alert.",
-            ),
-        ],
+        Field::FeedbackVolume => vec![text(
+            "The lowest you can still hear over your typing is usually right.",
+        )],
     }
 }
 
