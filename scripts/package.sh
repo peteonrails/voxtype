@@ -736,6 +736,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
         --deb-suggests libvulkan1 \
+        --deb-suggests "libcudnn9-cuda-12 | libcudnn9-cuda-13" \
         --package "$DEB_FILE" \
         usr etc
 

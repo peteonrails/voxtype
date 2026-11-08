@@ -309,10 +309,12 @@ impl AudioCapture for CpalCapture {
                             }
                         }
 
-                        // Get collected samples
+                        // Hand over the collected samples. Taken, not cloned:
+                        // the capture is ending, and a 30-minute recording is
+                        // over 100 MB.
                         let collected = {
-                            let guard = samples_clone.lock().unwrap();
-                            guard.clone()
+                            let mut guard = samples_clone.lock().unwrap();
+                            std::mem::take(&mut *guard)
                         };
 
                         // Send samples back

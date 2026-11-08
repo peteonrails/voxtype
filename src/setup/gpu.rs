@@ -107,7 +107,13 @@ fn parse_ldd_missing(output: &str) -> Vec<String> {
 /// alongside the binary, or no `ldd`), and `Some(vec![])` when every
 /// dependency resolves.
 fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
-    let resolved = fs::canonicalize(Path::new(VOXTYPE_LIB_DIR).join(binary_name)).ok()?;
+    unresolved_provider_deps_at(&Path::new(VOXTYPE_LIB_DIR).join(binary_name))
+}
+
+/// As [`unresolved_provider_deps`], for the binary at `binary` (for example
+/// the running daemon's own executable).
+pub fn unresolved_provider_deps_at(binary: &Path) -> Option<Vec<String>> {
+    let resolved = fs::canonicalize(binary).ok()?;
     let dir = resolved.parent()?;
 
     // Providers sit next to the binary; ORT locates them via /proc/self/exe.
@@ -121,6 +127,27 @@ fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
         return None;
     }
     Some(parse_ldd_missing(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// What to install so the provider for `binary_name` can load, one line each.
+pub fn provider_fix_lines(binary_name: &str, missing: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if binary_name.contains("migraphx") || binary_name.contains("rocm") {
+        lines.push("Install the AMD runtime, e.g. on Arch:".to_string());
+        lines.push("  sudo pacman -S migraphx rocm-hip-runtime".to_string());
+    } else if binary_name.contains("cuda") {
+        if missing.iter().any(|lib| lib.starts_with("libcudnn")) {
+            lines.extend(
+                super::parakeet::CUDNN_INSTALL_HINT
+                    .lines()
+                    .map(|l| l.trim_end().to_string()),
+            );
+        }
+        if missing.iter().any(|lib| !lib.starts_with("libcudnn")) {
+            lines.push("Install the matching NVIDIA CUDA runtime for this variant.".to_string());
+        }
+    }
+    lines
 }
 
 /// Warn when the active GPU backend cannot actually load its execution
@@ -139,11 +166,8 @@ fn warn_if_provider_unloadable(binary_name: &str) {
     for lib in &missing {
         println!("             {lib}");
     }
-    if binary_name.contains("migraphx") || binary_name.contains("rocm") {
-        println!("           Install the AMD runtime, e.g. on Arch:");
-        println!("             sudo pacman -S migraphx rocm-hip-runtime");
-    } else if binary_name.contains("cuda") {
-        println!("           Install the matching NVIDIA CUDA runtime for this variant.");
+    for line in provider_fix_lines(binary_name, &missing) {
+        println!("           {line}");
     }
 }
 
@@ -1619,6 +1643,23 @@ GPU1:
                       \t/lib64/ld-linux-x86-64.so.2 (0x00007f83e0a1c000)\n\
                       \tstatically linked\n";
         assert!(parse_ldd_missing(output).is_empty());
+    }
+
+    #[test]
+    fn missing_cudnn_gets_the_cudnn_install_command() {
+        let lines = provider_fix_lines("voxtype-onnx-cuda-13", &["libcudnn.so.9".to_string()]);
+        assert!(lines.iter().any(|l| l.contains("sudo pacman -S cudnn")));
+        assert!(!lines.iter().any(|l| l.contains("CUDA runtime")));
+
+        let lines = provider_fix_lines("voxtype-onnx-cuda-13", &["libcublas.so.13".to_string()]);
+        assert!(!lines.iter().any(|l| l.contains("cudnn")));
+        assert!(lines.iter().any(|l| l.contains("CUDA runtime")));
+
+        let lines =
+            provider_fix_lines("voxtype-onnx-migraphx", &["libmigraphx_c.so.3".to_string()]);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("migraphx rocm-hip-runtime")));
     }
 
     #[test]

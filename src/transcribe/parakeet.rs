@@ -10,6 +10,7 @@
 use super::{TimedSegment, Transcriber};
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
+use crate::state::ChunkResult;
 #[cfg(any(
     feature = "parakeet-cuda",
     feature = "parakeet-migraphx",
@@ -18,6 +19,7 @@ use crate::error::TranscribeError;
 use parakeet_rs::ExecutionProvider;
 use parakeet_rs::{
     ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait,
+    TranscriptionResult,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -85,6 +87,92 @@ impl ParakeetTranscriber {
     }
 }
 
+/// Sample rate Parakeet models take.
+const SAMPLE_RATE: usize = 16000;
+
+/// Longest stretch of audio given to the model in one call.
+///
+/// The ONNX exports of Parakeet's FastConformer encoder carry a relative
+/// positional encoding precomputed for 5000 encoder frames. At 80 ms per
+/// frame that caps one call at 400 s; past it ONNX Runtime fails in
+/// `/layers.0/self_attn/Add_2` with "Attempting to broadcast an axis by a
+/// dimension other than 1" (#288). Self-attention is also quadratic in the
+/// input length, so long single passes are slow well before the hard limit.
+/// Anything up to this length goes through one call exactly as before;
+/// longer recordings are split at pauses (see [`crate::eager::long_audio_windows`]).
+const MAX_WINDOW_SECS: usize = 60;
+
+/// How far before a window's nominal end to look for a pause to cut at.
+const CUT_SEARCH_SECS: usize = 10;
+
+/// Windows of `samples` to transcribe one at a time, as sample ranges.
+fn windows(samples: &[f32]) -> Vec<(usize, usize)> {
+    crate::eager::long_audio_windows(
+        samples,
+        MAX_WINDOW_SECS * SAMPLE_RATE,
+        CUT_SEARCH_SECS * SAMPLE_RATE,
+    )
+}
+
+impl ParakeetTranscriber {
+    /// One model call over `samples`, which must fit in the encoder.
+    fn run_model(&self, samples: &[f32]) -> Result<TranscriptionResult, TranscribeError> {
+        let (label, result) = match &self.model {
+            ParakeetModel::Ctc(parakeet) => (
+                "CTC",
+                lock(parakeet)?.transcribe_samples(samples.to_vec(), SAMPLE_RATE as u32, 1, None),
+            ),
+            ParakeetModel::Tdt(parakeet) => (
+                "TDT",
+                lock(parakeet)?.transcribe_samples(samples.to_vec(), SAMPLE_RATE as u32, 1, None),
+            ),
+        };
+        result.map_err(|e| {
+            TranscribeError::InferenceFailed(format!("Parakeet {} inference failed: {}", label, e))
+        })
+    }
+
+    /// Run the model over each window of `samples` in order, calling `each`
+    /// with the window's start offset in seconds and its result.
+    fn run_windows(
+        &self,
+        samples: &[f32],
+        mut each: impl FnMut(f32, TranscriptionResult),
+    ) -> Result<(), TranscribeError> {
+        let windows = windows(samples);
+        if windows.len() > 1 {
+            tracing::info!(
+                "Splitting {:.1}s of audio into {} windows of at most {}s",
+                samples.len() as f32 / SAMPLE_RATE as f32,
+                windows.len(),
+                MAX_WINDOW_SECS
+            );
+        }
+        for (i, &(start, end)) in windows.iter().enumerate() {
+            let window_start = std::time::Instant::now();
+            let result = self.run_model(&samples[start..end])?;
+            if windows.len() > 1 {
+                tracing::debug!(
+                    "Window {}/{} ({:.1}s-{:.1}s) transcribed in {:.2}s",
+                    i + 1,
+                    windows.len(),
+                    start as f32 / SAMPLE_RATE as f32,
+                    end as f32 / SAMPLE_RATE as f32,
+                    window_start.elapsed().as_secs_f32()
+                );
+            }
+            each(start as f32 / SAMPLE_RATE as f32, result);
+        }
+        Ok(())
+    }
+}
+
+fn lock<T>(model: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, TranscribeError> {
+    model.lock().map_err(|e| {
+        TranscribeError::InferenceFailed(format!("Failed to lock Parakeet mutex: {}", e))
+    })
+}
+
 impl Transcriber for ParakeetTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
@@ -93,7 +181,7 @@ impl Transcriber for ParakeetTranscriber {
             ));
         }
 
-        let duration_secs = samples.len() as f32 / 16000.0;
+        let duration_secs = samples.len() as f32 / SAMPLE_RATE as f32;
         tracing::debug!(
             "Transcribing {:.2}s of audio ({} samples) with Parakeet {:?}",
             duration_secs,
@@ -103,56 +191,14 @@ impl Transcriber for ParakeetTranscriber {
 
         let start = std::time::Instant::now();
 
-        let text = match &self.model {
-            ParakeetModel::Ctc(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-
-                let result = parakeet
-                    .transcribe_samples(
-                        samples.to_vec(),
-                        16000, // sample rate
-                        1,     // mono
-                        None,  // default timestamp mode
-                    )
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet CTC inference failed: {}",
-                            e
-                        ))
-                    })?;
-
-                result.text.trim().to_string()
-            }
-            ParakeetModel::Tdt(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-
-                let result = parakeet
-                    .transcribe_samples(
-                        samples.to_vec(),
-                        16000, // sample rate
-                        1,     // mono
-                        None,  // default timestamp mode
-                    )
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet TDT inference failed: {}",
-                            e
-                        ))
-                    })?;
-
-                result.text.trim().to_string()
-            }
-        };
+        let mut parts = Vec::new();
+        self.run_windows(samples, |_, result| {
+            parts.push(ChunkResult {
+                text: result.text.trim().to_string(),
+                chunk_index: parts.len(),
+            });
+        })?;
+        let text = crate::eager::combine_chunk_results(parts);
 
         tracing::info!(
             "Parakeet {:?} transcription completed in {:.2}s: {:?}",
@@ -171,109 +217,10 @@ impl Transcriber for ParakeetTranscriber {
     fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
         let start = std::time::Instant::now();
 
-        let result = match &self.model {
-            ParakeetModel::Ctc(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-                parakeet
-                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet CTC inference failed: {}",
-                            e
-                        ))
-                    })?
-            }
-            ParakeetModel::Tdt(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-                parakeet
-                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet TDT inference failed: {}",
-                            e
-                        ))
-                    })?
-            }
-        };
-
-        // Split the full text on sentence boundaries (.!?) and map each sentence
-        // back to token timestamps. result.text is properly assembled by parakeet-rs;
-        // individual tokens are subword pieces that can't be naively joined.
-        let full_text = result.text.trim();
-        let tokens = &result.tokens;
-
-        if full_text.is_empty() || tokens.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Split text into sentences on .!? boundaries
-        let mut sentences: Vec<String> = Vec::new();
-        let mut current = String::new();
-        for ch in full_text.chars() {
-            current.push(ch);
-            if ch == '.' || ch == '!' || ch == '?' {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    sentences.push(trimmed);
-                }
-                current = String::new();
-            }
-        }
-        if !current.trim().is_empty() {
-            sentences.push(current.trim().to_string());
-        }
-
-        // Map sentences to timestamps by distributing tokens proportionally.
-        // Each sentence gets the time span of its corresponding token range.
-        let total_sentences = sentences.len();
-        let total_tokens = tokens.len();
-        let tokens_per_sentence = if total_sentences > 0 {
-            total_tokens / total_sentences
-        } else {
-            total_tokens
-        };
-
         let mut segments = Vec::new();
-        let mut token_idx = 0;
-
-        for (i, sentence) in sentences.iter().enumerate() {
-            let start_secs = if token_idx < tokens.len() {
-                tokens[token_idx].start
-            } else {
-                tokens.last().map(|t| t.end).unwrap_or(0.0)
-            };
-
-            // Last sentence gets all remaining tokens
-            let end_token_idx = if i == total_sentences - 1 {
-                total_tokens
-            } else {
-                (token_idx + tokens_per_sentence).min(total_tokens)
-            };
-
-            let end_secs = if end_token_idx > 0 && end_token_idx <= tokens.len() {
-                tokens[end_token_idx - 1].end
-            } else {
-                start_secs
-            };
-
-            segments.push(TimedSegment {
-                text: sentence.clone(),
-                start_secs,
-                end_secs,
-            });
-
-            token_idx = end_token_idx;
-        }
+        self.run_windows(samples, |offset, result| {
+            segments.extend(sentence_segments(&result, offset));
+        })?;
 
         tracing::info!(
             "Parakeet {:?} timed transcription completed in {:.2}s: {} segments",
@@ -286,11 +233,89 @@ impl Transcriber for ParakeetTranscriber {
     }
 }
 
+/// Sentences of one model result, with times shifted by `offset_secs` so a
+/// window's segments sit where that window starts in the whole recording.
+///
+/// The full text is split on sentence boundaries (.!?) and each sentence is
+/// mapped back to token timestamps. result.text is properly assembled by
+/// parakeet-rs; individual tokens are subword pieces that can't be naively
+/// joined.
+fn sentence_segments(result: &TranscriptionResult, offset_secs: f32) -> Vec<TimedSegment> {
+    let full_text = result.text.trim();
+    let tokens = &result.tokens;
+
+    if full_text.is_empty() || tokens.is_empty() {
+        return vec![];
+    }
+
+    // Split text into sentences on .!? boundaries
+    let mut sentences: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in full_text.chars() {
+        current.push(ch);
+        if ch == '.' || ch == '!' || ch == '?' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed);
+            }
+            current = String::new();
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+
+    // Map sentences to timestamps by distributing tokens proportionally.
+    // Each sentence gets the time span of its corresponding token range.
+    let total_sentences = sentences.len();
+    let total_tokens = tokens.len();
+    let tokens_per_sentence = total_tokens
+        .checked_div(total_sentences)
+        .unwrap_or(total_tokens);
+
+    let mut segments = Vec::new();
+    let mut token_idx = 0;
+
+    for (i, sentence) in sentences.iter().enumerate() {
+        let start_secs = if token_idx < tokens.len() {
+            tokens[token_idx].start
+        } else {
+            tokens.last().map(|t| t.end).unwrap_or(0.0)
+        };
+
+        // Last sentence gets all remaining tokens
+        let end_token_idx = if i == total_sentences - 1 {
+            total_tokens
+        } else {
+            (token_idx + tokens_per_sentence).min(total_tokens)
+        };
+
+        let end_secs = if end_token_idx > 0 && end_token_idx <= tokens.len() {
+            tokens[end_token_idx - 1].end
+        } else {
+            start_secs
+        };
+
+        segments.push(TimedSegment {
+            text: sentence.clone(),
+            start_secs: start_secs + offset_secs,
+            end_secs: end_secs + offset_secs,
+        });
+
+        token_idx = end_token_idx;
+    }
+
+    segments
+}
+
 /// Build execution config based on compile-time feature flags
 pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
+            if !crate::setup::parakeet::cudnn_present_or_warn() {
+                return None;
+            }
             tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
             return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
         }
@@ -301,6 +326,9 @@ pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-tensorrt")]
     {
         if probe_cuda_runtime() {
+            if !crate::setup::parakeet::cudnn_present_or_warn() {
+                return None;
+            }
             tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
             return Some(
                 ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT),

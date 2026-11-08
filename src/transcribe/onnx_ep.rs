@@ -53,13 +53,18 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
     #[allow(unused_mut)]
     let mut providers: Vec<(&'static str, ExecutionProviderDispatch)> = Vec::new();
 
+    // Both NVIDIA EPs link against cuDNN. Without it ort only logs a raw
+    // dlopen error and runs on CPU, so skip them and say why instead.
+    #[cfg(any(feature = "onnx-tensorrt-enabled", feature = "onnx-cuda-enabled"))]
+    let cudnn = crate::setup::parakeet::cudnn_present_or_warn();
+
     #[cfg(feature = "onnx-tensorrt-enabled")]
-    {
+    if cudnn {
         use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
         providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-cuda-enabled")]
-    {
+    if cudnn {
         use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
         providers.push(("CUDA", CUDAExecutionProvider::default().build()));
     }
