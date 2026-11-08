@@ -466,7 +466,7 @@ impl Transcriber for OpenVinoTranscriber {
             // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
             // in generation_config.json), while voxtype config uses bare codes like "en"
             let lang = &self.config.language;
-            
+
             // For auto-detection, skip set_language() to let the model detect from audio
             if lang != "auto" {
                 let lang_token = if lang.starts_with("<|") {
