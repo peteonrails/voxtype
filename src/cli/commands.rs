@@ -154,6 +154,17 @@ pub enum Commands {
         icon_theme: Option<String>,
     },
 
+    /// Show dictation stats (words, WPM) parsed from the journal
+    Stats {
+        /// How many recent dictations to list
+        #[arg(long, default_value_t = 10)]
+        lines: usize,
+
+        /// Output format: "text" (default) or "json"
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
     /// Control recording from external sources (compositor keybindings, scripts)
     Record {
         #[command(subcommand)]
