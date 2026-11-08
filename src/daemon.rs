@@ -1566,6 +1566,11 @@ impl Daemon {
         };
 
         let streaming = transcriber.as_streaming().expect("checked above");
+        let session = if streaming.partials_are_final() {
+            StreamingSession::processing_partials()
+        } else {
+            StreamingSession::new()
+        };
         let handle = match streaming.start_stream(samples_rx) {
             Ok(h) => h,
             Err(e) => {
@@ -1588,7 +1593,7 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
+        *streaming_session = Some(session);
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
@@ -1691,6 +1696,11 @@ impl Daemon {
             }
             self.stop_streaming_capture(audio_capture).await;
             if !file_output {
+                // Text already transcribed but held back in case a phrase
+                // continued is typed now, while focus is still where the
+                // user was dictating. Disowning below would drop it.
+                self.flush_held_streaming_text(streaming_session, streaming_chain)
+                    .await;
                 // Drop the typing surface synchronously so any
                 // Final/Partial events the backend emits while
                 // draining its internal buffer reach the event-pump
@@ -1800,6 +1810,35 @@ impl Daemon {
         }
     }
 
+    /// Type what a session that processes partials held back in case a
+    /// phrase continued (see `TextProcessor::stable_prefix_len`). Called when
+    /// the stream stops, since nothing more will arrive to complete it.
+    async fn flush_held_streaming_text(
+        &self,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        let (Some(s), Some(chain)) = (streaming_session.as_mut(), streaming_chain.as_ref()) else {
+            return;
+        };
+        if !s.processes_partials() {
+            return;
+        }
+        if let Err(e) = s
+            .type_processed_delta(
+                chain,
+                "",
+                &self.text_processor,
+                true,
+                self.config.output.pre_output_command.as_deref(),
+                self.config.output.post_output_command.as_deref(),
+            )
+            .await
+        {
+            tracing::error!("Streaming text flush failed: {}", e);
+        }
+    }
+
     /// Early-stop the streaming capture: cut audio flow to the backend,
     /// start the OSD silence pump so the visualizer stays alive during
     /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
@@ -1886,6 +1925,9 @@ impl Daemon {
             return;
         }
 
+        // The engine sends no Final when its last chunk decoded nothing new.
+        self.flush_held_streaming_text(streaming_session, streaming_chain)
+            .await;
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -4803,12 +4845,16 @@ impl Daemon {
                                 if file_output {
                                     s.observe_partial_delta(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
-                                    if let Err(e) = s.type_partial_delta(
-                                        chain,
-                                        text,
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
+                                    let pre = self.config.output.pre_output_command.as_deref();
+                                    let post = self.config.output.post_output_command.as_deref();
+                                    let typed = if s.processes_partials() {
+                                        s.type_processed_delta(
+                                            chain, &text, &self.text_processor, false, pre, post,
+                                        ).await
+                                    } else {
+                                        s.type_partial_delta(chain, text, pre, post).await
+                                    };
+                                    if let Err(e) = typed {
                                         tracing::warn!("Streaming partial delta type failed: {}", e);
                                     }
                                 }
@@ -4826,13 +4872,18 @@ impl Daemon {
                                     // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
-                                    if let Err(e) = s.commit_segment(
-                                        chain,
-                                        &text,
-                                        Some(&self.text_processor),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
+                                    let pre = self.config.output.pre_output_command.as_deref();
+                                    let post = self.config.output.post_output_command.as_deref();
+                                    let committed = if s.processes_partials() {
+                                        s.type_processed_delta(
+                                            chain, &text, &self.text_processor, true, pre, post,
+                                        ).await
+                                    } else {
+                                        s.commit_segment(
+                                            chain, &text, Some(&self.text_processor), pre, post,
+                                        ).await
+                                    };
+                                    if let Err(e) = committed {
                                         tracing::error!("Streaming commit_segment failed: {}", e);
                                     }
                                 }

@@ -8,12 +8,67 @@ use crate::config::TextConfig;
 use regex::Regex;
 use std::collections::HashMap;
 
+/// Spoken phrases and the symbols they become, longest phrases first so
+/// "question mark" is replaced before anything shorter can match inside it.
+/// Word boundaries keep "comma" from matching inside "commander".
+const SPOKEN_PUNCTUATION: &[(&str, &str)] = &[
+    // Multi-word phrases first
+    ("question mark", "?"),
+    ("exclamation mark", "!"),
+    ("exclamation point", "!"),
+    ("open parenthesis", "("),
+    ("close parenthesis", ")"),
+    ("open paren", "("),
+    ("close paren", ")"),
+    ("open bracket", "["),
+    ("close bracket", "]"),
+    ("open brace", "{"),
+    ("close brace", "}"),
+    ("at sign", "@"),
+    ("at symbol", "@"),
+    ("dollar sign", "$"),
+    ("percent sign", "%"),
+    ("plus sign", "+"),
+    ("equals sign", "="),
+    ("forward slash", "/"),
+    ("single quote", "'"),
+    ("double quote", "\""),
+    ("new paragraph", "\n\n"),
+    ("new line", "\n"),
+    // Single words
+    ("period", "."),
+    ("comma", ","),
+    ("colon", ":"),
+    ("semicolon", ";"),
+    ("dash", "-"),
+    ("hyphen", "-"),
+    ("underscore", "_"),
+    ("hash", "#"),
+    ("hashtag", "#"),
+    ("percent", "%"),
+    ("ampersand", "&"),
+    ("asterisk", "*"),
+    ("plus", "+"),
+    ("equals", "="),
+    ("slash", "/"),
+    ("backslash", "\\"),
+    ("pipe", "|"),
+    ("tilde", "~"),
+    ("backtick", "`"),
+    ("tab", "\t"),
+];
+
 /// Text processor that applies transformations to transcribed text
 pub struct TextProcessor {
     /// Whether spoken punctuation is enabled
     spoken_punctuation: bool,
-    /// Custom word replacements (lowercase key → replacement value)
-    replacements: HashMap<String, String>,
+    /// Custom word replacements: a word-bounded, case-insensitive regex for
+    /// each key, and its replacement. Compiled once, since streaming runs
+    /// the processor on every chunk.
+    replacements: Vec<(Regex, String)>,
+    /// Spoken punctuation phrases, compiled the same way. Empty when
+    /// spoken punctuation is off.
+    spoken_punctuation_res: Vec<(Regex, &'static str)>,
     /// Whether smart auto-submit is enabled
     smart_auto_submit: bool,
     /// Pre-compiled regex for submit trigger detection
@@ -38,6 +93,13 @@ pub struct TextProcessor {
     /// up directly before a sentence terminator (".!?") after filler removal,
     /// e.g. "hello world, uh." -> "hello world,." -> "hello world.".
     filler_connector_before_term_re: Regex,
+    /// Lowercase phrases that streamed text may still be growing into:
+    /// replacement keys, spoken punctuation phrases and filler words, each
+    /// only when its feature is on. See [`stable_prefix_len`](Self::stable_prefix_len).
+    hold_keys: Vec<String>,
+    /// The same phrases as one word-bounded alternation, `None` when there
+    /// are none. Finds whole matches that a cut must not split.
+    hold_key_re: Option<Regex>,
 }
 
 /// Default filler entries that are ordinary vocabulary in a given language.
@@ -77,7 +139,7 @@ impl TextProcessor {
     /// explicitly gets exactly what they asked for.
     pub fn new_for_language(config: &TextConfig, language: Option<&str>) -> Self {
         // Normalize replacement keys to lowercase for case-insensitive matching
-        let replacements = config
+        let replacements: HashMap<String, String> = config
             .replacements
             .iter()
             .map(|(k, v)| (k.to_lowercase(), v.clone()))
@@ -131,9 +193,52 @@ impl TextProcessor {
             "BUG: connector-before-terminator regex is a compile-time constant and must be valid",
         );
 
+        let mut hold_keys: Vec<String> = replacements.keys().cloned().collect();
+        if config.spoken_punctuation {
+            hold_keys.extend(
+                SPOKEN_PUNCTUATION
+                    .iter()
+                    .map(|(phrase, _)| phrase.to_string()),
+            );
+        }
+        if filler_re.is_some() {
+            hold_keys.extend(
+                effective_fillers
+                    .iter()
+                    .map(|w| w.trim().to_lowercase())
+                    .filter(|w| !w.is_empty()),
+            );
+        }
+        hold_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        hold_keys.dedup();
+        let hold_key_re = if hold_keys.is_empty() {
+            None
+        } else {
+            let alternation = hold_keys
+                .iter()
+                .map(|k| regex::escape(k))
+                .collect::<Vec<_>>()
+                .join("|");
+            Regex::new(&format!(r"(?i)\b(?:{})\b", alternation)).ok()
+        };
+
+        let spoken_punctuation_res = if config.spoken_punctuation {
+            SPOKEN_PUNCTUATION
+                .iter()
+                .filter_map(|(phrase, symbol)| Some((phrase_regex(phrase)?, *symbol)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let replacements = replacements
+            .into_iter()
+            .filter_map(|(from, to)| Some((phrase_regex(&from)?, to)))
+            .collect();
+
         Self {
             spoken_punctuation: config.spoken_punctuation,
             replacements,
+            spoken_punctuation_res,
             smart_auto_submit: config.smart_auto_submit,
             submit_re,
             filter_filler_words: config.filter_filler_words,
@@ -142,6 +247,8 @@ impl TextProcessor {
             filler_punct_re,
             filler_dup_punct_re,
             filler_connector_before_term_re,
+            hold_keys,
+            hold_key_re,
         }
     }
 
@@ -174,6 +281,56 @@ impl TextProcessor {
         }
 
         result
+    }
+
+    /// Length in bytes of the longest prefix of `text` that can be processed
+    /// now and come out the same as it will once more text follows.
+    ///
+    /// Streaming engines deliver text a few words at a time, so a phrase can
+    /// arrive split across chunks: "question" now and " mark" next, or even
+    /// "com" then "ma". The tail that could still grow into a replacement
+    /// key, a spoken punctuation phrase or a filler word is held back, with
+    /// the whitespace before it, and so is any whole match the cut would
+    /// split. Once the stream ends, process all of it.
+    pub fn stable_prefix_len(&self, text: &str) -> usize {
+        let Some(longest) = self.hold_keys.first().map(|k| k.len()) else {
+            return text.len();
+        };
+
+        // The earliest word start whose remaining text is the beginning of
+        // a key. A tail longer than the longest key can't be, so only look
+        // that far back (4 bytes per char covers any UTF-8).
+        let mut window = text.len().saturating_sub(longest * 4);
+        while !text.is_char_boundary(window) {
+            window += 1;
+        }
+        let mut cut = text.len();
+        for (offset, c) in text[window..].char_indices() {
+            let i = window + offset;
+            let word_start =
+                is_word_char(c) && !text[..i].chars().next_back().is_some_and(is_word_char);
+            if !word_start {
+                continue;
+            }
+            let tail = text[i..].to_lowercase();
+            if self.hold_keys.iter().any(|k| k.starts_with(&tail)) {
+                cut = i;
+                break;
+            }
+        }
+
+        // A whole match that starts before the cut and ends after it would
+        // be processed in two halves. Move the cut to its start.
+        if let Some(re) = &self.hold_key_re {
+            while let Some(m) = re
+                .find_iter(text)
+                .find(|m| m.start() < cut && m.end() > cut)
+            {
+                cut = m.start();
+            }
+        }
+
+        text[..cut].trim_end_matches(char::is_whitespace).len()
     }
 
     /// Check if text ends with the submit trigger word.
@@ -211,57 +368,8 @@ impl TextProcessor {
     fn apply_spoken_punctuation(&self, text: &str) -> String {
         let mut result = text.to_string();
 
-        // Order matters: longer phrases first to avoid partial matches
-        // Using word boundaries to avoid replacing parts of words
-        let punctuation_map: &[(&str, &str)] = &[
-            // Multi-word phrases first
-            ("question mark", "?"),
-            ("exclamation mark", "!"),
-            ("exclamation point", "!"),
-            ("open parenthesis", "("),
-            ("close parenthesis", ")"),
-            ("open paren", "("),
-            ("close paren", ")"),
-            ("open bracket", "["),
-            ("close bracket", "]"),
-            ("open brace", "{"),
-            ("close brace", "}"),
-            ("at sign", "@"),
-            ("at symbol", "@"),
-            ("dollar sign", "$"),
-            ("percent sign", "%"),
-            ("plus sign", "+"),
-            ("equals sign", "="),
-            ("forward slash", "/"),
-            ("single quote", "'"),
-            ("double quote", "\""),
-            ("new paragraph", "\n\n"),
-            ("new line", "\n"),
-            // Single words
-            ("period", "."),
-            ("comma", ","),
-            ("colon", ":"),
-            ("semicolon", ";"),
-            ("dash", "-"),
-            ("hyphen", "-"),
-            ("underscore", "_"),
-            ("hash", "#"),
-            ("hashtag", "#"),
-            ("percent", "%"),
-            ("ampersand", "&"),
-            ("asterisk", "*"),
-            ("plus", "+"),
-            ("equals", "="),
-            ("slash", "/"),
-            ("backslash", "\\"),
-            ("pipe", "|"),
-            ("tilde", "~"),
-            ("backtick", "`"),
-            ("tab", "\t"),
-        ];
-
-        for (phrase, symbol) in punctuation_map {
-            result = replace_phrase_case_insensitive(&result, phrase, symbol);
+        for (re, symbol) in &self.spoken_punctuation_res {
+            result = re.replace_all(&result, *symbol).into_owned();
         }
 
         // Clean up spacing around punctuation
@@ -320,26 +428,23 @@ impl TextProcessor {
     fn apply_replacements(&self, text: &str) -> String {
         let mut result = text.to_string();
 
-        for (word, replacement) in &self.replacements {
-            result = replace_phrase_case_insensitive(&result, word, replacement);
+        for (re, replacement) in &self.replacements {
+            result = re.replace_all(&result, replacement.as_str()).into_owned();
         }
 
         result
     }
 }
 
-/// Replace a word/phrase case-insensitively using regex for proper word boundaries
-fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
-    // Escape regex special characters in the search phrase
-    let escaped = regex::escape(from);
+/// A character that `\b` in a regex treats as part of a word.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
 
-    // Build regex with word boundaries (case-insensitive)
-    let pattern = format!(r"(?i)\b{}\b", escaped);
-
-    match Regex::new(&pattern) {
-        Ok(re) => re.replace_all(text, to).into_owned(),
-        Err(_) => text.to_string(),
-    }
+/// A case-insensitive regex matching `phrase` on word boundaries. `None` if it
+/// can't compile; that phrase is then skipped, as it always has been.
+fn phrase_regex(phrase: &str) -> Option<Regex> {
+    Regex::new(&format!(r"(?i)\b{}\b", regex::escape(phrase))).ok()
 }
 
 /// Clean up spacing around punctuation marks
@@ -920,5 +1025,108 @@ mod tests {
         let processor = TextProcessor::new(&config);
 
         assert_eq!(processor.process("well um I think period"), "well I think.");
+    }
+
+    /// Feed `deltas` the way a streaming session does: process the stable
+    /// prefix after each one, then everything at the end. Fails if text
+    /// already at the cursor would have to be taken back.
+    fn stream_through(tp: &TextProcessor, deltas: &[&str]) -> String {
+        let mut source = String::new();
+        let mut typed = String::new();
+        for delta in deltas {
+            source.push_str(delta);
+            let wanted = tp.process(&source[..tp.stable_prefix_len(&source)]);
+            assert!(
+                wanted.starts_with(&typed),
+                "{deltas:?}: typed {typed:?}, then processing wanted {wanted:?}"
+            );
+            typed = wanted;
+        }
+        let all = tp.process(&source);
+        assert!(
+            all.starts_with(&typed),
+            "{deltas:?}: typed {typed:?}, but the whole transcript is {all:?}"
+        );
+        all
+    }
+
+    #[test]
+    fn stable_prefix_is_everything_when_nothing_could_match() {
+        let config = TextConfig {
+            filter_filler_words: false,
+            ..make_config(false, &[])
+        };
+        let tp = TextProcessor::new(&config);
+        assert_eq!(tp.stable_prefix_len("Hello com"), "Hello com".len());
+    }
+
+    #[test]
+    fn stable_prefix_holds_back_a_phrase_still_arriving() {
+        let tp = TextProcessor::new(&make_config(true, &[("fox type", "voxtype")]));
+        let held = |text: &'static str| &text[tp.stable_prefix_len(text)..];
+
+        assert_eq!(held("Hello com"), " com");
+        assert_eq!(held("Hello comma"), " comma"); // could still be "commas"
+        assert_eq!(held("Is it done question"), " question");
+        assert_eq!(held("I use fox"), " fox");
+        assert_eq!(held("Hello world"), "");
+        assert_eq!(held("The command"), "");
+        assert_eq!(held("Hello comma how"), "");
+    }
+
+    #[test]
+    fn stable_prefix_does_not_split_a_whole_match() {
+        // "sign of" might become the replacement "sign off", but cutting
+        // there would split "dollar sign" from its first word.
+        let tp = TextProcessor::new(&make_config(true, &[("sign off", "bye")]));
+        let text = "pay dollar sign of";
+        assert_eq!(&text[..tp.stable_prefix_len(text)], "pay");
+    }
+
+    #[test]
+    fn streamed_phrases_split_across_chunks_still_convert() {
+        let tp = TextProcessor::new(&make_config(true, &[("fox type", "voxtype")]));
+
+        assert_eq!(
+            stream_through(
+                &tp,
+                &["Hello", " com", "ma how", " are you", " question", " mark"]
+            ),
+            "Hello, how are you?"
+        );
+        assert_eq!(
+            stream_through(&tp, &["I use fox", " type", " daily period"]),
+            "I use voxtype daily."
+        );
+        assert_eq!(
+            stream_through(&tp, &["um", " so new", " line next"]),
+            "so\nnext"
+        );
+        assert_eq!(
+            stream_through(&tp, &["The command", " works"]),
+            "The command works"
+        );
+    }
+
+    /// Every way of splitting a transcript into two or three chunks must
+    /// type the same text as batch processing, without taking any back.
+    #[test]
+    fn streaming_matches_batch_for_every_split() {
+        let tp = TextProcessor::new(&make_config(true, &[("fox type", "voxtype")]));
+        for transcript in [
+            "Hello comma how are you question mark",
+            "um I use fox type at sign home new line Thanks, Pat.",
+        ] {
+            let batch = tp.process(transcript);
+            let cuts: Vec<usize> = transcript.char_indices().map(|(i, _)| i).skip(1).collect();
+            for (n, &a) in cuts.iter().enumerate() {
+                let (first, rest) = transcript.split_at(a);
+                assert_eq!(stream_through(&tp, &[first, rest]), batch);
+                for &b in &cuts[n + 1..] {
+                    let (second, third) = rest.split_at(b - a);
+                    assert_eq!(stream_through(&tp, &[first, second, third]), batch);
+                }
+            }
+        }
     }
 }
