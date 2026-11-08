@@ -19,7 +19,7 @@ pub use omnilingual::OmnilingualConfig;
 pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
-pub use sensevoice::SenseVoiceConfig;
+pub use sensevoice::{GgmlBackend, SenseVoiceConfig, SenseVoiceRuntime};
 pub use soniox::SonioxConfig;
 
 /// Transcription engine selection (which ASR technology to use)
