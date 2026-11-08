@@ -5,7 +5,7 @@
 //!
 //! - The IPC reader runs on a dedicated thread with a single-threaded Tokio
 //!   runtime; it pushes decoded `AudioFrame`s into an `Arc<Mutex<FrameRing>>`,
-//!   updates an `Arc<Mutex<PeakHold>>`, and notifies the main thread via a
+//!   feeds an `Arc<Mutex<LevelMeter>>`, and notifies the main thread via a
 //!   `calloop::ping::Ping` so the renderer can wake the surface up.
 //! - The main thread runs the Wayland event loop (calloop + SCTK), creates
 //!   the wlr-layer-shell surface on demand when frames start arriving, and
@@ -29,11 +29,11 @@ use std::time::Instant;
 use anyhow::Context as _;
 use clap::Parser;
 
-use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
+use voxtype::audio::levels::AudioFrame;
 use voxtype::osd::config::OsdConfig;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
 use voxtype::osd::theme::ThemeWatcher;
-use voxtype::osd::visual::PeakHold;
+use voxtype::osd::visual::LevelMeter;
 
 use crate::app::SharedState;
 
@@ -78,9 +78,9 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_OPACITY")]
     opacity: Option<f32>,
 
-    /// Visual gain applied to audio samples before drawing the waveform.
-    /// Higher = waveform fills more of the vertical for quiet inputs.
-    /// Reduce for hot mics (e.g. 4.0); raise for quiet sources (e.g. 14.0).
+    /// Waveform sensitivity. 10 is neutral; each doubling shows the input
+    /// 6 dB louder. Reduce for hot mics (e.g. 5.0); raise for quiet
+    /// sources (e.g. 20.0). The waveform always stays inside the card.
     #[arg(long, env = "VOXTYPE_OSD_GAIN")]
     waveform_gain: Option<f32>,
 }
@@ -160,7 +160,9 @@ fn main() -> anyhow::Result<()> {
         ring: Arc::new(Mutex::new(FrameRing::for_window(
             osd_config.waveform_window_secs,
         ))),
-        peak_hold: Arc::new(Mutex::new(PeakHold::new(osd_config.peak_decay_db_per_sec))),
+        meter: Arc::new(Mutex::new(LevelMeter::new(
+            osd_config.peak_decay_db_per_sec,
+        ))),
         last_frame_at: Arc::new(Mutex::new(None)),
         palette,
         config: osd_config,
@@ -217,14 +219,14 @@ fn ipc_thread_main(
 
     let mut total: u64 = 0;
     let mut last_log = Instant::now();
-    let dt_per_frame = 1.0 / FRAME_HZ as f32;
 
     let on_frame = move |frame: AudioFrame| {
         if let Ok(mut r) = shared.ring.lock() {
             r.push(frame);
         }
-        if let Ok(mut p) = shared.peak_hold.lock() {
-            p.update(frame.peak_dbfs, dt_per_frame);
+        // The renderer advances the meter once per drawn frame.
+        if let Ok(mut m) = shared.meter.lock() {
+            m.push(frame.peak_dbfs);
         }
         if let Ok(mut t) = shared.last_frame_at.lock() {
             *t = Some(Instant::now());

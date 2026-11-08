@@ -42,15 +42,17 @@ use smithay_client_toolkit::{
 use voxtype::audio::levels::AudioFrame;
 use voxtype::osd::config::{OsdConfig, OsdPosition};
 use voxtype::osd::ipc::FrameRing;
+use voxtype::osd::placement::card_top;
 use voxtype::osd::visual::{
-    peak_meter_fraction, project_envelope, EnvelopeColumn, MeterZone, Palette, PeakHold,
+    level_dbfs, project_envelope, waveform_gain_db, waveform_level, EnvelopeColumn, LevelMeter,
+    MeterZone, Palette,
 };
 
 /// State shared between the IPC thread and the render thread.
 #[derive(Clone)]
 pub struct SharedState {
     pub ring: Arc<Mutex<FrameRing>>,
-    pub peak_hold: Arc<Mutex<PeakHold>>,
+    pub meter: Arc<Mutex<LevelMeter>>,
     /// Wall-clock timestamp of the most recent frame. Used to drive idle
     /// teardown when no frames have arrived for a while.
     pub last_frame_at: Arc<Mutex<Option<Instant>>>,
@@ -99,6 +101,8 @@ struct RenderSurface {
     /// Whether we've received the first configure (and thus may render).
     configured: bool,
     frame_pending: bool,
+    /// When the previous frame was drawn; paces the level meter.
+    last_render: Option<Instant>,
 
     // wgpu plumbing.
     _instance: wgpu::Instance,
@@ -221,11 +225,14 @@ impl App {
         );
 
         let cfg = &self.shared.config;
-        let (anchor, margin_top, margin_bottom, margin_left, margin_right) =
+        // Span the full height of whichever output the compositor picks
+        // (the focused one: no output is requested) and place the card
+        // inside it once the configure reports that output's height.
+        let (anchor, margin_left, margin_right) =
             position_to_anchor_and_margins(cfg.position, cfg.margin_px as i32);
         layer.set_anchor(anchor);
-        layer.set_margin(margin_top, margin_right, margin_bottom, margin_left);
-        layer.set_size(cfg.width_px, cfg.height_px);
+        layer.set_margin(0, margin_right, 0, margin_left);
+        layer.set_size(cfg.width_px, 0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_exclusive_zone(0);
 
@@ -314,6 +321,7 @@ impl App {
             height: cfg.height_px,
             configured: false,
             frame_pending: false,
+            last_render: None,
             _instance: instance,
             surface,
             device,
@@ -400,32 +408,39 @@ impl App {
             )
         };
 
-        let (peak_dbfs, held_dbfs) = {
-            let ring = self.shared.ring.lock().expect("ring poisoned");
-            let p = ring.latest().map(|f| f.peak_dbfs).unwrap_or(-120.0);
-            let h = self
-                .shared
-                .peak_hold
-                .lock()
-                .map(|x| x.held_dbfs)
-                .unwrap_or(-120.0);
-            (p, h)
+        let gain_db = waveform_gain_db(cfg.waveform_gain);
+        // Advance the meter by the time since the previous drawn frame; a
+        // fresh surface (new recording) starts it from the floor.
+        let now = Instant::now();
+        let meter = {
+            let mut m = self.shared.meter.lock().expect("meter poisoned");
+            if rs.last_render.is_none() {
+                m.reset();
+            }
+            let dt = rs
+                .last_render
+                .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+            m.advance(dt, gain_db)
         };
+        rs.last_render = Some(now);
 
-        let width_px = rs.width;
-        let height_px = rs.height;
-        let gain = self.shared.config.waveform_gain;
+        let card = egui::Rect::from_min_size(
+            egui::pos2(
+                0.0,
+                card_top(
+                    cfg.position,
+                    rs.height as f32,
+                    cfg.height_px as f32,
+                    cfg.margin_px as f32,
+                    cfg.top_margin,
+                )
+                .round(),
+            ),
+            egui::vec2(rs.width as f32, cfg.height_px as f32),
+        );
+        let opacity = cfg.opacity.clamp(0.0, 1.0);
         let full_output = rs.egui_ctx.run_ui(raw_input, |ui| {
-            draw_ui(
-                ui,
-                width_px,
-                height_px,
-                &palette,
-                &envelope_cols,
-                peak_dbfs,
-                held_dbfs,
-                gain,
-            );
+            draw_ui(ui, card, &palette, &envelope_cols, meter, gain_db, opacity);
         });
 
         let primitives = rs
@@ -457,7 +472,6 @@ impl App {
         );
 
         {
-            let bg = palette.background;
             let mut rpass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("voxtype-osd-pass"),
@@ -465,12 +479,9 @@ impl App {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: bg.r as f64,
-                                g: bg.g as f64,
-                                b: bg.b as f64,
-                                a: bg.a as f64,
-                            }),
+                            // Outside the card the full-height surface is
+                            // transparent; draw_ui paints the card itself.
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         },
                         depth_slice: None,
@@ -512,42 +523,45 @@ fn reconfigure_surface(rs: &mut RenderSurface) {
     rs.surface.configure(&rs.device, &surface_config);
 }
 
-fn position_to_anchor_and_margins(pos: OsdPosition, margin: i32) -> (Anchor, i32, i32, i32, i32) {
-    // (anchor, top, bottom, left, right)
+/// Anchors and horizontal margins `(anchor, left, right)`. Vertically the
+/// surface always spans the output; `card_top` places the card.
+fn position_to_anchor_and_margins(pos: OsdPosition, margin: i32) -> (Anchor, i32, i32) {
+    let vertical = Anchor::TOP | Anchor::BOTTOM;
     match pos {
-        OsdPosition::BottomCenter => (Anchor::BOTTOM, 0, margin, 0, 0),
-        OsdPosition::TopCenter => (Anchor::TOP, margin, 0, 0, 0),
-        OsdPosition::BottomLeft => (Anchor::BOTTOM | Anchor::LEFT, 0, margin, margin, 0),
-        OsdPosition::BottomRight => (Anchor::BOTTOM | Anchor::RIGHT, 0, margin, 0, margin),
-        OsdPosition::TopLeft => (Anchor::TOP | Anchor::LEFT, margin, 0, margin, 0),
-        OsdPosition::TopRight => (Anchor::TOP | Anchor::RIGHT, margin, 0, 0, margin),
+        OsdPosition::BottomCenter | OsdPosition::TopCenter => (vertical, 0, 0),
+        OsdPosition::BottomLeft | OsdPosition::TopLeft => (vertical | Anchor::LEFT, margin, 0),
+        OsdPosition::BottomRight | OsdPosition::TopRight => (vertical | Anchor::RIGHT, 0, margin),
     }
 }
 
 /// Render the egui UI: scrolling waveform on the left, segmented vertical
 /// peak meter on the right.
-#[allow(clippy::too_many_arguments)]
 fn draw_ui(
     ui: &mut egui::Ui,
-    width: u32,
-    height: u32,
+    card: egui::Rect,
     palette: &Palette,
     envelope: &[EnvelopeColumn],
-    peak_dbfs: f32,
-    held_dbfs: f32,
-    gain: f32,
+    meter: (f32, f32),
+    gain_db: f32,
+    opacity: f32,
 ) {
     use egui::{Pos2, Rect};
-    let painter = ui.painter().clone();
-    let w = width as f32;
-    let h = height as f32;
+    let mut painter = ui.painter().clone();
+    // `[osd] opacity`, fixed for as long as the card is shown.
+    painter.set_opacity(opacity);
+    painter.rect_filled(card, 0.0, color_to_egui(palette.background));
+    let w = card.width();
+    let h = card.height();
     let meter_w = (w * 0.05).max(8.0);
     let waveform_w = w - meter_w - 4.0;
-    let waveform_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(waveform_w, h));
-    let meter_rect = Rect::from_min_size(Pos2::new(w - meter_w, 0.0), egui::vec2(meter_w, h));
+    let waveform_rect = Rect::from_min_size(card.min, egui::vec2(waveform_w, h));
+    let meter_rect = Rect::from_min_size(
+        Pos2::new(card.min.x + w - meter_w, card.min.y),
+        egui::vec2(meter_w, h),
+    );
 
-    draw_waveform(&painter, waveform_rect, palette, envelope, gain);
-    draw_meter(&painter, meter_rect, palette, peak_dbfs, held_dbfs);
+    draw_waveform(&painter, waveform_rect, palette, envelope, gain_db);
+    draw_meter(&painter, meter_rect, palette, meter, gain_db);
 }
 
 fn draw_waveform(
@@ -555,7 +569,7 @@ fn draw_waveform(
     rect: egui::Rect,
     palette: &Palette,
     envelope: &[EnvelopeColumn],
-    gain: f32,
+    gain_db: f32,
 ) {
     use egui::{pos2, Shape};
     if envelope.is_empty() {
@@ -574,8 +588,8 @@ fn draw_waveform(
     let mut bottom_edge = Vec::with_capacity(n);
     for (i, col) in envelope.iter().enumerate() {
         let x = rect.left() + (i as f32 + 0.5) * col_w;
-        let top = mid_y - (col.max * gain).clamp(-1.0, 1.0) * half_h;
-        let bot = mid_y - (col.min * gain).clamp(-1.0, 1.0) * half_h;
+        let top = mid_y - waveform_level(col.max, gain_db) * half_h;
+        let bot = mid_y - waveform_level(col.min, gain_db) * half_h;
         mesh.colored_vertex(pos2(x, top), fill);
         mesh.colored_vertex(pos2(x, bot), fill);
         top_edge.push(pos2(x, top));
@@ -604,18 +618,15 @@ fn draw_meter(
     painter: &egui::Painter,
     rect: egui::Rect,
     palette: &Palette,
-    peak_dbfs: f32,
-    held_dbfs: f32,
+    (lit_fraction, held_fraction): (f32, f32),
+    gain_db: f32,
 ) {
     use egui::{pos2, Rect};
     const SEGMENTS: usize = 10;
-    const FLOOR_DBFS: f32 = -60.0;
 
     let segment_h = rect.height() / SEGMENTS as f32;
     let segment_gap = (segment_h * 0.15).clamp(1.0, 3.0);
     let inner_w = rect.width() - 4.0;
-    let lit_fraction = peak_meter_fraction(peak_dbfs, FLOOR_DBFS);
-    let lit_segments = (lit_fraction * SEGMENTS as f32).round() as usize;
 
     for i in 0..SEGMENTS {
         // Segment 0 is the BOTTOM of the bar (low dB == bottom).
@@ -626,20 +637,24 @@ fn draw_meter(
             pos2(rect.left() + 2.0 + inner_w, y_bot),
         );
 
-        let segment_peak_dbfs = FLOOR_DBFS * (1.0 - i as f32 / SEGMENTS as f32);
-        let zone = MeterZone::from_dbfs(segment_peak_dbfs);
-        let lit = i < lit_segments;
+        let frac_bottom = i as f32 / SEGMENTS as f32;
+        let frac_top = (i as f32 + 1.0) / SEGMENTS as f32;
+        let zone = MeterZone::from_dbfs(level_dbfs(frac_top, gain_db));
         let base = zone.color(palette);
-        let color = if lit {
-            color_to_egui(base)
-        } else {
-            color_to_egui(base.with_alpha(0.18))
-        };
-        painter.rect_filled(seg_rect, 1.0, color);
+        painter.rect_filled(seg_rect, 1.0, color_to_egui(base.with_alpha(0.18)));
+        // Light the segment as far as the level reaches into it, so the
+        // meter moves smoothly instead of in tenths.
+        let lit = ((lit_fraction - frac_bottom) * SEGMENTS as f32).clamp(0.0, 1.0);
+        if lit > 0.0 {
+            let lit_rect = Rect::from_min_max(
+                pos2(seg_rect.left(), y_bot - (y_bot - y_top) * lit),
+                seg_rect.max,
+            );
+            painter.rect_filled(lit_rect, 1.0, color_to_egui(base));
+        }
     }
 
     // Held-peak tick, drawn as a thin foreground bar.
-    let held_fraction = peak_meter_fraction(held_dbfs, FLOOR_DBFS);
     if held_fraction > 0.0 {
         let y = rect.bottom() - held_fraction * rect.height();
         let tick_rect = Rect::from_min_max(
