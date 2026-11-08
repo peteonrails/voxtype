@@ -987,6 +987,36 @@ threads = 8  # Match your CPU cores
 3. **Use English-only model:**
 `.en` models are faster than multilingual models.
 
+### "Whisper is running on CPU" notification (GPU build)
+
+**Cause:** The daemon is running a GPU build of Whisper (the Vulkan binary, or a CUDA/ROCm/Metal source build), but whisper.cpp found no usable GPU when it loaded the model, so it is transcribing on CPU. whisper.cpp itself only logs `no GPU found` and carries on; Voxtype notifies once per daemon start so the slowdown isn't a mystery. Transcription keeps working, just at CPU speed.
+
+The usual reason on the Vulkan build is a missing Vulkan driver (ICD): the Vulkan loader is installed, but no driver for your GPU is.
+
+**Solutions:**
+
+1. Install the Vulkan driver for your GPU and check that it lists a device:
+```bash
+# Arch: AMD / Intel / NVIDIA
+sudo pacman -S vulkan-radeon      # or vulkan-intel, or nvidia-utils
+# Debian/Ubuntu/Fedora (AMD/Intel): mesa-vulkan-drivers
+vulkaninfo --summary
+systemctl --user restart voxtype
+```
+
+2. If the notification says `gpu_device = N but only M GPU(s) were found`, `[whisper] gpu_device` points past the end of the device list. Devices are numbered from 0; pick one from `vulkaninfo --summary` or remove the setting.
+
+3. Check what the running daemon actually got:
+```bash
+voxtype info accel
+```
+
+### "OpenVINO fell back to GPU/CPU" notification
+
+**Cause:** `[openvino] device` names a device (usually `NPU`) that failed to initialize, so Voxtype fell back to the next device in the chain (GPU, then CPU). The notification names the packages for the configured device.
+
+**Solution:** Install the packages named in the notification (for NPU: `openvino-intel-npu-plugin intel-npu-driver`, then reboot), check the device with `voxtype setup npu --status`, and restart the daemon. `voxtype info accel` shows which device the running daemon is using.
+
 ### Slow transcription on multi-GPU systems (Vulkan)
 
 **Cause:** whisper.cpp 1.7+ enumerates integrated GPUs via Vulkan. On systems with both an integrated GPU (e.g., Intel UHD) and a discrete GPU (e.g., NVIDIA RTX), the integrated GPU gets index 0 and becomes the default. This can cause ~3x slower transcription.

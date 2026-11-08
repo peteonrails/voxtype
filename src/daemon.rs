@@ -3808,6 +3808,10 @@ impl Daemon {
         // Mark any orphaned active meetings as completed
         cleanup_stale_meetings(&self.config);
 
+        // A predecessor's acceleration state describes a model this daemon
+        // has not loaded yet.
+        crate::setup::accel::clear();
+
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
 
@@ -5091,6 +5095,8 @@ impl Daemon {
         if let Some(ref path) = self.meeting_state_file_path {
             cleanup_state_file(path);
         }
+
+        crate::setup::accel::clear();
 
         // Remove PID file on shutdown
         if let Some(ref path) = self.pid_file_path {
