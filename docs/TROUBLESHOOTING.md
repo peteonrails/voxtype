@@ -527,6 +527,10 @@ Look for log messages about speech detection to understand what VAD is doing wit
 
 ## Output Problems
 
+For experimental clipboard-free Linux keyboard delivery, see
+[Native keyboard output](NATIVE_KEYBOARD_OUTPUT.md). It requires an explicit
+matching device keymap and an exclusive `driver_order = ["uinput"]`.
+
 ### wtype not working on KDE Plasma or GNOME Wayland
 
 **Symptom:** wtype fails with "Compositor does not support the virtual keyboard protocol"
