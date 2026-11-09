@@ -148,6 +148,11 @@ impl ConfigEditor {
         self.dirty
     }
 
+    pub fn candidate_config(&self) -> Result<config::Config, EditorError> {
+        toml::from_str(&self.document.to_string())
+            .map_err(|error| EditorError::Validate(error.to_string()))
+    }
+
     pub fn set_string(&mut self, table: &str, key: &str, value: &str) {
         self.set_decorated_value(table, key, Value::from(value));
     }

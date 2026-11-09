@@ -122,6 +122,38 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             }
         }
     }
+    if cli.gguf_model.is_some()
+        || cli.gguf_architecture.is_some()
+        || cli.gguf_language.is_some()
+        || cli.gguf_backend.is_some()
+        || cli.gguf_streaming
+    {
+        let gguf = config.gguf.get_or_insert_with(config::GgufConfig::default);
+        if let Some(model) = &cli.gguf_model {
+            gguf.model = model.clone();
+        }
+        if let Some(architecture) = &cli.gguf_architecture {
+            gguf.architecture = architecture.clone();
+        }
+        if let Some(language) = &cli.gguf_language {
+            gguf.language = language.clone();
+        }
+        if let Some(backend) = &cli.gguf_backend {
+            gguf.gguf_backend = backend.clone();
+        }
+        if cli.gguf_streaming {
+            gguf.streaming = true;
+        }
+        if let Err(message) = voxtype::model_selection::validate_gguf_choice(
+            &gguf.model,
+            &gguf.architecture,
+            &gguf.language,
+            gguf.streaming,
+        ) {
+            eprintln!("Error: {message}");
+            std::process::exit(1);
+        }
+    }
 
     // Hotkey overrides
     if let Some(ref hotkey) = cli.hotkey {
@@ -155,13 +187,21 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.initial_prompt = Some(prompt.clone());
     }
     if let Some(ref lang) = cli.language {
-        config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config.gguf.get_or_insert_with(Default::default).language = lang.clone();
+        } else {
+            config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        }
     }
     if cli.translate {
         config.whisper.translate = true;
     }
     if let Some(threads) = cli.threads {
-        config.whisper.threads = Some(threads);
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config.gguf.get_or_insert_with(Default::default).threads = Some(threads);
+        } else {
+            config.whisper.threads = Some(threads);
+        }
     }
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
@@ -173,7 +213,14 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.flash_attention = true;
     }
     if cli.on_demand_loading {
-        config.whisper.on_demand_loading = true;
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config
+                .gguf
+                .get_or_insert_with(Default::default)
+                .on_demand_loading = true;
+        } else {
+            config.whisper.on_demand_loading = true;
+        }
     }
     if let Some(ref mode) = cli.whisper_mode {
         match mode.to_lowercase().as_str() {

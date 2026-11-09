@@ -1,8 +1,8 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig,
-    ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig,
-    TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
+    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
+    ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
+    StreamingConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,6 +59,10 @@ pub struct Config {
     /// Cohere Transcribe configuration (optional, only used when engine = "cohere")
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
+
+    /// Shared native GGUF configuration (optional, only used for engine = "gguf").
+    #[serde(default)]
+    pub gguf: Option<GgufConfig>,
 
     /// OpenVINO Whisper configuration (optional, only used when engine = "openvino")
     #[serde(default)]
@@ -151,6 +155,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            gguf: None,
             openvino: None,
             soniox: None,
             streaming: None,
@@ -408,6 +413,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::Gguf => self
+                .gguf
+                .as_ref()
+                .map(|g| g.on_demand_loading)
+                .unwrap_or(false),
             TranscriptionEngine::OpenVino => self
                 .openvino
                 .as_ref()
@@ -436,6 +446,7 @@ impl Config {
                 super::language::LanguageConfig::Multiple(_) => return None,
             },
             TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str())?,
+            TranscriptionEngine::Gguf => self.gguf.as_ref().map(|g| g.language.as_str())?,
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
@@ -529,6 +540,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::Gguf => self
+                .gguf
+                .as_ref()
+                .map(|g| g.model.as_str())
+                .unwrap_or("gguf (not configured)"),
             TranscriptionEngine::OpenVino => self
                 .openvino
                 .as_ref()
@@ -575,6 +591,18 @@ impl Config {
             }
             TranscriptionEngine::Cohere => {
                 self.cohere.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Gguf => {
+                let gguf = self.gguf.get_or_insert_with(Default::default);
+                if gguf.model != model || gguf.architecture.is_empty() {
+                    if let Some(entry) = crate::setup::model::find_pending_gguf_model(&model)
+                        .filter(|entry| entry.runnable)
+                    {
+                        gguf.architecture = entry.arch.to_string();
+                        gguf.language = entry.languages.first().copied().unwrap_or("auto").into();
+                    }
+                }
+                gguf.model = model;
             }
             TranscriptionEngine::OpenVino => {
                 self.openvino.get_or_insert_with(Default::default).model = model

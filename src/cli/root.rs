@@ -88,6 +88,46 @@ pub struct Cli {
     )]
     pub engine: Option<String>,
 
+    /// GGUF checkpoint path for the shared native engine
+    #[arg(
+        long,
+        value_name = "FILE",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_model: Option<String>,
+
+    /// Expected GGUF general.architecture value
+    #[arg(
+        long,
+        value_name = "ARCH",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_architecture: Option<String>,
+
+    /// Language hint for the selected GGUF checkpoint
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_language: Option<String>,
+
+    /// transcribe.cpp backend: auto, cpu, cpu_accel, vulkan, metal, cuda, or rocm
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_backend: Option<String>,
+
+    /// Request native GGUF streaming (currently rejected explicitly)
+    #[arg(long, help_heading = "GGUF", hide_short_help = true)]
+    pub gguf_streaming: bool,
+
     /// Language for transcription (e.g., en, fr, auto, or comma-separated: en,fr,de)
     #[arg(long, value_name = "LANG", help_heading = "Transcription")]
     pub language: Option<String>,

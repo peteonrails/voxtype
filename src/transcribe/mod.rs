@@ -80,10 +80,10 @@ pub mod cohere;
 /// Drives voxtype-gguf-worker, which runs the transcribe.cpp GGUF engines out of
 /// process. voxtype never links transcribe.cpp: its ggml collides with
 /// whisper-rs's.
-#[cfg(any(feature = "cohere-gguf", feature = "parakeet-gguf"))]
+#[cfg(any(feature = "cohere-gguf", feature = "parakeet-gguf", feature = "gguf"))]
 pub mod gguf_subprocess;
 
-#[cfg(any(feature = "cohere", feature = "cohere-gguf"))]
+#[cfg(any(feature = "cohere", feature = "cohere-gguf", feature = "gguf"))]
 // Without the ONNX engine, voxtype only validates the settings; the chunker
 // itself runs in voxtype-gguf-worker, which compiles this same file.
 #[cfg_attr(not(feature = "cohere"), allow(dead_code))]
@@ -359,6 +359,26 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             { Ok(Box::new(cohere::CohereTranscriber::new(cfg)?)) }
             #[cfg(not(feature = "cohere"))]
             { Err(TranscribeError::InitFailed("Cohere ONNX requires --features cohere".to_string())) }
+        }
+        TranscriptionEngine::Gguf => {
+            let cfg = config.gguf.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "GGUF engine selected but [gguf] config section is missing".to_string(),
+                )
+            })?;
+            #[cfg(feature = "gguf")]
+            {
+                Ok(Box::new(
+                    gguf_subprocess::GgufSubprocessTranscriber::generic(cfg)?,
+                ))
+            }
+            #[cfg(not(feature = "gguf"))]
+            {
+                let _ = cfg;
+                Err(TranscribeError::InitFailed(
+                    "GGUF engine requires --features gguf (or gpu-vulkan)".to_string(),
+                ))
+            }
         }
         TranscriptionEngine::Soniox => {
             let cfg = config.soniox.as_ref().ok_or_else(|| {

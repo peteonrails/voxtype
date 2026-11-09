@@ -10,12 +10,12 @@ p.add_argument('--evidence',required=True,type=pathlib.Path)
 p.add_argument('--tui',action='store_true')
 a=p.parse_args(); binary=a.bin.resolve(); evidence=a.evidence.resolve(); evidence.mkdir(parents=True,exist_ok=True)
 assert os.environ.get('DBUS_SESSION_BUS_ADDRESS','').endswith('absent-bus'), 'Run inside isolated runtime sandbox'
-models={'parakeet':'parakeet-tdt-0.6b-v3-Q8_0.gguf','cohere':'cohere-transcribe-03-2026-Q4_K_M.gguf'}
+models={'parakeet':'parakeet-ultra-Q8_0.gguf','cohere':'cohere-transcribe-03-2026-Q4_K_M.gguf'}
 legacy={'parakeet':'parakeet-tdt-0.6b-v2','cohere':'cohere-transcribe-int8'}
 results=[]
 with tempfile.TemporaryDirectory(dir=evidence) as temporary:
  root=pathlib.Path(temporary); config=root/'config.toml'; data=root/'data'; store=data/'voxtype/models'; store.mkdir(parents=True)
- for name in models.values():
+ for name in list(models.values())+['parakeet-ultra-F16.gguf','parakeet-ultra-Q4_K_M.gguf','parakeet-tdt-0.6b-v3-F16.gguf']:
   source=a.models/name; assert source.is_file(),str(source); (store/name).symlink_to(source)
  env={k:v for k,v in os.environ.items() if not k.startswith('VOXTYPE_')}
  env.update(HOME=str(root),XDG_CONFIG_HOME=str(root/'config'),XDG_DATA_HOME=str(data),XDG_CACHE_HOME=str(root/'cache'),TERM='xterm-256color')
@@ -54,6 +54,11 @@ with tempfile.TemporaryDirectory(dir=evidence) as temporary:
    x=run(engine+'-picker',['info','models','--engine',engine,'--json'])
    entries=json.loads(x.stdout)['engines'][engine]['models']; assert entries and all(entry['name'].endswith('.gguf') for entry in entries)
   run('restart-compatible-selection',['config','set','engine','cohere'])
+  for model in ['parakeet-ultra-F16.gguf','parakeet-ultra-Q8_0.gguf','parakeet-ultra-Q4_K_M.gguf','parakeet-tdt-0.6b-v3-F16.gguf']:
+   run(model+'-explicit',['config','set','parakeet.model',model])
+   run(model+'-return-preserves',['config','set','engine','parakeet'],reset=False)
+   assert tomllib.loads(config.read_text())['parakeet']['model']==model
+  run('restart-compatible-selection-again',['config','set','engine','cohere'])
   runtime=pathlib.Path(env['XDG_RUNTIME_DIR'])/'voxtype';runtime.mkdir(parents=True,exist_ok=True)
   sentinel=subprocess.Popen(['/usr/bin/sleep','20'])
   try:
@@ -70,7 +75,7 @@ with tempfile.TemporaryDirectory(dir=evidence) as temporary:
   finally:
    sentinel.terminate();sentinel.wait();(runtime/'voxtype.lock').unlink()
   if a.tui:
-   for engine in models:
+   for engine,target,steps in [('parakeet','parakeet-ultra-F16.gguf',3),('parakeet','parakeet-ultra-Q8_0.gguf',4),('parakeet','parakeet-ultra-Q4_K_M.gguf',5),('cohere',models['cohere'],1)]:
     config.write_text(original); before=config.read_bytes(); pid,fd=pty.fork()
     if pid==0: os.execve(str(binary),[str(binary),'--config',str(config),'configure'],env)
     fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',42,180,0,0)); raw=bytearray()
@@ -84,12 +89,12 @@ with tempfile.TemporaryDirectory(dir=evidence) as temporary:
      drain(2); send('j\r'+('l' if engine=='parakeet' else 'll')+'s')
      assert config.read_bytes()==before,'TUI saved incompatible intermediate engine/model'
      assert b'ONNX' in raw and b'GGUF' in raw
-     send('j'+('ll' if engine=='parakeet' else 'l')+'s')
-     saved=tomllib.loads(config.read_text()); assert saved['engine']==engine and saved[engine]['model']==models[engine],saved
-     (evidence/('tui-'+engine+'.toml')).write_bytes(config.read_bytes())
-     results.append({'case':'tui-'+engine,'passed':True,'scope':'real PTY keyboard/save; child killed, no quit/restart'})
+     send('j'+'l'*steps+'s')
+     saved=tomllib.loads(config.read_text()); assert saved['engine']==engine and saved[engine]['model']==target,saved
+     (evidence/('tui-'+target+'.toml')).write_bytes(config.read_bytes())
+     results.append({'case':'tui-'+target,'passed':True,'scope':'real PTY keyboard/save; child killed, no quit/restart'})
     finally:
-     (evidence/('tui-'+engine+'.raw')).write_bytes(raw); os.kill(pid,signal.SIGKILL); os.waitpid(pid,0); os.close(fd)
+     (evidence/('tui-'+target+'.raw')).write_bytes(raw); os.kill(pid,signal.SIGKILL); os.waitpid(pid,0); os.close(fd)
  finally:
   (evidence/'results.json').write_text(json.dumps(results,indent=2)+'\n')
 print(json.dumps({'passed':len(results),'failed':0,'cases':results},indent=2))

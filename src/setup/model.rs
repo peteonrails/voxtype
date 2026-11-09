@@ -672,6 +672,8 @@ pub(crate) struct GgufModelInfo {
     /// R2 directory under the engine's prefix. Spelled out rather than
     /// derived from `name` so the mirrored layout stays greppable.
     pub r2_dir: &'static str,
+    /// Explicit pinned upstream source for approved, not-yet-mirrored models.
+    pub upstream_url: Option<&'static str>,
     pub size: u64,
     pub sha256: &'static str,
     /// Weights license, shown before the download is confirmed.
@@ -679,11 +681,144 @@ pub(crate) struct GgufModelInfo {
     pub description: &'static str,
 }
 
+/// Durable origin and readiness inventory for every approved Handy conversion.
+/// Entries become runnable only after both publication and inference gates pass.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingGgufModelInfo {
+    pub name: &'static str,
+    pub arch: &'static str,
+    pub origin_repo: &'static str,
+    pub origin_revision: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub r2_dir: Option<&'static str>,
+    pub runnable: bool,
+    pub license_gated: bool,
+    pub languages: &'static [&'static str],
+}
+
+const HANDY_PENDING_GGUF_MODELS: &[PendingGgufModelInfo] = &[
+    PendingGgufModelInfo {
+        name: "Qwen3-ASR-0.6B-Q8_0.gguf",
+        arch: "qwen3_asr",
+        origin_repo: "handy-computer/Qwen3-ASR-0.6B-gguf",
+        origin_revision: "7e7c69a577fa2725dfedbe34b5e999336e30a19b",
+        size: 850_423_456,
+        sha256: "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+        r2_dir: Some("qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b"),
+        runnable: true,
+        license_gated: false,
+        languages: &[
+            "auto", "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th",
+            "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el",
+            "ro", "hu", "mk",
+        ],
+    },
+    PendingGgufModelInfo {
+        name: "Qwen3-ASR-1.7B-Q8_0.gguf",
+        arch: "qwen3_asr",
+        origin_repo: "handy-computer/Qwen3-ASR-1.7B-gguf",
+        origin_revision: "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
+        size: 2_185_030_624,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+        r2_dir: Some("qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f"),
+        runnable: true,
+        license_gated: false,
+        languages: &[
+            "auto", "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th",
+            "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el",
+            "ro", "hu", "mk",
+        ],
+    },
+    PendingGgufModelInfo {
+        name: "moonshine-base-ja-Q8_0.gguf",
+        arch: "moonshine",
+        origin_repo: "handy-computer/moonshine-base-ja-gguf",
+        origin_revision: "1674f5f93b7655000951d25d496dcfac947b3968",
+        size: 77_476_544,
+        sha256: "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
+        r2_dir: None,
+        runnable: false,
+        license_gated: true,
+        languages: &["auto", "ja"],
+    },
+    PendingGgufModelInfo {
+        name: "SenseVoiceSmall-Q8_0.gguf",
+        arch: "sensevoice",
+        origin_repo: "handy-computer/SenseVoiceSmall-gguf",
+        origin_revision: "ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b",
+        size: 252_684_608,
+        sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
+        r2_dir: None,
+        runnable: false,
+        license_gated: true,
+        languages: &["auto", "zh", "yue", "en", "ja", "ko"],
+    },
+    PendingGgufModelInfo {
+        name: "moonshine-streaming-small-Q8_0.gguf",
+        arch: "moonshine_streaming",
+        origin_repo: "handy-computer/moonshine-streaming-small-gguf",
+        origin_revision: "e53f28b0cb90308390c852068b950a1aadd238b0",
+        size: 198_506_848,
+        sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+        r2_dir: Some("moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0"),
+        runnable: true,
+        license_gated: false,
+        languages: &["auto", "en"],
+    },
+    PendingGgufModelInfo {
+        name: "gigaam-v3-e2e-rnnt-Q8_0.gguf",
+        arch: "gigaam",
+        origin_repo: "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        origin_revision: "3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d",
+        size: 273_724_832,
+        sha256: "78d63b47723b7f8d78c6113a6ef983b5a86e2a86f6c273e1f5cb6967b1c4467a",
+        r2_dir: Some("gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d"),
+        runnable: true,
+        license_gated: false,
+        languages: &["auto", "ru"],
+    },
+    PendingGgufModelInfo {
+        name: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+        arch: "parakeet",
+        origin_repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        origin_revision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
+        size: 751_094_240,
+        sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+        r2_dir: Some(
+            "nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd",
+        ),
+        runnable: true,
+        license_gated: false,
+        languages: &[
+            "auto", "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR",
+            "pt-PT", "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR",
+            "vi-VN", "uk-UA", "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI",
+            "hr-HR", "sk-SK", "zh-CN", "hu-HU", "ro-RO", "et-EE",
+        ],
+    },
+];
+
+pub fn handy_pending_gguf_models() -> &'static [PendingGgufModelInfo] {
+    HANDY_PENDING_GGUF_MODELS
+}
+
+pub(crate) fn find_pending_gguf_model(name: &str) -> Option<&'static PendingGgufModelInfo> {
+    let basename = std::path::Path::new(name)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or(name);
+    HANDY_PENDING_GGUF_MODELS
+        .iter()
+        .find(|model| model.name == basename)
+}
+
 impl GgufModelInfo {
     /// Cargo feature that compiles this engine's GGUF runtime.
     pub(crate) fn feature(&self) -> &'static str {
         match self.engine {
             "parakeet" => "parakeet-gguf",
+            "gguf" => "gguf",
             _ => "cohere-gguf",
         }
     }
@@ -695,6 +830,7 @@ impl GgufModelInfo {
     pub(crate) fn compiled(&self) -> bool {
         match self.engine {
             "parakeet" => cfg!(feature = "parakeet-gguf"),
+            "gguf" => cfg!(feature = "gguf"),
             _ => cfg!(feature = "cohere-gguf"),
         }
     }
@@ -714,6 +850,7 @@ const COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
         engine: "cohere",
         name: "cohere-transcribe-03-2026-Q4_K_M.gguf",
         r2_dir: "cohere-transcribe-03-2026-q4_k_m-gguf",
+        upstream_url: None,
         size: 1_558_162_944,
         sha256: "0ea56826d8bd5d74b7143a4a04e022dc1bb75452cfae49d98b6acb0c1d16a1fb",
         license: "Apache-2.0",
@@ -723,6 +860,7 @@ const COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
         engine: "cohere",
         name: "cohere-transcribe-03-2026-Q8_0.gguf",
         r2_dir: "cohere-transcribe-03-2026-q8_0-gguf",
+        upstream_url: None,
         size: 2_410_655_232,
         sha256: "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
         license: "Apache-2.0",
@@ -744,6 +882,7 @@ const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         engine: "parakeet",
         name: "parakeet-tdt-0.6b-v3-F16.gguf",
         r2_dir: "parakeet-tdt-0.6b-v3-f16-gguf",
+        upstream_url: None,
         size: 1_255_869_856,
         sha256: "d9ec7e2c39da7b4fec3e01e71e82c7f7bbe97741e08c0c054091bf3d520a41d3",
         license: "CC-BY-4.0",
@@ -753,10 +892,94 @@ const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         engine: "parakeet",
         name: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
         r2_dir: "parakeet-tdt-0.6b-v3-q8_0-gguf",
+        upstream_url: None,
         size: 739_508_576,
         sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
         license: "CC-BY-4.0",
         description: "Q8_0, smaller with the same accuracy in our tests",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-ultra-F16.gguf",
+        r2_dir: "",
+        upstream_url: Some("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-F16.gguf"),
+        size: 1_256_724_448,
+        sha256: "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
+        license: "CC-BY-4.0",
+        description: "Ultra F16, full precision; 25 European languages, automatic language",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-ultra-Q8_0.gguf",
+        r2_dir: "",
+        upstream_url: Some("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q8_0.gguf"),
+        size: 740_363_168,
+        sha256: "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
+        license: "CC-BY-4.0",
+        description: "Ultra Q8_0, recommended for new GGUF selections; 25 European languages",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-ultra-Q4_K_M.gguf",
+        r2_dir: "",
+        upstream_url: Some("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q4_K_M.gguf"),
+        size: 486_280_096,
+        sha256: "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
+        license: "CC-BY-4.0",
+        description: "Ultra Q4_K_M, smaller quantization; 25 European languages",
+    },
+];
+
+const HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
+    GgufModelInfo {
+        engine: "gguf",
+        name: "Qwen3-ASR-0.6B-Q8_0.gguf",
+        r2_dir: "qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b",
+        upstream_url: None,
+        size: 850_423_456,
+        sha256: "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+        license: "Apache-2.0",
+        description: "Qwen3 ASR 0.6B Q8, multilingual",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "Qwen3-ASR-1.7B-Q8_0.gguf",
+        r2_dir: "qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
+        upstream_url: None,
+        size: 2_185_030_624,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+        license: "Apache-2.0",
+        description: "Qwen3 ASR 1.7B Q8, multilingual",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "moonshine-streaming-small-Q8_0.gguf",
+        r2_dir: "moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0",
+        upstream_url: None,
+        size: 198_506_848,
+        sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+        license: "MIT",
+        description: "Moonshine Streaming Small Q8, offline English inference",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "gigaam-v3-e2e-rnnt-Q8_0.gguf",
+        r2_dir: "gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d",
+        upstream_url: None,
+        size: 273_724_832,
+        sha256: "78d63b47723b7f8d78c6113a6ef983b5a86e2a86f6c273e1f5cb6967b1c4467a",
+        license: "MIT",
+        description: "GigaAM v3 Q8, Russian only",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+        r2_dir: "nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd",
+        upstream_url: None,
+        size: 751_094_240,
+        sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+        license: "OpenMDW-1.1",
+        description: "Nemotron 3.5 ASR 0.6B Q8, offline multilingual inference",
     },
 ];
 
@@ -768,19 +991,26 @@ pub(crate) fn parakeet_gguf_models() -> &'static [GgufModelInfo] {
     PARAKEET_GGUF_MODELS
 }
 
+pub(crate) fn handy_gguf_models() -> &'static [GgufModelInfo] {
+    HANDY_GGUF_MODELS
+}
+
 /// A curated GGUF of any engine, by file name.
 pub(crate) fn find_gguf_model(name: &str) -> Option<&'static GgufModelInfo> {
     COHERE_GGUF_MODELS
         .iter()
         .chain(PARAKEET_GGUF_MODELS)
+        .chain(HANDY_GGUF_MODELS)
         .find(|model| model.name == name)
 }
 
-/// GGUF weights are mirrored to R2 under their engine's prefix. The runtime
-/// never reaches HuggingFace: see the R2-only policy from #459. The
-/// `*_GGUF_REPO` and `*_GGUF_REVISION` consts stay as provenance for whoever
-/// re-mirrors these, and as the source of the pinned sha256s.
+/// Existing GGUF weights keep their R2 mirrors. Ultra is an explicit exception:
+/// its approved upstream download is revision- and checksum-pinned until a
+/// separately approved mirror exists. Never construct an unpopulated R2 URL.
 fn gguf_url(model: &GgufModelInfo) -> String {
+    if let Some(url) = model.upstream_url {
+        return url.to_string();
+    }
     format!(
         "{}/{}/{}/{}",
         crate::setup::manifest::MODELS_BASE_URL,
@@ -1640,6 +1870,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_dolphin_engine = matches!(config.engine, TranscriptionEngine::Dolphin);
     let is_omnilingual_engine = matches!(config.engine, TranscriptionEngine::Omnilingual);
     let is_cohere_engine = matches!(config.engine, TranscriptionEngine::Cohere);
+    let is_gguf_engine = matches!(config.engine, TranscriptionEngine::Gguf);
     let is_openvino_engine = matches!(config.engine, TranscriptionEngine::OpenVino);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
@@ -1649,6 +1880,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_dolphin_model = config.dolphin.as_ref().map(|d| d.model.as_str());
     let current_omnilingual_model = config.omnilingual.as_ref().map(|o| o.model.as_str());
     let current_cohere_model = config.cohere.as_ref().map(|c| c.model.as_str());
+    let current_gguf_model = config.gguf.as_ref().map(|g| g.model.as_str());
     let current_openvino_model = config.openvino.as_ref().map(|o| o.model.as_str());
     let parakeet_available = cfg!(feature = "parakeet");
     let moonshine_available = cfg!(feature = "moonshine");
@@ -1659,6 +1891,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let cohere_available = cfg!(feature = "cohere");
     let cohere_gguf_available = cfg!(feature = "cohere-gguf");
     let parakeet_gguf_available = cfg!(feature = "parakeet-gguf");
+    let gguf_available = cfg!(feature = "gguf");
     let openvino_available = cfg!(feature = "openvino-whisper");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
@@ -1670,6 +1903,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let cohere_count = COHERE_MODELS.len();
     let cohere_gguf_count = COHERE_GGUF_MODELS.len();
     let parakeet_gguf_count = PARAKEET_GGUF_MODELS.len();
+    let gguf_count = HANDY_GGUF_MODELS.len();
     let openvino_count = OPENVINO_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
@@ -1683,6 +1917,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(cohere_available, cohere_count)
         + available_count(cohere_gguf_available, cohere_gguf_count)
         + available_count(parakeet_gguf_available, parakeet_gguf_count)
+        + available_count(gguf_available, gguf_count)
         + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
@@ -2001,9 +2236,18 @@ pub async fn interactive_select() -> anyhow::Result<()> {
             .flatten(),
     );
 
-    // --- OpenVINO Section ---
-    let openvino_offset =
+    let gguf_offset =
         parakeet_gguf_offset + available_count(parakeet_gguf_available, parakeet_gguf_count);
+    println!("\n--- Handy GGUF families (offline transcribe.cpp) ---\n");
+    print_gguf_section(
+        HANDY_GGUF_MODELS,
+        gguf_available,
+        gguf_offset,
+        is_gguf_engine.then_some(current_gguf_model).flatten(),
+    );
+
+    // --- OpenVINO Section ---
+    let openvino_offset = gguf_offset + available_count(gguf_available, gguf_count);
     println!("\n--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---\n");
 
     if openvino_available {
@@ -2093,6 +2337,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if parakeet_gguf_available && selection <= parakeet_gguf_offset + parakeet_gguf_count {
         let idx = selection - parakeet_gguf_offset;
         handle_gguf_selection(PARAKEET_GGUF_MODELS, idx).await
+    } else if gguf_available && selection <= gguf_offset + gguf_count {
+        let idx = selection - gguf_offset;
+        handle_gguf_selection(HANDY_GGUF_MODELS, idx).await
     } else if openvino_available && selection <= openvino_offset + openvino_count {
         let idx = selection - openvino_offset;
         handle_openvino_selection(idx, &config).await
@@ -3208,7 +3455,9 @@ pub fn download_gguf_model(name: &str) -> anyhow::Result<()> {
 fn update_config_gguf(model: &GgufModelInfo) -> anyhow::Result<()> {
     match model.engine {
         "parakeet" => update_config_parakeet(model.name),
-        _ => update_config_cohere(model.name),
+        "cohere" => update_config_cohere(model.name),
+        "gguf" => set_engine_model_config("gguf", model.name),
+        _ => unreachable!(),
     }
 }
 
@@ -3730,6 +3979,22 @@ pub(crate) fn set_engine_model_config(engine: &str, model_name: &str) -> anyhow:
         Config::default_path().ok_or_else(|| anyhow::anyhow!("Could not determine config path"))?;
     crate::model_selection::validate_ready(engine, model_name).map_err(anyhow::Error::msg)?;
     let mut editor = crate::tui::ConfigEditor::load_from_path(path)?;
+    if engine == "gguf" {
+        let metadata = find_pending_gguf_model(model_name)
+            .filter(|entry| entry.runnable)
+            .ok_or_else(|| anyhow::anyhow!("GGUF model '{model_name}' is not runnable"))?;
+        let language = metadata.languages.first().copied().unwrap_or("auto");
+        crate::model_selection::validate_gguf_choice(model_name, metadata.arch, language, false)
+            .map_err(anyhow::Error::msg)?;
+        editor.set_string("gguf", "architecture", metadata.arch);
+        editor.set_string("gguf", "language", language);
+    }
+    crate::model_selection::validate_mode(
+        engine,
+        model_name,
+        editor.get_bool(engine, "streaming").unwrap_or(false),
+    )
+    .map_err(anyhow::Error::msg)?;
     editor.set_string("", "engine", engine);
     editor.set_string(engine, "model", model_name);
     editor.save()?;
@@ -5422,6 +5687,34 @@ mode = "type"
     }
 
     #[test]
+    fn ultra_catalog_has_three_pinned_precisions_and_real_download_urls() {
+        for (name, size, sha256) in [
+            (
+                "parakeet-ultra-F16.gguf",
+                1_256_724_448,
+                "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
+            ),
+            (
+                "parakeet-ultra-Q8_0.gguf",
+                740_363_168,
+                "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
+            ),
+            (
+                "parakeet-ultra-Q4_K_M.gguf",
+                486_280_096,
+                "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
+            ),
+        ] {
+            let model = find_gguf_model(name).expect("Ultra checkpoint must be catalogued");
+            assert_eq!((model.size, model.sha256), (size, sha256));
+            assert_eq!(model.license, "CC-BY-4.0");
+            assert_eq!(model.engine, "parakeet");
+            assert_eq!(gguf_url(model), format!("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/{name}"));
+            assert!(parakeet_setup_model_names().contains(&name));
+        }
+    }
+
+    #[test]
     fn cohere_gguf_validation_checks_size_magic_and_publisher_hash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cohere.gguf");
@@ -5429,6 +5722,7 @@ mode = "type"
             engine: "cohere",
             name: "cohere.gguf",
             r2_dir: "cohere-gguf-test",
+            upstream_url: None,
             size: 11,
             sha256: "70d5523972d92139e4d1f62ee3d7cd79054f08ac90b5ba3b87df19c08adb3b17",
             license: "test",
@@ -5460,7 +5754,7 @@ mode = "type"
     /// or directory), and are found by the same lookup as Cohere's.
     #[test]
     fn parakeet_gguf_entries_are_single_files_under_the_parakeet_prefix() {
-        assert_eq!(parakeet_gguf_models().len(), 2);
+        assert_eq!(parakeet_gguf_models().len(), 5);
         for model in parakeet_gguf_models() {
             assert_eq!(model.engine, "parakeet");
             assert!(model.name.ends_with(".gguf"), "{}", model.name);
@@ -5469,15 +5763,17 @@ mode = "type"
             assert!(std::ptr::eq(find_gguf_model(model.name).unwrap(), model));
             assert!(!is_parakeet_model(model.name), "{}", model.name);
             assert!(parakeet_setup_model_names().contains(&model.name));
-            assert_eq!(
-                gguf_url(model),
-                format!(
-                    "{}/parakeet/{}/{}",
-                    crate::setup::manifest::MODELS_BASE_URL,
-                    model.r2_dir,
-                    model.name
-                )
-            );
+            if model.upstream_url.is_none() {
+                assert_eq!(
+                    gguf_url(model),
+                    format!(
+                        "{}/parakeet/{}/{}",
+                        crate::setup::manifest::MODELS_BASE_URL,
+                        model.r2_dir,
+                        model.name
+                    )
+                );
+            }
         }
         // Cohere's URLs keep the layout 2f3d95e mirrored them under.
         let cohere = find_gguf_model("cohere-transcribe-03-2026-Q8_0.gguf").unwrap();
@@ -5728,6 +6024,55 @@ on_demand_loading = false
         assert_eq!(
             got,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn handy_conversions_keep_publication_and_license_readiness_explicit() {
+        let models = handy_pending_gguf_models();
+        assert_eq!(models.len(), 7);
+        assert_eq!(
+            models.iter().map(|model| model.arch).collect::<Vec<_>>(),
+            [
+                "qwen3_asr",
+                "qwen3_asr",
+                "moonshine",
+                "sensevoice",
+                "moonshine_streaming",
+                "gigaam",
+                "parakeet",
+            ]
+        );
+        assert_eq!(models.iter().filter(|model| model.runnable).count(), 5);
+        assert!(models
+            .iter()
+            .filter(|model| model.runnable)
+            .all(|model| model.r2_dir.is_some()));
+        assert!(models
+            .iter()
+            .filter(|model| model.license_gated)
+            .all(|model| !model.runnable && model.r2_dir.is_none()));
+        assert_eq!(handy_gguf_models().len(), 5);
+        let expected_urls = [
+            "https://models.voxtype.io/gguf/qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+        ];
+        for (model, expected_url) in handy_gguf_models().iter().zip(expected_urls) {
+            assert_eq!(model.engine, "gguf");
+            assert!(model.r2_dir.contains('-'));
+            assert!(std::ptr::eq(find_gguf_model(model.name).unwrap(), model));
+            assert_eq!(gguf_url(model), expected_url);
+        }
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.license_gated)
+                .map(|model| model.name)
+                .collect::<Vec<_>>(),
+            ["moonshine-base-ja-Q8_0.gguf", "SenseVoiceSmall-Q8_0.gguf"]
         );
     }
 }

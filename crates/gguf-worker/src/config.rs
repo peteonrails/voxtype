@@ -55,6 +55,20 @@ pub struct ParakeetConfig {
     pub streaming: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenericGgufConfig {
+    pub model: String,
+    pub architecture: String,
+    #[serde(default = "default_gguf_backend")]
+    pub gguf_backend: String,
+    #[serde(default = "default_auto_language")]
+    pub language: String,
+    #[serde(default)]
+    pub threads: Option<usize>,
+    #[serde(default)]
+    pub streaming: bool,
+}
+
 impl Default for ParakeetConfig {
     fn default() -> Self {
         Self {
@@ -82,6 +96,10 @@ fn default_boundary_search_secs() -> f32 {
 
 fn default_cohere_language() -> String {
     "en".to_string()
+}
+
+fn default_auto_language() -> String {
+    "auto".to_string()
 }
 
 fn default_parakeet_max_window_secs() -> f32 {

@@ -28,7 +28,7 @@ mod whisper;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
+    CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
     ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
     TranscriptionEngine,
 };

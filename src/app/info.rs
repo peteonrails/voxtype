@@ -240,6 +240,21 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
         let doc = serde_json::json!({
             "engines": serde_json::Value::Object(map),
             "verified": verify,
+            "pending_gguf": voxtype::setup::model::handy_pending_gguf_models()
+                .iter()
+                .map(|model| serde_json::json!({
+                    "name": model.name,
+                    "architecture": model.arch,
+                    "languages": model.languages,
+                    "origin_repo": model.origin_repo,
+                    "origin_revision": model.origin_revision,
+                    "size": model.size,
+                    "sha256": model.sha256,
+                    "r2_dir": model.r2_dir,
+                    "runnable": model.runnable,
+                    "license_gated": model.license_gated,
+                }))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(());

@@ -632,6 +632,7 @@ pub(crate) enum ModelKind {
     Cohere,
     CohereGguf,
     ParakeetGguf,
+    Gguf,
     OpenVino,
 }
 
@@ -666,10 +667,22 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
     } else if let Some(gguf) = model::find_gguf_model(name) {
         Ok(match gguf.engine {
             "parakeet" => ModelKind::ParakeetGguf,
-            _ => ModelKind::CohereGguf,
+            "cohere" => ModelKind::CohereGguf,
+            "gguf" => ModelKind::Gguf,
+            _ => unreachable!(),
         })
     } else if model::is_openvino_model(name) {
         Ok(ModelKind::OpenVino)
+    } else if let Some(pending) = model::find_pending_gguf_model(name) {
+        anyhow::bail!(
+            "GGUF model '{}' is pinned but pending publication{}; it is not downloadable or selectable yet.",
+            pending.name,
+            if pending.license_gated {
+                " and license clearance"
+            } else {
+                ""
+            }
+        )
     } else {
         anyhow::bail!(
             "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  \
@@ -853,7 +866,10 @@ pub async fn run_setup(
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
     let is_openvino = kind == Some(ModelKind::OpenVino);
-    let is_gguf = matches!(kind, Some(ModelKind::CohereGguf | ModelKind::ParakeetGguf));
+    let is_gguf = matches!(
+        kind,
+        Some(ModelKind::CohereGguf | ModelKind::ParakeetGguf | ModelKind::Gguf)
+    );
 
     if let Some(route) = kind.and_then(onnx_setup_route) {
         // Engines whose downloads were picker-only until #687: routed

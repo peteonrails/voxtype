@@ -13,7 +13,7 @@
 //! - A worker that dies is replaced on the next `prepare()` or `transcribe()`.
 
 use super::Transcriber;
-use crate::config::{CohereConfig, Config, ParakeetConfig};
+use crate::config::{CohereConfig, Config, GgufConfig, ParakeetConfig};
 use crate::error::TranscribeError;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
@@ -77,6 +77,19 @@ impl GgufSubprocessTranscriber {
         let mut config = config.clone();
         config.model = resolve_model(&config.model)?;
         Self::start("parakeet", "Parakeet", serialize(&config)?)
+    }
+
+    pub fn generic(config: &GgufConfig) -> Result<Self, TranscribeError> {
+        crate::model_selection::validate_gguf_choice(
+            &config.model,
+            &config.architecture,
+            &config.language,
+            config.streaming,
+        )
+        .map_err(TranscribeError::ConfigError)?;
+        let mut config = config.clone();
+        config.model = resolve_model(&config.model)?;
+        Self::start("gguf", "GGUF", serialize(&config)?)
     }
 
     fn start(

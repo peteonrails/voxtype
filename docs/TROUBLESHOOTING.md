@@ -2,6 +2,21 @@
 
 Solutions to common issues when using Voxtype.
 
+## Ultra is missing, cannot download, or is not the current model
+
+Use `voxtype info models --json` to distinguish catalogued, supported and locally
+installed weights. Ultra F16/Q8_0/Q4_K_M need a GGUF-capable Parakeet build and its
+matching worker. ONNX-only packages cannot load these files and keep their ONNX
+default. Install a compatible build deliberately rather than renaming a file.
+An existing explicit v3 selection is intentionally preserved, even when Ultra
+weights are installed. Select Ultra explicitly to change it.
+
+Ultra's pinned upstream Hugging Face downloads need network access to that host;
+they do not use an unpublished R2 object. Size/hash rejection does not replace an
+existing good model. Retry a failed explicit download, not a settings save.
+The automatic, read-only Ultra language display is expected: this runtime has
+no selectable language hint for Parakeet. No translation or streaming is added.
+
 ## Parakeet is compiled but startup requests an unavailable ONNX feature
 
 Check the exact model with `voxtype config get parakeet.model`. A name such as
@@ -366,6 +381,16 @@ max_duration_secs = 120  # 2 minutes
 ---
 
 ## Transcription Issues
+
+### Shared GGUF selection is refused
+
+The `gguf` engine validates the selected checkpoint's architecture, language,
+file size/header, compiled client, and companion worker before saving an engine
+or model change. Download the named model first with
+`voxtype setup --download --model <filename>` and keep the worker shipped with
+the same Voxtype build. `streaming = true` is intentionally unsupported. An
+explicit `vulkan` backend also fails when no hardware Vulkan device is visible;
+use `auto` or `cpu` only when that is the backend you intend.
 
 ### GGUF worker selection
 

@@ -881,6 +881,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(any(feature = "cohere", feature = "cohere-gguf")) {
         f.push("cohere");
     }
+    if cfg!(feature = "gguf") {
+        f.push("gguf");
+    }
     if cfg!(feature = "openvino-whisper") {
         f.push("openvino");
     }

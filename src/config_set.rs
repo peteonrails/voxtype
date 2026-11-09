@@ -104,6 +104,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gguf",
     "openvino",
 ];
 
@@ -147,6 +148,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
         TranscriptionEngine::Cohere => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
+        TranscriptionEngine::Gguf => cfg!(feature = "gguf"),
         TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
     }
 }
@@ -175,9 +177,51 @@ pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> 
             &crate::config::Config::models_dir(),
         )
         .map_err(ConfigSetError::IncompatibleModel)?;
+        crate::model_selection::validate_mode(
+            name,
+            &model,
+            editor.get_bool(name, "streaming").unwrap_or(false),
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
         crate::model_selection::validate_ready(name, &model)
             .map_err(ConfigSetError::IncompatibleModel)?;
         editor.set_string(name, "model", &model);
+    }
+    if name == "gguf" {
+        let retained = editor.get_string("gguf", "model");
+        let model = crate::model_selection::select_engine_model_in(
+            "gguf",
+            retained.as_deref(),
+            &crate::config::Config::models_dir(),
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+        let metadata =
+            crate::setup::model::find_pending_gguf_model(&model).filter(|entry| entry.runnable);
+        let architecture = metadata
+            .map(|entry| entry.arch.to_string())
+            .or_else(|| editor.get_string("gguf", "architecture"))
+            .ok_or_else(|| ConfigSetError::IncompatibleModel("A custom GGUF model requires gguf.architecture before switching engines. Config unchanged.".into()))?;
+        let language = retained
+            .as_deref()
+            .filter(|retained| *retained == model)
+            .and_then(|_| editor.get_string("gguf", "language"))
+            .or_else(|| {
+                metadata
+                    .and_then(|entry| entry.languages.first().copied())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "auto".into());
+        editor.set_string("gguf", "model", &model);
+        editor.set_string("gguf", "architecture", &architecture);
+        editor.set_string("gguf", "language", &language);
+        crate::model_selection::validate_gguf_choice(
+            &model,
+            &architecture,
+            &language,
+            editor.get_bool("gguf", "streaming").unwrap_or(false),
+        )
+        .and_then(|()| crate::model_selection::validate_ready("gguf", &model))
+        .map_err(ConfigSetError::IncompatibleModel)?;
     }
     editor.set_string("", "engine", name);
     let default = crate::model_catalog::default_model(name);
@@ -244,6 +288,44 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
 
     let mut editor = ConfigEditor::load_from_path(path)?;
     schema::apply(&mut editor, &found, &value);
+    if key == "gguf.model" {
+        if let Some(metadata) =
+            crate::setup::model::find_pending_gguf_model(raw).filter(|entry| entry.runnable)
+        {
+            editor.set_string("gguf", "architecture", metadata.arch);
+            editor.set_string(
+                "gguf",
+                "language",
+                metadata.languages.first().copied().unwrap_or("auto"),
+            );
+        }
+    }
+    if matches!(key, "parakeet.model" | "parakeet.streaming") {
+        let model = editor
+            .get_string("parakeet", "model")
+            .unwrap_or_else(|| crate::model_catalog::default_model("parakeet").into());
+        crate::model_selection::validate_mode(
+            "parakeet",
+            &model,
+            editor.get_bool("parakeet", "streaming").unwrap_or(false),
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+    }
+    if key.starts_with("gguf.") {
+        let candidate = editor.candidate_config()?;
+        let gguf = candidate.gguf.as_ref().ok_or_else(|| {
+            ConfigSetError::IncompatibleModel("[gguf] config section is missing".into())
+        })?;
+        crate::model_selection::validate_gguf_choice(
+            &gguf.model,
+            &gguf.architecture,
+            &gguf.language,
+            gguf.streaming,
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+        crate::model_selection::validate_ready("gguf", &gguf.model)
+            .map_err(ConfigSetError::IncompatibleModel)?;
+    }
     editor.save()?;
 
     Ok(SetOutcome {
@@ -308,6 +390,63 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    #[cfg(feature = "gguf")]
+    fn generic_gguf_streaming_rejection_preserves_config_bytes() {
+        let original = r#"# keep this exact comment
+engine = "gguf"
+
+[gguf]
+model = "/models/moonshine-streaming-small-Q8_0.gguf"
+architecture = "moonshine_streaming"
+language = "en"
+streaming = false # offline is intentional
+"#;
+        let (_dir, path) = temp_config(original);
+        let error = set_key(path.clone(), "gguf.streaming", "true").unwrap_err();
+        assert!(error.to_string().contains("offline only"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    #[cfg(feature = "gguf")]
+    fn generic_gguf_missing_weights_preserve_config_bytes() {
+        let original = r#"# explicit legacy choice stays untouched
+engine = "whisper"
+[whisper]
+model = "base.en"
+[gguf]
+model = "/nonexistent/voxtype/Qwen3-ASR-0.6B-Q8_0.gguf"
+architecture = "qwen3_asr"
+language = "en"
+"#;
+        let (_dir, path) = temp_config(original);
+        let error = set_engine(path.clone(), "gguf").unwrap_err();
+        assert!(
+            error.to_string().contains("missing or incomplete"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    #[cfg(feature = "gguf")]
+    fn generic_gguf_unsupported_backend_preserves_config_bytes() {
+        let original = r#"engine = "whisper"
+[whisper]
+model = "base.en"
+[gguf]
+model = "/models/Qwen3-ASR-0.6B-Q8_0.gguf"
+architecture = "qwen3_asr"
+language = "en"
+gguf_backend = "cpu"
+"#;
+        let (_dir, path) = temp_config(original);
+        let error = set_key(path.clone(), "gguf.gguf_backend", "opencl").unwrap_err();
+        assert!(error.to_string().contains("not a valid"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]
@@ -893,7 +1032,7 @@ type_delay_ms = 5
             if let Err(error) = set_engine(path.clone(), name) {
                 assert!(
                     matches!(error, ConfigSetError::IncompatibleModel(_))
-                        && matches!(*name, "parakeet" | "cohere"),
+                        && matches!(*name, "parakeet" | "cohere" | "gguf"),
                     "{error}"
                 );
                 assert_eq!(fs::read(&path).unwrap(), original);

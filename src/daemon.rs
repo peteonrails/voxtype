@@ -2438,6 +2438,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                     let config = self.config.clone();
@@ -2473,6 +2474,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(ref t) = self.transcriber_preloaded {
@@ -2734,6 +2736,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(t) = self.transcriber_preloaded.clone() {
@@ -4305,6 +4308,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                     // Non-Whisper engines do their own setup; Soniox just validates
@@ -5524,10 +5528,17 @@ mod tests {
         if std::env::var_os("VOXTYPE_LANGUAGE_BACKEND_CHILD").is_none() {
             let fixture = tempfile::tempdir().unwrap();
             let worker = fixture.path().join("worker.py");
+            let python = std::process::Command::new("python3")
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output()
+                .expect("python3 is required for the isolated protocol fixture");
+            assert!(python.status.success());
             std::fs::write(
                 &worker,
-                r#"#!/usr/bin/python3
-import sys,json,struct
+                format!(
+                    "#!{}\n{}",
+                    String::from_utf8(python.stdout).unwrap().trim(),
+                    r#"import sys,json,struct
 config=json.loads(sys.argv[sys.argv.index('--config-json')+1])
 print('READY',flush=True)
 while True:
@@ -5537,7 +5548,8 @@ while True:
     data=b''
     while len(data)<size: data+=sys.stdin.buffer.read(size-len(data))
     print(json.dumps({'ok':True,'text':'CONFIG_HINT:'+config['language']}),flush=True)
-"#,
+"#
+                ),
             )
             .unwrap();
             std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();

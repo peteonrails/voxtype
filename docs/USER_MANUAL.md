@@ -1,5 +1,49 @@
 # Voxtype User Manual
 
+## Parakeet Ultra
+
+Parakeet Ultra is Moondream's post-trained Parakeet v3 checkpoint, not another
+engine. The model picker offers F16 (1,256,724,448 bytes), Q8_0 (740,363,168 bytes)
+and Q4_K_M (486,280,096 bytes). New compatible GGUF selections recommend
+`parakeet-ultra-Q8_0.gguf`. Existing explicit v3, custom and supported legacy
+ONNX/MIGraphX choices are retained. Switching back to a previously configured
+Parakeet model is not an automatic Ultra migration.
+
+Download deliberately, then choose the model in CLI, terminal or graphical settings:
+
+```sh
+voxtype setup --download --model parakeet-ultra-Q8_0.gguf
+voxtype config set parakeet.model parakeet-ultra-Q8_0.gguf
+voxtype config set engine parakeet
+```
+
+F16 and Q4_K_M use the corresponding exact filenames. GGUF support and its matching
+worker are required; ONNX-only builds retain their supported ONNX default.
+Saving settings never downloads weights. Ultra recognizes the same 25 European
+languages as v3 automatically; it does not expose a language hint, translation or
+streaming control. The tray therefore correctly shows its language as automatic
+and read-only. Upstream inference-pipeline features are not implied by the weights.
+
+Ultra downloads are an explicit exception to the usual R2-mirror policy: they
+come directly from a pinned handy-computer Hugging Face revision, with pinned
+size and SHA-256 checks. No unpopulated Voxtype mirror is advertised. See
+[model provenance](models/parakeet-ultra.md) for attribution and CC-BY-4.0 terms.
+
+## Handy GGUF model families
+
+The `gguf` engine exposes five cleared, checksum-pinned Q8 checkpoints through
+the same isolated transcribe.cpp worker used by Cohere and Parakeet GGUF:
+Qwen3 ASR 0.6B and 1.7B, Moonshine Streaming Small, GigaAM v3, and Nemotron
+3.5 ASR. Use `voxtype setup model` or an engine/model picker to download and
+select one; selection writes its architecture and compatible language hint
+together with the model name.
+
+These checkpoints currently run after recording stops. Native streaming is not
+implemented, even for models with “streaming” in their published name, and an
+explicit streaming request is rejected instead of silently downgraded. GigaAM
+is Russian-only. Japanese Moonshine Base and SenseVoice conversions are held
+out of public downloads until their separate license gates are cleared.
+
 ## Switching Parakeet or Cohere backends
 
 The graphical and terminal model pickers offer checkpoints supported by the

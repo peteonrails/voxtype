@@ -70,7 +70,10 @@ impl LanguageMenu {
             TranscriptionEngine::Parakeet => {
                 menu.current = if basename.contains("-v2") || basename.contains("-en-") {
                     "en"
-                } else if basename.contains("-v3") {
+                } else if basename.contains("-v3")
+                    || (basename.starts_with("parakeet-ultra-")
+                        && crate::setup::model::find_gguf_model(basename).is_some())
+                {
                     "automatic"
                 } else {
                     "model-controlled"
@@ -234,6 +237,22 @@ disfluency_removal = false
         assert!(persist(&cfg, &path, "fr").unwrap_err().contains("differs"));
         assert!(persist(&cfg, &dir.path().join("missing"), "fr").is_err());
         assert_eq!(cfg.active_language(), Some("en"));
+    }
+
+    #[test]
+    fn ultra_language_is_automatic_without_an_unsupported_hint() {
+        for model in [
+            "parakeet-ultra-F16.gguf",
+            "parakeet-ultra-Q8_0.gguf",
+            "parakeet-ultra-Q4_K_M.gguf",
+        ] {
+            let mut config = Config::default();
+            config.set_model_for(TranscriptionEngine::Parakeet, model);
+            let menu = LanguageMenu::for_config(&config);
+            assert_eq!(menu.current, "automatic");
+            assert!(menu.choices.is_empty());
+            assert!(menu.explanation.contains("no selectable"));
+        }
     }
 
     #[test]

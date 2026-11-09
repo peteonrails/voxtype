@@ -185,6 +185,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
         "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
+        "gguf" => cfg!(feature = "gguf"),
         "openvino" => cfg!(feature = "openvino-whisper"),
         _ => false,
     }
@@ -723,6 +724,84 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // shared transcribe.cpp GGUF
+    spec(
+        "gguf.model",
+        "gguf",
+        "model",
+        KeyType::DynamicEnum { source: "models" },
+        "Engine",
+        "Model path",
+        "Path to a curated or custom transcribe.cpp GGUF checkpoint.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.architecture",
+        "gguf",
+        "architecture",
+        KeyType::String,
+        "Engine",
+        "Architecture",
+        "Expected general.architecture value; curated checkpoints validate it automatically.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.language",
+        "gguf",
+        "language",
+        KeyType::String,
+        "Engine",
+        "Language",
+        "Language hint validated against the selected checkpoint metadata.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.gguf_backend",
+        "gguf",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for the isolated transcribe.cpp worker.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.threads",
+        "gguf",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "Inference threads. Unset lets transcribe.cpp choose.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.on_demand_loading",
+        "gguf",
+        "on_demand_loading",
+        KeyType::Bool,
+        "Engine",
+        "Load on demand",
+        "Load the worker model when recording starts and unload at idle.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.streaming",
+        "gguf",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Native streaming",
+        "Reserved for native streaming; true is rejected until implemented.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
     // openvino
     spec(
         "openvino.model",
@@ -2574,6 +2653,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
     let so = || cfg.soniox.clone().unwrap_or_default();
     // Without a table, post-processing is off; report the values a new
@@ -2672,6 +2752,17 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "cohere.max_chunk_secs" => json!(co().max_chunk_secs),
         "cohere.boundary_search_secs" => json!(co().boundary_search_secs),
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+
+        "gguf.model" => json!(gg().model),
+        "gguf.architecture" => json!(gg().architecture),
+        "gguf.language" => json!(gg().language),
+        "gguf.gguf_backend" => json!(gg().gguf_backend),
+        "gguf.threads" => match gg().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "gguf.on_demand_loading" => json!(gg().on_demand_loading),
+        "gguf.streaming" => json!(gg().streaming),
 
         "openvino.model" => json!(ov().model),
         "openvino.device" => json!(ov().device),
@@ -3609,6 +3700,7 @@ mod tests {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gguf",
             "openvino",
             "soniox",
         ]

@@ -17,7 +17,7 @@
 # config representations still agree; dev-dependencies never reach the binary.
 [package]
 name = "voxtype-gguf-worker"
-version = "1.2.0-rc1"
+version = "1.2.0-rc2"
 edition = "2021"
 license = "MIT"
 publish = false

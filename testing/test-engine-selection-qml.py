@@ -6,7 +6,7 @@ import argparse, json, os, pathlib, re, shutil, subprocess, tempfile, time, toml
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--bin',required=True,type=pathlib.Path);p.add_argument('--models',required=True,type=pathlib.Path);p.add_argument('--plugin',type=pathlib.Path);p.add_argument('--tools',type=pathlib.Path);p.add_argument('--evidence',required=True,type=pathlib.Path);a=p.parse_args()
 r=pathlib.Path(__file__).resolve().parents[1]; evidence=a.evidence.resolve();evidence.mkdir(parents=True,exist_ok=True);binary=a.bin.resolve();plugin=(a.plugin or r/'omarchy-plugin').resolve();tools=(a.tools or r/'selection-evidence/compositor-tools/usr').resolve()
 assert os.environ.get('XDG_RUNTIME_DIR')=='/run/user/1000' and os.environ.get('DBUS_SESSION_BUS_ADDRESS','').endswith('absent-bus')
-models={'parakeet':'parakeet-tdt-0.6b-v3-Q8_0.gguf','cohere':'cohere-transcribe-03-2026-Q4_K_M.gguf'};legacy={'parakeet':'parakeet-tdt-0.6b-v2','cohere':'cohere-transcribe-int8'}
+models={'parakeet':'parakeet-ultra-Q8_0.gguf','cohere':'cohere-transcribe-03-2026-Q4_K_M.gguf'};legacy={'parakeet':'parakeet-tdt-0.6b-v2','cohere':'cohere-transcribe-int8'}
 children=[]; results=[]
 with tempfile.TemporaryDirectory(dir=evidence) as temporary:
  root=pathlib.Path(temporary);home=root/'home';home.mkdir();env=dict(os.environ,HOME=str(home),XDG_CONFIG_HOME=str(home/'.config'),XDG_CACHE_HOME=str(home/'.cache'),XDG_DATA_HOME=str(home/'.local/share'),WAYLAND_DISPLAY='',DISPLAY='',HYPRLAND_INSTANCE_SIGNATURE='',WLR_BACKENDS='headless',WLR_RENDERER='gles2',WLR_RENDER_DRM_DEVICE='/dev/dri/renderD128',LD_LIBRARY_PATH=str(tools/'lib'),QT_QPA_PLATFORM='wayland',QT_QUICK_BACKEND='software')
@@ -21,13 +21,21 @@ with tempfile.TemporaryDirectory(dir=evidence) as temporary:
   for engine,model in models.items():
    test=root/engine;test.mkdir();config=test/'config.toml';original=f'# graphical selection fixture\nengine = "{engine}"\n[parakeet]\nmodel = "{legacy["parakeet"]}" # preserve comment\nstreaming = false\nmodel_type = "tdt"\n[cohere]\nmodel = "{legacy["cohere"]}"\nlanguage = "en"\ngguf_backend = "vulkan"\n[whisper]\nlanguage = "de"\n';config.write_text(original)
    store=home/'.local/share/voxtype/models';store.mkdir(parents=True,exist_ok=True)
-   for name in models.values():
+   for name in list(models.values())+['parakeet-ultra-F16.gguf','parakeet-ultra-Q4_K_M.gguf']:
     if not (store/name).exists():(store/name).symlink_to(a.models/name)
    for directory in pathlib.Path('/usr/share/omarchy/shell').iterdir():
     if directory.is_dir():(test/directory.name).symlink_to(directory)
    shutil.copytree(plugin,test/'plugin',ignore=shutil.ignore_patterns('__pycache__'))
    path=test/'plugin/Panel.qml';path.write_text(path.read_text().replace('id: root','id: root\n  readonly property alias formUnderTest: form\n  readonly property alias cliUnderTest: cli',1))
-   path=test/'plugin/components/SchemaForm.qml';path.write_text(path.read_text().replace('id: root','id: root\n  readonly property alias enginePickerUnderTest: testEnginePicker',1).replace('EnginePicker {','EnginePicker {\n      id: testEnginePicker',1))
+   path=test/'plugin/components/SchemaForm.qml';path.write_text(path.read_text().replace('id: root','id: root\n  readonly property alias enginePickerUnderTest: testEnginePicker\n  readonly property alias modelCardUnderTest: testModelCard',1).replace('EnginePicker {','EnginePicker {\n      id: testEnginePicker',1).replace('EngineModelCard {','EngineModelCard {\n      id: testModelCard',1))
+   path=test/'plugin/components/EngineModelCard.qml';path.write_text(path.read_text().replace('id: root','''id: root
+  function clickModelUnderTest(name) {
+    for (var i = 0; i < testRepeater.count; i++) {
+      var row = testRepeater.itemAt(i)
+      if (row.modelName === name) { row.useButtonUnderTest.clicked(); return true }
+    }
+    return false
+  }''',1).replace('Repeater {','Repeater {\n          id: testRepeater',1).replace('id: entry','id: entry\n            readonly property alias useButtonUnderTest: testUseButton',1).replace('text: "Use"','id: testUseButton\n                  text: "Use"',1))
    path=test/'plugin/components/EnginePicker.qml';path.write_text(path.read_text().replace('id: root','id: root\n  readonly property alias dropdownUnderTest: engineDropdown',1))
    wrapper=test/'voxtype-test';wrapper.write_text('#!/usr/bin/python3\nimport os,sys\nos.execv('+repr(str(binary))+',['+repr(str(binary))+',"--config",'+repr(str(config))+']+sys.argv[1:])\n');wrapper.chmod(0o755)
    (test/'plugin/dev.json').write_text(json.dumps({'voxtypeBin':str(wrapper)}))
@@ -40,6 +48,8 @@ Item {
  property int phase: 0
  property bool finished: false
  property string failure: ""
+ property var ultraModels: ["parakeet-ultra-F16.gguf", "parakeet-ultra-Q4_K_M.gguf", "parakeet-ultra-Q8_0.gguf"]
+ property int ultraIndex: 0
  function finish(message) { if (finished) return; finished = true; failure = message; console.log(message === "" ? "ENGINE_SELECTION_QS_PASS" : "ENGINE_SELECTION_QS_FAIL: " + message); Qt.callLater(Qt.quit) }
  Connections {
   target: panel.cliUnderTest
@@ -48,7 +58,18 @@ Item {
    if (test.phase === 0) { test.phase = 1; panel.cliUnderTest.restartDaemon() }
    else if (test.phase === 2) {
     if (panel.engine !== ENGINE || panel.modelValue !== MODEL) { test.finish("persisted pair mismatch " + panel.engine + "/" + panel.modelValue); return }
-    test.phase = 3; panel.cliUnderTest.setKey(ENGINE + ".model", LEGACY)
+    if (ENGINE === "parakeet") {
+      var card = panel.formUnderTest.modelCardUnderTest
+      var names = card.modelRows.map(function(row) { return row.name })
+      for (var i = 0; i < ultraModels.length; i++) if (names.indexOf(ultraModels[i]) === -1) { test.finish("Ultra model absent from graphical choices"); return }
+      test.phase = 4; card.clickModelUnderTest(ultraModels[0])
+    } else { test.phase = 3; panel.cliUnderTest.setKey(ENGINE + ".model", LEGACY) }
+   } else if (test.phase === 4) {
+    if (panel.modelValue !== ultraModels[ultraIndex]) { test.finish("model Use button did not persist: " + panel.modelValue); return }
+    console.log("ULTRA_USE_QS_PASS: " + panel.modelValue)
+    ultraIndex++
+    if (ultraIndex < ultraModels.length) panel.formUnderTest.modelCardUnderTest.clickModelUnderTest(ultraModels[ultraIndex])
+    else { test.phase = 3; panel.cliUnderTest.setKey(ENGINE + ".model", LEGACY) }
    }
   }
   function onRestarted(ok, message) {

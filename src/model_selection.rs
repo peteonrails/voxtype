@@ -10,6 +10,7 @@ pub struct BackendCapabilities {
     pub parakeet_gguf: bool,
     pub cohere_onnx: bool,
     pub cohere_gguf: bool,
+    pub gguf: bool,
 }
 
 impl BackendCapabilities {
@@ -19,6 +20,7 @@ impl BackendCapabilities {
             parakeet_gguf: cfg!(feature = "parakeet-gguf"),
             cohere_onnx: cfg!(feature = "cohere"),
             cohere_gguf: cfg!(feature = "cohere-gguf"),
+            gguf: cfg!(feature = "gguf"),
         }
     }
 
@@ -28,6 +30,7 @@ impl BackendCapabilities {
             ("parakeet", false) => self.parakeet_onnx,
             ("cohere", true) => self.cohere_gguf,
             ("cohere", false) => self.cohere_onnx,
+            ("gguf", true) => self.gguf,
             _ => crate::config_set::engine_feature_compiled(engine),
         }
     }
@@ -37,7 +40,59 @@ pub fn is_gguf(model: &str) -> bool {
     model.to_ascii_lowercase().ends_with(".gguf")
 }
 
+/// Do not silently turn an explicit streaming request into batch inference.
+pub fn validate_mode(engine: &str, model: &str, streaming: bool) -> Result<(), String> {
+    if engine == "parakeet" && is_gguf(model) && streaming {
+        return Err("Parakeet GGUF (including Ultra) is batch-only; streaming = true requires a supported legacy streaming checkpoint. Keep that selection, or explicitly disable parakeet.streaming before choosing GGUF. Config unchanged.".into());
+    }
+    if engine == "gguf" && streaming {
+        return Err("Generic GGUF checkpoints run offline only; streaming = true is not implemented. Set gguf.streaming = false or keep the existing engine. Config unchanged.".into());
+    }
+    Ok(())
+}
+
+pub fn validate_gguf_choice(
+    model: &str,
+    architecture: &str,
+    language: &str,
+    streaming: bool,
+) -> Result<(), String> {
+    validate_mode("gguf", model, streaming)?;
+    let Some(checkpoint) = crate::setup::model::find_pending_gguf_model(model) else {
+        if architecture.trim().is_empty() {
+            return Err(
+                "A custom GGUF model requires an explicit gguf.architecture. Config unchanged."
+                    .into(),
+            );
+        }
+        return Ok(());
+    };
+    if checkpoint.arch != architecture {
+        return Err(format!(
+            "Model '{}' uses the '{}' architecture, not '{}'. Config unchanged.",
+            checkpoint.name, checkpoint.arch, architecture
+        ));
+    }
+    if !checkpoint.languages.contains(&language) {
+        let scope = if checkpoint.name == "moonshine-base-ja-Q8_0.gguf" {
+            "Japanese only".to_string()
+        } else {
+            format!("supports {}", checkpoint.languages.join(", "))
+        };
+        return Err(format!(
+            "Model '{}' is {scope}; language '{language}' is unsupported. Config unchanged.",
+            checkpoint.name
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_backend(engine: &str, model: &str) -> Result<(), String> {
+    if engine == "gguf" && !is_gguf(model) {
+        return Err(format!(
+            "gguf model '{model}' is not a .gguf checkpoint. Config unchanged."
+        ));
+    }
     if let Some(checkpoint) = Path::new(model)
         .file_name()
         .and_then(|p| p.to_str())
@@ -51,7 +106,9 @@ pub fn validate_backend(engine: &str, model: &str) -> Result<(), String> {
         return Ok(());
     }
     let format = if is_gguf(model) { "GGUF" } else { "ONNX" };
-    let feature = if is_gguf(model) {
+    let feature = if engine == "gguf" {
+        "gguf".to_string()
+    } else if is_gguf(model) {
         format!("{engine}-gguf")
     } else {
         engine.to_string()
@@ -74,19 +131,23 @@ pub fn model_path_in(models: &Path, model: &str) -> PathBuf {
 /// Validate a targeted choice before committing. No downloads or worker spawn.
 pub fn validate_ready_in(engine: &str, model: &str, models: &Path) -> Result<(), String> {
     validate_backend(engine, model)?;
-    if !matches!(engine, "parakeet" | "cohere") {
+    if !matches!(engine, "parakeet" | "cohere" | "gguf") {
         return Ok(());
     }
     let path = model_path_in(models, model);
     let present = if is_gguf(model) {
         match crate::setup::model::find_gguf_model(model) {
             Some(checkpoint) => crate::setup::model::validate_gguf_model(&path, checkpoint).is_ok(),
-            None => crate::setup::model::validate_download(
-                &path,
-                None,
-                crate::setup::model::ContentCheck::Gguf,
-            )
-            .is_ok(),
+            None => {
+                let size = crate::setup::model::find_pending_gguf_model(model)
+                    .map(|checkpoint| checkpoint.size);
+                crate::setup::model::validate_download(
+                    &path,
+                    size,
+                    crate::setup::model::ContentCheck::Gguf,
+                )
+                .is_ok()
+            }
         }
     } else {
         crate::model_catalog::model_health_in(models, engine, model)
@@ -100,8 +161,8 @@ pub fn validate_ready_in(engine: &str, model: &str, models: &Path) -> Result<(),
 
 pub fn validate_ready(engine: &str, model: &str) -> Result<(), String> {
     validate_ready_in(engine, model, &Config::models_dir())?;
-    #[cfg(any(feature = "parakeet-gguf", feature = "cohere-gguf"))]
-    if matches!(engine, "parakeet" | "cohere") && is_gguf(model) {
+    #[cfg(any(feature = "parakeet-gguf", feature = "cohere-gguf", feature = "gguf"))]
+    if matches!(engine, "parakeet" | "cohere" | "gguf") && is_gguf(model) {
         let worker = crate::transcribe::gguf_subprocess::worker_path();
         if which::which(&worker).is_err() {
             return Err(format!("Matching GGUF worker '{}' is missing or not executable. Install the worker packaged with this application, or set VOXTYPE_GGUF_WORKER to a compatible executable. Config unchanged.", worker.display()));
@@ -139,6 +200,7 @@ pub fn select_engine_model_in(
 pub fn validate_saved_for_restart(path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let config: Config = toml::from_str(&text).map_err(|error| error.to_string())?;
+    validate_config_backend(&config)?;
     validate_ready(config.engine.name(), config.model_name())?;
     validate_idle_for_restart(&config)
 }
@@ -167,11 +229,31 @@ pub fn validate_idle_for_restart(config: &Config) -> Result<(), String> {
 
 /// Runtime routing errors must identify the unavailable format, not the engine.
 pub fn validate_config_backend(config: &Config) -> Result<(), String> {
+    if let Some(parakeet) = config
+        .parakeet
+        .as_ref()
+        .filter(|_| config.engine == TranscriptionEngine::Parakeet)
+    {
+        validate_mode("parakeet", &parakeet.model, parakeet.streaming)?;
+    }
     if matches!(
         config.engine,
         TranscriptionEngine::Parakeet | TranscriptionEngine::Cohere
     ) {
         validate_backend(config.engine.name(), config.model_name())?;
+    }
+    if config.engine == TranscriptionEngine::Gguf {
+        let gguf = config.gguf.as_ref().ok_or_else(|| {
+            "GGUF engine selected but [gguf] config section is missing. Config unchanged."
+                .to_string()
+        })?;
+        validate_backend("gguf", &gguf.model)?;
+        validate_gguf_choice(
+            &gguf.model,
+            &gguf.architecture,
+            &gguf.language,
+            gguf.streaming,
+        )?;
     }
     Ok(())
 }
@@ -234,12 +316,14 @@ mod tests {
             parakeet_gguf: false,
             cohere_onnx: true,
             cohere_gguf: false,
+            gguf: false,
         };
         let gguf = BackendCapabilities {
             parakeet_onnx: false,
             parakeet_gguf: true,
             cohere_onnx: false,
             cohere_gguf: true,
+            gguf: true,
         };
         for engine in ["parakeet", "cohere"] {
             assert!(legacy.supports(engine, "/custom/legacy-model"));
@@ -247,5 +331,35 @@ mod tests {
             assert!(!gguf.supports(engine, "/custom/legacy-model"));
             assert!(gguf.supports(engine, "/custom/model.GGUF"));
         }
+    }
+
+    #[test]
+    fn handy_models_validate_architecture_language_and_offline_mode() {
+        assert!(validate_gguf_choice("Qwen3-ASR-0.6B-Q8_0.gguf", "qwen3_asr", "en", false).is_ok());
+        assert!(
+            validate_gguf_choice("gigaam-v3-e2e-rnnt-Q8_0.gguf", "qwen3_asr", "ru", false)
+                .unwrap_err()
+                .contains("gigaam")
+        );
+        assert!(
+            validate_gguf_choice("moonshine-base-ja-Q8_0.gguf", "moonshine", "en", false)
+                .unwrap_err()
+                .contains("Japanese")
+        );
+        assert!(validate_gguf_choice(
+            "moonshine-streaming-small-Q8_0.gguf",
+            "moonshine_streaming",
+            "en",
+            true
+        )
+        .unwrap_err()
+        .contains("offline only"));
+        assert!(validate_gguf_choice(
+            "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+            "parakeet",
+            "fr-FR",
+            false
+        )
+        .is_ok());
     }
 }

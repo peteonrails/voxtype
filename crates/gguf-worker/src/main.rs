@@ -29,6 +29,7 @@
 mod cohere;
 mod config;
 mod error;
+mod generic;
 mod gguf;
 mod parakeet;
 
@@ -42,7 +43,7 @@ mod window;
 
 use std::io::{Read, Write};
 
-use config::{CohereConfig, ParakeetConfig};
+use config::{CohereConfig, GenericGgufConfig, ParakeetConfig};
 use error::TranscribeError;
 
 /// One loaded GGUF model, ready to transcribe 16 kHz mono audio.
@@ -72,8 +73,13 @@ fn load(engine: &str, config_json: &str) -> Result<Box<dyn Transcriber>, Transcr
             let config: ParakeetConfig = serde_json::from_str(config_json).map_err(bad_config)?;
             Ok(Box::new(parakeet::ParakeetGgufTranscriber::new(&config)?))
         }
+        "gguf" => {
+            let config: GenericGgufConfig =
+                serde_json::from_str(config_json).map_err(bad_config)?;
+            Ok(Box::new(generic::GenericGgufTranscriber::new(&config)?))
+        }
         other => Err(TranscribeError::ConfigError(format!(
-            "unknown engine '{other}'; expected cohere or parakeet"
+            "unknown engine '{other}'; expected cohere, parakeet, or gguf"
         ))),
     }
 }
@@ -96,7 +102,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(engine), Some(config_json)) = (arg(&args, "--engine"), arg(&args, "--config-json"))
     else {
-        eprintln!("[gguf-worker] usage: voxtype-gguf-worker --engine <cohere|parakeet> --config-json <json>");
+        eprintln!("[gguf-worker] usage: voxtype-gguf-worker --engine <cohere|parakeet|gguf> --config-json <json>");
         std::process::exit(2);
     };
 
@@ -198,5 +204,18 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("/nonexistent/voxtype/parakeet.gguf"));
+    }
+
+    #[test]
+    fn generic_gguf_engine_preserves_missing_model_error_kind() {
+        let json = r#"{
+            "model":"/nonexistent/voxtype/qwen.gguf",
+            "architecture":"qwen3_asr",
+            "language":"auto",
+            "streaming":false
+        }"#;
+        let err = load("gguf", json).err().unwrap();
+        assert_eq!(err.kind(), "model_not_found");
+        assert!(err.to_string().contains("/nonexistent/voxtype/qwen.gguf"));
     }
 }

@@ -121,6 +121,16 @@ pub struct AllFields {
     pub co_on_demand_loading: bool,
     pub co_section_existed: bool,
 
+    // Shared native GGUF
+    pub gg_model: String,
+    pub gg_architecture: String,
+    pub gg_language: String,
+    pub gg_backend: String,
+    pub gg_threads: Option<i64>,
+    pub gg_on_demand_loading: bool,
+    pub gg_streaming: bool,
+    pub gg_section_existed: bool,
+
     // OpenVINO GenAI Whisper (Intel NPU/GPU/CPU)
     pub ov_model: String,
     pub ov_device: String,
@@ -199,6 +209,15 @@ pub enum FieldId {
     CoThreads,
     CoOnDemandLoading,
 
+    // Shared GGUF
+    GgModel,
+    GgArchitecture,
+    GgLanguage,
+    GgBackend,
+    GgThreads,
+    GgOnDemandLoading,
+    GgStreaming,
+
     // OpenVINO
     OvModel,
     OvDevice,
@@ -225,6 +244,15 @@ const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
 /// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
 /// own AUTO arm) — included here so it's reachable from the picker.
 const OV_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
+const GGUF_BACKEND_CHOICES: &[&str] = &[
+    "auto",
+    "cpu",
+    "cpu_accel",
+    "vulkan",
+    "metal",
+    "cuda",
+    "rocm",
+];
 
 fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
     let mut rows = vec![FieldId::Engine];
@@ -288,6 +316,15 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::CoLanguage,
             FieldId::CoThreads,
             FieldId::CoOnDemandLoading,
+        ]),
+        "gguf" => rows.extend_from_slice(&[
+            FieldId::GgModel,
+            FieldId::GgArchitecture,
+            FieldId::GgLanguage,
+            FieldId::GgBackend,
+            FieldId::GgThreads,
+            FieldId::GgOnDemandLoading,
+            FieldId::GgStreaming,
         ]),
         "openvino" => rows.extend_from_slice(&[
             FieldId::OvModel,
@@ -407,6 +444,20 @@ impl EngineState {
             co_on_demand_loading: ed.get_bool("cohere", "on_demand_loading").unwrap_or(false),
             co_section_existed: ed.get_string("cohere", "model").is_some(),
 
+            // Shared GGUF
+            gg_model: ed.get_string("gguf", "model").unwrap_or_default(),
+            gg_architecture: ed.get_string("gguf", "architecture").unwrap_or_default(),
+            gg_language: ed
+                .get_string("gguf", "language")
+                .unwrap_or_else(|| "auto".to_string()),
+            gg_backend: ed
+                .get_string("gguf", "gguf_backend")
+                .unwrap_or_else(|| "auto".to_string()),
+            gg_threads: ed.get_int("gguf", "threads"),
+            gg_on_demand_loading: ed.get_bool("gguf", "on_demand_loading").unwrap_or(false),
+            gg_streaming: ed.get_bool("gguf", "streaming").unwrap_or(false),
+            gg_section_existed: ed.get_string("gguf", "model").is_some(),
+
             // OpenVINO
             ov_model: ed
                 .get_string("openvino", "model")
@@ -466,6 +517,7 @@ impl EngineState {
             "parakeet" if self.fields.pk_model.to_ascii_lowercase().ends_with(".gguf") => {
                 Some(cfg!(feature = "parakeet-gguf"))
             }
+            "gguf" => Some(cfg!(feature = "gguf")),
             _ => None,
         };
         if let Some(supported) = gguf_supported {
@@ -569,7 +621,29 @@ impl EngineState {
     fn save_to_editor(&mut self, ed: &mut ConfigEditor) -> Action {
         if let Some(model) = active_model_for_engine(&self.engine, &self.fields) {
             if matches!(self.engine.as_str(), "parakeet" | "cohere") {
-                if let Err(message) = crate::model_selection::validate_ready(&self.engine, &model) {
+                let ready = crate::model_selection::validate_mode(
+                    &self.engine,
+                    &model,
+                    ed.get_bool(&self.engine, "streaming").unwrap_or(false),
+                )
+                .and_then(|()| crate::model_selection::validate_ready(&self.engine, &model));
+                if let Err(message) = ready {
+                    self.feedback = Some(Feedback {
+                        level: FeedbackLevel::Err,
+                        message,
+                    });
+                    return Action::None;
+                }
+            }
+            if self.engine == "gguf" {
+                let ready = crate::model_selection::validate_gguf_choice(
+                    &model,
+                    &self.fields.gg_architecture,
+                    &self.fields.gg_language,
+                    self.fields.gg_streaming,
+                )
+                .and_then(|()| crate::model_selection::validate_ready("gguf", &model));
+                if let Err(message) = ready {
                     self.feedback = Some(Feedback {
                         level: FeedbackLevel::Err,
                         message,
@@ -693,6 +767,20 @@ impl EngineState {
             ed.set_bool("cohere", "on_demand_loading", f.co_on_demand_loading);
         }
 
+        // Shared native GGUF
+        if self.engine == "gguf" || f.gg_section_existed {
+            ed.set_string("gguf", "model", &f.gg_model);
+            ed.set_string("gguf", "architecture", &f.gg_architecture);
+            ed.set_string("gguf", "language", &f.gg_language);
+            ed.set_string("gguf", "gguf_backend", &f.gg_backend);
+            match f.gg_threads {
+                Some(n) => ed.set_int("gguf", "threads", n),
+                None => ed.unset("gguf", "threads"),
+            }
+            ed.set_bool("gguf", "on_demand_loading", f.gg_on_demand_loading);
+            ed.set_bool("gguf", "streaming", f.gg_streaming);
+        }
+
         // OpenVINO
         if self.engine == "openvino" || f.ov_section_existed {
             ed.set_string("openvino", "model", &f.ov_model);
@@ -811,6 +899,9 @@ impl EngineState {
                 | FieldId::WRemoteEndpoint
                 | FieldId::WRemoteApiKey
                 | FieldId::WRemoteModel
+                | FieldId::GgModel
+                | FieldId::GgArchitecture
+                | FieldId::GgLanguage
         )
     }
 
@@ -824,6 +915,9 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint.clone().unwrap_or_default(),
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key.clone().unwrap_or_default(),
             FieldId::WRemoteModel => self.fields.w_remote_model.clone().unwrap_or_default(),
+            FieldId::GgModel => self.fields.gg_model.clone(),
+            FieldId::GgArchitecture => self.fields.gg_architecture.clone(),
+            FieldId::GgLanguage => self.fields.gg_language.clone(),
             _ => String::new(),
         };
         self.editing = Some(TextEdit {
@@ -845,6 +939,9 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint = opt,
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key = opt,
             FieldId::WRemoteModel => self.fields.w_remote_model = opt,
+            FieldId::GgModel => self.fields.gg_model = buffer,
+            FieldId::GgArchitecture => self.fields.gg_architecture = buffer,
+            FieldId::GgLanguage => self.fields.gg_language = buffer,
             _ => {}
         }
         self.dirty_since_load = true;
@@ -879,6 +976,26 @@ impl EngineState {
                     .unwrap_or(0);
                 let n = (idx + delta).rem_euclid(filtered.len() as i32);
                 self.engine = filtered[n as usize].to_string();
+                if self.engine == "gguf" {
+                    let retained = (!f.gg_model.is_empty()).then_some(f.gg_model.as_str());
+                    if let Ok(model) = crate::model_selection::select_engine_model_in(
+                        "gguf",
+                        retained,
+                        &crate::config::Config::models_dir(),
+                    ) {
+                        let model_changed = f.gg_model != model;
+                        f.gg_model = model;
+                        if let Some(metadata) =
+                            crate::setup::model::find_pending_gguf_model(&f.gg_model)
+                        {
+                            f.gg_architecture = metadata.arch.to_string();
+                            if model_changed {
+                                f.gg_language =
+                                    metadata.languages.first().copied().unwrap_or("auto").into();
+                            }
+                        }
+                    }
+                }
                 let max = self.rows().len().saturating_sub(1);
                 self.cursor = self.cursor.min(max);
                 self.refresh_binary_match();
@@ -956,6 +1073,25 @@ impl EngineState {
             FieldId::CoThreads => f.co_threads = cycle_threads(f.co_threads, delta),
             FieldId::CoOnDemandLoading => f.co_on_demand_loading = !f.co_on_demand_loading,
 
+            FieldId::GgModel => {
+                f.gg_model = cycle_model("gguf", &f.gg_model, delta);
+                if let Some(metadata) = crate::setup::model::find_pending_gguf_model(&f.gg_model) {
+                    f.gg_architecture = metadata.arch.to_string();
+                    f.gg_language = metadata.languages.first().copied().unwrap_or("auto").into();
+                }
+                self.refresh_binary_match();
+            }
+            FieldId::GgArchitecture | FieldId::GgLanguage => {
+                self.start_edit_if_text_field();
+                return;
+            }
+            FieldId::GgBackend => {
+                f.gg_backend = cycle_str(GGUF_BACKEND_CHOICES, &f.gg_backend, delta)
+            }
+            FieldId::GgThreads => f.gg_threads = cycle_threads(f.gg_threads, delta),
+            FieldId::GgOnDemandLoading => f.gg_on_demand_loading = !f.gg_on_demand_loading,
+            FieldId::GgStreaming => f.gg_streaming = !f.gg_streaming,
+
             FieldId::OvModel => f.ov_model = cycle_model("openvino", &f.ov_model, delta),
             FieldId::OvDevice => f.ov_device = cycle_str(OV_DEVICE_CHOICES, &f.ov_device, delta),
             FieldId::OvLanguage => f.ov_language = cycle_str(LANG_CHOICES, &f.ov_language, delta),
@@ -983,6 +1119,7 @@ fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
         "dolphin" => Some(f.dol_model.clone()),
         "omnilingual" => Some(f.om_model.clone()),
         "cohere" => Some(f.co_model.clone()),
+        "gguf" => Some(f.gg_model.clone()),
         "openvino" => Some(f.ov_model.clone()),
         _ => None,
     }
@@ -1019,6 +1156,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gguf",
             "openvino",
         ] {
             if variant.supports_engine(engine) {
@@ -1042,6 +1180,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gguf",
             // OpenVINO isn't checked against `variant.supports_engine()`
             // above — it has no prebuilt binary variant at all (Intel-only
             // runtime, unrelated to the Whisper/ONNX distribution). Source
@@ -1363,6 +1502,21 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             yesno(f.co_on_demand_loading),
         ),
 
+        FieldId::GgModel => ("GGUF · model path", f.gg_model.clone()),
+        FieldId::GgArchitecture => ("GGUF · architecture", f.gg_architecture.clone()),
+        FieldId::GgLanguage => ("GGUF · language", f.gg_language.clone()),
+        FieldId::GgBackend => ("GGUF · backend", f.gg_backend.clone()),
+        FieldId::GgThreads => (
+            "GGUF · threads",
+            f.gg_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
+        FieldId::GgOnDemandLoading => {
+            ("GGUF · on-demand model load", yesno(f.gg_on_demand_loading))
+        }
+        FieldId::GgStreaming => ("GGUF · native streaming", yesno(f.gg_streaming)),
+
         FieldId::OvModel => ("OpenVINO · model", f.ov_model.clone()),
         FieldId::OvDevice => ("OpenVINO · device", f.ov_device.clone()),
         FieldId::OvLanguage => ("OpenVINO · language", f.ov_language.clone()),
@@ -1513,6 +1667,27 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::DolModel => model_guidance("dolphin", &f.dol_model),
         FieldId::OmModel => model_guidance("omnilingual", &f.om_model),
         FieldId::CoModel => model_guidance("cohere", &f.co_model),
+        FieldId::GgModel | FieldId::GgArchitecture | FieldId::GgLanguage => vec![
+            heading("GGUF · curated offline checkpoint"),
+            Line::from(""),
+            Line::from("Enter the exact model path, native general.architecture, and language hint."),
+            Line::from("Pending publication models remain absent from the runnable picker."),
+        ],
+        FieldId::GgBackend => vec![
+            heading("GGUF · compute backend"),
+            Line::from(""),
+            Line::from("auto selects an available backend; vulkan requires the matching hardware worker."),
+        ],
+        FieldId::GgThreads => threads_guidance("GGUF"),
+        FieldId::GgOnDemandLoading => on_demand_guidance("GGUF"),
+        FieldId::GgStreaming => vec![
+            heading("GGUF · native streaming"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Not implemented: true is rejected rather than silently running offline.",
+                Style::default().fg(Color::Yellow),
+            )),
+        ],
         FieldId::OvModel => model_guidance("openvino", &f.ov_model),
 
         FieldId::WMode => vec![
@@ -2000,6 +2175,7 @@ fn display_engine(engine: &str) -> &'static str {
         "dolphin" => "Dolphin",
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
+        "gguf" => "GGUF",
         "openvino" => "OpenVINO",
         _ => "Engine",
     }

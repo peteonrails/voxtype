@@ -23,6 +23,7 @@ pub const CATALOG_ENGINES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gguf",
     "openvino",
 ];
 
@@ -50,6 +51,10 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
             models.extend(model::cohere_gguf_models().iter().map(|entry| entry.name));
             models
         }
+        "gguf" => model::handy_gguf_models()
+            .iter()
+            .map(|entry| entry.name)
+            .collect(),
         "openvino" => model::valid_openvino_model_names(),
         _ => Vec::new(),
     }
@@ -71,7 +76,7 @@ pub fn supported_model_catalog(engine: &str) -> Vec<&'static str> {
 pub const fn default_model(engine: &str) -> &'static str {
     match engine.as_bytes() {
         b"whisper" => "base.en",
-        b"parakeet" if cfg!(feature = "parakeet-gguf") => "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+        b"parakeet" if cfg!(feature = "parakeet-gguf") => "parakeet-ultra-Q8_0.gguf",
         b"parakeet" => "parakeet-tdt-0.6b-v3",
         b"moonshine" => "base",
         b"sensevoice" => "sensevoice-small",
@@ -80,6 +85,7 @@ pub const fn default_model(engine: &str) -> &'static str {
         b"omnilingual" => "omnilingual-300m",
         b"cohere" if cfg!(feature = "cohere-gguf") => "cohere-transcribe-03-2026-Q4_K_M.gguf",
         b"cohere" => "cohere-transcribe-q4f16",
+        b"gguf" => "Qwen3-ASR-0.6B-Q8_0.gguf",
         b"openvino" => "base.en-int8",
         _ => "",
     }
@@ -726,7 +732,7 @@ mod tests {
             (
                 "parakeet",
                 cfg!(feature = "parakeet-gguf"),
-                "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+                "parakeet-ultra-Q8_0.gguf",
                 "parakeet-tdt-0.6b-v3",
             ),
         ] {

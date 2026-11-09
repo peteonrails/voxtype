@@ -128,6 +128,38 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             Err(_) => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
+    if let Ok(model) = std::env::var("VOXTYPE_GGUF_MODEL") {
+        config.gguf.get_or_insert_with(Default::default).model = model;
+    }
+    if let Ok(architecture) = std::env::var("VOXTYPE_GGUF_ARCHITECTURE") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .architecture = architecture;
+    }
+    if let Ok(language) = std::env::var("VOXTYPE_GGUF_LANGUAGE") {
+        config.gguf.get_or_insert_with(Default::default).language = language;
+    }
+    if let Ok(backend) = std::env::var("VOXTYPE_GGUF_BACKEND") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .gguf_backend = backend;
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_THREADS") {
+        if let Ok(threads) = value.parse::<usize>() {
+            config.gguf.get_or_insert_with(Default::default).threads = Some(threads);
+        }
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_ON_DEMAND_LOADING") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .on_demand_loading = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_STREAMING") {
+        config.gguf.get_or_insert_with(Default::default).streaming = parse_bool_env(&value);
+    }
     if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
         config.whisper.language = LanguageConfig::from_comma_separated(&lang);
     }

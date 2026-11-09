@@ -4,6 +4,26 @@ Complete reference for all configuration options in Voxtype.
 
 ## Engine/model selection transactions
 
+For a new GGUF-capable Parakeet selection the default is
+`parakeet-ultra-Q8_0.gguf`. F16 and Q4_K_M are separate precision choices of the
+same Ultra checkpoint. This default is feature-aware: an ONNX-only build still
+uses `parakeet-tdt-0.6b-v3`, never a GGUF filename. Loaded explicit model paths,
+legacy provider settings and a working prior selection are not migrated.
+
+```toml
+engine = "parakeet"
+[parakeet]
+model = "parakeet-ultra-Q8_0.gguf"
+gguf_backend = "vulkan"
+streaming = false
+```
+
+Provision the model explicitly before saving this selection. `gguf_backend` is
+independent of precision; Ultra does not enable streaming or translation.
+An explicit `streaming = true` request is not silently downgraded: retain a
+supported streaming checkpoint, or deliberately disable streaming before selecting
+GGUF. The incompatible selection is refused before config persistence.
+
 Parakeet and Cohere each have separate GGUF and legacy ONNX backends. An engine
 being compiled does not imply support for both formats. `config set engine`
 preserves an installed compatible explicit model. When a retained model needs an
@@ -124,6 +144,7 @@ settings), use:
 ```bash
 voxtype config set engine whisper
 voxtype config set engine parakeet
+voxtype config set engine gguf
 ```
 
 This is non-interactive equivalent of the `voxtype configure` TUI's engine
@@ -136,11 +157,53 @@ new engine to take effect.
 
 **Notes:**
 - First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
-- Whisper, Remote Whisper, and Soniox run in every binary. Cohere and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables both clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
+- Whisper, Remote Whisper, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
 - Cohere Transcribe is the largest model voxtype ships (~3 GB int8); use `voxtype setup model` to download it
+
+---
+
+## [gguf]
+
+The shared `gguf` engine runs curated transcribe.cpp checkpoints from several
+model families through the isolated `voxtype-gguf-worker`. It does not replace
+the existing Parakeet, Cohere, ONNX, or MIGraphX selections.
+
+```toml
+engine = "gguf"
+
+[gguf]
+model = "Qwen3-ASR-0.6B-Q8_0.gguf"
+architecture = "qwen3_asr"
+language = "auto"
+gguf_backend = "auto"
+streaming = false
+```
+
+Curated model selection saves `model`, `architecture`, and a compatible
+language together. The downloadable catalog contains Qwen3 ASR 0.6B and 1.7B,
+Moonshine Streaming Small (offline inference only), GigaAM v3 (Russian), and
+Nemotron 3.5 ASR. Japanese Moonshine Base and SenseVoice remain visible only
+in the pending inventory because their model licenses are not cleared for the
+public catalog.
+
+`streaming = true` is rejected at config mutation, setup, validation, and
+runtime boundaries. A model with “streaming” in its upstream name can still be
+selected for honest batch/offline inference; Voxtype does not claim native
+streaming for it. `gguf_backend` accepts `auto`, `cpu`, `cpu_accel`, `vulkan`,
+`metal`, `cuda`, or `rocm`. An explicitly requested unavailable backend is an
+error and never rewrites the config.
+
+Every setting is also available as `VOXTYPE_GGUF_MODEL`,
+`VOXTYPE_GGUF_ARCHITECTURE`, `VOXTYPE_GGUF_LANGUAGE`,
+`VOXTYPE_GGUF_BACKEND`, `VOXTYPE_GGUF_THREADS`,
+`VOXTYPE_GGUF_ON_DEMAND_LOADING`, or `VOXTYPE_GGUF_STREAMING`, and through the
+`--gguf-model`, `--gguf-architecture`, `--gguf-language`, `--gguf-backend`,
+`--threads`, `--on-demand-loading`, and `--gguf-streaming` CLI flags
+respectively. Disable on-demand loading through `gguf.on_demand_loading = false`
+or `VOXTYPE_GGUF_ON_DEMAND_LOADING=false`.
 
 ---
 

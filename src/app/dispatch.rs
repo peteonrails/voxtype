@@ -440,6 +440,8 @@ pub(crate) async fn dispatch(
         Commands::Config { action } => match action {
             None => show_config(&config).await?,
             Some(ConfigAction::ValidateSelection { require_idle }) => {
+                voxtype::model_selection::validate_config_backend(&config)
+                    .map_err(anyhow::Error::msg)?;
                 voxtype::model_selection::validate_ready(config.engine.name(), config.model_name())
                     .map_err(anyhow::Error::msg)?;
                 if require_idle {
