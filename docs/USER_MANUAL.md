@@ -2902,3 +2902,15 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [Waybar Integration](WAYBAR.md) - Status bar indicator setup
 - [Troubleshooting Guide](TROUBLESHOOTING.md) - Common issues and solutions
 - [FAQ](FAQ.md) - Frequently asked questions
+## Generic GGUF selection in the graphical application
+
+The engine picker browses catalogs without saving. Download requires an explicit
+click and only adds weights. GGUF Use validates the installed checkpoint and
+worker, then saves engine, exact model and architecture in one transaction. A
+compatible saved language hint and backend are preserved. If a checkpoint needs
+a different hint, the card discloses the replacement before Use. Failed Use
+leaves configuration unchanged. Restart separately when ready to apply it.
+
+Other engine catalogs remain browsable, but this local hotfix only adds
+cross-engine activation for generic GGUF. Existing configured-engine Use and
+terminal configuration retain their RC2 behavior.

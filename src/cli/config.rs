@@ -4,6 +4,15 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum ConfigAction {
+    /// Use an installed generic GGUF model atomically, without downloading or restarting
+    SelectModel {
+        engine: String,
+        model: String,
+        /// Explicit GGUF language hint; omitted preserves a compatible saved hint
+        #[arg(long)]
+        language: Option<String>,
+    },
+
     /// Check the active engine/model/backend and installed worker without loading audio
     ValidateSelection {
         /// Refuse while a running daemon is busy or its idle state cannot be verified

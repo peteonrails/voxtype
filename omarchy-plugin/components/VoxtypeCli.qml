@@ -173,6 +173,12 @@ Item {
     enqueueWrite({ key: String(key), args: [root.bin, "config", "set", String(key), formatValue(value)] })
   }
 
+  function selectModel(engine, model, language) {
+    var args = [root.bin, "config", "select-model", String(engine), String(model)]
+    if (language) args.push("--language", String(language))
+    enqueueWrite({ key: "engine", args: args })
+  }
+
   function unsetKey(key) {
     enqueueWrite({ key: String(key), args: [root.bin, "config", "unset", String(key)] })
   }
@@ -677,6 +683,8 @@ Item {
   // there is no second slot in the UI worth building for it.
 
   property string downloadModel: ""
+  property string downloadArgument: ""
+  property string downloadEngine: ""
   readonly property bool downloading: downloadModel !== ""
 
   // Negative until the child reports a percentage. A build whose `setup
@@ -705,9 +713,11 @@ Item {
   // ok=false with an empty message is a cancellation: the user already knows.
   signal downloadFinished(string model, bool ok, string message)
 
-  function startDownload(name) {
+  function startDownload(name, argument, engine) {
     if (root.downloading || downloadProc.running) return
     root.downloadModel = String(name)
+    root.downloadArgument = argument ? String(argument) : String(name)
+    root.downloadEngine = engine ? String(engine) : ""
     root.downloadPct = -1
     root.downloadFile = ""
     root.downloadError = ""
@@ -718,7 +728,7 @@ Item {
   }
 
   function launchDownload(name) {
-    var args = [root.bin, "setup", "--download", "--model", String(name)]
+    var args = [root.bin, "setup", "--download", "--no-post-install", "--model", root.downloadArgument]
     if (root.downloadJsonMode) {
       args.push("--progress-format")
       args.push("json")

@@ -194,6 +194,7 @@ jobs:
         run: |
           python3 testing/test-release-transport.py
           python3 testing/test-release-validation.py
+          python3 testing/test-platform-ci.py
 
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |

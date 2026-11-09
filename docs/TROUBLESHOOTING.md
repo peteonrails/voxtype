@@ -1,5 +1,14 @@
 # Voxtype Troubleshooting Guide
 
+## Browsing GGUF models without installed weights
+
+The graphical engine picker should stay on GGUF and show Download buttons while
+the configured engine remains unchanged. Download failures and cancellation do
+not activate a model. Retry Download, then choose Use after completion. A failed
+Use shows a short error with optional details and preserves the working config.
+Check the selected checkpoint, language and matching executable worker. No
+download, config-key workaround or service restart is required merely to browse.
+
 Solutions to common issues when using Voxtype.
 
 ## Ultra is missing, cannot download, or is not the current model

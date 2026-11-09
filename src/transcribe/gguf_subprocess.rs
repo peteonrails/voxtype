@@ -274,12 +274,7 @@ impl Transcriber for GgufSubprocessTranscriber {
 /// in-process engines did, and fail here if the file is missing so the error
 /// names the path the user configured.
 fn resolve_model(model: &str) -> Result<String, TranscribeError> {
-    let configured = PathBuf::from(model);
-    let path = if configured.exists() || configured.is_absolute() {
-        configured
-    } else {
-        Config::models_dir().join(configured)
-    };
+    let path = crate::model_selection::model_path_in(&Config::models_dir(), model);
     std::fs::metadata(&path)
         .map_err(|e| TranscribeError::ModelNotFound(format!("{}: {e}", path.display())))?;
     Ok(path.to_string_lossy().into_owned())

@@ -16,6 +16,7 @@ Item {
   id: root
 
   property string engine: ""
+  property string activeEngine: engine
   property var engineChoices: []
 
   // { engineName: compiled } from `voxtype info engines --json`. An engine this
@@ -23,6 +24,9 @@ Item {
   property var engineAvailability: ({})
 
   property string errorText: ""
+  property bool showDetails: false
+  property bool downloadBusy: false
+  onErrorTextChanged: showDetails = false
 
   signal engineChangeRequested(string name)
 
@@ -83,7 +87,7 @@ Item {
           PanelSectionHeader { text: "TRANSCRIPTION ENGINE" }
 
           Text {
-            text: root.engine === "" ? "unknown" : root.engine
+            text: "Configured: " + (root.activeEngine || "unknown")
             color: ShellTheme.Color.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.title
@@ -92,7 +96,7 @@ Item {
 
           Text {
             width: parent.width
-            text: "Switching engines validates and saves a compatible installed model together with the engine. Existing compatible choices are preserved; missing weights require an explicit download. The panel reloads after saving."
+            text: "Browse models without changing your configuration. Download adds weights only. GGUF Use saves the selected model and engine together; other engines can select models while configured. Restart separately to apply."
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
@@ -107,6 +111,7 @@ Item {
           width: Style.spacing.dropdownWidth
           showLabel: false
           options: root.engineOptions
+          enabled: !root.downloadBusy
           value: root.engine
           onChanged: function(next) {
             // Dropdown writes its own `value` when a row is picked, which drops
@@ -123,11 +128,16 @@ Item {
       Text {
         visible: root.errorText !== ""
         width: parent.width
-        text: root.errorText
+        text: root.showDetails ? root.errorText : "Could not use this model. Configuration unchanged. Check details, then retry or choose another installed model."
         color: ShellTheme.Color.urgent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
+      }
+      Button {
+        visible: root.errorText !== ""
+        text: root.showDetails ? "Hide details" : "Show details"
+        onClicked: root.showDetails = !root.showDetails
       }
     }
   }

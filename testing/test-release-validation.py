@@ -2,12 +2,16 @@
 """Exercise release validation without compiling or publishing a release."""
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.2.0-rc1"
+manifest_version = re.search(r'^version = "([^"]+)"$', (ROOT / "Cargo.toml").read_text(), re.M)
+assert manifest_version is not None, "Cargo.toml must declare the release version"
+VERSION = manifest_version.group(1)
+WRONG_VERSION = VERSION + "-wrong"
 
 
 class ReleaseValidationTests(unittest.TestCase):
@@ -94,16 +98,18 @@ class ReleaseValidationTests(unittest.TestCase):
         import json
         proof = json.loads(proof_path.read_text())
         self.assertFalse(proof["executed"])
+        original_manifest_hash = proof["cargo_toml_sha256"]
         proof["cargo_toml_sha256"] = "0" * 64
         proof_path.write_text(json.dumps(proof))
         self.assertNotEqual(self.check(path).returncode, 0, "wrong build-source metadata must fail")
-        proof["version"] = "1.2.0-rc2"
+        proof["cargo_toml_sha256"] = original_manifest_hash
+        proof["version"] = WRONG_VERSION
         proof_path.write_text(json.dumps(proof))
         self.assertNotEqual(self.check(path).returncode, 0)
         self.assertEqual(self.artifact_command("record-cross", path, "--source", str(source)).returncode, 0)
         path.write_text(path.read_text() + "# changed artifact\n")
         self.assertNotEqual(self.check(path).returncode, 0)
-        (source / "Cargo.toml").write_text('[package]\nversion = "1.2.0"\n')
+        (source / "Cargo.toml").write_text(f'[package]\nversion = "{WRONG_VERSION}"\n')
         self.assertNotEqual(self.artifact_command("record-cross", path, "--source", str(source)).returncode, 0)
 
     def test_gtk_build_proof_requires_successful_exact_stdout(self):
@@ -154,7 +160,10 @@ class ReleaseValidationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_wrong_prerelease_and_stable_are_rejected(self):
-        for version in ("1.2.0", "1.2.0-rc2", "1.2.0-rc1+gstale"):
+        versions = [WRONG_VERSION, VERSION + "+gstale"]
+        if "-" in VERSION:
+            versions.append(VERSION.split("-", 1)[0])
+        for version in versions:
             with self.subTest(version=version):
                 result = self.check(self.binary(output=f"voxtype {version}"))
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)

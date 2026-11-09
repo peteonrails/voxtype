@@ -160,6 +160,13 @@ impl ModelStatus {
     fn json(&self) -> serde_json::Value {
         let mut o = serde_json::Map::new();
         o.insert("name".into(), serde_json::json!(self.name));
+        if let Some(metadata) = voxtype::setup::model::handy_pending_gguf_models()
+            .iter()
+            .find(|entry| entry.name == self.name)
+        {
+            o.insert("languages".into(), serde_json::json!(metadata.languages));
+            o.insert("architecture".into(), serde_json::json!(metadata.arch));
+        }
         o.insert("installed".into(), serde_json::json!(self.installed()));
         // `name` is the config value; the argument that downloads it is not
         // always the same string, and for five engines there is no such

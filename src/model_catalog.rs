@@ -122,7 +122,7 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 /// The remaining engines' catalog names are already directory names.
 pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     match engine {
-        "whisper" | "parakeet" | "openvino" => Some(model.to_string()),
+        "whisper" | "parakeet" | "openvino" | "gguf" => Some(model.to_string()),
         "sensevoice" | "moonshine" => Some(model_dir_name(engine, model)),
         "paraformer" | "dolphin" | "omnilingual" | "cohere" => Some(model.to_string()),
         _ => None,
@@ -141,6 +141,9 @@ pub fn download_command(engine: &str, model: &str) -> String {
 /// On-disk location of a model: a single file for Whisper and GGUF models,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
+    if engine == "gguf" {
+        return crate::model_selection::model_path_in(models_dir, model);
+    }
     if engine == "whisper" {
         models_dir.join(format!("ggml-{}.bin", model))
     } else {

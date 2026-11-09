@@ -44,6 +44,13 @@ Item {
   property string activeSection: ""
   property string searchText: ""
   property string engine: ""
+  property string browsingEngine: ""
+  readonly property string catalogEngine: browsingEngine || engine
+  readonly property string catalogLanguage: {
+    for (var i = 0; i < root.keys.length; i++)
+      if (String(root.keys[i].key) === root.catalogEngine + ".language") return String(root.keys[i].file_value || "")
+    return ""
+  }
   property string voxtypeVersion: ""
   property string daemonVersionLabel: ""
   property bool daemonVersionDiffers: false
@@ -154,6 +161,7 @@ Item {
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
 
     root.opened = true
+    if (cli.downloading) root.browsingEngine = cli.downloadEngine
     // Re-read on every summon: the config file may have been edited by the
     // TUI, another shell, or an upgrade since the last time we looked.
     root.searchText = ""
@@ -253,11 +261,26 @@ Item {
     root.engines = next
   }
 
-  function noteDownloadError(model, message) {
+  function noteDownloadError(engine, model, message) {
+    var identity = engine + ":" + model
     var next = ({})
-    for (var k in root.downloadErrors) if (k !== model) next[k] = root.downloadErrors[k]
-    if (message !== "") next[model] = message
+    for (var k in root.downloadErrors) if (k !== identity) next[k] = root.downloadErrors[k]
+    if (message !== "") next[identity] = message
     root.downloadErrors = next
+  }
+
+  function startModelDownload(name) {
+    var info = root.engines[root.catalogEngine]
+    var argument = name
+    if (info && info.models && info.models.length !== undefined) {
+      for (var i = 0; i < info.models.length; i++) {
+        var entry = info.models[i]
+        if (entry && String(entry.name) === name && entry.download_arg)
+          argument = String(entry.download_arg)
+      }
+    }
+    root.noteDownloadError(root.catalogEngine, name, "")
+    cli.startDownload(name, argument, root.catalogEngine)
   }
 
   // ---------------------------------------------------------------- ipc
@@ -334,8 +357,7 @@ Item {
       var name = String(model || "")
       if (name === "") return "usage: download <model>"
       if (cli.downloading) return "busy: already downloading " + cli.downloadModel
-      root.noteDownloadError(name, "")
-      cli.startDownload(name)
+      root.startModelDownload(name)
       return "ok"
     }
 
@@ -505,8 +527,9 @@ Item {
     onDownloadFinished: function(model, ok, message) {
       // A cancellation reports ok=false with no message: the user asked for it,
       // so there is nothing to tell them.
-      root.noteDownloadError(model, ok ? "" : message)
-      if (ok) root.markModelInstalled(model)
+      root.noteDownloadError(cli.downloadEngine, model, ok ? "" : message)
+      // Re-read authoritative per-engine status. Short catalog names can be
+      // shared by multiple engines; do not optimistically mark all of them.
       // The catalog is what says whether the file is on disk now, so re-read it
       // either way — a cancelled or failed download may still have left a
       // partial state worth reflecting.
@@ -814,6 +837,8 @@ Item {
             Layout.fillHeight: true
             keys: root.keys
             engine: root.engine
+            catalogEngine: root.catalogEngine
+            catalogLanguage: root.catalogLanguage
             activeSection: root.activeSection
             searchText: root.searchText
             engines: root.engines
@@ -824,9 +849,11 @@ Item {
             styleOptions: root.styleOptions
             modelKey: root.modelKey
             modelValue: root.modelValue
-            downloadingModel: cli.downloadModel
+            downloadingModel: cli.downloadEngine === root.catalogEngine ? cli.downloadModel : ""
             downloadPct: cli.downloadPct
+            downloadFile: cli.downloadFile
             downloadCancelling: cli.downloadCancelling
+            downloadBusy: cli.downloading
             downloadErrors: root.downloadErrors
             replacements: root.replacements
             errors: root.errors
@@ -839,10 +866,13 @@ Item {
 
             onSetRequested: function(key, value) { cli.setKey(key, value) }
             onUnsetRequested: function(key) { cli.unsetKey(key) }
-            onEngineChangeRequested: function(name) { cli.setKey("engine", name) }
+            onEngineChangeRequested: function(name) { if (cli.downloading) return; root.browsingEngine = name; root.engineError = "" }
+            onModelSelectionRequested: function(name, language) {
+              if (root.catalogEngine === "gguf") cli.selectModel("gguf", name, language)
+              else if (root.catalogEngine === root.engine) cli.setKey(root.modelKey, name)
+            }
             onDownloadRequested: function(name) {
-              root.noteDownloadError(name, "")
-              cli.startDownload(name)
+              root.startModelDownload(name)
             }
             onCancelDownloadRequested: cli.cancelDownload()
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }

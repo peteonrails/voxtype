@@ -85,6 +85,12 @@ fn isolated(name: &str) -> bool {
         return false;
     }
     let status = std::process::Command::new("dbus-run-session")
+        // Nix's build sandbox has no system /etc/dbus-1/session.conf.
+        .arg("--config-file")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tray-session.conf"
+        ))
         .arg("--")
         .arg(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])

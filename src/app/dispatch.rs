@@ -439,6 +439,24 @@ pub(crate) async fn dispatch(
 
         Commands::Config { action } => match action {
             None => show_config(&config).await?,
+            Some(ConfigAction::SelectModel {
+                engine,
+                model,
+                language,
+            }) => {
+                let path = super::config_set::resolve_config_path_for_write(cli.config.clone())?;
+                match voxtype::config_set::select_model(path, &engine, &model, language.as_deref())
+                {
+                    Ok(path) => println!(
+                        "Selected {engine} / {model} in {}. Restart separately to apply.",
+                        path.display()
+                    ),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        std::process::exit(error.exit_code());
+                    }
+                }
+            }
             Some(ConfigAction::ValidateSelection { require_idle }) => {
                 voxtype::model_selection::validate_config_backend(&config)
                     .map_err(anyhow::Error::msg)?;

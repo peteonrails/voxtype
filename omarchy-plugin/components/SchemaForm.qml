@@ -18,6 +18,8 @@ Item {
 
   property var keys: []
   property string engine: ""
+  property string catalogEngine: engine
+  property string catalogLanguage: ""
   property string activeSection: ""
   property string searchText: ""
 
@@ -40,6 +42,7 @@ Item {
   signal setRequested(string key, var value)
   signal unsetRequested(string key)
   signal engineChangeRequested(string name)
+  signal modelSelectionRequested(string name, string language)
   signal downloadRequested(string name)
   signal replacementSetRequested(string from, string to)
   signal replacementUnsetRequested(string from)
@@ -87,7 +90,9 @@ Item {
   // model card.
   property string downloadingModel: ""
   property real downloadPct: -1
+  property string downloadFile: ""
   property bool downloadCancelling: false
+  property bool downloadBusy: false
   property var downloadErrors: ({})
 
   readonly property string engineSection: {
@@ -106,6 +111,8 @@ Item {
   readonly property bool showEngineCard: !searching && activeSection === engineSection
 
   readonly property var visibleKeys: {
+    // Do not show editors for the configured engine below another catalog.
+    if (root.showEngineCard && root.catalogEngine !== root.engine) return []
     var out = []
     for (var i = 0; i < root.keys.length; i++) {
       var spec = root.keys[i]
@@ -278,10 +285,12 @@ Item {
     EnginePicker {
       Layout.fillWidth: true
       visible: root.showEngineCard
-      engine: root.engine
+      engine: root.catalogEngine
+      activeEngine: root.engine
       engineChoices: root.engineChoices
       engineAvailability: root.engineAvailability
       errorText: root.engineError
+      downloadBusy: root.downloadBusy
       onEngineChangeRequested: function(name) { root.engineChangeRequested(name) }
     }
 
@@ -300,16 +309,18 @@ Item {
         EngineModelCard {
           width: parent.width
           visible: root.showEngineCard
-          engine: root.engine
+          engine: root.catalogEngine
           engines: root.engines
-          modelKey: root.modelKey
-          modelValue: root.modelValue
+          modelKey: root.catalogEngine === "gguf" ? "gguf.model" : (root.catalogEngine === root.engine ? root.modelKey : "")
+          modelValue: root.catalogEngine === root.engine ? root.modelValue : ""
+          language: root.catalogLanguage
           downloadingModel: root.downloadingModel
           downloadPct: root.downloadPct
+          downloadFile: root.downloadFile
           downloadCancelling: root.downloadCancelling
           downloadErrors: root.downloadErrors
-          onModelChangeRequested: function(name) {
-            if (root.modelKey !== "") root.setRequested(root.modelKey, name)
+          onModelChangeRequested: function(name, language) {
+            root.modelSelectionRequested(name, language)
           }
           onDownloadRequested: function(name) { root.downloadRequested(name) }
           onCancelDownloadRequested: root.cancelDownloadRequested()
@@ -342,7 +353,7 @@ Item {
 
         Text {
           width: parent.width
-          visible: !root.showReplacements && root.visibleKeys.length === 0
+          visible: !root.showReplacements && root.visibleKeys.length === 0 && !(root.showEngineCard && root.catalogEngine !== root.engine)
           text: root.searching
             ? ("Nothing matches \"" + root.searchText.trim() + "\".")
             : "This section has no settings for the current engine."

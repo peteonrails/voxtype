@@ -3,9 +3,8 @@ import qs.Commons
 import qs.Commons as ShellTheme
 import qs.Ui
 
-// One muted line of what is actually running, as opposed to what is
-// configured to run. The header says which config file is in effect; this says
-// what came of it.
+// Saved selection plus measured daemon/unit state. The selection is explicitly
+// labelled configured: the daemon may still run its previous startup snapshot.
 //
 // Every fact here is measured, never inferred. A reading the panel could not
 // take is left out rather than filled in with a plausible number, so an absent
@@ -44,7 +43,7 @@ Item {
 
     if (root.engine !== "") {
       out.push({
-        text: root.model !== "" ? (root.engine + " · " + root.model) : root.engine,
+        text: "configured: " + (root.model !== "" ? (root.engine + " · " + root.model) : root.engine),
         urgent: false
       })
     }

@@ -4713,3 +4713,13 @@ The following configuration options are deprecated but still supported for backw
 |-------------------|-------------|-------|
 | `wtype_delay_ms` | `pre_type_delay_ms` | Renamed for clarity (applies to all output drivers, not just wtype) |
 | `--wtype-delay` CLI flag | `--pre-type-delay` | CLI equivalent of the above |
+## Atomic generic GGUF selection
+
+`voxtype config select-model gguf MODEL [--language CODE]` selects an installed
+generic GGUF checkpoint without downloading or restarting. Catalog checkpoints
+set the canonical architecture; custom checkpoints require an existing explicit
+`gguf.architecture`. Omitting `--language` preserves a compatible saved hint;
+incompatible hints fail without modifying the file. Model paths are preserved
+literally and resolved like the worker: an existing current-directory path wins,
+otherwise the models directory is searched. This additive command currently
+accepts only engine `gguf`; existing `config set` contracts are unchanged.

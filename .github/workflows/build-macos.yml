@@ -87,6 +87,9 @@ jobs:
           echo "RUSTFLAGS=-C link-arg=${CLANG_RT}" >> "$GITHUB_ENV"
           echo "Linking ${CLANG_RT}"
 
+      - name: Check notification engine coverage
+        run: python3 testing/test-platform-ci.py PlatformCiTests.test_macos_notification_image_match_covers_every_engine
+
       - name: Build for x86_64
         run: |
           cargo build --release --target x86_64-apple-darwin --features gpu-metal

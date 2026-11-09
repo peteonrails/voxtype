@@ -232,6 +232,60 @@ pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> 
     Ok(editor.path().to_path_buf())
 }
 
+/// Commit an explicit installed model and engine in one validated save.
+/// Browsing and download-only operations must never call this entry point.
+pub fn select_model(
+    path: PathBuf,
+    engine: &str,
+    model: &str,
+    language: Option<&str>,
+) -> Result<PathBuf, ConfigSetError> {
+    // This additive transaction is intentionally limited to the generic GGUF
+    // catalog. Legacy engine/model writes keep their RC2 contracts.
+    if engine != "gguf" {
+        return Err(ConfigSetError::IncompatibleModel(
+            "select-model currently supports only engine gguf. Other engines retain config set. Config unchanged.".into(),
+        ));
+    }
+    crate::model_selection::validate_ready(engine, model)
+        .map_err(ConfigSetError::IncompatibleModel)?;
+
+    let mut editor = ConfigEditor::load_from_path(path)?;
+    editor.set_string(engine, "model", model);
+    if let Some(language) = language {
+        if engine != "gguf" {
+            return Err(ConfigSetError::IncompatibleModel(
+                "--language is only supported for a GGUF selection. Config unchanged.".into(),
+            ));
+        }
+        editor.set_string("gguf", "language", language);
+    }
+    if engine == "gguf" {
+        let metadata = std::path::Path::new(model)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(crate::setup::model::find_pending_gguf_model);
+        if let Some(metadata) = metadata {
+            editor.set_string("gguf", "architecture", metadata.arch);
+            // Keep explicit compatible language hints, including when switching
+            // checkpoints. An incompatible explicit hint is rejected below.
+            if editor.get_string("gguf", "language").is_none() {
+                editor.set_string(
+                    "gguf",
+                    "language",
+                    metadata.languages.first().copied().unwrap_or("auto"),
+                );
+            }
+        }
+    }
+    editor.set_string("", "engine", engine);
+    let candidate = editor.candidate_config()?;
+    crate::model_selection::validate_config_backend(&candidate)
+        .map_err(ConfigSetError::IncompatibleModel)?;
+    editor.save()?;
+    Ok(editor.path().to_path_buf())
+}
+
 /// Outcome of a successful generic set: what was written and where.
 #[derive(Debug, Clone)]
 pub struct SetOutcome {

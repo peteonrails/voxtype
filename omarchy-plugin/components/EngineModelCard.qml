@@ -21,6 +21,7 @@ Item {
 
   property string modelKey: ""
   property string modelValue: ""
+  property string language: ""
 
   // Download state, owned by VoxtypeCli and passed down. Only one download runs
   // at a time, so every other row's button goes flat while one is in flight
@@ -35,7 +36,7 @@ Item {
   // starts on that model.
   property var downloadErrors: ({})
 
-  signal modelChangeRequested(string name)
+  signal modelChangeRequested(string name, string language)
   signal downloadRequested(string name)
   signal cancelDownloadRequested()
 
@@ -49,6 +50,13 @@ Item {
   // panel when a download finishes, and an array that has crossed a `var`
   // property boundary does not reliably answer that question. Getting it wrong
   // here would empty the whole model list.
+  function selectionLanguage(languages) {
+    if (!languages || languages.length === undefined || languages.length === 0) return ""
+    for (var i = 0; i < languages.length; i++)
+      if (String(languages[i]) === root.language) return root.language
+    return String(languages[0])
+  }
+
   readonly property var modelRows: {
     var info = root.engines[root.engine]
     if (!info || !info.models || info.models.length === undefined) return []
@@ -58,6 +66,7 @@ Item {
       if (!entry) continue
       out.push({
         name: String(entry.name),
+        language: root.selectionLanguage(entry.languages),
         installed: entry.installed === true
       })
     }
@@ -116,7 +125,9 @@ Item {
 
             readonly property string modelName: String(modelData.name)
             readonly property bool downloading: root.downloadingModel === entry.modelName
-            readonly property string errorText: String(root.downloadErrors[entry.modelName] || "")
+            readonly property string errorText: String(root.downloadErrors[root.engine + ":" + entry.modelName] || "")
+            readonly property string selectionLanguage: String(modelData.language || "")
+            readonly property bool changesLanguage: selectionLanguage !== "" && selectionLanguage !== root.language
 
             width: parent.width
             spacing: Style.spacing.xxs
@@ -163,7 +174,7 @@ Item {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   visible: modelRow.inUse && !entry.downloading
-                  text: "in use"
+                  text: "configured"
                   color: ShellTheme.Color.accent
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
@@ -178,9 +189,9 @@ Item {
                   // Names in this list can differ by one suffix, and the button
                   // sits a long way to the right of the name it belongs to, so
                   // it says which model it means.
-                  tooltipText: "Use " + entry.modelName
+                  tooltipText: "Use " + entry.modelName + (entry.changesLanguage ? " with language " + entry.selectionLanguage : "")
                   bordered: true
-                  onClicked: root.modelChangeRequested(entry.modelName)
+                  onClicked: root.modelChangeRequested(entry.modelName, entry.changesLanguage ? entry.selectionLanguage : "")
                 }
 
                 Button {
@@ -206,6 +217,16 @@ Item {
                   onCancelRequested: root.cancelDownloadRequested()
                 }
               }
+            }
+
+            Text {
+              visible: entry.changesLanguage
+              width: parent.width
+              text: "Use selects language " + entry.selectionLanguage + "; the saved hint is not supported by this checkpoint."
+              color: root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             Text {

@@ -837,8 +837,9 @@ pub async fn run_setup(
         print_success(&format!("Models directory: {:?}", Config::models_dir()));
     }
 
-    // Create default config file if it doesn't exist
-    if let Some(config_path) = Config::default_path() {
+    // Provisioning weights is not selection, including on a fresh installation.
+    // --activate writes its selection only after a successful download below.
+    if let Some(config_path) = Config::default_path().filter(|_| !download) {
         if !config_path.exists() {
             if !quiet {
                 println!("\nCreating default config file...");
@@ -1833,6 +1834,7 @@ mod tests {
                     "cohere" if model.ends_with(".gguf") => ModelKind::CohereGguf,
                     "cohere" => ModelKind::Cohere,
                     "openvino" => ModelKind::OpenVino,
+                    "gguf" => ModelKind::Gguf,
                     other => panic!(
                         "'{}' advertises a download argument but run_setup has no branch for it",
                         other

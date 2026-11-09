@@ -58,7 +58,11 @@ pub fn validate_gguf_choice(
     streaming: bool,
 ) -> Result<(), String> {
     validate_mode("gguf", model, streaming)?;
-    let Some(checkpoint) = crate::setup::model::find_pending_gguf_model(model) else {
+    let Some(checkpoint) = Path::new(model)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(crate::setup::model::find_pending_gguf_model)
+    else {
         if architecture.trim().is_empty() {
             return Err(
                 "A custom GGUF model requires an explicit gguf.architecture. Config unchanged."
@@ -121,7 +125,7 @@ pub fn validate_backend(engine: &str, model: &str) -> Result<(), String> {
 
 pub fn model_path_in(models: &Path, model: &str) -> PathBuf {
     let path = Path::new(model);
-    if path.is_absolute() || model.contains('/') {
+    if path.exists() || path.is_absolute() {
         path.to_path_buf()
     } else {
         models.join(model)
@@ -136,10 +140,14 @@ pub fn validate_ready_in(engine: &str, model: &str, models: &Path) -> Result<(),
     }
     let path = model_path_in(models, model);
     let present = if is_gguf(model) {
-        match crate::setup::model::find_gguf_model(model) {
+        let name = Path::new(model)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(model);
+        match crate::setup::model::find_gguf_model(name) {
             Some(checkpoint) => crate::setup::model::validate_gguf_model(&path, checkpoint).is_ok(),
             None => {
-                let size = crate::setup::model::find_pending_gguf_model(model)
+                let size = crate::setup::model::find_pending_gguf_model(name)
                     .map(|checkpoint| checkpoint.size);
                 crate::setup::model::validate_download(
                     &path,
