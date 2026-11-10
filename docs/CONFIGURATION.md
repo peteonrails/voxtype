@@ -69,6 +69,24 @@ bundled theme icons under `$XDG_DATA_HOME/icons/hicolor` (`--uninstall` removes 
 The daemon never installs icons or rewrites configuration at startup.
 
 
+## Omarchy Settings panel link
+
+```toml
+[omarchy]
+link_settings_plugin = true # default
+```
+
+On Omarchy, lets the daemon link the packaged Voxtype Settings panel into
+`~/.config/omarchy/plugins` on its first start and ask the shell to rescan it
+after upgrades. It never replaces your own copy of the panel and never re-adds
+a panel you removed. Set `false` to leave `~/.config/omarchy` untouched;
+`voxtype setup omarchy` still works by hand.
+
+Also settable as `VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN=false`, the daemon flag
+`--omarchy-link-settings-plugin=false`, or
+`voxtype config set omarchy.link_settings_plugin false`. Voxtype records what it
+has done in `~/.local/state/voxtype/omarchy-plugin.json`, not in `config.toml`.
+
 > **Tip**: For interactive editing, run `voxtype configure` — it edits the
 > same `config.toml` this document describes, preserves comments and unknown
 > fields, and validates each save before swapping the file in. The reference

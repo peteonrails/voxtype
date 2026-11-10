@@ -186,6 +186,42 @@ settings application; `voxtype-osd-gtk4` is an OSD, not settings. On a headless 
 run `voxtype configure` directly in your terminal. Concurrent app-open requests
 are coalesced, and Quickshell uses idempotent `open` rather than `toggle`.
 
+## Omarchy Settings panel
+
+The deb, rpm and AUR packages include a Settings panel for Omarchy's shell,
+installed at `/usr/share/voxtype/omarchy-plugin/io.voxtype.settings`. Nothing
+is written to your home directory at install time. The first time the voxtype
+daemon starts on Omarchy, it links the panel into
+`~/.config/omarchy/plugins/io.voxtype.settings` and enables it. Open it with
+`omarchy-shell shell toggle io.voxtype.settings '{}'`, or choose **Settings**
+in the voxtype tray menu.
+
+The link points at the packaged copy, so the panel updates with voxtype. After
+a package upgrade, restart the daemon (`systemctl --user restart voxtype`) and
+Omarchy loads the new panel without a shell restart.
+
+To link the panel by hand, or check its state:
+
+```bash
+voxtype setup omarchy
+voxtype setup omarchy --status
+```
+
+If you installed the panel earlier with `omarchy plugin add`, voxtype leaves
+that copy alone, and it does not update with voxtype. The panel offers to
+switch, or run `voxtype setup omarchy --replace`. Your copy is moved to a
+hidden backup beside it (`~/.config/omarchy/plugins/.io.voxtype.settings.backup-<time>`),
+not deleted.
+
+To remove the panel, run `voxtype setup omarchy --remove` (or
+`omarchy plugin remove io.voxtype.settings`). The daemon does not add it back;
+run `voxtype setup omarchy` to get it again. To stop the daemon from linking
+the panel at all, set `[omarchy] link_settings_plugin = false` (see the
+configuration guide).
+
+When the configured Parakeet model is a `.gguf` file, the panel and
+`voxtype configure` hide **Decoder type**, which only applies to ONNX models.
+
 ## Table of Contents
 
 - [Getting Started](#getting-started)

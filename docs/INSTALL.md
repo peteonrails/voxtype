@@ -138,6 +138,33 @@ sudo pacman -S wtype wl-clipboard libnotify gtk4-layer-shell pipewire-alsa
 
 The post-install hook auto-picks the right CUDA variant (`cuda-12` vs `cuda-13`) based on your installed libcudart, and sets up `/usr/bin/voxtype` as a wrapper that dispatches to the matching binary.
 
+`voxtype-bin` downloads only the variants your machine uses: the CPU build for
+your processor, the baseline build, the Vulkan build, and whichever variant
+`/usr/bin/voxtype` runs now. That is about 170 MB instead of 914 MB. Variants
+you ask for are remembered for later upgrades in
+`/usr/lib/voxtype/package-variants`. To add one, set `VOXTYPE_VARIANTS` when
+you build:
+
+```bash
+VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin
+VOXTYPE_VARIANTS=onnx-migraphx paru -S --rebuild voxtype-bin
+VOXTYPE_VARIANTS=onnx-avx2 makepkg -si      # from a clone of the AUR repo
+```
+
+Names: `baseline`, `avx2`, `avx512`, `vulkan`, `onnx-avx2`, `onnx-avx512`,
+`onnx-cuda-12`, `onnx-cuda-13`, `onnx-migraphx` (aarch64: `cpu`, `onnx`).
+Separate several with commas. `all` downloads every variant, as before 1.2.1;
+`default` forgets the variants you asked for earlier. Clean-chroot builds
+(`makechrootpkg`, `pkgctl build`, `paru --chroot`, `aurutils --chroot`) pass no
+environment and cannot see your current backend, so they build the default
+set. Build on the host, or set the variable in your helper's chroot
+environment. Repackagers should build with `VOXTYPE_VARIANTS=all`.
+
+The deb, rpm and AUR packages also install the Omarchy Settings panel at
+`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings`. On Omarchy the daemon
+links it into `~/.config/omarchy/plugins` on first start, or run
+`voxtype setup omarchy`. See the user manual's "Omarchy Settings panel" section.
+
 ### Debian / Ubuntu
 
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
