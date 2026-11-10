@@ -1111,34 +1111,49 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
         return None;
     }
 
+    let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
+    let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
+    let host_cuda_major = if has_nvidia {
+        crate::setup::parakeet::detect_cuda_runtime_major()
+    } else {
+        None
+    };
+
+    pick_parakeet_gpu_backend(has_amd, has_nvidia, host_cuda_major, |name| {
+        Path::new(VOXTYPE_LIB_DIR).join(name).exists()
+    })
+}
+
+/// Pick the Parakeet GPU binary given the detected GPU vendors, the host CUDA
+/// runtime major version, and a predicate reporting which binaries are installed.
+///
+/// CUDA is preferred whenever an NVIDIA GPU is present, matching
+/// `pick_best_backend` in `setup/parakeet.rs`. This matters on hybrid boxes
+/// with an NVIDIA dGPU and an AMD iGPU, which previously got MIGraphX.
+fn pick_parakeet_gpu_backend(
+    has_amd: bool,
+    has_nvidia: bool,
+    host_cuda_major: Option<i32>,
+    is_installed: impl Fn(&str) -> bool,
+) -> Option<(&'static str, &'static str)> {
     // Helper to find installed binary, preferring new name over legacy
     let find_binary = |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
-        if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
+        if is_installed(new_name) {
             Some(new_name)
-        } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
+        } else if is_installed(legacy_name) {
             Some(legacy_name)
         } else {
             None
         }
     };
 
-    // Check for AMD GPU and MIGraphX binary (legacy "rocm" name accepted via symlink)
-    let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
-    if let Some(binary) = find_binary("voxtype-onnx-migraphx", "voxtype-onnx-rocm") {
-        if has_amd {
-            return Some((binary, "MIGraphX"));
-        }
-    }
-
-    // Check for NVIDIA GPU and CUDA binary. v0.7.0 splits cuda into -12 and
-    // -13 variants; pick the one matching the host's CUDA runtime so ort's
+    // Check for NVIDIA GPU and CUDA binary first. v0.7.0 splits cuda into -12
+    // and -13 variants; pick the one matching the host's CUDA runtime so ort's
     // bundled libonnxruntime_providers_cuda.so (built against a fixed CUDA
     // ABI) doesn't fail to register at runtime. Mismatched pairings would
     // silently fall back to CPU.
-    let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
     if has_nvidia {
-        let host_cuda_major = crate::setup::parakeet::detect_cuda_runtime_major();
-        let cuda_pref: &[&str] = match host_cuda_major {
+        let cuda_pref: &[&'static str] = match host_cuda_major {
             Some(13) => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda"],
             Some(12) => &["voxtype-onnx-cuda-12", "voxtype-onnx-cuda"],
             // No detection — try cu13 first (rolling-distro default), then cu12
@@ -1149,7 +1164,7 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
             ],
         };
         for name in cuda_pref {
-            if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
+            if is_installed(name) {
                 let label = match host_cuda_major {
                     Some(13) => "CUDA 13",
                     Some(12) => "CUDA 12",
@@ -1157,6 +1172,13 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
                 };
                 return Some((*name, label));
             }
+        }
+    }
+
+    // Then AMD GPU and MIGraphX binary (legacy "rocm" name accepted via symlink)
+    if has_amd {
+        if let Some(binary) = find_binary("voxtype-onnx-migraphx", "voxtype-onnx-rocm") {
+            return Some((binary, "MIGraphX"));
         }
     }
 
@@ -1169,7 +1191,7 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
         "voxtype-onnx-cuda-12",
         "voxtype-onnx-cuda",
     ] {
-        if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
+        if is_installed(name) {
             return Some((name, "CUDA"));
         }
     }
@@ -1391,6 +1413,47 @@ fn switch_backend_tiered_parakeet(binary_name: &str, retry_hint: &str) -> anyhow
 
 #[cfg(test)]
 mod tests {
+
+    fn installed(names: &'static [&'static str]) -> impl Fn(&str) -> bool {
+        move |n| names.contains(&n)
+    }
+
+    /// #917: NVIDIA dGPU + AMD iGPU with both binaries installed got MIGraphX.
+    #[test]
+    fn parakeet_prefers_cuda_on_nvidia_plus_amd_igpu() {
+        let have = installed(&["voxtype-onnx-migraphx", "voxtype-onnx-cuda-13"]);
+        assert_eq!(
+            super::pick_parakeet_gpu_backend(true, true, Some(13), have),
+            Some(("voxtype-onnx-cuda-13", "CUDA 13"))
+        );
+    }
+
+    #[test]
+    fn parakeet_uses_migraphx_on_amd_only_box() {
+        let have = installed(&["voxtype-onnx-migraphx", "voxtype-onnx-cuda-13"]);
+        assert_eq!(
+            super::pick_parakeet_gpu_backend(true, false, None, have),
+            Some(("voxtype-onnx-migraphx", "MIGraphX"))
+        );
+    }
+
+    #[test]
+    fn parakeet_falls_back_to_migraphx_when_no_matching_cuda_binary() {
+        let have = installed(&["voxtype-onnx-rocm"]);
+        assert_eq!(
+            super::pick_parakeet_gpu_backend(true, true, Some(12), have),
+            Some(("voxtype-onnx-rocm", "MIGraphX"))
+        );
+    }
+
+    #[test]
+    fn parakeet_picks_matching_cuda_major() {
+        let have = installed(&["voxtype-onnx-cuda-12", "voxtype-onnx-cuda-13"]);
+        assert_eq!(
+            super::pick_parakeet_gpu_backend(false, true, Some(12), have),
+            Some(("voxtype-onnx-cuda-12", "CUDA 12"))
+        );
+    }
 
     fn advice(vendors: &[super::GpuVendor], selected: Option<super::GpuVendor>) -> String {
         super::gpu_selection_advice(vendors, selected).join("\n")
