@@ -1,4 +1,4 @@
-# Voxtype Settings — an Omarchy shell panel
+# VoxType: an Omarchy shell panel
 
 A graphical settings panel for [voxtype](https://voxtype.io), running as a
 panel plugin inside `omarchy-shell`. It renders whatever `voxtype config schema
@@ -81,6 +81,42 @@ sets `keepLoaded: true` — the panel is instantiated with the shell so its IPC
 target exists from the start. Adding or removing that flag needs a full
 `omarchy-restart-shell`; `rescanPlugins` alone will not re-instantiate it.
 
+## Text Cleanup
+
+Open it with `omarchy-shell io.voxtype.settings section 'Text Cleanup'`.
+The legacy `section Text` IPC request remains an alias. The canonical section
+label comes from the executable's schema; older schemas labeled Text are displayed
+as Text Cleanup without adding unsupported keys. A schema without
+`text.lard_disfluency` cannot offer the model opt-in switch: update to a compatible
+client and plugin together. A daemon restart alone does not add CLI schema keys.
+
+
+The **Text Cleanup** section groups **Clean up text** as independent deterministic
+switches: spoken punctuation, filler removal, restart collapse, sentence-break
+repair, and number formatting. It preserves each stage's schema value; opening
+the section does not enable anything. **LARD disfluency cleanup** is a separate
+opt-in switch over `text.lard_disfluency`, with its own local-model path and
+CC BY-SA 4.0 license link. It requires explicit English and separate model setup
+(`voxtype setup lard --source /path/to/model.vxdf`). Missing or invalid models
+leave deterministic cleanup available. A click on the license opens the browser;
+there are no automatic network requests or downloads. Older schemas only show
+the keys they actually support. Learned punctuation/casing restoration and
+smart auto-submit remain under **Other text options**.
+
+Regression test (Quickshell and a Wayland session required):
+
+```bash
+python3 omarchy-plugin/tests/test-cleanup-controls.py \
+  --bin /path/to/new/voxtype --old-bin /path/to/older/voxtype \
+  --evidence /path/to/evidence
+```
+
+The test drives the real panel's keyboard activation through SettingDelegate,
+SchemaForm, and VoxtypeCli into a disposable config, then re-fetches the schema
+and verifies independent toggles, exact writes, sibling values, the model
+license affordance, and older-schema behavior. It never writes your live config
+or restarts the daemon.
+
 ## Keybinding
 
 Add this to `~/.config/hypr/bindings.lua`:
@@ -154,6 +190,11 @@ Inside the panel:
   dismissing the panel and switching sections — the process is owned at the top
   of the panel, not by the row that started it, so the row rebuilding does not
   interrupt it.
+- A model whose catalog entry carries `license_url` (from `voxtype info models
+  --json`, alongside an optional `license` name) shows a small "License: <name>"
+  link under its row that opens the page in your browser. It is information
+  only; nothing asks you to accept it. Entries without a URL, and older builds
+  without the fields, show no link.
 - Progress comes from `voxtype setup --download --model <name> --progress-format
   json`, read as NDJSON (`{"event":"progress","file":…,"pct":…}`,
   `{"event":"done"}`, `{"event":"error","message":…}`). A voxtype that rejects
@@ -169,6 +210,22 @@ Inside the panel:
   immediately, a catalog read that arrives while one is already running is queued
   rather than dropped (and retried once if it fails), and the panel re-reads the
   catalog on a timer while it is open so stale state heals on its own.
+- When a better model is available for the one you run, the Engine section
+  opens with a **model update** banner: each offer with its download size and
+  an **Update** button (Parakeet Ultra first when it is the recommended one),
+  plus **Keep current model**. Update runs `voxtype setup migrate --accept <id>
+  --yes` with the same in-panel progress bar, cancel and inline error as a
+  model Download; a failed or cancelled update leaves the current model in
+  place and the button offers **Retry**. On success the CLI switches the model
+  and restarts the daemon itself, so no restart banner follows. Keep current
+  model records the decline through `voxtype setup migrate --decline` and then
+  shows the 2.0 removal notice and the pin command for your install as
+  selectable text (nothing is copied to the clipboard for you). The banner
+  stays while offers exist, declined or not, so a kept model can still be
+  updated later. After an update, **Remove old model files** runs `voxtype
+  setup migrate --cleanup`. The offers come from `voxtype setup migrate
+  --json`; a voxtype without that command shows no banner. The tray's "Model
+  update available..." item opens the panel here.
 - Voxtype reads its config at startup, so a banner appears after the first
   successful write and stays until a restart succeeds.
 - The Advanced section leads with **Release GPU memory when idle**, one switch
@@ -199,11 +256,43 @@ Inside the panel:
 | GPU memory (AMD) | `rocm-smi --showmeminfo vram --json` |
 | Restart the daemon | `systemctl --user restart voxtype` |
 | Download a model | `voxtype setup --download --model <name> --progress-format json` (in panel) |
+| Model upgrade offers | `voxtype setup migrate --json` |
+| Accept / keep / clean up | `voxtype setup migrate --accept <id> --yes --progress-format json`, `--decline`, `--cleanup` (in panel) |
 | Open the TUI | `voxtype configure` (floating terminal) |
 | Edit the config file | `omarchy-launch-config-editor <config path>` |
 | Install / update voxtype | `omarchy-voxtype-install` (floating terminal) |
 
 ## Development
+
+### Model upgrade banner test
+
+```bash
+python3 omarchy-plugin/tests/test-upgrade-offers.py [--evidence DIR]
+```
+
+Runs the real panel offscreen (`QT_QPA_PLATFORM=offscreen`; the test copy
+swaps the layer-shell window for a plain one) against
+`tests/fake-voxtype-migrate.py`, so it needs Quickshell and the Omarchy shell
+but no compositor, daemon, config or network. It refuses to run with
+`WAYLAND_DISPLAY` or `DISPLAY` set; run it in a desktop-isolated sandbox.
+
+### Schema boundary regression test
+
+Run `python3 omarchy-plugin/tests/test-schema-boundary.py` from the repository
+root with Quickshell, an Omarchy shell checkout, and a Wayland session available.
+Use `--shell /path/to/omarchy/shell` for a nonstandard checkout. A headless
+compositor may provide the Wayland session in automation.
+
+The test instantiates the actual panel without opening it or changing settings.
+It passes schema JSON through a QML `signal(var)` and checks section discovery,
+engine choices, values, engine filtering, schema reloads, and empty/null keys.
+This must run in QML: a JavaScript-only test misses Qt sequence wrappers that
+retain length and indexed access but fail `Array.isArray`. JSON validation stays
+in `VoxtypeCli` before the signal; consumers must accept the wrapped sequences.
+
+After installing a panel change, verify it in the running shell. If a plugin
+rescan still serves cached QML, `omarchy-restart-shell` loads the new code without
+restarting the Voxtype daemon.
 
 Two things about this panel's environment are worth knowing before adding UI to
 it:
@@ -236,8 +325,12 @@ to `manifest.json`:
 { "voxtypeBin": "/home/you/voxtype/target/release/voxtype" }
 ```
 
-It is read synchronously at load, before the shell calls `open()`, so the first
-schema fetch already uses it. The file is deliberately not committed.
+It is read synchronously when a command first resolves its executable, including
+an `open()` queued before the host injects the manifest. Missing or malformed
+files fall back to `voxtype` on `PATH`. The file is deliberately not committed.
+For an installation that uses a launcher wrapper, point `voxtypeBin` at that
+wrapper, not its resolved executable: the wrapper may establish model-cache or
+runtime environment variables needed by its backend.
 
 `dev/sample-schema.json` is a fixture matching the `config schema --json`
 contract — useful for eyeballing the layout, or as a stub:
@@ -249,9 +342,12 @@ contract — useful for eyeballing the layout, or as a stub:
 where `fake-voxtype` is a script that `cat`s the fixture for `config schema
 --json`.
 
-Saving any file under `~/.config/omarchy/plugins/` hot-reloads plugin code, so
-iterating is edit-and-resummon. `omarchy plugin validate ./omarchy-plugin`
-checks the manifest against what the shell enforces.
+Saving a file under `~/.config/omarchy/plugins/` requests a plugin hot reload.
+A rescan alone retains `keepLoaded` instances, and Qt can retain compiled QML
+even across a full plugin reload. If the old code remains after resummoning,
+restart the shell in an unlocked session; do not restart the dictation daemon
+for a panel-only change. `omarchy plugin validate ./omarchy-plugin` checks the
+manifest against what the shell enforces.
 
 Layout of the QML:
 
@@ -263,6 +359,7 @@ Layout of the QML:
 | `components/RuntimeFacts.qml` | the measured-facts line under the title |
 | `components/AccelBadge.qml` | the GPU / CPU-fallback acceleration badge |
 | `components/DownloadProgress.qml` | the in-row bar, percentage, and cancel |
+| `components/UpgradeOfferBanner.qml` | model upgrade offers at the top of the Engine section |
 | `components/SectionSidebar.qml` | search box + section list |
 | `components/SchemaForm.qml` | the scrolling pane and what goes in it |
 | `components/SettingDelegate.qml` | one form row, one control per schema type |

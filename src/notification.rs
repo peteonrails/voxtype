@@ -303,7 +303,8 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Omnilingual
         | TranscriptionEngine::Cohere
         | TranscriptionEngine::Soniox
-        | TranscriptionEngine::OpenVino => None,
+        | TranscriptionEngine::OpenVino
+        | TranscriptionEngine::Gguf => None,
     });
 
     for notifier in notifier_paths {
@@ -505,6 +506,72 @@ mod linux_tests {
         assert_eq!(Lifetime::UntilClosed.bounded(2000), Lifetime::Millis(2000));
         assert_eq!(Lifetime::Millis(3000).bounded(2000), Lifetime::Millis(3000));
     }
+}
+
+/// Which inline-markup dialect this session's notification server speaks.
+///
+/// Cached: the answer cannot change while the daemon runs, and the probe is a
+/// blocking round trip on the session bus.
+#[cfg(target_os = "linux")]
+pub async fn body_markup() -> crate::text::diff::BodyMarkup {
+    use tokio::sync::OnceCell;
+    static CACHE: OnceCell<crate::text::diff::BodyMarkup> = OnceCell::const_new();
+    *CACHE.get_or_init(detect_body_markup).await
+}
+
+/// Ask the notification server what it supports.
+///
+/// Two questions, because `body-markup` alone is not enough: the capability
+/// says markup is parsed, not which family. Qt rich text (quickshell, Plasma)
+/// honours `<font color>` and drops `<span>`; Pango (mako, dunst, swaync,
+/// GNOME Shell) does the reverse. Guessing wrong loses the colour silently.
+#[cfg(target_os = "linux")]
+async fn detect_body_markup() -> crate::text::diff::BodyMarkup {
+    use crate::text::diff::BodyMarkup;
+
+    const DEST: &str = "org.freedesktop.Notifications";
+    const PATH: &str = "/org/freedesktop/Notifications";
+
+    let Ok(conn) = zbus::Connection::session().await else {
+        tracing::debug!("No session bus; notification markup disabled");
+        return BodyMarkup::Plain;
+    };
+    let Ok(proxy) = zbus::Proxy::new(&conn, DEST, PATH, DEST).await else {
+        return BodyMarkup::Plain;
+    };
+
+    let caps: Vec<String> = match proxy.call("GetCapabilities", &()).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("GetCapabilities failed: {e}");
+            return BodyMarkup::Plain;
+        }
+    };
+    if !caps.iter().any(|c| c == "body-markup") {
+        tracing::debug!("Notification server does not advertise body-markup");
+        return BodyMarkup::Plain;
+    }
+
+    let name = proxy
+        .call::<_, _, (String, String, String, String)>("GetServerInformation", &())
+        .await
+        .map(|info| info.0.to_lowercase())
+        .unwrap_or_default();
+
+    let dialect = if name.contains("quickshell") || name.contains("plasma") || name.contains("kde")
+    {
+        BodyMarkup::Qt
+    } else {
+        BodyMarkup::Pango
+    };
+    tracing::debug!(server = %name, ?dialect, "Notification markup dialect");
+    dialect
+}
+
+/// Non-Linux platforms have no freedesktop notification server to ask.
+#[cfg(not(target_os = "linux"))]
+pub async fn body_markup() -> crate::text::diff::BodyMarkup {
+    crate::text::diff::BodyMarkup::Plain
 }
 
 #[cfg(test)]

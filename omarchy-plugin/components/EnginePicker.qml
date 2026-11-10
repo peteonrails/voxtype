@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // The engine switch, pinned above the Engine section's scroller rather than
@@ -15,6 +16,7 @@ Item {
   id: root
 
   property string engine: ""
+  property string activeEngine: engine
   property var engineChoices: []
 
   // { engineName: compiled } from `voxtype info engines --json`. An engine this
@@ -22,10 +24,13 @@ Item {
   property var engineAvailability: ({})
 
   property string errorText: ""
+  property bool showDetails: false
+  property bool downloadBusy: false
+  onErrorTextChanged: showDetails = false
 
   signal engineChangeRequested(string name)
 
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   function engineAvailable(name) {
     // Absent the engines list, offer everything: `config set engine` refuses an
@@ -53,9 +58,9 @@ Item {
     anchors.right: parent.right
     implicitHeight: body.implicitHeight + contentTopInset + contentBottomInset
     height: implicitHeight
-    color: Util.alpha(Color.foreground, 0.04)
+    color: Util.alpha(ShellTheme.Color.foreground, 0.04)
     radius: Style.cornerRadius
-    borderSpec: Border.flat(Util.alpha(Color.accent, 0.35), Math.max(1, Style.normalBorderWidth))
+    borderSpec: Border.flat(Util.alpha(ShellTheme.Color.accent, 0.35), Math.max(1, Style.normalBorderWidth))
     padding: Style.spacing.rowPaddingX
 
     Column {
@@ -82,8 +87,8 @@ Item {
           PanelSectionHeader { text: "TRANSCRIPTION ENGINE" }
 
           Text {
-            text: root.engine === "" ? "unknown" : root.engine
-            color: Color.foreground
+            text: "Configured: " + (root.activeEngine || "unknown")
+            color: ShellTheme.Color.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.title
             font.bold: true
@@ -91,7 +96,7 @@ Item {
 
           Text {
             width: parent.width
-            text: "Switching engines rewrites the engine key and reloads this panel, because each engine brings its own settings and its own models."
+            text: "Browse models without changing your configuration. Download adds weights only. GGUF Use saves the selected model and engine together; other engines can select models while configured. Restart separately to apply."
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
@@ -106,6 +111,7 @@ Item {
           width: Style.spacing.dropdownWidth
           showLabel: false
           options: root.engineOptions
+          enabled: !root.downloadBusy
           value: root.engine
           onChanged: function(next) {
             // Dropdown writes its own `value` when a row is picked, which drops
@@ -122,11 +128,16 @@ Item {
       Text {
         visible: root.errorText !== ""
         width: parent.width
-        text: root.errorText
-        color: Color.urgent
+        text: root.showDetails ? root.errorText : "Could not use this model. Configuration unchanged. Check details, then retry or choose another installed model."
+        color: ShellTheme.Color.urgent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
+      }
+      Button {
+        visible: root.errorText !== ""
+        text: root.showDetails ? "Hide details" : "Show details"
+        onClicked: root.showDetails = !root.showDetails
       }
     }
   }

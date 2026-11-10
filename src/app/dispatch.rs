@@ -53,12 +53,15 @@ pub(crate) async fn dispatch(
     // On macOS, detect if launched as app bundle executable (no subcommand, binary inside .app)
     #[cfg(target_os = "macos")]
     let default_command = if cli.command.is_none() {
-        std::env::current_exe()
+        let launched_from_app_bundle = std::env::current_exe()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
-            .unwrap_or(false)
-            .then_some(Commands::AppLaunch)
-            .unwrap_or(Commands::Daemon)
+            .unwrap_or(false);
+        if launched_from_app_bundle {
+            Commands::AppLaunch
+        } else {
+            Commands::Daemon
+        }
     } else {
         Commands::Daemon // unused, cli.command is Some
     };
@@ -141,6 +144,7 @@ pub(crate) async fn dispatch(
             language,
             translate,
             threads,
+            initial_prompt,
         } => {
             // Internal command: run transcription worker process
             // This is spawned by the daemon when gpu_isolation is enabled
@@ -158,6 +162,9 @@ pub(crate) async fn dispatch(
             }
             if let Some(t) = threads {
                 whisper_config.threads = Some(t);
+            }
+            if let Some(prompt) = initial_prompt {
+                whisper_config.initial_prompt = Some(prompt);
             }
             transcribe::worker::run_worker(&whisper_config)?;
         }
@@ -347,12 +354,63 @@ pub(crate) async fn dispatch(
                     warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;
                 }
+                #[cfg(target_os = "linux")]
+                Some(SetupAction::Icons { uninstall }) => {
+                    if uninstall {
+                        setup::icons::uninstall()?;
+                    } else {
+                        setup::icons::install()?;
+                    }
+                }
+                Some(SetupAction::Migrate {
+                    json,
+                    accept,
+                    decline,
+                    cleanup,
+                    yes,
+                    progress_format: migrate_progress,
+                }) => {
+                    warn_if_root("migrate");
+                    let json_progress =
+                        json_progress || migrate_progress.as_deref() == Some("json");
+                    if json_progress {
+                        setup::progress::set_format(setup::progress::ProgressFormat::Json);
+                    }
+                    super::migrate::run(
+                        &config,
+                        cli.config.clone(),
+                        super::migrate::MigrateArgs {
+                            json,
+                            accept,
+                            decline,
+                            cleanup,
+                            yes,
+                            json_progress,
+                        },
+                    )?;
+                }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");
                     if status {
                         setup::vad::show_status();
                     } else {
                         setup::vad::download_model()?;
+                    }
+                }
+                Some(SetupAction::Lard {
+                    source,
+                    url,
+                    status,
+                }) => {
+                    warn_if_root("lard");
+                    setup::lard::setup(source.as_deref(), url.as_deref(), status)?;
+                }
+                Some(SetupAction::Punctuation { status }) => {
+                    warn_if_root("punctuation");
+                    if status {
+                        setup::punctuation::show_status();
+                    } else {
+                        setup::punctuation::download_model()?;
                     }
                 }
                 Some(SetupAction::Osd {
@@ -408,6 +466,35 @@ pub(crate) async fn dispatch(
 
         Commands::Config { action } => match action {
             None => show_config(&config).await?,
+            Some(ConfigAction::SelectModel {
+                engine,
+                model,
+                language,
+            }) => {
+                let path = super::config_set::resolve_config_path_for_write(cli.config.clone())?;
+                match voxtype::config_set::select_model(path, &engine, &model, language.as_deref())
+                {
+                    Ok(path) => println!(
+                        "Selected {engine} / {model} in {}. Restart separately to apply.",
+                        path.display()
+                    ),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        std::process::exit(error.exit_code());
+                    }
+                }
+            }
+            Some(ConfigAction::ValidateSelection { require_idle }) => {
+                voxtype::model_selection::validate_config_backend(&config)
+                    .map_err(anyhow::Error::msg)?;
+                voxtype::model_selection::validate_ready(config.engine.name(), config.model_name())
+                    .map_err(anyhow::Error::msg)?;
+                if require_idle {
+                    voxtype::model_selection::validate_idle_for_restart(&config)
+                        .map_err(anyhow::Error::msg)?;
+                }
+                println!("Engine/model selection is compatible and installed");
+            }
             Some(ConfigAction::Set { key, value }) => {
                 run_config_set(cli.config.clone(), &key, &value)?;
             }

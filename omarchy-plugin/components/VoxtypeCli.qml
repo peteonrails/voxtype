@@ -12,9 +12,9 @@ import Quickshell.Io
 //
 //   { "voxtypeBin": "/home/you/voxtype/target/release/voxtype" }
 //
-// The file is read synchronously (blockLoading) at load time, which is
-// before the shell calls the panel's open(), so the very first schema fetch
-// already uses the right binary. Without the file we run "voxtype" off PATH.
+// The file is read synchronously when resolving the first command, including
+// when the host delivers a queued open immediately after assigning manifest.
+// Without the file we run "voxtype" off PATH.
 Item {
   id: root
 
@@ -22,7 +22,18 @@ Item {
   property var manifest: null
 
   readonly property string manifestDir: (manifest && manifest.__sourceDir) ? String(manifest.__sourceDir) : ""
-  property string bin: "voxtype"
+  readonly property string bin: {
+    // The host assigns manifest after constructing the asynchronous Loader.
+    // Resolve on the first command read, not an onLoaded callback which may
+    // run after a queued open() has already fetched the schema from PATH.
+    if (devConfig.path === "") return "voxtype"
+    try {
+      var parsed = JSON.parse(devConfig.text())
+      if (parsed && typeof parsed.voxtypeBin === "string" && parsed.voxtypeBin.length > 0)
+        return parsed.voxtypeBin
+    } catch (e) {}
+    return "voxtype"
+  }
 
   // Command used for anything that wants a terminal the user can watch.
   readonly property string terminalLauncher: "omarchy-launch-floating-terminal-with-presentation"
@@ -160,6 +171,12 @@ Item {
 
   function setKey(key, value) {
     enqueueWrite({ key: String(key), args: [root.bin, "config", "set", String(key), formatValue(value)] })
+  }
+
+  function selectModel(engine, model, language) {
+    var args = [root.bin, "config", "select-model", String(engine), String(model)]
+    if (language) args.push("--language", String(language))
+    enqueueWrite({ key: "engine", args: args })
   }
 
   function unsetKey(key) {
@@ -601,8 +618,40 @@ Item {
   // ------------------------------------------------------------- restart
 
   function restartDaemon() {
-    if (restartProc.running) return
+    if (root.restarting) return
+    if (root.writeQueue.length > 0 || root.writing) {
+      root.restarted(false, "Wait for pending settings to finish saving before restarting.")
+      return
+    }
     root.restarting = true
+    restartCheck.err = ""
+    restartCheck.command = [root.bin, "config", "validate-selection", "--require-idle"]
+    restartCheck.running = true
+  }
+
+  Process {
+    id: restartCheck
+    property string err: ""
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: restartCheck.err = String(text || "").trim()
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.restarting = false
+        root.restarted(false, restartCheck.err || "Engine/model selection is not ready; no restart performed.")
+        return
+      }
+      if (root.writeQueue.length > 0 || root.writing) {
+        root.restarting = false
+        root.restarted(false, "Settings changed during validation. Finish saving and retry the restart.")
+        return
+      }
+      root.performRestart()
+    }
+  }
+
+  function performRestart() {
     restartProc.err = ""
     restartProc.command = ["systemctl", "--user", "restart", "voxtype"]
     restartProc.running = true
@@ -634,7 +683,17 @@ Item {
   // there is no second slot in the UI worth building for it.
 
   property string downloadModel: ""
+  property string downloadArgument: ""
+  property string downloadEngine: ""
   readonly property bool downloading: downloadModel !== ""
+
+  // A model upgrade's `setup migrate --accept` downloads through this same slot
+  // and speaks the same NDJSON, so it shares the progress plumbing, the cancel
+  // and the progress-flag fallback. It reports through upgradeFinished instead
+  // of downloadFinished: the switch and restart it does afterwards are not a
+  // plain download, and its errors belong to the offer, not to a model row.
+  property string upgradeOfferId: ""
+  readonly property bool upgrading: upgradeOfferId !== ""
 
   // Negative until the child reports a percentage. A build whose `setup
   // --download` predates --progress-format json prints human-readable lines
@@ -662,9 +721,12 @@ Item {
   // ok=false with an empty message is a cancellation: the user already knows.
   signal downloadFinished(string model, bool ok, string message)
 
-  function startDownload(name) {
+  function startDownload(name, argument, engine) {
     if (root.downloading || downloadProc.running) return
+    root.upgradeOfferId = ""
     root.downloadModel = String(name)
+    root.downloadArgument = argument ? String(argument) : String(name)
+    root.downloadEngine = engine ? String(engine) : ""
     root.downloadPct = -1
     root.downloadFile = ""
     root.downloadError = ""
@@ -674,8 +736,28 @@ Item {
     root.launchDownload(String(name))
   }
 
+  // `model` is what the offer downloads; it only labels the busy slot. The
+  // engine is left empty so no catalog row claims the progress: the banner
+  // shows it, and every Download button still goes flat while it runs.
+  function startUpgrade(offerId, model) {
+    if (root.downloading || downloadProc.running || migrateProc.running) return
+    root.upgradeOfferId = String(offerId)
+    root.downloadModel = String(model || offerId)
+    root.downloadArgument = ""
+    root.downloadEngine = ""
+    root.downloadPct = -1
+    root.downloadFile = ""
+    root.downloadError = ""
+    root.downloadStderr = ""
+    root.downloadCancelling = false
+    root.downloadJsonMode = true
+    root.launchDownload(root.downloadModel)
+  }
+
   function launchDownload(name) {
-    var args = [root.bin, "setup", "--download", "--model", String(name)]
+    var args = root.upgrading
+      ? [root.bin, "setup", "migrate", "--accept", root.upgradeOfferId, "--yes"]
+      : [root.bin, "setup", "--download", "--no-post-install", "--model", root.downloadArgument]
     if (root.downloadJsonMode) {
       args.push("--progress-format")
       args.push("json")
@@ -755,13 +837,26 @@ Item {
       }
 
       var message = root.downloadError !== "" ? root.downloadError : root.downloadStderr
+      var offerId = root.upgradeOfferId
 
       root.downloadModel = ""
+      root.upgradeOfferId = ""
       root.downloadPct = -1
       root.downloadFile = ""
       root.downloadError = ""
       root.downloadStderr = ""
       root.downloadCancelling = false
+
+      if (offerId !== "") {
+        // Exit status first: once its download is verified, `--accept`
+        // ignores SIGTERM until the switch and restart finish, so a cancel
+        // that arrives late can still end in a successful switch.
+        if (exitCode === 0) root.upgradeFinished(offerId, true, "")
+        else if (cancelled) root.upgradeFinished(offerId, false, "")
+        else root.upgradeFinished(offerId, false,
+                                  message || ("voxtype setup migrate --accept exited " + exitCode))
+        return
+      }
 
       if (cancelled) {
         root.downloadFinished(model, false, "")
@@ -773,6 +868,95 @@ Item {
       }
       root.downloadFinished(model, false,
                             message || ("voxtype setup --download exited " + exitCode))
+    }
+  }
+
+  // ------------------------------------------------------- model upgrades
+  //
+  // `setup migrate --json` is the one place the offers come from; the panel
+  // only renders them. A build without the subcommand exits non-zero, which is
+  // the same answer as "nothing to offer": the banner stays hidden.
+
+  // ok=false with an empty message is a cancellation, as for downloads.
+  signal upgradeFinished(string offerId, bool ok, string message)
+  // null when there is nothing to offer or the answer could not be read.
+  signal upgradeLoaded(var status)
+  signal declineFinished(bool ok, string message)
+  signal cleanupFinished(bool ok, string message)
+
+  property bool pendingUpgrade: false
+  readonly property bool declining: migrateProc.running && migrateProc.action === "decline"
+  readonly property bool cleaningUp: migrateProc.running && migrateProc.action === "cleanup"
+
+  function fetchUpgrade() {
+    if (upgradeProc.running) {
+      root.pendingUpgrade = true
+      return
+    }
+    root.pendingUpgrade = false
+    upgradeProc.out = ""
+    upgradeProc.command = [root.bin, "setup", "migrate", "--json"]
+    upgradeProc.running = true
+  }
+
+  Process {
+    id: upgradeProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: upgradeProc.out = String(text || "")
+    }
+    onExited: function(exitCode) {
+      if (root.pendingUpgrade) {
+        root.pendingUpgrade = false
+        Qt.callLater(root.fetchUpgrade)
+        return
+      }
+      var parsed = null
+      if (exitCode === 0) {
+        try {
+          parsed = JSON.parse(upgradeProc.out)
+        } catch (e) {
+          parsed = null
+        }
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = null
+      root.upgradeLoaded(parsed)
+    }
+  }
+
+  function declineUpgrade() {
+    root.runMigrate("decline", [root.bin, "setup", "migrate", "--decline"])
+  }
+
+  function cleanupUpgrade() {
+    root.runMigrate("cleanup", [root.bin, "setup", "migrate", "--cleanup"])
+  }
+
+  function runMigrate(action, args) {
+    if (migrateProc.running || root.downloading) return
+    migrateProc.action = action
+    migrateProc.err = ""
+    migrateProc.command = args
+    migrateProc.running = true
+  }
+
+  Process {
+    id: migrateProc
+    property string action: ""
+    property string err: ""
+    stderr: SplitParser {
+      onRead: function(line) {
+        var text = String(line || "").trim()
+        if (text !== "") migrateProc.err = text
+      }
+    }
+    onExited: function(exitCode) {
+      var action = migrateProc.action
+      var message = exitCode === 0 ? ""
+        : (migrateProc.err || ("voxtype setup migrate --" + action + " exited " + exitCode))
+      if (action === "decline") root.declineFinished(exitCode === 0, message)
+      else root.cleanupFinished(exitCode === 0, message)
     }
   }
 
@@ -806,16 +990,7 @@ Item {
     id: devConfig
     path: root.manifestDir !== "" ? root.manifestDir + "/dev.json" : ""
     blockLoading: true
+    blockAllReads: true
     printErrors: false
-    onLoaded: {
-      try {
-        var parsed = JSON.parse(text())
-        if (parsed && typeof parsed.voxtypeBin === "string" && parsed.voxtypeBin.length > 0)
-          root.bin = parsed.voxtypeBin
-      } catch (e) {
-        root.bin = "voxtype"
-      }
-    }
-    onLoadFailed: root.bin = "voxtype"
   }
 }

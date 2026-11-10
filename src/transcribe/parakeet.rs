@@ -22,6 +22,9 @@ use parakeet_rs::{
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// Parakeet models are fixed at 16kHz mono.
+const SAMPLE_RATE: usize = 16_000;
+
 /// Internal enum to hold either CTC or TDT model instance
 enum ParakeetModel {
     /// CTC model (character-level, faster)
@@ -36,6 +39,11 @@ pub struct ParakeetTranscriber {
     model: ParakeetModel,
     /// Model type for logging
     model_type: ParakeetModelType,
+    /// Longest audio, in samples, sent through the model in one pass.
+    /// Zero disables windowing.
+    max_window: usize,
+    /// Audio shared between consecutive windows, in samples.
+    window_overlap: usize,
 }
 
 impl ParakeetTranscriber {
@@ -56,7 +64,7 @@ impl ParakeetTranscriber {
         let start = std::time::Instant::now();
 
         // Configure execution provider based on feature flags
-        let exec_config = build_execution_config();
+        let exec_config = build_execution_config(config.threads);
 
         let model = match model_type {
             ParakeetModelType::Ctc => {
@@ -81,7 +89,12 @@ impl ParakeetTranscriber {
             start.elapsed().as_secs_f32()
         );
 
-        Ok(Self { model, model_type })
+        Ok(Self {
+            model,
+            model_type,
+            max_window: (config.max_window_secs.max(0.0) * SAMPLE_RATE as f32) as usize,
+            window_overlap: (config.window_overlap_secs.max(0.0) * SAMPLE_RATE as f32) as usize,
+        })
     }
 }
 
@@ -93,7 +106,39 @@ impl Transcriber for ParakeetTranscriber {
             ));
         }
 
-        let duration_secs = samples.len() as f32 / 16000.0;
+        // The TDT exports carry a fixed-size attention bias. Past it ONNX
+        // Runtime does not degrade, it aborts the run and the recording is
+        // lost (#288). Cut long audio into windows the model can actually
+        // take and stitch the transcripts back together.
+        if self.max_window > 0 && samples.len() > self.max_window {
+            let spans = crate::transcribe::window::windows(
+                samples.len(),
+                self.max_window,
+                self.window_overlap,
+            );
+            tracing::info!(
+                "Parakeet: {:.1}s exceeds the {:.0}s window; transcribing in {} \
+                 overlapping passes",
+                samples.len() as f32 / SAMPLE_RATE as f32,
+                self.max_window as f32 / SAMPLE_RATE as f32,
+                spans.len()
+            );
+            let mut merged = String::new();
+            for (start, end) in spans {
+                let text = self.transcribe_one(&samples[start..end])?;
+                merged = crate::transcribe::window::merge_overlapping(&merged, &text);
+            }
+            return Ok(merged);
+        }
+
+        self.transcribe_one(samples)
+    }
+}
+
+impl ParakeetTranscriber {
+    /// One forward pass over audio already known to fit the model.
+    fn transcribe_one(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        let duration_secs = samples.len() as f32 / SAMPLE_RATE as f32;
         tracing::debug!(
             "Transcribing {:.2}s of audio ({} samples) with Parakeet {:?}",
             duration_secs,
@@ -286,8 +331,19 @@ impl Transcriber for ParakeetTranscriber {
     }
 }
 
-/// Build execution config based on compile-time feature flags
-pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
+/// Build the ONNX Runtime session config: the execution provider the
+/// features select, with `threads` intra-op threads when it is set. Unset
+/// keeps parakeet-rs's default of 4.
+pub(super) fn build_execution_config(threads: Option<usize>) -> Option<ExecutionConfig> {
+    let config = provider_execution_config();
+    match threads {
+        Some(n) => Some(config.unwrap_or_default().with_intra_threads(n)),
+        None => config,
+    }
+}
+
+/// Execution provider config based on compile-time feature flags
+fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
@@ -515,6 +571,22 @@ pub(super) fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn threads_set_the_onnx_intra_op_thread_count() {
+        let config = build_execution_config(Some(12)).expect("threads set");
+        assert_eq!(config.intra_threads, 12);
+    }
+
+    #[cfg(not(any(
+        feature = "parakeet-cuda",
+        feature = "parakeet-tensorrt",
+        feature = "parakeet-migraphx"
+    )))]
+    #[test]
+    fn unset_threads_keep_the_parakeet_rs_default_on_the_cpu() {
+        assert!(build_execution_config(None).is_none());
+    }
     use tempfile::TempDir;
 
     #[test]

@@ -45,8 +45,14 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     git \
     binutils \
+    python3 \
     meson \
     ninja-build \
+    libvulkan-dev \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
     && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu 24.04 doesn't package gtk4-layer-shell. Build the C library from
@@ -89,11 +95,20 @@ ENV GGML_AVX512_VNNI=OFF
 ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds (can hang on TrueNAS)
-# Build with all ONNX engines
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
+# Build with all ONNX engines plus the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf): every release binary routes `.gguf` models to the worker.
+# The worker is built with Vulkan, the same as Dockerfile.vulkan's, so a GPU
+# user gets GPU GGUF whichever binary they run. `gguf_backend = "auto"` falls
+# back to the CPU when no Vulkan device exists; the worker only needs the
+# libvulkan.so.1 loader to start.
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-onnx-avx2
+    && cp target/release/voxtype /tmp/voxtype-onnx-avx2 \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Build the OSD launcher + frontends + audio bridge in a separate cargo
 # invocation so the daemon binary stays clean of GTK4 / layer-shell baggage.
@@ -118,6 +133,13 @@ RUN RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx51
     && cp target/release/voxtype-osd-quickshell /tmp/voxtype-osd-quickshell \
     && cp target/release/voxtype-audio-bridge /tmp/voxtype-audio-bridge
 
+# Preserve exact build-stage version evidence for collection on another runner.
+# Cross-version metadata is not a claim that AVX-512 executed here.
+RUN mkdir -p /tmp/release-proof \
+    && cp /tmp/voxtype-osd-gtk4 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
+    && python3 scripts/release-artifacts.py record-runtime \
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 "${VERSION}"
+
 # Verify binary
 RUN echo "=== Verifying ONNX AVX2 binary ===" \
     && /tmp/voxtype-onnx-avx2 --version \
@@ -129,14 +151,19 @@ RUN echo "=== Verifying ONNX AVX2 binary ===" \
        else \
          echo "✓ Binary is clean (no AVX-512)"; \
        fi \
+    && echo "=== Verifying GGUF client and Vulkan worker ===" \
+    && scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-onnx-avx2 /tmp/voxtype-gguf-worker \
     && echo "=== Binary size ===" \
-    && ls -lh /tmp/voxtype-onnx-avx2
+    && ls -lh /tmp/voxtype-onnx-avx2 /tmp/voxtype-gguf-worker
 
 # Output stage
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-avx2 /output/voxtype-${VERSION}-linux-x86_64-onnx-avx2 \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-avx2.gguf-worker \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-x86_64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
+    && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4.version-proof.json /output/ \
     && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-x86_64-osd-quickshell \
     && cp /tmp/voxtype-audio-bridge /output/voxtype-${VERSION}-linux-x86_64-audio-bridge \
     && echo "Binaries copied to /output:" \

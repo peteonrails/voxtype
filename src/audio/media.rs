@@ -19,6 +19,10 @@
 //! errors on resume.
 
 /// PulseAudio/PipeWire stream volume captured before media ducking.
+///
+/// Only the Linux `imp` module reads these, but `Daemon` holds a
+/// `Vec<DuckedMediaStream>` on every platform, so the type cannot be gated.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct DuckedMediaStream {
     index: u32,

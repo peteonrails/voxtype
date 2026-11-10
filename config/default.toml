@@ -1,5 +1,7 @@
 # Voxtype Configuration
 #
+# Native Linux tray is enabled by default. Set [tray] enabled = false to opt out.
+#
 # Location: ~/.config/voxtype/config.toml
 # All settings can be overridden via CLI flags
 
@@ -29,6 +31,7 @@ enabled = false
 
 # Key to hold for push-to-talk (when enabled = true)
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
+# On macOS: F13-F20 supported (PrintScreen/ScrollLock/Pause arrive as F13/F14/F15)
 # Use `evtest` to find key names for your keyboard
 key = "SCROLLLOCK"
 
@@ -217,6 +220,10 @@ on_transcription = true
 # Show notification when no speech is detected and the recording is discarded
 on_no_speech = true
 
+# When text cleanup or post_process changed the transcription, show the edits
+# as a word diff in the notification instead of a plain preview
+show_edits = true
+
 # [output.post_process]
 # Pipe transcribed text through an external command for cleanup before output.
 # The command receives text on stdin and outputs processed text on stdout.
@@ -226,14 +233,28 @@ on_no_speech = true
 # command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words. Output only the cleaned text:'"
 # timeout_ms = 30000  # 30 second timeout (generous for LLM)
 
-# [text]
+[text]
+# Optional English-only trained cleanup. Install the separately licensed model
+# explicitly with: voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+# lard_disfluency = false
+# lard_model_path = "/path/to/lard-disfluency-v1.vxdf"
 # Text processing options (word replacements, spoken punctuation)
 #
 # Enable spoken punctuation conversion (e.g., say "period" to get ".")
-# spoken_punctuation = false
+spoken_punctuation = false
 #
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
+
+# Remove common filler words while preserving word boundaries.
+filter_filler_words = true
+
+# Keep destructive restart collapsing opt-in: a false positive deletes words.
+collapse_restarts = false
+
+# Enable the cleanup stages whose guards leave ordinary prose unchanged.
+repair_sentence_breaks = true
+format_numbers = true
 
 [osd]
 # On-screen display frontend.
@@ -278,6 +299,13 @@ layout = "compact"
 # opacity = 1.0
 # mirror = true
 
+[vad]
+# Filter silence-only recordings without requiring a separate VAD model.
+enabled = true
+backend = "energy"
+threshold = 0.5
+min_speech_duration_ms = 100
+
 [status]
 # Status display icons for Waybar/tray integrations
 #
@@ -295,6 +323,11 @@ layout = "compact"
 #     - "arrows"    - Media player style (▶ ● ↻ ■)
 #     - "text"      - Plain text ([MIC] [REC] [...] [OFF])
 icon_theme = "emoji"
+#
+# Native Linux system tray: enabled by default, including omitted keys.
+# Disable in Status settings or via `voxtype config set tray.enabled false`.
+# [tray]
+# enabled = true
 #
 # Per-state icon overrides (optional, takes precedence over theme)
 # [status.icons]

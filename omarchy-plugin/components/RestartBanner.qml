@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // Voxtype reads its config at startup, so a written setting is not a live
@@ -31,9 +32,9 @@ Item {
     implicitHeight: Math.max(bannerText.implicitHeight, restartButton.implicitHeight)
       + root.pad * 2
     height: implicitHeight
-    color: Util.alpha(Color.accent, 0.12)
+    color: Util.alpha(ShellTheme.Color.accent, 0.12)
     radius: Style.cornerRadius
-    borderSpec: Border.flat(Util.alpha(Color.accent, 0.45), Math.max(1, Style.normalBorderWidth))
+    borderSpec: Border.flat(Util.alpha(ShellTheme.Color.accent, 0.45), Math.max(1, Style.normalBorderWidth))
 
     Text {
       id: bannerText
@@ -43,7 +44,7 @@ Item {
       anchors.rightMargin: Style.spacing.controlGap
       anchors.verticalCenter: parent.verticalCenter
       text: root.message
-      color: Color.foreground
+      color: ShellTheme.Color.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       wrapMode: Text.WordWrap

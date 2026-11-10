@@ -81,11 +81,14 @@ pub mod error;
 pub mod hotkey;
 #[cfg(target_os = "macos")]
 pub mod hotkey_macos;
+pub mod language_selection;
 pub mod meeting;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 pub mod model_catalog;
 pub mod model_manager;
+pub mod model_selection;
+pub mod model_upgrade;
 pub mod notification;
 pub mod osd;
 pub mod output;
@@ -94,6 +97,8 @@ pub mod state;
 pub mod status_json;
 pub mod text;
 pub mod transcribe;
+#[cfg(target_os = "linux")]
+pub mod tray;
 pub mod tui;
 pub mod vad;
 
