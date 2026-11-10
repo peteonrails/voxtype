@@ -3656,10 +3656,16 @@ impl Daemon {
     }
 
     fn refresh_tray_upgrade(&self) {
-        let Some(tray) = &self.tray else { return };
-        match serde_json::to_value(crate::model_upgrade::status_for_config(&self.config)) {
-            Ok(value) => tray.update_upgrade(crate::tray::UpgradeMenu::from_status_value(&value)),
-            Err(error) => tracing::warn!(%error, "Could not refresh the tray's model upgrade menu"),
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            match serde_json::to_value(crate::model_upgrade::status_for_config(&self.config)) {
+                Ok(value) => {
+                    tray.update_upgrade(crate::tray::UpgradeMenu::from_status_value(&value))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Could not refresh the tray's model upgrade menu")
+                }
+            }
         }
     }
 
