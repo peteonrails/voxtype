@@ -266,7 +266,9 @@ Inside the panel:
   `cp -r`) and your voxtype package ships its own, a banner offers to **Switch**
   to the packaged one, which updates with voxtype. The button runs `voxtype
   setup omarchy --replace --yes --restart-shell` in a terminal. A voxtype
-  without `setup omarchy` shows no banner.
+  without `setup omarchy` shows no banner. **Not now** records the choice with
+  `voxtype setup omarchy --dismiss-copy` so later opens do not ask again; if
+  recording fails, the banner stays hidden until the shell restarts.
 - The Advanced section leads with **Release GPU memory when idle**, one switch
   over two keys (`whisper.on_demand_loading` and `whisper.gpu_isolation`). Both
   are needed before the driver actually hands VRAM back between dictations, which
@@ -303,6 +305,7 @@ Inside the panel:
 | Install / update voxtype | `omarchy-install-dictation-voxtype`, or `omarchy-voxtype-install` on an Omarchy that predates it (floating terminal) |
 | Is this the packaged copy of the panel | `voxtype setup omarchy --status --json` |
 | Switch to the packaged copy | `voxtype setup omarchy --replace --yes --restart-shell` (floating terminal) |
+| Not now on that banner | `voxtype setup omarchy --dismiss-copy` |
 
 ## Development
 

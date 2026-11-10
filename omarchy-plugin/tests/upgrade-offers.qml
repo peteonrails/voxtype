@@ -43,6 +43,9 @@ Item {
           else if (__SCENARIO__ === "linkcopy") tc.driveLinkCopy()
           else if (__SCENARIO__ === "linklinked") tc.driveLinkHidden("linked")
           else if (__SCENARIO__ === "linkunknown") tc.driveLinkHidden("")
+          else if (__SCENARIO__ === "linkdismissed") tc.driveLinkHidden("copy")
+          else if (__SCENARIO__ === "linknotnow") tc.driveNotNow(true)
+          else if (__SCENARIO__ === "linknotnowfail") tc.driveNotNow(false)
           else tc.fail("unknown scenario " + __SCENARIO__)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -276,6 +279,7 @@ Item {
     function driveLinkCopy() {
       waitFor(function() { return tc.linkLoads > 0 }, "plugin link status read")
       check(panel.pluginLink !== null && panel.pluginLink.state === "copy", "link state copy")
+      check(panel.pluginLink.copy_dismissed === undefined, "older CLI: no copy_dismissed key")
       waitFor(function() { return shown(copyBanner()) }, "copy banner shown")
       var text = find(copyBanner(), "pluginCopyText").text
       check(text === "This is an older copy of Voxtype Settings. Switch to the one that updates with voxtype?",
@@ -288,12 +292,34 @@ Item {
       wait(800)
     }
 
+    // Not now: one `--dismiss-copy`, then the banner goes. When recording
+    // works it is the re-read that hides it; when it fails the panel hides it
+    // for the session anyway, including across a re-summon.
+    function driveNotNow(records) {
+      waitFor(function() { return tc.linkLoads > 0 }, "plugin link status read")
+      waitFor(function() { return shown(copyBanner()) }, "copy banner shown")
+      check(panel.pluginLink.copy_dismissed === false, "not dismissed yet")
+      var before = tc.linkLoads
+      click(find(copyBanner(), "pluginCopyNotNow"), "Not now")
+      waitFor(function() { return tc.linkLoads > before }, "link status re-read after Not now")
+      waitFor(function() { return !shown(copyBanner()) }, "banner hidden after Not now")
+      check(panel.opened, "Not now must not dismiss the panel")
+      if (records) check(panel.pluginLink.copy_dismissed === true, "re-read reports the dismissal")
+      else check(panel.pluginLink.copy_dismissed === false && panel.copyDismissedHere, "failed record hides for the session")
+      var again = tc.linkLoads
+      panel.open('{"section":"Engine"}')
+      waitFor(function() { return tc.linkLoads > again }, "re-read after re-summon")
+      wait(200)
+      check(!shown(copyBanner()), "banner stays hidden after a re-summon")
+    }
+
     // Linked to the packaged copy, or a CLI that has no `setup omarchy`: no banner.
     function driveLinkHidden(state) {
       waitFor(function() { return tc.linkLoads > 0 }, "plugin link status read")
       wait(200)
       if (state === "") check(panel.pluginLink === null, "unknown command reads as no answer")
       else check(panel.pluginLink !== null && panel.pluginLink.state === state, "link state " + state)
+      if (state === "copy") check(panel.pluginLink.copy_dismissed === true, "dismissed copy")
       check(copyBanner() !== null, "copy banner component exists")
       check(!shown(copyBanner()), "no copy banner when " + (state || "the CLI lacks setup omarchy"))
       check(!panel.degraded, "an unknown subcommand must not degrade the panel")

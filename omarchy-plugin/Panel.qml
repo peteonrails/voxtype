@@ -107,9 +107,15 @@ Item {
 
   // The `setup omarchy --status --json` object, or null.
   property var pluginLink: null
+  // "Not now" whose recording failed: hidden anyway, for as long as the shell
+  // keeps this panel loaded, rather than asking again on every summon.
+  property bool copyDismissedHere: false
+  // A CLI that predates `copy_dismissed` omits it, which reads as not dismissed.
   readonly property bool offerReplaceCopy: root.pluginLink !== null
     && String(root.pluginLink.state || "") === "copy"
     && String(root.pluginLink.packaged_dir || "") !== ""
+    && root.pluginLink.copy_dismissed !== true
+    && !root.copyDismissedHere
 
   readonly property string replacementsSectionName: "Replacements"
   readonly property bool degraded: schemaError !== "" || cliMissing !== ""
@@ -608,6 +614,13 @@ Item {
       else if (what === "styles") root.styles = []
     }
     onPluginLinkLoaded: function(status) { root.pluginLink = status }
+    onCopyDismissFinished: function(ok, message) {
+      if (!ok) {
+        console.warn("Voxtype Settings: could not record Not now (" + message + "); hiding the banner for this session")
+        root.copyDismissedHere = true
+      }
+      cli.fetchPluginLink()
+    }
     onModelsLoaded: function(engines) { root.engines = engines }
     onDevicesLoaded: function(devices) {
       root.noteInfoError("devices", "")
@@ -888,7 +901,9 @@ Item {
         PluginCopyBanner {
           Layout.fillWidth: true
           active: root.offerReplaceCopy
+          dismissing: cli.dismissingCopy
           onReplaceRequested: root.dismissThen(function() { cli.replacePluginCopy() })
+          onNotNowRequested: cli.dismissPluginCopy()
         }
 
         CliErrorBanner {

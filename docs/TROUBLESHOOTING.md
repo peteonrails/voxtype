@@ -172,6 +172,8 @@ graphical frontend is installed, install a supported terminal or run
   `omarchy plugin add`. Switch with `voxtype setup omarchy --replace`; your copy
   is backed up. `foreign-link` means the panel is a symlink to somewhere else,
   such as a development checkout, and voxtype leaves it alone in the same way.
+  If you chose **Not now** on the Switch banner, it stays hidden for that copy;
+  `--status` still shows `copy`, and `--replace` still switches.
 - **Did not appear on first start.** If Omarchy's shell was not running yet, the
   daemon links the panel and enables it at its next start. To do it now, run
   `voxtype setup omarchy --restart-shell`.

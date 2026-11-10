@@ -6,14 +6,17 @@ import qs.Ui
 // Shown when this panel was installed by hand (a plain directory under
 // ~/.config/omarchy/plugins) and voxtype's package ships its own copy. The
 // hand-installed one never updates with voxtype, so it drifts from the CLI it
-// drives. The button runs `voxtype setup omarchy --replace` in a terminal,
-// which swaps the directory for a link to the packaged copy.
+// drives. Switch runs `voxtype setup omarchy --replace` in a terminal, which
+// swaps the directory for a link to the packaged copy. Not now records a
+// dismissal through `voxtype setup omarchy --dismiss-copy`.
 Item {
   id: root
 
   property bool active: false
+  property bool dismissing: false
 
   signal replaceRequested()
+  signal notNowRequested()
 
   objectName: "pluginCopyBanner"
   visible: active
@@ -37,7 +40,7 @@ Item {
       objectName: "pluginCopyText"
       anchors.left: parent.left
       anchors.leftMargin: root.pad
-      anchors.right: switchButton.left
+      anchors.right: notNowButton.left
       anchors.rightMargin: Style.spacing.controlGap
       anchors.verticalCenter: parent.verticalCenter
       text: "This is an older copy of Voxtype Settings. Switch to the one that updates with voxtype?"
@@ -45,6 +48,18 @@ Item {
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       wrapMode: Text.WordWrap
+    }
+
+    Button {
+      id: notNowButton
+      objectName: "pluginCopyNotNow"
+      anchors.right: switchButton.left
+      anchors.rightMargin: Style.spacing.controlGap
+      anchors.verticalCenter: parent.verticalCenter
+      text: "Not now"
+      bordered: true
+      enabled: !root.dismissing
+      onClicked: root.notNowRequested()
     }
 
     Button {

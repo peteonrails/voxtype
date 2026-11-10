@@ -80,7 +80,8 @@ On Omarchy, lets the daemon link the packaged Voxtype Settings panel into
 `~/.config/omarchy/plugins` on its first start and ask the shell to rescan it
 after upgrades. It never replaces your own copy of the panel and never re-adds
 a panel you removed. Set `false` to leave `~/.config/omarchy` untouched;
-`voxtype setup omarchy` still works by hand.
+`voxtype setup omarchy` still works by hand. Setting it to `false` also turns
+off the one-time notification about an old copy of the panel.
 
 Also settable as `VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN=false`, the daemon flag
 `--omarchy-link-settings-plugin=false`, or

@@ -213,6 +213,13 @@ switch, or run `voxtype setup omarchy --replace`. Your copy is moved to a
 hidden backup beside it (`~/.config/omarchy/plugins/.io.voxtype.settings.backup-<time>`),
 not deleted.
 
+If you installed the panel before voxtype 1.2.1, the daemon shows a one-time
+desktop notification the first time it finds your copy, because older copies
+cannot offer the switch themselves. Newer copies show a Switch banner at the top
+of the panel. Choose **Not now** (or run `voxtype setup omarchy --dismiss-copy`)
+to stop the banner offering it for that copy. `voxtype setup omarchy --replace`
+still works later, and a new copy offers the switch again.
+
 To remove the panel, run `voxtype setup omarchy --remove` (or
 `omarchy plugin remove io.voxtype.settings`). The daemon does not add it back;
 run `voxtype setup omarchy` to get it again. To stop the daemon from linking

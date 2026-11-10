@@ -14,6 +14,10 @@ follows the contract the real CLI implements:
 such as "copy" or "linked" (contract 2.2 of the 1.2.1 plan), or absent for a
 build without the subcommand, which exits 2 like an unknown subcommand does.
 
+`copy_dismissed` is reported only when state["copy_dismissed"] is not None,
+as an older CLI omits it. `setup omarchy --dismiss-copy` sets it, or with
+state["dismiss_fail"] exits 1 and changes nothing.
+
 state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
 the stderr it should fail with (exit 1).
 
@@ -156,7 +160,7 @@ def omarchy_status(state):
         "state": link,
         "path": "/home/u/.config/omarchy/plugins/io.voxtype.settings",
         "installed_version": "1.2.0" if link == "copy" else "1.2.1",
-    }
+    } | ({} if state.get("copy_dismissed") is None else {"copy_dismissed": state["copy_dismissed"]})
 
 
 def main():
@@ -186,6 +190,12 @@ def main():
             return 2
         if args[2:] == ["--status", "--json"]:
             print(json.dumps(omarchy_status(state)))
+        elif args[2:] == ["--dismiss-copy"]:
+            if state.get("dismiss_fail"):
+                print("error: could not write the dismissal", file=sys.stderr)
+                return 1
+            state["copy_dismissed"] = True
+            save(state)
         else:
             return 2
     elif args[:2] == ["setup", "migrate"]:

@@ -1094,6 +1094,35 @@ Item {
     }
   }
 
+  // "Not now" on the copy banner. `setup omarchy --dismiss-copy` records it so
+  // the next status read reports copy_dismissed. Not a terminal launch: it
+  // asks nothing and finishes at once.
+  signal copyDismissFinished(bool ok, string message)
+  readonly property bool dismissingCopy: dismissProc.running
+
+  function dismissPluginCopy() {
+    if (dismissProc.running) return
+    dismissProc.err = ""
+    dismissProc.launch([root.bin, "setup", "omarchy", "--dismiss-copy"])
+  }
+
+  CliProcess {
+    id: dismissProc
+    property string err: ""
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: dismissProc.err = String(text || "").trim()
+    }
+    onFailedToStart: {
+      root.copyDismissFinished(false, "Could not run " + root.bin)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      root.copyDismissFinished(exitCode === 0, exitCode === 0 ? ""
+        : (dismissProc.err || ("voxtype setup omarchy --dismiss-copy exited " + exitCode)))
+    }
+  }
+
   // --------------------------------------------- things that want a terminal
   //
   // Every one of these has to be launched *after* the panel is dismissed. The
