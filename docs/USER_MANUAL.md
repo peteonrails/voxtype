@@ -1580,6 +1580,10 @@ remote_timeout_secs = 30
 
 While this feature was built for self-hosted servers, it also works with OpenAI's hosted Whisper API and other compatible services:
 
+Use the provider's base URL. Both `https://api.openai.com` and `https://api.openai.com/v1/` work without duplicating `/v1`. For a router with an `/api` prefix, both `https://openrouter.ai/api` and `https://openrouter.ai/api/v1` produce the request path `/api/v1/audio/transcriptions`. Translation uses the matching `/audio/translations` path instead. Trailing slashes are accepted.
+
+This only selects the base URL for the audio API. It does not add support for providers or models that require `chat/completions`, nor does it accept a full custom request route such as `/inference`. If a server returns 404, check that the chosen `remote_model` and provider support the transcription or translation route, not just an OpenAI-compatible chat API.
+
 ```toml
 [whisper]
 backend = "remote"

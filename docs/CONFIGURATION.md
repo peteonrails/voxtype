@@ -1245,7 +1245,11 @@ The following options are used when `backend = "remote"`. They have no effect wh
 **Default:** None
 **Required:** Yes (when `backend = "remote"`)
 
-The base URL of the remote Whisper server. Must include the protocol (`http://` or `https://`).
+The base URL of the remote Whisper server. Must include the protocol (`http://` or `https://`). Voxtype appends `/v1/audio/transcriptions` (or `/v1/audio/translations` when translating). A final `/v1` in the base URL is reused rather than duplicated; trailing slashes are accepted.
+
+For example, `https://api.openai.com` and `https://api.openai.com/v1/` both target `/v1/audio/transcriptions`. An OpenAI-compatible router base of `https://openrouter.ai/api` or `https://openrouter.ai/api/v1` targets `/api/v1/audio/transcriptions`. Prefix paths are preserved, and any query string remains after the completed request path.
+
+Use a base URL, not a full request URL such as one ending in `/audio/transcriptions` or `/inference`. This setting does not override the request path or switch to `chat/completions`; the provider and selected `remote_model` must support the audio transcription or translation route.
 
 **Examples:**
 ```toml
