@@ -73,6 +73,15 @@ Item {
     return String(spec.engine) === root.engine
   }
 
+  // `onnx_model_only` keys (Parakeet's decoder type) do nothing for a GGUF
+  // model, which carries its own architecture. modelValue is the model of the
+  // engine in effect, and appliesToEngine has already limited keys to that
+  // engine. Schemas without the field show the key as before.
+  function appliesToModel(spec) {
+    if (spec.onnx_model_only !== true) return true
+    return !/\.gguf$/i.test(String(root.modelValue || ""))
+  }
+
   function matchesQuery(spec) {
     var haystack = [
       String(spec.key || ""),
@@ -130,6 +139,7 @@ Item {
       var spec = root.keys[i]
       if (!spec) continue
       if (!root.appliesToEngine(spec)) continue
+      if (!root.appliesToModel(spec)) continue
       if (root.searching) {
         if (!root.matchesQuery(spec)) continue
       } else {

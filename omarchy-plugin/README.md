@@ -200,6 +200,9 @@ Inside the panel:
   next to it removes the override (`voxtype config unset`).
 - Settings for engines that are not compiled into your binary render dimmed, and
   the engine picker marks those engines "not in this build".
+- Keys the schema flags `onnx_model_only` (today Parakeet's **Decoder type**) are
+  hidden while the engine's model is a `.gguf` file, which carries its own
+  architecture. A voxtype that predates the flag shows the key as before.
 - Enums the schema marks `open` (an evdev key name, a language list, a sound
   theme that may be a path) carry a **Custom value…** row that turns the picker
   into a text field. Escape backs out of it without writing.
@@ -321,6 +324,7 @@ but no compositor, daemon, config or network. It refuses to run with
 ```bash
 python3 omarchy-plugin/tests/test-cli-missing.py [--evidence DIR]
 python3 omarchy-plugin/tests/test-section-refresh.py [--evidence DIR]
+python3 omarchy-plugin/tests/test-onnx-model-only.py [--evidence DIR]
 ```
 
 Same harness (`tests/panel_harness.py`) and the same isolation rules as the
@@ -329,6 +333,8 @@ does not exist, removes the binary between two summons, empties `PATH`, and
 makes the `info` readers fail; it checks the error names the binary and that
 nothing stale stays on screen. `test-section-refresh.py` changes the fake CLI's
 answers behind an open panel and checks that `section` re-reads all of them.
+`test-onnx-model-only.py` checks Decoder type is hidden for a GGUF model, shown
+for an ONNX one, and shown by a schema without the flag.
 Terminal launches are logged by a stand-in, never opened.
 
 ### Schema boundary regression test

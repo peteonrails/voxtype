@@ -67,6 +67,12 @@ def status(state):
 
 
 def schema(state):
+    model_type = {"key": "parakeet.model_type", "type": "enum", "choices": ["tdt", "ctc"], "section": "Engine",
+                  "label": "Decoder type", "description": "", "value": None, "file_value": None,
+                  "engine": "parakeet", "compiled": True, "restart_required": True}
+    # Older CLIs never emitted the flag; state["legacy_schema"] reproduces them.
+    if not state.get("legacy_schema"):
+        model_type["onnx_model_only"] = True
     return {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
         "engine": "parakeet", "replacements": {},
@@ -77,6 +83,7 @@ def schema(state):
             {"key": "parakeet.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
              "label": "Model", "description": "", "value": state["model"], "file_value": state["model"],
              "engine": "parakeet", "compiled": True, "restart_required": True},
+            model_type,
             {"key": "audio.device", "type": "string", "section": "Audio", "label": "Device",
              "description": "", "value": "default", "file_value": None, "engine": None,
              "compiled": True, "restart_required": True},
