@@ -21,12 +21,17 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 ENV VERSION=${VERSION}
 
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
 # Install build dependencies
 # - Standard build tools
 # - ALSA for audio (cpal)
 # - OpenSSL for ureq/tokenizers
 # - Protobuf for ONNX Runtime
-RUN apt-get update && apt-get install -y \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -53,7 +58,11 @@ RUN apt-get update && apt-get install -y \
     spirv-tools \
     libshaderc-dev \
     glslc \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu 24.04 doesn't package gtk4-layer-shell. Build the C library from
 # source so the Rust gtk4-layer-shell crate (used by voxtype-osd-gtk4) can
