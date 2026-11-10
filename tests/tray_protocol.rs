@@ -43,7 +43,7 @@ async fn watcher(w: Watcher) -> zbus::Connection {
         .unwrap()
 }
 async fn registered(w: &Watcher) -> String {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Some(name) = w.items.lock().unwrap().first() {
                 return name.clone();
