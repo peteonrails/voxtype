@@ -57,6 +57,12 @@ pub struct HotkeyConfig {
     /// Example: { "LEFTSHIFT" = "translate" } activates [profiles.translate] when Shift is held
     #[serde(default)]
     pub profile_modifiers: HashMap<String, String>,
+
+    /// Cancel the recording when another key is pressed while the hotkey is
+    /// held, so a shortcut that shares the hotkey (Right Ctrl+C with
+    /// key = "RIGHTCTRL") doesn't start a dictation. Modifier keys don't count.
+    #[serde(default)]
+    pub cancel_on_other_key: bool,
 }
 
 impl Default for HotkeyConfig {
@@ -69,6 +75,7 @@ impl Default for HotkeyConfig {
             cancel_key: None,
             model_modifier: None,
             profile_modifiers: HashMap::new(),
+            cancel_on_other_key: false,
         }
     }
 }
