@@ -138,6 +138,22 @@ sudo pacman -S wtype wl-clipboard libnotify gtk4-layer-shell pipewire-alsa
 
 The post-install hook auto-picks the right CUDA variant (`cuda-12` vs `cuda-13`) based on your installed libcudart, and sets up `/usr/bin/voxtype` as a wrapper that dispatches to the matching binary.
 
+#### Development source package
+
+For unreleased fixes, the repository includes a [`voxtype-git` PKGBUILD](https://github.com/peteonrails/voxtype/blob/dev/packaging/arch-git/README.md)
+that builds the latest `dev` branch, including the OSD frontends. It is prepared
+for AUR publication by the upstream maintainer; until it is published, build it
+locally from a repository checkout:
+
+```bash
+cd packaging/arch-git
+makepkg -si
+```
+
+This replaces the installed stable package. Development builds may contain
+regressions and require compilation on each update. See the packaging README
+for included engines, optional runtime dependencies, and rebuild instructions.
+
 ### Debian / Ubuntu
 
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
