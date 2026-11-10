@@ -277,6 +277,7 @@ pub(crate) async fn dispatch(
                     remove,
                     restart_shell,
                     yes,
+                    dismiss_copy,
                 }) => {
                     if !json {
                         warn_if_root("omarchy");
@@ -288,6 +289,7 @@ pub(crate) async fn dispatch(
                         remove,
                         restart_shell,
                         yes,
+                        dismiss_copy,
                     })?;
                 }
                 Some(SetupAction::Model { list, set, restart }) => {

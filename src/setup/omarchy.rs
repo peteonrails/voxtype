@@ -102,6 +102,9 @@ pub struct Status {
     /// The version the shell is running from that entry: for our link, the
     /// version it last rescanned; for a copy or foreign link, its manifest.
     pub installed_version: Option<String>,
+    /// The user dismissed the Switch banner for their copy
+    /// (`--dismiss-copy`). Only ever true while a copy is present.
+    pub copy_dismissed: bool,
     /// Where a symlink entry points (not part of the JSON contract).
     #[serde(skip)]
     pub link_target: Option<PathBuf>,
@@ -123,6 +126,10 @@ pub struct Marker {
     /// The first link could not enable the plugin; retry at the next start.
     #[serde(default)]
     pub enable_pending: bool,
+    /// The user chose "Not now" on the panel's Switch banner for their copy.
+    /// Cleared by `--replace` and once there is no longer a copy.
+    #[serde(default)]
+    pub copy_dismissed: bool,
 }
 
 impl Marker {
@@ -387,6 +394,7 @@ pub fn status(ctx: &Context, marker: &Marker) -> Status {
         _ => e.version.clone(),
     });
 
+    let has_copy = entry.as_ref().is_some_and(|e| e.kind == EntryKind::Copy);
     Status {
         omarchy,
         packaged_dir: ctx.packaged_dir.clone(),
@@ -394,6 +402,7 @@ pub fn status(ctx: &Context, marker: &Marker) -> Status {
         state,
         path: entry.as_ref().map(|e| e.path.clone()),
         installed_version,
+        copy_dismissed: marker.copy_dismissed && has_copy,
         link_target: entry.and_then(|e| e.target),
     }
 }
@@ -716,13 +725,14 @@ pub fn replace(
             dest.display()
         )))?;
         match &entry.target {
-            Some(target) => tracing::info!(
+            // The CLI prints its own line for this; only the daemon logs at info.
+            Some(target) => tracing::debug!(
                 "Moved the Omarchy panel link {} (pointing at {}) to {}",
                 entry.path.display(),
                 target.display(),
                 dest.display()
             ),
-            None => tracing::info!(
+            None => tracing::debug!(
                 "Moved the Omarchy panel copy {} to {}",
                 entry.path.display(),
                 dest.display()
@@ -731,6 +741,7 @@ pub fn replace(
         backup = Some(dest);
     }
     marker.copy_noted = false;
+    marker.copy_dismissed = false;
     let mut report = link(ctx, shell, marker, true)?;
     report.backup = backup;
     Ok(report)
@@ -759,6 +770,27 @@ pub fn remove(
         shell.rescan();
     }
     Ok(Some(entry.path))
+}
+
+/// A dismissal belongs to a copy: once there is no copy (removed, replaced,
+/// or swapped for a link), forget it so a later copy shows the banner again.
+/// Returns true when the marker changed.
+fn forget_stale_dismissal(ctx: &Context, marker: &mut Marker) -> bool {
+    let has_copy = find_entry(ctx).is_some_and(|e| e.kind == EntryKind::Copy);
+    if marker.copy_dismissed && !has_copy {
+        marker.copy_dismissed = false;
+        return true;
+    }
+    false
+}
+
+/// Remember "Not now" for the panel's Switch banner. Only a copy can be
+/// dismissed; returns its path, or `None` when there is no copy.
+pub fn dismiss_copy(ctx: &Context, marker: &mut Marker) -> Option<PathBuf> {
+    let entry = find_entry(ctx).filter(|e| e.kind == EntryKind::Copy)?;
+    marker.copy_dismissed = true;
+    save_marker(ctx, marker);
+    Some(entry.path)
 }
 
 fn save_marker(ctx: &Context, marker: &Marker) {
@@ -803,9 +835,25 @@ pub fn decide(status: &Status, marker: &Marker, opted_in: bool) -> AutoAction {
     }
 }
 
+/// Desktop notification sent once when the daemon first finds an old copy:
+/// copies made before 1.2.1 have no Switch banner of their own.
+pub const COPY_NOTICE_TITLE: &str = "Voxtype Settings panel";
+pub const COPY_NOTICE_BODY: &str =
+    "Your Settings panel is a copy that does not update with voxtype. \
+     Run voxtype setup omarchy --replace to switch to the packaged one.";
+
 /// Apply the daemon's rules once. Never fails: problems are logged.
-pub fn auto_link(ctx: &Context, shell: Option<&Shell>, opted_in: bool) -> AutoAction {
+/// `notify(title, body)` sends a desktop notification.
+pub fn auto_link(
+    ctx: &Context,
+    shell: Option<&Shell>,
+    opted_in: bool,
+    notify: &dyn Fn(&str, &str),
+) -> AutoAction {
     let mut marker = Marker::load(&ctx.marker_path);
+    if opted_in && forget_stale_dismissal(ctx, &mut marker) {
+        save_marker(ctx, &marker);
+    }
     let status = status(ctx, &marker);
     let action = decide(&status, &marker, opted_in);
     tracing::debug!(
@@ -868,7 +916,12 @@ pub fn auto_link(ctx: &Context, shell: Option<&Shell>, opted_in: bool) -> AutoAc
                     .unwrap_or_default()
             );
             marker.copy_noted = true;
+            // Recorded before notifying, so the notice is sent at most once
+            // per copy even if the daemon exits meanwhile. Never retried.
             save_marker(ctx, &marker);
+            if status.state == LinkState::Copy && !marker.copy_dismissed {
+                notify(COPY_NOTICE_TITLE, COPY_NOTICE_BODY);
+            }
         }
     }
     action
@@ -887,7 +940,9 @@ pub fn spawn_auto_link(config: &Config) {
             let ctx = Context::from_env();
             let runner = TimeoutRunner::default();
             let shell = Shell::patient(&ctx, &runner);
-            auto_link(&ctx, shell.as_ref(), true);
+            auto_link(&ctx, shell.as_ref(), true, &|title, body| {
+                crate::notification::send_sync(title, body)
+            });
         });
     if let Err(err) = spawned {
         tracing::warn!("Could not start the Omarchy Settings panel check: {err}");
@@ -905,6 +960,7 @@ pub struct CliArgs {
     pub remove: bool,
     pub restart_shell: bool,
     pub yes: bool,
+    pub dismiss_copy: bool,
 }
 
 /// Entry point for `voxtype setup omarchy`.
@@ -1066,11 +1122,31 @@ pub fn execute(
     let mut marker = Marker::load(&ctx.marker_path);
     let status = status(ctx, &marker);
 
+    if !args.status && forget_stale_dismissal(ctx, &mut marker) {
+        save_marker(ctx, &marker);
+    }
+
     if args.status {
         if args.json {
             writeln!(out, "{}", serde_json::to_string_pretty(&status)?)?;
         } else {
             print_status(&status, out)?;
+        }
+        return Ok(());
+    }
+
+    if args.dismiss_copy {
+        match dismiss_copy(ctx, &mut marker) {
+            Some(path) => writeln!(
+                out,
+                "The Settings panel will stop offering to replace your copy at {}.\n\
+                 Switch any time with: voxtype setup omarchy --replace",
+                path.display()
+            )?,
+            None => writeln!(
+                out,
+                "There is no copy of the Settings panel to dismiss; nothing changed."
+            )?,
         }
         return Ok(());
     }
@@ -1216,6 +1292,8 @@ mod tests {
             }
         }
     }
+
+    fn no_notify(_: &str, _: &str) {}
 
     fn shell<'a>(ctx: &Context, runner: &'a FakeRunner) -> Shell<'a> {
         Shell::new(ctx, runner).unwrap().with_attempts(1, 3)
@@ -1592,6 +1670,7 @@ mod tests {
                 "state": "linked",
                 "path": f.link_path(),
                 "installed_version": "1.2.1",
+                "copy_dismissed": false,
             })
         );
     }
@@ -1633,6 +1712,7 @@ mod tests {
                 version: Some("1.2.1".into()),
                 copy_noted: false,
                 enable_pending: false,
+                copy_dismissed: false,
             }
         );
         // No temp link left behind.
@@ -1878,6 +1958,7 @@ mod tests {
             state,
             path: None,
             installed_version: None,
+            copy_dismissed: false,
             link_target: None,
         }
     }
@@ -1933,7 +2014,7 @@ mod tests {
     fn daemon_first_run_links_and_enables() {
         let f = Fixture::new("1.2.1");
         let runner = FakeRunner::running();
-        let action = auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true);
+        let action = auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify);
         assert_eq!(action, AutoAction::Link);
         assert_eq!(f.link_target(), Some(f.packaged()));
         assert_eq!(runner.calls(), vec![RESCAN, ENABLE]);
@@ -1941,7 +2022,7 @@ mod tests {
         // A second start does nothing at all.
         let again = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &again)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &again)), true, &no_notify),
             AutoAction::Nothing
         );
         assert!(again.calls().is_empty());
@@ -1951,12 +2032,12 @@ mod tests {
     fn daemon_never_relinks_after_the_user_removed_it() {
         let f = Fixture::new("1.2.1");
         let runner = FakeRunner::running();
-        auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true);
+        auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify);
         // `omarchy plugin remove` unlinks the symlink.
         fs::remove_file(f.link_path()).unwrap();
         let later = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &later)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &later)), true, &no_notify),
             AutoAction::Nothing
         );
         assert!(!f.is_link());
@@ -1964,7 +2045,7 @@ mod tests {
         // Even after an upgrade.
         f.upgrade_package("1.2.2");
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &later)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &later)), true, &no_notify),
             AutoAction::Nothing
         );
         assert!(!f.is_link());
@@ -1987,7 +2068,7 @@ mod tests {
         );
         result.unwrap();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify),
             AutoAction::Nothing
         );
         assert!(!f.is_link());
@@ -1997,11 +2078,11 @@ mod tests {
     fn daemon_rescans_when_the_packaged_version_changes() {
         let f = Fixture::new("1.2.1");
         let runner = FakeRunner::running();
-        auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true);
+        auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify);
         f.upgrade_package("1.2.2");
         let after = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &after)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &after)), true, &no_notify),
             AutoAction::Refresh
         );
         assert_eq!(
@@ -2017,13 +2098,23 @@ mod tests {
     #[test]
     fn daemon_retries_the_rescan_at_next_start_when_the_shell_was_down() {
         let f = Fixture::new("1.2.1");
-        auto_link(&f.ctx, Some(&shell(&f.ctx, &FakeRunner::running())), true);
+        auto_link(
+            &f.ctx,
+            Some(&shell(&f.ctx, &FakeRunner::running())),
+            true,
+            &no_notify,
+        );
         f.upgrade_package("1.2.2");
-        auto_link(&f.ctx, Some(&shell(&f.ctx, &FakeRunner::stopped())), true);
+        auto_link(
+            &f.ctx,
+            Some(&shell(&f.ctx, &FakeRunner::stopped())),
+            true,
+            &no_notify,
+        );
         assert_eq!(f.state(), LinkState::LinkedStale);
         let up = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &up)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &up)), true, &no_notify),
             AutoAction::Refresh
         );
         assert_eq!(f.state(), LinkState::Linked);
@@ -2035,12 +2126,12 @@ mod tests {
         let copy = f.add_copy(PLUGIN_ID, "1.1.0");
         let runner = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify),
             AutoAction::NoteCopy
         );
         assert!(f.marker().copy_noted);
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify),
             AutoAction::Nothing
         );
         assert!(runner.calls().is_empty());
@@ -2054,7 +2145,7 @@ mod tests {
         let worktree = f.add_foreign_link("1.3.0-dev");
         let runner = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify),
             AutoAction::NoteCopy
         );
         assert_eq!(f.link_target(), Some(worktree));
@@ -2065,9 +2156,12 @@ mod tests {
     fn daemon_does_not_link_after_the_user_removed_their_copy() {
         let f = Fixture::new("1.2.1");
         let copy = f.add_copy(PLUGIN_ID, "1.1.0");
-        auto_link(&f.ctx, None, true);
+        auto_link(&f.ctx, None, true, &no_notify);
         fs::remove_dir_all(copy).unwrap();
-        assert_eq!(auto_link(&f.ctx, None, true), AutoAction::Nothing);
+        assert_eq!(
+            auto_link(&f.ctx, None, true, &no_notify),
+            AutoAction::Nothing
+        );
         assert!(!f.is_link());
     }
 
@@ -2076,7 +2170,7 @@ mod tests {
         let f = Fixture::new("1.2.1");
         let down = FakeRunner::stopped();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &down)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &down)), true, &no_notify),
             AutoAction::Link
         );
         assert!(f.is_link());
@@ -2085,7 +2179,7 @@ mod tests {
         // Next start: the stale rescan and the pending enable both happen.
         let up = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &up)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &up)), true, &no_notify),
             AutoAction::Refresh
         );
         assert_eq!(up.calls(), vec![RESCAN, ENABLE]);
@@ -2098,13 +2192,13 @@ mod tests {
         let f = Fixture::new("1.2.1");
         let runner = FakeRunner::running();
         runner.answer(ENABLE, &[Some("unknown")]);
-        auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true);
+        auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), true, &no_notify);
         assert!(f.marker().enable_pending);
         assert_eq!(f.state(), LinkState::Linked);
 
         let up = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &up)), true),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &up)), true, &no_notify),
             AutoAction::RetryEnable
         );
         assert_eq!(up.calls(), vec![RESCAN, ENABLE]);
@@ -2116,7 +2210,7 @@ mod tests {
         let f = Fixture::new("1.2.1");
         let runner = FakeRunner::running();
         assert_eq!(
-            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), false),
+            auto_link(&f.ctx, Some(&shell(&f.ctx, &runner)), false, &no_notify),
             AutoAction::Nothing
         );
         assert!(runner.calls().is_empty());
@@ -2138,11 +2232,227 @@ mod tests {
     fn daemon_does_nothing_off_omarchy_or_without_a_package() {
         let mut f = Fixture::new("1.2.1");
         f.ctx.packaged_dir = None;
-        assert_eq!(auto_link(&f.ctx, None, true), AutoAction::Nothing);
+        assert_eq!(
+            auto_link(&f.ctx, None, true, &no_notify),
+            AutoAction::Nothing
+        );
         f.ctx.omarchy_shell = None;
-        assert_eq!(auto_link(&f.ctx, None, true), AutoAction::Nothing);
+        assert_eq!(
+            auto_link(&f.ctx, None, true, &no_notify),
+            AutoAction::Nothing
+        );
         assert!(!f.is_link());
         assert!(!f.ctx.marker_path.exists());
+    }
+
+    // ------------------------------------------- copy notice and dismissal
+
+    /// Collects notifications instead of sending them.
+    #[derive(Default)]
+    struct Notices(RefCell<Vec<(String, String)>>);
+
+    impl Notices {
+        fn run(&self, f: &Fixture, shell: Option<&Shell>) -> AutoAction {
+            auto_link(&f.ctx, shell, true, &|t: &str, b: &str| {
+                self.0.borrow_mut().push((t.to_string(), b.to_string()))
+            })
+        }
+
+        fn sent(&self) -> Vec<(String, String)> {
+            self.0.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn daemon_notifies_once_when_it_first_finds_a_copy() {
+        let f = Fixture::new("1.2.1");
+        f.add_copy(PLUGIN_ID, "1.1.0");
+        let notices = Notices::default();
+        let runner = FakeRunner::running();
+        assert_eq!(
+            notices.run(&f, Some(&shell(&f.ctx, &runner))),
+            AutoAction::NoteCopy
+        );
+        assert_eq!(
+            notices.sent(),
+            vec![(
+                "Voxtype Settings panel".to_string(),
+                "Your Settings panel is a copy that does not update with voxtype. \
+                 Run voxtype setup omarchy --replace to switch to the packaged one."
+                    .to_string()
+            )]
+        );
+        assert!(!COPY_NOTICE_BODY.contains('\u{2014}'), "no em dashes");
+        // Later starts never repeat it.
+        notices.run(&f, Some(&shell(&f.ctx, &runner)));
+        notices.run(&f, None);
+        assert_eq!(notices.sent().len(), 1);
+        assert!(runner.calls().is_empty(), "the notice needs no shell call");
+    }
+
+    #[test]
+    fn daemon_does_not_notify_for_a_foreign_link() {
+        let f = Fixture::new("1.2.1");
+        f.add_foreign_link("1.3.0-dev");
+        let notices = Notices::default();
+        assert_eq!(notices.run(&f, None), AutoAction::NoteCopy);
+        assert!(notices.sent().is_empty());
+    }
+
+    #[test]
+    fn daemon_does_not_notify_about_a_dismissed_copy() {
+        let f = Fixture::new("1.2.1");
+        f.add_copy(PLUGIN_ID, "1.1.0");
+        dismiss_copy(&f.ctx, &mut Marker::default()).unwrap();
+        let notices = Notices::default();
+        assert_eq!(notices.run(&f, None), AutoAction::NoteCopy);
+        assert!(notices.sent().is_empty());
+        assert!(
+            f.marker().copy_dismissed,
+            "a present copy keeps its dismissal"
+        );
+    }
+
+    #[test]
+    fn daemon_opt_out_sends_no_notice() {
+        let f = Fixture::new("1.2.1");
+        f.add_copy(PLUGIN_ID, "1.1.0");
+        let sent = RefCell::new(0);
+        auto_link(&f.ctx, None, false, &|_: &str, _: &str| {
+            *sent.borrow_mut() += 1
+        });
+        assert_eq!(*sent.borrow(), 0);
+        assert!(!f.marker().copy_noted);
+    }
+
+    #[test]
+    fn old_markers_read_as_not_dismissed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(MARKER_FILE);
+        fs::write(
+            &path,
+            r#"{"auto_linked":false,"version":null,"copy_noted":true,"enable_pending":false}"#,
+        )
+        .unwrap();
+        let marker = Marker::load(&path);
+        assert!(marker.copy_noted);
+        assert!(!marker.copy_dismissed);
+    }
+
+    #[test]
+    fn dismiss_copy_is_remembered_and_reported() {
+        let f = Fixture::new("1.2.1");
+        let copy = f.add_copy(PLUGIN_ID, "1.1.0");
+        assert!(!f.status().copy_dismissed);
+        let (result, out, _) = f.run_cli(
+            &FakeRunner::running(),
+            CliArgs {
+                dismiss_copy: true,
+                ..CliArgs::default()
+            },
+            false,
+            false,
+        );
+        result.unwrap();
+        assert!(out.contains("voxtype setup omarchy --replace"), "{out}");
+        assert!(f.marker().copy_dismissed);
+        let status = f.status();
+        assert_eq!(status.state, LinkState::Copy);
+        assert!(status.copy_dismissed);
+        assert!(
+            copy.join("user-file").is_file(),
+            "dismissing changes no files"
+        );
+    }
+
+    #[test]
+    fn dismiss_without_a_copy_changes_nothing() {
+        let f = Fixture::new("1.2.1");
+        for setup in [None, Some("link")] {
+            if setup.is_some() {
+                f.add_foreign_link("1.3.0-dev");
+            }
+            let (result, out, _) = f.run_cli(
+                &FakeRunner::running(),
+                CliArgs {
+                    dismiss_copy: true,
+                    ..CliArgs::default()
+                },
+                false,
+                false,
+            );
+            result.unwrap();
+            assert!(out.contains("nothing changed"), "{out}");
+            assert!(!f.marker().copy_dismissed);
+        }
+    }
+
+    #[test]
+    fn replace_clears_a_dismissal() {
+        let f = Fixture::new("1.2.1");
+        f.add_copy(PLUGIN_ID, "1.1.0");
+        let mut marker = Marker::default();
+        dismiss_copy(&f.ctx, &mut marker).unwrap();
+        replace(&f.ctx, None, &mut marker).unwrap();
+        assert!(!f.marker().copy_dismissed);
+        assert!(!f.status().copy_dismissed);
+    }
+
+    #[test]
+    fn a_dismissal_ends_when_the_copy_goes_away() {
+        let f = Fixture::new("1.2.1");
+        let copy = f.add_copy(PLUGIN_ID, "1.1.0");
+        dismiss_copy(&f.ctx, &mut Marker::default()).unwrap();
+        fs::remove_dir_all(&copy).unwrap();
+        // Reported false at once, even before anything rewrites the marker.
+        assert!(!f.status().copy_dismissed);
+        // The daemon forgets it, so a later copy offers the switch again.
+        auto_link(&f.ctx, None, true, &no_notify);
+        assert!(!f.marker().copy_dismissed);
+        f.add_copy(PLUGIN_ID, "1.1.0");
+        assert!(!f.status().copy_dismissed);
+    }
+
+    #[test]
+    fn a_cli_action_forgets_a_stale_dismissal_but_status_writes_nothing() {
+        let f = Fixture::new("1.2.1");
+        let copy = f.add_copy(PLUGIN_ID, "1.1.0");
+        dismiss_copy(&f.ctx, &mut Marker::default()).unwrap();
+        fs::remove_dir_all(&copy).unwrap();
+        let status = CliArgs {
+            status: true,
+            json: true,
+            ..CliArgs::default()
+        };
+        f.run_cli(&FakeRunner::running(), status, false, false)
+            .0
+            .unwrap();
+        assert!(f.marker().copy_dismissed, "--status is read-only");
+        f.run_cli(&FakeRunner::running(), CliArgs::default(), false, false)
+            .0
+            .unwrap();
+        assert!(!f.marker().copy_dismissed);
+    }
+
+    #[test]
+    fn status_json_ends_with_copy_dismissed() {
+        let f = Fixture::new("1.2.1");
+        f.add_copy(PLUGIN_ID, "1.1.0");
+        dismiss_copy(&f.ctx, &mut Marker::default()).unwrap();
+        let text = serde_json::to_string(&f.status()).unwrap();
+        let keys: Vec<&str> = [
+            "\"omarchy\"",
+            "\"packaged_dir\"",
+            "\"packaged_version\"",
+            "\"state\"",
+            "\"path\"",
+            "\"installed_version\"",
+            "\"copy_dismissed\"",
+        ]
+        .to_vec();
+        let positions: Vec<usize> = keys.iter().map(|k| text.find(k).unwrap()).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{text}");
+        assert!(text.ends_with("\"copy_dismissed\":true}"), "{text}");
     }
 
     // --------------------------------------------------------------- CLI

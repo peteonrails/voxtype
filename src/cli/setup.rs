@@ -133,9 +133,14 @@ pub enum SetupAction {
         packaged panel; it asks first in a terminal and needs --yes \
         otherwise. --yes alone never replaces a copy. --remove removes \
         voxtype's link only, never a copy.\n\n\
+        --dismiss-copy answers \"Not now\" to the Settings panel's offer to \
+        replace your copy: the panel stops showing it for that copy. \
+        --replace, or removing the copy, clears it.\n\n\
         --status --json prints {omarchy, packaged_dir, packaged_version, \
-        state, path, installed_version}, where state is one of not-omarchy, \
-        no-package, absent, linked, linked-stale, copy or foreign-link.\n\n\
+        state, path, installed_version, copy_dismissed}, where state is one \
+        of not-omarchy, no-package, absent, linked, linked-stale, copy or \
+        foreign-link, and copy_dismissed is true only while a copy you \
+        dismissed is present.\n\n\
         Exit codes: 0 on success or when there is nothing to do (no packaged \
         panel, or a copy left in place), 1 when Omarchy is not detected or an \
         action fails.\n\n\
@@ -145,6 +150,7 @@ pub enum SetupAction {
         voxtype setup omarchy --status --json\n  \
         voxtype setup omarchy --replace\n  \
         voxtype setup omarchy --replace --yes --restart-shell\n  \
+        voxtype setup omarchy --dismiss-copy\n  \
         voxtype setup omarchy --remove")]
     Omarchy {
         /// Show the link state instead of changing anything
@@ -170,6 +176,10 @@ pub enum SetupAction {
         /// Answer yes to prompts (required for --replace without a terminal)
         #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Stop offering to replace your copy ("Not now"); --replace clears it
+        #[arg(long, conflicts_with_all = ["status", "replace", "remove", "restart_shell"])]
+        dismiss_copy: bool,
     },
 
     /// Interactive model selection and download
@@ -775,6 +785,7 @@ mod tests {
                         remove,
                         restart_shell,
                         yes,
+                        ..
                     }),
                 ..
             }) => Ok((status, json, replace, remove, restart_shell, yes)),
@@ -817,6 +828,25 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_omarchy_dismiss_copy() {
+        let dismiss = |args: &[&str]| -> Result<bool, clap::Error> {
+            let argv = ["voxtype", "setup", "omarchy"].iter().chain(args);
+            match Cli::try_parse_from(argv)?.command {
+                Some(Commands::Setup {
+                    action: Some(SetupAction::Omarchy { dismiss_copy, .. }),
+                    ..
+                }) => Ok(dismiss_copy),
+                _ => panic!("Expected Setup Omarchy command"),
+            }
+        };
+        assert!(dismiss(&["--dismiss-copy"]).unwrap());
+        assert!(!dismiss(&[]).unwrap());
+        for other in ["--status", "--replace", "--remove", "--restart-shell"] {
+            assert!(dismiss(&["--dismiss-copy", other]).is_err(), "{other}");
+        }
+    }
+
+    #[test]
     fn test_setup_omarchy_rejects_conflicting_flags() {
         assert!(parse_omarchy(&["--json"]).is_err(), "--json needs --status");
         assert!(parse_omarchy(&["--replace", "--remove"]).is_err());
@@ -837,6 +867,11 @@ mod tests {
         );
         assert!(help.contains("link_settings_plugin"), "{help}");
         assert!(help.contains("--restart-shell"), "{help}");
+        assert!(
+            help.contains("voxtype setup omarchy --dismiss-copy"),
+            "{help}"
+        );
+        assert!(help.contains("copy_dismissed"), "{help}");
     }
 
     #[test]
