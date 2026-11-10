@@ -22,6 +22,7 @@ pub mod gpu;
 pub mod hammerspoon;
 #[cfg(target_os = "linux")]
 pub mod icons;
+pub mod install_hint;
 pub mod lard;
 pub mod launchd;
 #[cfg(target_os = "macos")]

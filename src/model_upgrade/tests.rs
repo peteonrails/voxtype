@@ -35,6 +35,7 @@ fn status_with(
             model,
             streaming,
             capabilities,
+            gguf_worker: true,
             models_dir,
             state,
         },
@@ -277,6 +278,49 @@ fn binaries_without_the_gguf_runtime_get_no_offer() {
     .is_empty());
 }
 
+/// A package can compile the GGUF client and still leave the worker out (a
+/// repackaging without the `.gguf-worker` files). Accepting an offer there
+/// would fail, so none is made; the ONNX removal notice still shows.
+#[test]
+fn compiled_gguf_without_a_reachable_worker_gets_no_offer_but_the_removal_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = UpgradeState::default();
+    for (engine, model) in [
+        ("parakeet", "parakeet-tdt-0.6b-v3"),
+        ("parakeet", "parakeet-tdt-0.6b-v2-int8"),
+        ("parakeet", "parakeet-tdt-0.6b-v3-Q8_0.gguf"),
+        ("cohere", "cohere-transcribe-q4f16"),
+        ("cohere", "cohere-transcribe-fp16"),
+    ] {
+        let inputs = Inputs {
+            engine,
+            model,
+            streaming: false,
+            capabilities: ALL,
+            gguf_worker: false,
+            models_dir: dir.path(),
+            state: &state,
+        };
+        let status = compute(&inputs, || PIN.to_string());
+        assert!(status.offers.is_empty(), "{model}: {:?}", status.offers);
+        assert_eq!(
+            status.removal_notice.is_some(),
+            model_format(engine, model) == "onnx",
+            "{model}"
+        );
+
+        // The same inputs with the worker present do get offers.
+        let with_worker = compute(
+            &Inputs {
+                gguf_worker: true,
+                ..inputs
+            },
+            || PIN.to_string(),
+        );
+        assert!(!with_worker.offers.is_empty(), "{model}");
+    }
+}
+
 /// A format target already on disk is a switch, not a redownload, and the
 /// copy must not contradict the "already downloaded" line beside it.
 #[test]
@@ -347,6 +391,7 @@ fn the_pin_command_is_not_detected_for_gguf_models() {
             model: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
             streaming: false,
             capabilities: ALL,
+            gguf_worker: true,
             models_dir: dir.path(),
             state: &UpgradeState::default(),
         },

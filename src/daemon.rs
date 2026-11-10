@@ -4109,19 +4109,31 @@ impl Daemon {
             .as_deref()
             .unwrap_or("the running binary");
         let title = format!("Voxtype: {} unavailable", mismatch.configured_engine);
-        let body = match &mismatch.remediation {
-            crate::setup::variant_check::Remediation::SwitchToVariant { target } => format!(
+        let hint = crate::setup::install_hint::hint(crate::setup::install_hint::Need::Feature(
+            mismatch.required_feature,
+        ));
+        let body = match (&mismatch.remediation, &hint) {
+            (
+                crate::setup::variant_check::Remediation::SwitchToVariant { target },
+                crate::setup::install_hint::Hint::Switch { command },
+            ) => format!(
                 "{} was built without --features {}. \
-                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+                 Run `{}` (or open `voxtype configure` and press F2) \
                  to switch to {}.",
                 active,
                 mismatch.required_feature,
+                command,
                 target.binary_name(),
             ),
-            crate::setup::variant_check::Remediation::Rebuild { feature } => format!(
+            (crate::setup::variant_check::Remediation::SwitchToVariant { .. }, hint) => format!(
+                "{} was built without --features {}, and no installed variant has it. \
+                 To enable the {} engine, {}.",
+                active, mismatch.required_feature, mismatch.configured_engine, hint,
+            ),
+            (crate::setup::variant_check::Remediation::Rebuild { feature }, hint) => format!(
                 "This source build was compiled without --features {}. \
-                 Rebuild voxtype with that feature to enable the {} engine.",
-                feature, mismatch.configured_engine,
+                 To enable the {} engine, {}.",
+                feature, mismatch.configured_engine, hint,
             ),
         };
 

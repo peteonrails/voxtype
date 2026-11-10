@@ -963,8 +963,9 @@ pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
     if !binary_path.exists() {
         anyhow::bail!(
             "Binary not found: {}\n\
-             Install the appropriate voxtype package variant.",
-            binary_path.display()
+             To fix this, {}.",
+            binary_path.display(),
+            super::install_hint::hint(super::install_hint::Need::Variant(variant))
         );
     }
 

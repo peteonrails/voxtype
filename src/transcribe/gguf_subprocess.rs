@@ -337,6 +337,20 @@ pub(crate) fn worker_path() -> PathBuf {
     )
 }
 
+/// Whether the worker [`worker_path`] resolves to exists and is executable,
+/// directly or through `PATH`. A package can ship the GGUF client without the
+/// worker beside it (a repackaging that dropped the `.gguf-worker` files), and
+/// then every GGUF model fails to start.
+pub(crate) fn worker_available() -> bool {
+    worker_reachable(&worker_path())
+}
+
+/// An absolute path must be an executable file; a bare name is looked up on
+/// `PATH`, as spawning it would.
+fn worker_reachable(path: &Path) -> bool {
+    which::which(path).is_ok()
+}
+
 fn select_worker_path(worker_override: Option<&OsStr>, executable: Option<&Path>) -> PathBuf {
     if let Some(path) = worker_override {
         return PathBuf::from(path);
@@ -562,6 +576,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn worker_availability_follows_the_resolved_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join(WORKER_BIN);
+        assert!(!worker_reachable(&worker), "missing worker");
+        touch(&worker);
+        assert!(!worker_reachable(&worker), "not executable");
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(worker_reachable(&worker), "executable worker");
+        assert!(
+            !worker_reachable(Path::new("voxtype-gguf-worker-that-does-not-exist")),
+            "bare name not on PATH"
+        );
     }
 
     #[test]

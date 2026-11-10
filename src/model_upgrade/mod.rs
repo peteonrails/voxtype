@@ -200,6 +200,10 @@ pub struct Inputs<'a> {
     /// `[parakeet] streaming`; streaming configs get no offers.
     pub streaming: bool,
     pub capabilities: BackendCapabilities,
+    /// A GGUF worker executable is reachable. The GGUF client can be
+    /// compiled in while the package left the worker out; a GGUF offer would
+    /// then fail on accept, so none is made.
+    pub gguf_worker: bool,
     pub models_dir: &'a Path,
     pub state: &'a UpgradeState,
 }
@@ -212,9 +216,34 @@ impl<'a> Inputs<'a> {
             streaming: config.engine == TranscriptionEngine::Parakeet
                 && config.parakeet.as_ref().is_some_and(|p| p.streaming),
             capabilities: BackendCapabilities::compiled(),
+            gguf_worker: gguf_worker_available(),
             models_dir,
             state,
         }
+    }
+}
+
+/// Whether this binary can start a GGUF worker. Without any GGUF feature
+/// there is nothing to start, and no GGUF offer is made anyway.
+fn gguf_worker_available() -> bool {
+    #[cfg(any(feature = "cohere-gguf", feature = "parakeet-gguf", feature = "gguf"))]
+    {
+        crate::transcribe::gguf_subprocess::worker_available()
+    }
+    #[cfg(not(any(feature = "cohere-gguf", feature = "parakeet-gguf", feature = "gguf")))]
+    {
+        false
+    }
+}
+
+/// The capabilities an offer may rely on: the compiled GGUF backends count
+/// only when a worker is there to run them.
+fn reachable(capabilities: BackendCapabilities, gguf_worker: bool) -> BackendCapabilities {
+    BackendCapabilities {
+        parakeet_gguf: capabilities.parakeet_gguf && gguf_worker,
+        cohere_gguf: capabilities.cohere_gguf && gguf_worker,
+        gguf: capabilities.gguf && gguf_worker,
+        ..capabilities
     }
 }
 
@@ -466,7 +495,7 @@ pub fn compute(inputs: &Inputs, pin_command: impl FnOnce() -> String) -> Upgrade
         inputs.engine,
         inputs.model,
         inputs.streaming,
-        inputs.capabilities,
+        reachable(inputs.capabilities, inputs.gguf_worker),
     )
     .into_iter()
     .filter(|(_, target)| crate::setup::model::find_gguf_model(target).is_some())
