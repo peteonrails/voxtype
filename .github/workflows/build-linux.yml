@@ -257,6 +257,33 @@ jobs:
             fi
           done
 
+      - name: Verify GGUF client and worker companion
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          VARIANT='${{ matrix.variant }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${VARIANT}"
+          WORKER="${BIN}.gguf-worker"
+          # Every binary compiles the GGUF client. x86_64 vulkan and ONNX
+          # variants ship a Vulkan-capable worker; the Whisper CPU tiers and
+          # aarch64 ship CPU workers. ONNX binaries carry ORT's AVX-512, but
+          # their workers must still hold the Haswell floor.
+          args=()
+          if [[ '${{ matrix.arch }}' == x86_64 && ( "${VARIANT}" == vulkan || "${VARIANT}" == onnx-* ) ]]; then
+            args+=(--vulkan)
+          else
+            args+=(--cpu-only)
+          fi
+          case "${VARIANT}" in
+            avx2|vulkan|onnx-avx2|onnx-cuda-12|onnx-cuda-13|onnx-migraphx) args+=(--haswell-floor) ;;
+          esac
+          # AVX-512 variants are cross-compiled and may not run on the runner.
+          case "${VARIANT}" in
+            avx512|onnx-avx512) ;;
+            *) args+=(--run) ;;
+          esac
+          scripts/verify-gguf-companion.sh "${args[@]}" "${BIN}" "${WORKER}"
+
       - name: Verify ISA floor (Haswell / x86_64-v3) on AVX2 and Vulkan variants
         if: matrix.check_no_avx512
         run: |

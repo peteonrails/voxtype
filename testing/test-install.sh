@@ -142,10 +142,16 @@ test_gguf_worker_exists() {
         return 1
     fi
 
-    local directory
-    for directory in /usr/lib/voxtype /usr/bin; do
-        if [[ -x "$directory/voxtype-vulkan" && ! -x "$directory/voxtype-gguf-worker-vulkan" ]]; then
-            log_fail "Vulkan GGUF worker is missing or not executable beside $directory/voxtype-vulkan"
+    # The vulkan and ONNX variants ship their own (Vulkan-capable) worker,
+    # installed beside the real binary: GPU ONNX binaries live in provider
+    # subdirectories, so look there as well as in the top-level directories.
+    local binary name
+    for binary in /usr/lib/voxtype/voxtype-vulkan /usr/lib/voxtype/voxtype-onnx-* \
+        /usr/lib/voxtype/*/voxtype-onnx-* /usr/bin/voxtype-vulkan /usr/bin/voxtype-onnx-*; do
+        [[ -f "$binary" && ! -L "$binary" && -x "$binary" ]] || continue
+        name="${binary##*/}"
+        if [[ ! -x "${binary%/*}/voxtype-gguf-worker-${name#voxtype-}" ]]; then
+            log_fail "GGUF worker voxtype-gguf-worker-${name#voxtype-} is missing or not executable beside $binary"
             return 1
         fi
     done

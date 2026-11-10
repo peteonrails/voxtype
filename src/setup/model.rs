@@ -737,9 +737,9 @@ const HANDY_PENDING_GGUF_MODELS: &[PendingGgufModelInfo] = &[
         origin_revision: "1674f5f93b7655000951d25d496dcfac947b3968",
         size: 77_476_544,
         sha256: "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
-        r2_dir: None,
-        runnable: false,
-        license_gated: true,
+        r2_dir: Some("moonshine-base-ja-q8_0-1674f5f93b7655000951d25d496dcfac947b3968"),
+        runnable: true,
+        license_gated: false,
         languages: &["auto", "ja"],
     },
     PendingGgufModelInfo {
@@ -749,9 +749,9 @@ const HANDY_PENDING_GGUF_MODELS: &[PendingGgufModelInfo] = &[
         origin_revision: "ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b",
         size: 252_684_608,
         sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
-        r2_dir: None,
-        runnable: false,
-        license_gated: true,
+        r2_dir: Some("sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b"),
+        runnable: true,
+        license_gated: false,
         languages: &["auto", "zh", "yue", "en", "ja", "ko"],
     },
     PendingGgufModelInfo {
@@ -901,8 +901,8 @@ const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
     GgufModelInfo {
         engine: "parakeet",
         name: "parakeet-ultra-F16.gguf",
-        r2_dir: "",
-        upstream_url: Some("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-F16.gguf"),
+        r2_dir: "parakeet-ultra-f16-a1539be1b849ea7463b88343e5277b373d0c4ea9",
+        upstream_url: None,
         size: 1_256_724_448,
         sha256: "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
         license: "CC-BY-4.0",
@@ -911,8 +911,8 @@ const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
     GgufModelInfo {
         engine: "parakeet",
         name: "parakeet-ultra-Q8_0.gguf",
-        r2_dir: "",
-        upstream_url: Some("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q8_0.gguf"),
+        r2_dir: "parakeet-ultra-q8_0-a1539be1b849ea7463b88343e5277b373d0c4ea9",
+        upstream_url: None,
         size: 740_363_168,
         sha256: "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
         license: "CC-BY-4.0",
@@ -921,8 +921,8 @@ const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
     GgufModelInfo {
         engine: "parakeet",
         name: "parakeet-ultra-Q4_K_M.gguf",
-        r2_dir: "",
-        upstream_url: Some("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q4_K_M.gguf"),
+        r2_dir: "parakeet-ultra-q4_k_m-a1539be1b849ea7463b88343e5277b373d0c4ea9",
+        upstream_url: None,
         size: 486_280_096,
         sha256: "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
         license: "CC-BY-4.0",
@@ -981,6 +981,26 @@ const HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         license: "OpenMDW-1.1",
         description: "Nemotron 3.5 ASR 0.6B Q8, offline multilingual inference",
     },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "moonshine-base-ja-Q8_0.gguf",
+        r2_dir: "moonshine-base-ja-q8_0-1674f5f93b7655000951d25d496dcfac947b3968",
+        upstream_url: None,
+        size: 77_476_544,
+        sha256: "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
+        license: "Moonshine AI Community License",
+        description: "Moonshine Base Japanese Q8, Japanese",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "SenseVoiceSmall-Q8_0.gguf",
+        r2_dir: "sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b",
+        upstream_url: None,
+        size: 252_684_608,
+        sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
+        license: "FunASR Model Open Source License 1.1",
+        description: "SenseVoice Small Q8, Chinese, Cantonese, English, Japanese, Korean",
+    },
 ];
 
 pub(crate) fn cohere_gguf_models() -> &'static [GgufModelInfo] {
@@ -1004,9 +1024,9 @@ pub(crate) fn find_gguf_model(name: &str) -> Option<&'static GgufModelInfo> {
         .find(|model| model.name == name)
 }
 
-/// Existing GGUF weights keep their R2 mirrors. Ultra is an explicit exception:
-/// its approved upstream download is revision- and checksum-pinned until a
-/// separately approved mirror exists. Never construct an unpopulated R2 URL.
+/// Every curated GGUF downloads from its R2 mirror. `upstream_url` stays as an
+/// escape hatch for a pinned model whose mirror is not populated yet; never
+/// construct an unpopulated R2 URL.
 fn gguf_url(model: &GgufModelInfo) -> String {
     if let Some(url) = model.upstream_url {
         return url.to_string();
@@ -1466,6 +1486,68 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
         ],
     });
     out
+}
+
+/// One downloadable GGUF from the curated catalog, as the R2 audit sees it.
+/// Emitted by `voxtype-mirror-registry --gguf` for
+/// `scripts/mirror-models-to-r2.sh --gguf-audit`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GgufRegistryEntry {
+    pub engine: &'static str,
+    pub name: &'static str,
+    pub r2_dir: &'static str,
+    /// The URL the runtime downloads from today.
+    pub url: String,
+    /// True when `url` is the R2 mirror rather than a pinned upstream.
+    pub mirrored: bool,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub license: &'static str,
+}
+
+/// Every downloadable GGUF across engines, deduplicated by name (the Handy
+/// models are listed under more than one picker but are one file).
+pub fn gguf_registry_snapshot() -> Vec<GgufRegistryEntry> {
+    let mut out: Vec<GgufRegistryEntry> = Vec::new();
+    for model in COHERE_GGUF_MODELS
+        .iter()
+        .chain(PARAKEET_GGUF_MODELS)
+        .chain(HANDY_GGUF_MODELS)
+    {
+        if out.iter().any(|entry| entry.name == model.name) {
+            continue;
+        }
+        out.push(GgufRegistryEntry {
+            engine: model.engine,
+            name: model.name,
+            r2_dir: model.r2_dir,
+            url: gguf_url(model),
+            mirrored: model.upstream_url.is_none(),
+            size: model.size,
+            sha256: model.sha256,
+            license: model.license,
+        });
+    }
+    out
+}
+
+/// Where a model row's license link points. Standard licenses link to their
+/// canonical text; custom model licenses link to the copy shipped in the
+/// model's R2 bundle, the exact terms voxtype redistributes under.
+pub fn gguf_license(name: &str) -> Option<(&'static str, String)> {
+    let model = find_gguf_model(name)?;
+    let url = match model.license {
+        "Apache-2.0" => "https://www.apache.org/licenses/LICENSE-2.0".to_string(),
+        "CC-BY-4.0" => "https://creativecommons.org/licenses/by/4.0/".to_string(),
+        "MIT" => "https://opensource.org/license/mit".to_string(),
+        _ => format!(
+            "{}/{}/{}/LICENSE",
+            crate::setup::manifest::MODELS_BASE_URL,
+            model.engine,
+            model.r2_dir
+        ),
+    };
+    Some((model.license, url))
 }
 
 /// Download the punctuation/casing classifier from Voxtype's hash-verified
@@ -5709,7 +5791,21 @@ mode = "type"
             assert_eq!((model.size, model.sha256), (size, sha256));
             assert_eq!(model.license, "CC-BY-4.0");
             assert_eq!(model.engine, "parakeet");
-            assert_eq!(gguf_url(model), format!("https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/{name}"));
+            assert!(model.upstream_url.is_none(), "{name} must download from R2");
+            assert_eq!(
+                gguf_url(model),
+                format!(
+                    "{}/parakeet/{}/{name}",
+                    crate::setup::manifest::MODELS_BASE_URL,
+                    model.r2_dir
+                )
+            );
+            assert!(
+                model
+                    .r2_dir
+                    .ends_with("-a1539be1b849ea7463b88343e5277b373d0c4ea9"),
+                "{name} R2 dir pins the conversion revision"
+            );
             assert!(parakeet_setup_model_names().contains(&name));
         }
     }
@@ -5747,6 +5843,63 @@ mode = "type"
             .unwrap_err()
             .to_string()
             .contains("sha256 mismatch"));
+    }
+
+    /// Model rows link to the license: canonical text for standard licenses,
+    /// the mirrored copy for custom model licenses.
+    #[test]
+    fn gguf_license_links_standard_and_custom_licenses() {
+        let (license, url) = gguf_license("parakeet-ultra-Q8_0.gguf").unwrap();
+        assert_eq!(license, "CC-BY-4.0");
+        assert_eq!(url, "https://creativecommons.org/licenses/by/4.0/");
+        let (license, url) = gguf_license("SenseVoiceSmall-Q8_0.gguf").unwrap();
+        assert_eq!(license, "FunASR Model Open Source License 1.1");
+        assert_eq!(
+            url,
+            format!(
+                "{}/gguf/sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/LICENSE",
+                crate::setup::manifest::MODELS_BASE_URL
+            )
+        );
+        assert!(gguf_license("moonshine-base-ja-Q8_0.gguf")
+            .unwrap()
+            .1
+            .ends_with("/LICENSE"));
+        assert!(gguf_license("parakeet-tdt-0.6b-v3").is_none());
+        for entry in gguf_registry_snapshot() {
+            let (_, url) = gguf_license(entry.name).unwrap();
+            assert!(url.starts_with("https://"), "{url}");
+        }
+    }
+
+    /// The R2 audit must see every curated GGUF once, and every one of them
+    /// must download from the mirror: an upstream-only entry is a gap the
+    /// audit reports, so the shipped catalog has none.
+    #[test]
+    fn gguf_registry_snapshot_covers_the_catalog_and_is_fully_mirrored() {
+        let snapshot = gguf_registry_snapshot();
+        let mut names: Vec<_> = snapshot.iter().map(|entry| entry.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), snapshot.len(), "duplicate GGUF in snapshot");
+        for model in COHERE_GGUF_MODELS
+            .iter()
+            .chain(PARAKEET_GGUF_MODELS)
+            .chain(HANDY_GGUF_MODELS)
+        {
+            assert!(names.contains(&model.name), "{} missing", model.name);
+        }
+        for entry in &snapshot {
+            assert!(entry.mirrored, "{} is not mirrored to R2", entry.name);
+            assert!(
+                entry
+                    .url
+                    .starts_with(crate::setup::manifest::MODELS_BASE_URL),
+                "{}",
+                entry.url
+            );
+            assert_eq!(entry.sha256.len(), 64, "{}", entry.name);
+        }
     }
 
     /// The curated Parakeet GGUFs download from R2 under the `parakeet`
@@ -6043,7 +6196,7 @@ on_demand_loading = false
                 "parakeet",
             ]
         );
-        assert_eq!(models.iter().filter(|model| model.runnable).count(), 5);
+        assert_eq!(models.iter().filter(|model| model.runnable).count(), 7);
         assert!(models
             .iter()
             .filter(|model| model.runnable)
@@ -6052,13 +6205,15 @@ on_demand_loading = false
             .iter()
             .filter(|model| model.license_gated)
             .all(|model| !model.runnable && model.r2_dir.is_none()));
-        assert_eq!(handy_gguf_models().len(), 5);
+        assert_eq!(handy_gguf_models().len(), 7);
         let expected_urls = [
             "https://models.voxtype.io/gguf/qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q8_0.gguf",
             "https://models.voxtype.io/gguf/qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q8_0.gguf",
             "https://models.voxtype.io/gguf/moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf",
             "https://models.voxtype.io/gguf/gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q8_0.gguf",
             "https://models.voxtype.io/gguf/nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/moonshine-base-ja-q8_0-1674f5f93b7655000951d25d496dcfac947b3968/moonshine-base-ja-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-Q8_0.gguf",
         ];
         for (model, expected_url) in handy_gguf_models().iter().zip(expected_urls) {
             assert_eq!(model.engine, "gguf");
@@ -6066,13 +6221,19 @@ on_demand_loading = false
             assert!(std::ptr::eq(find_gguf_model(model.name).unwrap(), model));
             assert_eq!(gguf_url(model), expected_url);
         }
-        assert_eq!(
-            models
-                .iter()
-                .filter(|model| model.license_gated)
-                .map(|model| model.name)
-                .collect::<Vec<_>>(),
-            ["moonshine-base-ja-Q8_0.gguf", "SenseVoiceSmall-Q8_0.gguf"]
+        assert!(
+            models.iter().all(|model| !model.license_gated),
+            "every approved conversion is cleared for redistribution"
         );
+        for model in models.iter().filter(|model| model.runnable) {
+            let entry = find_gguf_model(model.name).expect("runnable conversion is downloadable");
+            assert_eq!(
+                (entry.size, entry.sha256),
+                (model.size, model.sha256),
+                "{}",
+                model.name
+            );
+            assert_eq!(Some(entry.r2_dir), model.r2_dir, "{}", model.name);
+        }
     }
 }

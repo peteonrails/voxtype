@@ -115,6 +115,10 @@ RUN echo "=== Verifying Vulkan binary ISA floor (x86_64-v3 / Haswell, no SSE4a) 
        fi \
     && echo "✓ Vulkan binary is clean"
 
+# gpu-vulkan implies the GGUF client features; prove the shipped pair agrees.
+RUN scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-vulkan /tmp/voxtype-gguf-worker
+
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-vulkan /output/voxtype-${VERSION}-linux-x86_64-vulkan \

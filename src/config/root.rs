@@ -330,6 +330,15 @@ impl Config {
         .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// Voxtype's user state directory, honoring `$XDG_STATE_HOME` (default
+    /// `~/.local/state`). Holds durable records voxtype writes about itself,
+    /// such as declined model upgrade offers, which never belong in the
+    /// user-edited config file.
+    pub fn state_dir() -> PathBuf {
+        Self::xdg_dir("XDG_STATE_HOME", ".local/state", None)
+            .unwrap_or_else(|| Self::data_dir().join("state"))
+    }
+
     /// Resolve a `voxtype` user dir. An explicit absolute `$xdg_var` wins;
     /// otherwise `$HOME/<default_rel>/voxtype`. Falls back to an existing
     /// `legacy` platform-native dir so an upgrade never orphans a prior install.

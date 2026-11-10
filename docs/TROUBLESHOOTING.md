@@ -26,6 +26,39 @@ existing good model. Retry a failed explicit download, not a settings save.
 The automatic, read-only Ultra language display is expected: this runtime has
 no selectable language hint for Parakeet. No translation or streaming is added.
 
+## Model upgrade offer fails, is missing, or keeps showing
+
+`voxtype setup migrate` prints the offers for the configured model, and
+`voxtype setup migrate --json` prints the object the tray and Settings read.
+
+- **No offer appears.** Offers need a build with the GGUF runtime for the engine
+  (`voxtype info engines`) and a model in the offer table. Streaming Parakeet
+  setups and models already on Parakeet Ultra get none.
+- **Accept failed.** Download, checksum, activation and restart failures all
+  leave `config.toml` byte-identical and keep the offer. The error names the
+  step. A failed download needs network access to the model host; a busy daemon
+  needs the current dictation or meeting to finish first. If the restarted
+  daemon did not come up, voxtype puts the previous config back and restarts it;
+  `journalctl --user -u voxtype -n 50` shows why the new model failed.
+- **Without a terminal**, accepting needs `--yes`.
+- **The offer still shows after declining.** That is intended: declined offers
+  stay listed, marked declined, so you can accept later. The tooltip line goes
+  away. Declines are stored in `~/.local/state/voxtype/model_upgrade.json`;
+  deleting that file brings the offer back as new.
+- **`--cleanup` refuses.** It only runs after the daemon has transcribed
+  successfully with the accepted model, and it only deletes the previous model
+  when it sits directly in the models directory. Symbolic links and files
+  elsewhere are never removed.
+
+## Status reports an ONNX backend for a GGUF model
+
+Upgrade to a build where `voxtype status --format json --extended` reports
+`GGUF ... (transcribe.cpp)` for `.gguf` models. GGUF models run in
+`voxtype-gguf-worker` regardless of the main binary's ONNX variant. With
+`gguf_backend = "auto"` the label reads `GGUF (transcribe.cpp)` until the worker
+has loaded the model and reported Vulkan or CPU; with `on_demand_loading = true`
+that happens at the first dictation.
+
 ## Parakeet is compiled but startup requests an unavailable ONNX feature
 
 Check the exact model with `voxtype config get parakeet.model`. A name such as

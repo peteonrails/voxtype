@@ -3,7 +3,7 @@ members = ["xtask", "crates/gguf-worker"]
 
 [package]
 name = "voxtype"
-version = "1.2.0-rc3"
+version = "1.2.0-rc4"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -215,7 +215,9 @@ parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
 parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
 # Parakeet GGUF models run through transcribe.cpp in voxtype-gguf-worker, like
 # Cohere's. Not implied by `parakeet`: transcribe.cpp is only faster than ONNX
-# Runtime on a GPU. `gpu-vulkan` enables it.
+# Runtime on a GPU. `gpu-vulkan` enables it, and every release Dockerfile
+# passes gguf,cohere-gguf,parakeet-gguf explicitly (see
+# scripts/verify-gguf-companion.sh).
 #
 # Both GGUF features only enable the client that drives the worker. voxtype
 # itself must never depend on transcribe-cpp: its ggml collides with

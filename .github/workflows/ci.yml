@@ -65,12 +65,12 @@ jobs:
         run: python3 testing/test-gguf-worker-packaging.py
 
       - name: cargo test
-        # These features include the worker client, not transcribe.cpp itself.
-        run: cargo test --features cohere-gguf,parakeet-gguf
+        # The GGUF client every release binary ships, not transcribe.cpp itself.
+        run: cargo test --features gguf,cohere-gguf,parakeet-gguf
 
       - name: GGUF worker executable-routing regressions
         run: |
-          cargo build --features cohere-gguf,parakeet-gguf --bin voxtype
+          cargo build --features gguf,cohere-gguf,parakeet-gguf --bin voxtype
           python3 testing/test-gguf-worker-routing.py --binary target/debug/voxtype
 
   # macOS-only modules (src/menubar.rs, src/hotkey_macos.rs) are behind

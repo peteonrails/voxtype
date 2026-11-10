@@ -403,6 +403,21 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
         VERIFY_FAILED=true
     fi
 
+    # Vulkan linkage must match what each package location promises: CPU
+    # workers for the Whisper CPU tiers, Vulkan-capable ones for the rest.
+    echo ""
+    for variant in baseline avx2 avx512 vulkan onnx-avx2 onnx-avx512 onnx-cuda-12 onnx-cuda-13 onnx-migraphx; do
+        case "$variant" in
+            baseline|avx2|avx512) linkage=--cpu-only ;;
+            *) linkage=--vulkan ;;
+        esac
+        if ! "${SCRIPT_DIR}/verify-gguf-companion.sh" "$linkage" \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}" \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker"; then
+            VERIFY_FAILED=true
+        fi
+    done
+
     if [[ "$VERIFY_FAILED" == "true" ]]; then
         echo ""
         echo "Binary verification FAILED!"
@@ -442,25 +457,39 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-vulkan"
 
-    # The application first probes beside /proc/self/exe. Install the v2-floor
-    # CPU worker at that fixed name so every packaged x86_64 system can start
-    # it safely. The application selects the matching Vulkan worker from the
-    # resolved executable name, including setup gpu --enable's symlink layout.
+    # GGUF worker companions. The application looks beside its resolved
+    # executable (/proc/self/exe) for voxtype-gguf-worker-<variant>, where
+    # <variant> is the executable name minus "voxtype-", then for the generic
+    # voxtype-gguf-worker. Install the v2-floor CPU worker under the generic
+    # name so every packaged x86_64 system can start it, and each variant's own
+    # worker under its variant name: the CPU-tier workers for avx2/avx512, and
+    # Vulkan-capable workers for vulkan and every ONNX variant. setup gpu
+    # --enable's symlinks resolve to the real binary, so they select the same
+    # worker. The baseline binary uses the generic worker (it is the same file).
+    install_gguf_worker() {
+        local variant="$1"      # release-asset variant, e.g. onnx-avx2
+        local dest="$2"         # directory under $STAGING/usr/lib/voxtype
+        install -Dm755 \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker" \
+            "${dest}/voxtype-gguf-worker-${variant}"
+    }
     install -Dm755 \
         "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker" \
         "$STAGING/usr/lib/voxtype/voxtype-gguf-worker"
-    install -Dm755 \
-        "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker" \
-        "$STAGING/usr/lib/voxtype/voxtype-gguf-worker-vulkan"
+    install_gguf_worker avx2 "$STAGING/usr/lib/voxtype"
+    install_gguf_worker avx512 "$STAGING/usr/lib/voxtype"
+    install_gguf_worker vulkan "$STAGING/usr/lib/voxtype"
 
     # x86_64: ONNX binaries (Parakeet + Moonshine engines via ONNX Runtime)
     if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" ]]; then
         cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" "$STAGING/usr/lib/voxtype/voxtype-onnx-avx2"
         chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-avx2"
+        install_gguf_worker onnx-avx2 "$STAGING/usr/lib/voxtype"
     fi
     if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512" ]]; then
         cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512" "$STAGING/usr/lib/voxtype/voxtype-onnx-avx512"
         chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-avx512"
+        install_gguf_worker onnx-avx512 "$STAGING/usr/lib/voxtype"
     fi
     # GPU-accelerated ONNX binaries each live in their own subdirectory
     # alongside the companion shared libs they dlopen at runtime.
@@ -490,8 +519,10 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
         mkdir -p "$subdir"
         cp "$src" "$subdir/voxtype-onnx-${variant}"
         chmod 755 "$subdir/voxtype-onnx-${variant}"
-        # current_exe() resolves into this provider directory. Keep the generic
-        # GGUF CPU worker reachable there too, without duplicating its binary.
+        # current_exe() resolves into this provider directory, so the
+        # variant's Vulkan-capable worker sits beside the binary. Keep the
+        # generic CPU worker reachable there too, without duplicating it.
+        install_gguf_worker "onnx-${variant}" "$subdir"
         ln -sf ../voxtype-gguf-worker "$subdir/voxtype-gguf-worker"
         cp "${src}.libonnxruntime_providers_${ep_lib}.so" \
             "$subdir/libonnxruntime_providers_${ep_lib}.so"
@@ -798,6 +829,16 @@ FPM_OPTS=(
     -C "$STAGING"
 )
 
+# x86_64 ships Vulkan-capable GGUF workers beside the vulkan binary and every
+# ONNX binary. They link the Vulkan loader even when gguf_backend = "auto"
+# falls back to the CPU, so the loader is a hard dependency there.
+DEB_VULKAN_DEPENDS=()
+RPM_VULKAN_DEPENDS=()
+if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+    DEB_VULKAN_DEPENDS=(--depends libvulkan1)
+    RPM_VULKAN_DEPENDS=(--depends vulkan-loader)
+fi
+
 # Build deb
 DEB_FILE="${RELEASE_DIR}/voxtype_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 if [[ "$BUILD_DEB" == "true" ]]; then
@@ -809,12 +850,12 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --depends "libasound2 | libasound2t64" \
         --depends libc6 \
         --depends curl \
+        "${DEB_VULKAN_DEPENDS[@]}" \
         --deb-recommends pipewire-alsa \
         --deb-recommends wtype \
         --deb-recommends wl-clipboard \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
-        --deb-suggests libvulkan1 \
         --package "$DEB_FILE" \
         usr etc
 
@@ -844,6 +885,7 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         --depends "glibc" \
         --depends "curl" \
         --depends "pipewire-alsa" \
+        "${RPM_VULKAN_DEPENDS[@]}" \
         --rpm-summary "$DESCRIPTION" \
         --package "$RPM_FILE" \
         usr etc

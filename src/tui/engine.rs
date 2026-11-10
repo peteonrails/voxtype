@@ -45,6 +45,10 @@ pub struct EngineState {
     /// Active inline text edit. While `Some`, all keypresses route to the
     /// TextInput; navigation and cycle are suspended.
     pub editing: Option<TextEdit>,
+    /// Model upgrade offer titles from `voxtype setup migrate --json`,
+    /// recommended first. Shown in the guidance pane with the command that
+    /// acts on them; the TUI itself never downloads or switches.
+    pub upgrade_offers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -341,7 +345,9 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
 impl EngineState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
-        Ok(Self::from_editor(&ed))
+        let mut state = Self::from_editor(&ed);
+        state.upgrade_offers = read_upgrade_offers();
+        Ok(state)
     }
 
     fn from_editor(ed: &ConfigEditor) -> Self {
@@ -483,6 +489,7 @@ impl EngineState {
             pending_variant_switch: None,
             binary_switch_blocked: None,
             editing: None,
+            upgrade_offers: Vec::new(),
         };
         state.refresh_binary_match();
         state
@@ -1230,7 +1237,12 @@ fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
 }
 
 fn cycle_model(engine: &str, current: &str, delta: i32) -> String {
-    let names = crate::model_catalog::supported_model_catalog(engine);
+    // Legacy ONNX checkpoints stay reachable only while one is selected:
+    // moving to a GGUF model is one way, as in the Settings model list.
+    let names: Vec<&str> = crate::model_catalog::supported_model_catalog(engine)
+        .into_iter()
+        .filter(|name| !crate::model_upgrade::is_legacy_model(engine, name) || *name == current)
+        .collect();
     if names.is_empty() {
         return current.to_string();
     }
@@ -1654,7 +1666,134 @@ fn family_name(family: EngineFamily) -> &'static str {
     }
 }
 
+/// Offer titles from the status object `voxtype setup migrate --json` prints,
+/// recommended first. Empty for anything unexpected.
+fn upgrade_offer_titles(value: &serde_json::Value) -> Vec<String> {
+    let mut recommended = Vec::new();
+    let mut rest = Vec::new();
+    for offer in value
+        .get("offers")
+        .and_then(|o| o.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = offer.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let title = ["title", "model"]
+            .iter()
+            .find_map(|k| offer.get(*k).and_then(|v| v.as_str()))
+            .unwrap_or(id)
+            .to_string();
+        if offer.get("recommended").and_then(|v| v.as_bool()) == Some(true) {
+            recommended.push(title);
+        } else {
+            rest.push(title);
+        }
+    }
+    recommended.extend(rest);
+    recommended
+}
+
+/// Asks this same binary, against the config the TUI is editing. Bounded so a
+/// stuck child cannot hold the Engine screen; a build without `setup
+/// migrate` exits non-zero and shows nothing.
+fn read_upgrade_offers() -> Vec<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    // Unit tests run as the test harness binary, which must not be re-entered.
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let mut command = Command::new(exe);
+    if let Some(path) = super::config_editor::tui_config_path() {
+        command.arg("--config").arg(path);
+    }
+    let Ok(mut child) = command
+        .args(["setup", "migrate", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    };
+    let mut out = String::new();
+    let read = match child.stdout.take() {
+        Some(mut stdout) => stdout.read_to_string(&mut out).is_ok(),
+        None => false,
+    };
+    if !status.success() || !read {
+        return Vec::new();
+    }
+    serde_json::from_str(&out)
+        .map(|v: serde_json::Value| upgrade_offer_titles(&v))
+        .unwrap_or_default()
+}
+
+fn upgrade_offer_lines(offers: &[String]) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "⬆ Model update available",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for title in offers {
+        lines.push(Line::from(format!("  • {title}")));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("Run "),
+        Span::styled("voxtype setup migrate", Style::default().fg(Color::Cyan)),
+        Span::raw(" to update, or to keep your current model."),
+    ]));
+    lines.push(Line::from(""));
+    lines
+}
+
 fn guidance(state: &EngineState) -> Vec<Line<'_>> {
+    let lines = field_guidance(state);
+    let on_offer_field = matches!(state.current_field(), FieldId::Engine)
+        || model_field_for_engine(&state.engine) == Some(state.current_field());
+    if state.upgrade_offers.is_empty() || !on_offer_field {
+        return lines;
+    }
+    let mut out = upgrade_offer_lines(&state.upgrade_offers);
+    out.extend(lines);
+    out
+}
+
+fn model_field_for_engine(engine: &str) -> Option<FieldId> {
+    Some(match engine {
+        "whisper" => FieldId::WModel,
+        "parakeet" => FieldId::PkModel,
+        "moonshine" => FieldId::MnModel,
+        "sensevoice" => FieldId::SvModel,
+        "paraformer" => FieldId::PfModel,
+        "dolphin" => FieldId::DolModel,
+        "omnilingual" => FieldId::OmModel,
+        "cohere" => FieldId::CoModel,
+        "gguf" => FieldId::GgModel,
+        _ => return None,
+    })
+}
+
+fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
     let f = &state.fields;
     match state.current_field() {
         FieldId::Engine => engine_guidance(state),
@@ -2281,6 +2420,39 @@ fn handle_edit_key(state: &mut EngineState, key: KeyEvent) -> Action {
 mod tests {
     use super::*;
 
+    /// Once on a GGUF model, cycling never reaches a legacy ONNX checkpoint;
+    /// a configured ONNX model is still listed until the user moves off it.
+    #[test]
+    fn cycle_model_skips_legacy_onnx_once_on_gguf() {
+        let catalog = crate::model_catalog::supported_model_catalog("parakeet");
+        if !catalog.iter().any(|name| name.ends_with(".gguf")) {
+            return; // GGUF Parakeet not compiled into this test build.
+        }
+        let mut current = "parakeet-ultra-Q8_0.gguf".to_string();
+        for _ in 0..(catalog.len() * 2) {
+            current = cycle_model("parakeet", &current, 1);
+            assert!(
+                !crate::model_upgrade::is_legacy_model("parakeet", &current),
+                "cycled onto legacy {current}"
+            );
+        }
+        if catalog.contains(&"parakeet-tdt-0.6b-v3") {
+            let next = cycle_model("parakeet", "parakeet-tdt-0.6b-v3", 1);
+            assert_ne!(next, "parakeet-tdt-0.6b-v3");
+            assert_eq!(
+                (0..catalog.len())
+                    .scan(next, |model, _| {
+                        *model = cycle_model("parakeet", model, 1);
+                        Some(model.clone())
+                    })
+                    .filter(|model| model == "parakeet-tdt-0.6b-v3")
+                    .count(),
+                0,
+                "a legacy model is unreachable once the user moves off it"
+            );
+        }
+    }
+
     fn line_text(lines: &[Line<'_>]) -> String {
         lines
             .iter()
@@ -2288,6 +2460,80 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn parakeet_state() -> (tempfile::TempDir, EngineState) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "engine = \"parakeet\"\n").unwrap();
+        let ed = ConfigEditor::load_from_path(path).unwrap();
+        (dir, EngineState::from_editor(&ed))
+    }
+
+    #[test]
+    fn upgrade_offer_titles_put_recommended_first() {
+        let status = serde_json::json!({
+            "schema": 1,
+            "offers": [
+                {"id": "format-gguf", "title": "Your model format has been updated", "recommended": false},
+                {"id": "parakeet-ultra", "title": "Parakeet Ultra is now available", "recommended": true},
+                {"title": "no id is not an offer"}
+            ],
+            "removal_notice": null,
+            "cleanup": null
+        });
+        assert_eq!(
+            upgrade_offer_titles(&status),
+            vec![
+                "Parakeet Ultra is now available".to_string(),
+                "Your model format has been updated".to_string()
+            ]
+        );
+        assert!(upgrade_offer_titles(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn engine_screen_shows_offers_and_the_migrate_command() {
+        let (_dir, mut state) = parakeet_state();
+        assert!(
+            state.upgrade_offers.is_empty(),
+            "loading from an editor must not spawn the CLI"
+        );
+        assert!(!line_text(&guidance(&state)).contains("Model update available"));
+
+        state.upgrade_offers = vec![
+            "Parakeet Ultra is now available".into(),
+            "Your model format has been updated".into(),
+        ];
+        state.cursor = state
+            .rows()
+            .iter()
+            .position(|f| *f == FieldId::Engine)
+            .unwrap();
+        let text = line_text(&guidance(&state));
+        assert!(text.starts_with("⬆ Model update available"), "{text}");
+        assert!(text.contains("Parakeet Ultra is now available"));
+        assert!(text.contains("voxtype setup migrate"));
+        assert!(
+            text.find("Parakeet Ultra").unwrap() < text.find("Your model format").unwrap(),
+            "Ultra first"
+        );
+
+        state.cursor = state
+            .rows()
+            .iter()
+            .position(|f| *f == FieldId::PkModel)
+            .unwrap();
+        assert!(line_text(&guidance(&state)).contains("voxtype setup migrate"));
+
+        if let Some(other) = state
+            .rows()
+            .iter()
+            .position(|f| !matches!(f, FieldId::Engine | FieldId::PkModel))
+        {
+            state.cursor = other;
+            assert!(!line_text(&guidance(&state)).contains("Model update available"));
+        }
     }
 
     #[test]

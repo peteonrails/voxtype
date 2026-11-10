@@ -54,6 +54,11 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     git \
     binutils \
+    libvulkan-dev \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
     python3 \
     python3-pip \
     python3-numpy \
@@ -106,14 +111,20 @@ WORKDIR /build/voxtype
 # can't compile their graphs (per-engine notes in src/transcribe/*.rs and
 # Cargo.toml). Cohere is held back until an int4/FP16 model variant ships.
 RUN cargo build --release \
-        --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
+        --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-migraphx \
-    && cargo build --release -p voxtype-gguf-worker \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+# Every release binary carries the GGUF client, and every x86_64 ONNX variant
+# ships a Vulkan-capable worker (gguf_backend = "auto" falls back to the CPU
+# when no Vulkan device initializes). See scripts/verify-gguf-companion.sh.
+RUN scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-onnx-migraphx /tmp/voxtype-gguf-worker
 
 # Copy companion provider .so files. ORT computes the .so search path from
 # argv[0]'s dirname (NOT /proc/self/exe), so package.sh installs the binary

@@ -126,6 +126,13 @@ impl GgufSubprocessTranscriber {
             .arg(self.engine)
             .arg("--config-json")
             .arg(&self.config_json)
+            // The worker reports the backend transcribe.cpp actually bound
+            // (Vulkan, or a CPU fallback) here, for `voxtype status`. Workers
+            // that predate this ignore it.
+            .env(
+                crate::status_json::GGUF_STATUS_ENV,
+                Config::runtime_dir().join(crate::status_json::GGUF_STATUS_FILE),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -472,6 +479,89 @@ mod tests {
         std::os::unix::fs::symlink(&executable, &symlink).unwrap();
 
         assert_eq!(select_worker_path(None, Some(&symlink)), variant_worker);
+    }
+
+    /// Every release variant compiles the GGUF client, so each one must find
+    /// the companion that packaging installs under its own name.
+    #[test]
+    fn every_release_variant_prefers_its_own_worker() {
+        for variant in [
+            "avx2",
+            "avx512",
+            "vulkan",
+            "onnx-avx2",
+            "onnx-avx512",
+            "onnx-cuda-12",
+            "onnx-cuda-13",
+            "onnx-migraphx",
+            "cpu",
+            "onnx",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let executable = dir.path().join(format!("voxtype-{variant}"));
+            let variant_worker = dir.path().join(format!("{WORKER_BIN}-{variant}"));
+            touch(&executable);
+            touch(&dir.path().join(WORKER_BIN));
+            touch(&variant_worker);
+
+            assert_eq!(
+                select_worker_path(None, Some(&executable)),
+                variant_worker,
+                "{variant}"
+            );
+        }
+    }
+
+    /// The baseline binary has no variant worker in the packages; the generic
+    /// worker is the v2-floor build it pairs with.
+    #[test]
+    fn baseline_executable_uses_generic_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("voxtype-baseline");
+        let generic_worker = dir.path().join(WORKER_BIN);
+        touch(&executable);
+        touch(&generic_worker);
+        touch(&dir.path().join("voxtype-gguf-worker-vulkan"));
+
+        assert_eq!(select_worker_path(None, Some(&executable)), generic_worker);
+    }
+
+    /// GPU ONNX binaries live in provider subdirectories behind top-level
+    /// symlinks (and /usr/bin/voxtype or the legacy voxtype-onnx-rocm name
+    /// pointing at those). The worker beside the real binary wins.
+    #[cfg(unix)]
+    #[test]
+    fn gpu_subdirectory_symlinks_select_the_nested_variant_worker() {
+        for (subdir, variant, alias) in [
+            ("cuda-12", "onnx-cuda-12", "voxtype-onnx-cuda"),
+            ("cuda-13", "onnx-cuda-13", "voxtype-onnx-cuda"),
+            ("migraphx", "onnx-migraphx", "voxtype-onnx-rocm"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let lib = dir.path().join("usr/lib/voxtype");
+            let nested = lib.join(subdir);
+            std::fs::create_dir_all(&nested).unwrap();
+            let executable = nested.join(format!("voxtype-{variant}"));
+            let nested_worker = nested.join(format!("{WORKER_BIN}-{variant}"));
+            touch(&executable);
+            touch(&nested_worker);
+            touch(&lib.join(WORKER_BIN));
+            std::os::unix::fs::symlink(format!("../{WORKER_BIN}"), nested.join(WORKER_BIN))
+                .unwrap();
+            let top = lib.join(format!("voxtype-{variant}"));
+            std::os::unix::fs::symlink(format!("{subdir}/voxtype-{variant}"), &top).unwrap();
+            let aliased = lib.join(alias);
+            std::os::unix::fs::symlink(&top, &aliased).unwrap();
+
+            for entry in [&executable, &top, &aliased] {
+                assert_eq!(
+                    select_worker_path(None, Some(entry)),
+                    nested_worker,
+                    "{}",
+                    entry.display()
+                );
+            }
+        }
     }
 
     #[test]

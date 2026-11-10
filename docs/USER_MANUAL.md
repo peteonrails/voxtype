@@ -59,6 +59,62 @@ Working explicit ONNX/MIGraphX setups stay unchanged in legacy-capable builds.
 Save operations preserve unrelated settings and comments. Finish the current
 dictation or meeting before explicitly restarting to apply an engine change.
 
+## Model upgrade offers
+
+When a better replacement exists for the model you use, voxtype offers it in the
+tray menu, the Settings Engine section and the Waybar tooltip ("Model update
+available"). Nothing changes until you accept. There are two kinds of offer:
+
+| Current model | Offer |
+|---|---|
+| `parakeet-tdt-0.6b-v3`, `parakeet-tdt-0.6b-v3-int8` (ONNX) | Parakeet Ultra (recommended), or the same model as `parakeet-tdt-0.6b-v3-Q8_0.gguf` |
+| `parakeet-tdt-0.6b-v3-*.gguf` | Parakeet Ultra |
+| `parakeet-tdt-0.6b-v2`, `parakeet-tdt-0.6b-v2-int8` (ONNX) | Parakeet Ultra |
+| `cohere-transcribe-q4f16`, `-q4`, `-int8` (ONNX) | `cohere-transcribe-03-2026-Q4_K_M.gguf` |
+| `cohere-transcribe-fp16` (ONNX) | `cohere-transcribe-03-2026-Q8_0.gguf` |
+
+A format update redownloads the model you already use in the GGUF format, for
+better performance. Parakeet Ultra is a different model that covers the same 25
+European languages as Parakeet v3. Streaming setups (`[parakeet] streaming = true`
+or `parakeet-unified-en-0.6b`) get no offer, because GGUF models do not stream
+yet. Offers only appear when this build includes the GGUF runtime for the engine.
+
+From a terminal:
+
+```sh
+voxtype setup migrate                          # show offers for the current model
+voxtype setup migrate --accept parakeet-ultra  # download, verify, switch, restart
+voxtype setup migrate --decline                # keep the current model
+voxtype setup migrate --cleanup                # remove the old ONNX models' files
+voxtype setup migrate --json                   # the status object, for scripts
+```
+
+Accepting shows the download size and asks before downloading (`--yes` skips the
+question). The download is checked against its pinned sha256, then engine and
+model are switched in one validated write and a running daemon is restarted. If
+anything fails, including a cancelled download, `config.toml` is left exactly as
+it was and the offer stays available. Your old models' files are kept until
+voxtype has transcribed successfully with the new model; after that
+`voxtype setup migrate --cleanup` deletes every ONNX model of that engine from
+the models directory, not only the one you switched from.
+
+Moving to GGUF is one way. For Parakeet and Cohere, whose model lists hold both
+ONNX and GGUF checkpoints, Settings and the TUI list ONNX models only while one
+is configured, and only that one. Once you are on a GGUF model the ONNX entries
+are gone from the list. They can still be selected from the command line until
+voxtype 2.0 removes ONNX support, for example
+`voxtype config set parakeet.model parakeet-tdt-0.6b-v3`.
+
+Declining records your answer in `~/.local/state/voxtype/model_upgrade.json`,
+never in `config.toml`. The offer stays listed, marked declined, so you can
+still accept it later, and the tooltip line goes away.
+
+Models that run on ONNX Runtime also carry a notice: ONNX support is removed in
+voxtype 2.0. The notice gives the command that pins voxtype to the current
+version for your install method, for example `IgnorePkg = voxtype-bin` in
+`/etc/pacman.conf` on Arch, `sudo apt-mark hold voxtype` on Debian and Ubuntu,
+or `sudo dnf versionlock add voxtype` on Fedora.
+
 Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, works on X11 too. This manual covers everything you need to know to use Voxtype effectively.
 
 ## OSD style picker
@@ -337,7 +393,7 @@ Query the daemon's current state (for Waybar/Polybar integration).
 voxtype status                      # Basic status (text format)
 voxtype status --format json        # JSON output for Waybar
 voxtype status --follow             # Continuously output on state changes
-voxtype status --format json --extended  # Include model, device, backend
+voxtype status --format json --extended  # Include model, device, backend, upgrade offers
 voxtype status --format json --icon-theme nerd-font  # Use specific icon theme
 ```
 
@@ -348,7 +404,7 @@ voxtype status --format json --icon-theme nerd-font  # Use specific icon theme
 | `--format text` | Human-readable output (default) |
 | `--format json` | JSON output for status bars |
 | `--follow` | Watch for state changes and output continuously |
-| `--extended` | Include model, device, and backend in JSON output |
+| `--extended` | Include model, device, backend and `model_upgrade` in JSON output |
 | `--icon-theme THEME` | Override icon theme (emoji, nerd-font, material, etc.) |
 
 **Example JSON output with `--extended`:**
@@ -359,9 +415,22 @@ voxtype status --format json --icon-theme nerd-font  # Use specific icon theme
   "tooltip": "Voxtype ready\nModel: base.en\nDevice: default\nBackend: CPU (AVX-512)",
   "model": "base.en",
   "device": "default",
-  "backend": "CPU (AVX-512)"
+  "backend": "CPU (AVX-512)",
+  "model_upgrade": null
 }
 ```
+
+`model_upgrade` is `null` unless there is an upgrade offer, an ONNX removal
+notice or a previous model to clean up. Otherwise it holds the same object as
+`voxtype setup migrate --json`: `schema`, `current` (engine, model, format),
+`offers` (each with `id`, `kind`, `engine`, `model`, `title`, `detail`,
+`download_bytes`, `recommended` and `declined`), `removal_notice` and `cleanup`.
+While an offer is open the tooltip ends with "Model update available".
+
+For a GGUF model, `backend` describes the transcribe.cpp worker that serves it,
+for example `GGUF Vulkan (transcribe.cpp)` or `GGUF CPU (transcribe.cpp)`, rather
+than the main binary's variant. With `gguf_backend = "auto"` the Vulkan or CPU
+detail appears once the worker has loaded the model.
 
 ### `voxtype setup gpu`
 

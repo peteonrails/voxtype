@@ -1500,7 +1500,7 @@ threads = 12
 
 The transcribe.cpp compute backend for GGUF models. Ignored for ONNX models. Accepts the same values as `[cohere] gguf_backend`: `auto`, `cpu`, `cpu_accel`, `vulkan`, `metal`, `cuda`, `rocm`.
 
-`"vulkan"` requires a hardware Vulkan device and reports an error if transcribe.cpp would run on a software renderer such as llvmpipe; `"auto"` lets transcribe.cpp choose. `--features parakeet-gguf` (included in `gpu-vulkan`) lets voxtype use GGUF models; transcribe.cpp itself runs in `voxtype-gguf-worker`, and the backends available are the ones that worker was built with (`--features vulkan` for Vulkan). GGUF models do not support `streaming = true`. See [PARAKEET.md](PARAKEET.md#gguf-on-vulkan-transcribecpp) for timings.
+`"vulkan"` requires a hardware Vulkan device and reports an error if transcribe.cpp would run on a software renderer such as llvmpipe; `"auto"` lets transcribe.cpp choose. `--features parakeet-gguf` (included in `gpu-vulkan` and in every release binary) lets voxtype use GGUF models; transcribe.cpp itself runs in `voxtype-gguf-worker`, and the backends available are the ones that worker was built with (`--features vulkan` for Vulkan). GGUF models do not support `streaming = true`. See [PARAKEET.md](PARAKEET.md#gguf-on-vulkan-transcribecpp) for timings.
 
 ### on_demand_loading
 
@@ -1846,7 +1846,7 @@ gguf_backend = "vulkan"
 language = "en"
 ```
 
-`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
+`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Release packages ship a Vulkan-capable worker beside the `vulkan` and x86_64 ONNX binaries and a CPU worker beside the others. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
 
 ---
 

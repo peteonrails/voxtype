@@ -36,6 +36,11 @@ RUN apt-get update && apt-get install -y \
     git \
     binutils \
     python3 \
+    libvulkan-dev \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
@@ -61,12 +66,20 @@ ENV TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CON
 ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
-# Build with all ONNX engines
-RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
+# Build with all ONNX engines plus the GGUF client (see Dockerfile.onnx).
+#
+# The worker is Vulkan-capable like every x86_64 ONNX variant's. Its build
+# drops CFLAGS/CXXFLAGS: ggml-vulkan compiles vulkan-shaders-gen as a host
+# tool through ExternalProject, which inherits them from the environment and
+# would SIGILL on a non-AVX-512 builder while generating shaders. The worker's
+# AVX-512 CPU kernels come from TRANSCRIBE_CMAKE_ARGS, and its Rust code from
+# the per-target RUSTFLAGS, so neither depends on CFLAGS.
+RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-onnx-avx512 \
-    && cargo build --release --target x86_64-unknown-linux-gnu -p voxtype-gguf-worker \
+    && env -u CFLAGS -u CXXFLAGS \
+        cargo build --release --target x86_64-unknown-linux-gnu -p voxtype-gguf-worker --features vulkan \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/x86_64-unknown-linux-gnu/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
@@ -93,6 +106,8 @@ RUN echo "=== Checking for AVX-512 instructions ===" \
          && exit 1; \
        fi \
     && echo "✓ Binary contains $avx512_count AVX-512 instructions" \
+    && scripts/verify-gguf-companion.sh --vulkan \
+        /tmp/voxtype-onnx-avx512 /tmp/voxtype-gguf-worker \
     && echo "=== Binary size ===" \
     && ls -lh /tmp/voxtype-onnx-avx512
 

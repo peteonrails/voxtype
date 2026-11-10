@@ -47,6 +47,9 @@ Item {
   signal replacementSetRequested(string from, string to)
   signal replacementUnsetRequested(string from)
   signal cancelDownloadRequested()
+  signal upgradeAcceptRequested(string offerId)
+  signal upgradeDeclineRequested()
+  signal upgradeCleanupRequested()
 
   // A row's field gave the keyboard back (Escape); the panel puts focus on the
   // card's key catcher so j/k drive the cursor again.
@@ -94,6 +97,15 @@ Item {
   property bool downloadCancelling: false
   property bool downloadBusy: false
   property var downloadErrors: ({})
+
+  // Model upgrade offers (see UpgradeOfferBanner). Shown on the Engine section.
+  property var upgradeStatus: null
+  property string upgradeBusyOfferId: ""
+  property var upgradeErrors: ({})
+  property bool upgradeDeclining: false
+  property bool upgradeCleaningUp: false
+  property bool upgradeDeclinedHere: false
+  property string upgradeActionError: ""
 
   readonly property string engineSection: {
     for (var i = 0; i < root.keys.length; i++) {
@@ -306,6 +318,29 @@ Item {
         width: scroller.availableWidth
         spacing: Style.spacing.panelGap
 
+        // First thing in the Engine section, above the catalog it would change.
+        UpgradeOfferBanner {
+          id: upgradeBanner
+          objectName: "upgradeOfferBanner"
+          width: parent.width
+          visible: root.showEngineCard && active
+          status: root.upgradeStatus
+          busyOfferId: root.upgradeBusyOfferId
+          downloadPct: root.downloadPct
+          downloadFile: root.downloadFile
+          downloadCancelling: root.downloadCancelling
+          downloadBusy: root.downloadBusy
+          offerErrors: root.upgradeErrors
+          declining: root.upgradeDeclining
+          cleaningUp: root.upgradeCleaningUp
+          declinedHere: root.upgradeDeclinedHere
+          actionError: root.upgradeActionError
+          onAcceptRequested: function(offerId) { root.upgradeAcceptRequested(offerId) }
+          onCancelRequested: root.cancelDownloadRequested()
+          onDeclineRequested: root.upgradeDeclineRequested()
+          onCleanupRequested: root.upgradeCleanupRequested()
+        }
+
         EngineModelCard {
           width: parent.width
           visible: root.showEngineCard
@@ -315,6 +350,7 @@ Item {
           modelValue: root.catalogEngine === root.engine ? root.modelValue : ""
           language: root.catalogLanguage
           downloadingModel: root.downloadingModel
+          otherDownloadBusy: root.downloadBusy
           downloadPct: root.downloadPct
           downloadFile: root.downloadFile
           downloadCancelling: root.downloadCancelling

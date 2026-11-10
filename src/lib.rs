@@ -88,6 +88,7 @@ pub mod menubar;
 pub mod model_catalog;
 pub mod model_manager;
 pub mod model_selection;
+pub mod model_upgrade;
 pub mod notification;
 pub mod osd;
 pub mod output;

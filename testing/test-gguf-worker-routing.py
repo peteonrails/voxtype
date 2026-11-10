@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Test the real Voxtype executable's worker routing and init diagnostics.
 
-Build with --features cohere-gguf,parakeet-gguf, then run:
+Build with the release GGUF client (--features gguf,cohere-gguf,parakeet-gguf,
+plus the ONNX engines for the ONNX-vs-GGUF model-name checks), then run:
   python3 testing/test-gguf-worker-routing.py --binary target/debug/voxtype
 
 Protocol-sentinel workers isolate routing from native backend/model availability.
@@ -40,6 +41,12 @@ class WorkerRoutingTests(unittest.TestCase):
             + json.dumps(str(self.model)) + '\ngguf_backend = "cpu"\nthreads = 2\n'
         )
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("VOXTYPE_")}
+        # Catalog names resolve against $XDG_DATA_HOME/voxtype/models; keep
+        # that inside the temp tree too.
+        self.models = self.root / "xdg-data/voxtype/models"
+        self.models.mkdir(parents=True)
+        self.env["XDG_DATA_HOME"] = str(self.root / "xdg-data")
+        self.env["XDG_CONFIG_HOME"] = str(self.root / "xdg-config")
 
     def executable(self, name):
         assert BINARY is not None
@@ -94,6 +101,106 @@ class WorkerRoutingTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, output)
         self.assertIn("routing-probe:" + generic.name, output)
         self.assertIn(str(worker), output)
+
+    def transcribe(self, executable, config_text):
+        self.config.write_text(config_text)
+        result = subprocess.run(
+            [str(executable), "--config", str(self.config), "transcribe",
+             str(ROOT / "tests/fixtures/vad/speech_hello.wav")],
+            env=self.env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        return result.returncode, result.stdout + result.stderr
+
+    def test_every_release_variant_prefers_its_own_worker(self):
+        # Top-level package layout: each variant's worker sits beside it.
+        for variant in ("avx2", "avx512", "vulkan", "onnx-avx2", "onnx-avx512"):
+            with self.subTest(variant):
+                executable = self.executable("voxtype-" + variant)
+                self.worker("voxtype-gguf-worker")
+                self.check_routing(executable, self.worker("voxtype-gguf-worker-" + variant))
+
+    def test_baseline_uses_generic_worker(self):
+        executable = self.executable("voxtype-baseline")
+        self.worker("voxtype-gguf-worker-avx2")
+        self.check_routing(executable, self.worker("voxtype-gguf-worker"))
+
+    def test_gpu_subdirectory_variants_use_nested_variant_worker(self):
+        assert BINARY is not None
+        generic = self.worker("voxtype-gguf-worker")
+        for subdir, alias in (("cuda-12", "voxtype-onnx-cuda"), ("cuda-13", None),
+                              ("migraphx", "voxtype-onnx-rocm")):
+            with self.subTest(subdir):
+                nested = self.lib / subdir
+                nested.mkdir()
+                executable = nested / ("voxtype-onnx-" + subdir)
+                shutil.copy2(BINARY, executable)
+                (nested / "voxtype-gguf-worker").symlink_to("../" + generic.name)
+                worker = nested / ("voxtype-gguf-worker-onnx-" + subdir)
+                worker.write_text(
+                    '#!/usr/bin/env python3\nimport json\nprint(json.dumps('
+                    '{"ok": False, "kind": "init_failed", "error": "routing-probe:'
+                    + worker.name + '"}))\n')
+                worker.chmod(0o755)
+                top = self.lib / ("voxtype-onnx-" + subdir)
+                top.symlink_to(subdir + "/voxtype-onnx-" + subdir)
+                entries = [executable, top]
+                if alias:
+                    (self.lib / alias).symlink_to(top.name)
+                    entries.append(self.lib / alias)
+                link = self.bin / ("voxtype-" + subdir)
+                link.symlink_to(top)
+                entries.append(link)
+                for entry in entries:
+                    self.check_routing(entry, worker)
+
+    def test_model_names_route_between_onnx_and_gguf(self):
+        executable = self.executable("voxtype-onnx-avx2")
+        self.worker("voxtype-gguf-worker")
+        worker = self.worker("voxtype-gguf-worker-onnx-avx2")
+        for engine, gguf, onnx in (
+            ("parakeet", "parakeet-ultra-Q8_0.gguf", "parakeet-tdt-0.6b-v3"),
+            ("cohere", "cohere-transcribe-03-2026-Q4_K_M.gguf", "cohere-transcribe-q4f16"),
+        ):
+            with self.subTest(engine=engine, model=gguf):
+                (self.models / gguf).touch()
+                code, output = self.transcribe(
+                    executable, f'engine = "{engine}"\n[{engine}]\nmodel = "{gguf}"\n')
+                self.assertNotEqual(code, 0, output)
+                self.assertIn("routing-probe:" + worker.name, output)
+            with self.subTest(engine=engine, model=onnx):
+                # An existing explicit ONNX config keeps running ONNX: the
+                # worker is never started, whatever the build's GGUF default.
+                code, output = self.transcribe(
+                    executable, f'engine = "{engine}"\n[{engine}]\nmodel = "{onnx}"\n')
+                self.assertNotEqual(code, 0, output)
+                self.assertNotIn("routing-probe:", output)
+                self.assertNotIn("gguf-worker", output)
+                # ONNX builds name the missing model; GGUF-only builds name
+                # the ONNX feature they lack. Neither reaches the worker.
+                self.assertTrue(onnx in output or "--features" in output, output)
+
+    def test_explicit_onnx_model_survives_gguf_default(self):
+        executable = self.executable("voxtype-onnx-avx2")
+        for engine, onnx in (("parakeet", "parakeet-tdt-0.6b-v3"),
+                             ("cohere", "cohere-transcribe-q4f16")):
+            with self.subTest(engine):
+                self.config.write_text(f'engine = "{engine}"\n[{engine}]\nmodel = "{onnx}"\n')
+                result = subprocess.run(
+                    [str(executable), "--config", str(self.config), "config", "get",
+                     engine + ".model"],
+                    env=self.env, capture_output=True, text=True, timeout=20, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), onnx)
+
+    def test_info_engines_reports_gguf_compiled(self):
+        result = subprocess.run(
+            [str(BINARY), "info", "engines", "--json"],
+            env=self.env, capture_output=True, text=True, timeout=20, check=True,
+        )
+        compiled = {e["name"]: e["compiled"] for e in json.loads(result.stdout)}
+        for engine in ("gguf", "parakeet", "cohere"):
+            self.assertTrue(compiled.get(engine), (engine, compiled))
 
     def test_direct_vulkan_prefers_variant(self):
         executable = self.executable("voxtype-vulkan")

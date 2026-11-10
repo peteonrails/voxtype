@@ -1154,6 +1154,10 @@ pub struct Daemon {
     // wins: some paths report a specific outcome (no speech) and then
     // fall through a generic one (empty result) on the way to idle.
     osd_outcome_sent: std::sync::atomic::AtomicBool,
+    // An accepted model upgrade still waiting for its first successful
+    // transcription, after which `setup migrate --cleanup` may delete the
+    // previous model. Read once at startup so the hot path does no I/O.
+    model_upgrade_pending: bool,
 }
 
 impl Daemon {
@@ -1263,6 +1267,11 @@ impl Daemon {
             None
         };
 
+        let model_upgrade_pending = crate::model_upgrade::pending_first_success(
+            &crate::model_upgrade::state_path(),
+            config.model_name(),
+        );
+
         Self {
             start_request: None,
             config,
@@ -1308,6 +1317,7 @@ impl Daemon {
             osd_session_started_at_ms: 0,
             osd_session_suppressed: std::sync::atomic::AtomicBool::new(false),
             osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
+            model_upgrade_pending,
         }
     }
 
@@ -3621,6 +3631,38 @@ impl Daemon {
         }
     }
 
+    /// Mark an accepted model upgrade as proven by a successful transcription.
+    fn record_model_upgrade_success(&mut self) {
+        if !self.model_upgrade_pending {
+            return;
+        }
+        self.model_upgrade_pending = false;
+        match crate::model_upgrade::record_first_success(
+            &crate::model_upgrade::state_path(),
+            self.config.model_name(),
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    "First transcription with the upgraded model succeeded; the previous model can be removed with `voxtype setup migrate --cleanup`"
+                );
+                // The tray reads offers once at startup; push the cleanup
+                // offer now so "Remove old model files" appears without a
+                // daemon restart.
+                self.refresh_tray_upgrade();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "Could not record the model upgrade success"),
+        }
+    }
+
+    fn refresh_tray_upgrade(&self) {
+        let Some(tray) = &self.tray else { return };
+        match serde_json::to_value(crate::model_upgrade::status_for_config(&self.config)) {
+            Ok(value) => tray.update_upgrade(crate::tray::UpgradeMenu::from_status_value(&value)),
+            Err(error) => tracing::warn!(%error, "Could not refresh the tray's model upgrade menu"),
+        }
+    }
+
     /// Handle transcription completion (called when transcription_task completes)
     async fn handle_transcription_result(
         &mut self,
@@ -3661,6 +3703,7 @@ impl Daemon {
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
+                    self.record_model_upgrade_success();
 
                     // Resolve the profile before cleanup because vocabulary is
                     // the first profile-aware stage in the cleanup pipeline.
@@ -4127,6 +4170,10 @@ impl Daemon {
 
         // Clean up any stale cancel and profile override files from previous runs
         cleanup_cancel_file();
+        // The GGUF worker rewrites this once it has bound a backend; a report
+        // from a previous daemon must not describe this one.
+        let _ =
+            std::fs::remove_file(Config::runtime_dir().join(crate::status_json::GGUF_STATUS_FILE));
         let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
         cleanup_profile_override();
 

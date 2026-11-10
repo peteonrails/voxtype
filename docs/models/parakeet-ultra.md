@@ -26,11 +26,12 @@ Pinned license and conversion notice:
 | `parakeet-ultra-Q8_0.gguf` | 740363168 | `007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59` |
 | `parakeet-ultra-Q4_K_M.gguf` | 486280096 | `c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9` |
 
-Downloads use the revision-pinned conversion repository directly, an explicit
-exception to the usual R2-only policy. There is no approved Ultra R2 mirror and
-none is invented here. The downloader checks bytes and SHA-256 before promotion;
-other models retain their original mirror URLs. No weights are bundled with the
-application. Model publication needs separate approval.
+Downloads come from the voxtype R2 mirror like every other model, at
+`https://models.voxtype.io/parakeet/parakeet-ultra-<quant>-a1539be1b849ea7463b88343e5277b373d0c4ea9/`
+(`<quant>` is `f16`, `q8_0` or `q4_k_m`). Each mirror directory holds the exact
+conversion bytes plus LICENSE, NOTICE, the conversion and upstream model cards,
+ATTRIBUTION.txt and a manifest with SHA-256s. The downloader checks bytes and
+SHA-256 before promotion. No weights are bundled with the application.
 
 The cards list 25 European languages: English, German, French, Spanish, Italian,
 Portuguese, Russian, Ukrainian, Croatian, Slovenian, Latvian, Lithuanian,

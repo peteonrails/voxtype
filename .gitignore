@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+/target-*/
 /dist
 
 # Cached prebuilt downloads (e.g. Microsoft ONNX Runtime for macOS builds)

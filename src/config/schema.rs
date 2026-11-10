@@ -176,6 +176,10 @@ impl KeySpec {
 /// Only features that gate config keys are listed. Pinned against
 /// [`crate::config_set::engine_feature_compiled`] by a test so the two
 /// `cfg!` blocks can't drift.
+// In a build with every listed feature (the ONNX release binaries, which also
+// carry the GGUF client) each arm is `true`, and clippy would rewrite this as
+// `matches!`, hiding the per-feature mapping the other builds depend on.
+#[allow(clippy::match_like_matches_macro)]
 pub fn feature_compiled(feature: &str) -> bool {
     match feature {
         "parakeet" => cfg!(any(feature = "parakeet", feature = "parakeet-gguf")),

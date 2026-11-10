@@ -10,8 +10,10 @@
 //!
 //! ## Contract
 //!
-//! - Key order: `text, alt, class, tooltip` (then `model, device, backend`
-//!   when extended).
+//! - Key order: `text, alt, class, tooltip` (then `model, device, backend,
+//!   model_upgrade` when extended). `model_upgrade` is the
+//!   `voxtype::model_upgrade::UpgradeStatus` object, or `null` when there is
+//!   nothing to offer, no ONNX removal notice and nothing to clean up.
 //! - Whitespace: a single space after each `:` between key and value.
 //! - The tooltip is a JSON string with `\n` (the two-byte escape) between
 //!   lines, not a real `0x0a` newline — Waybar renders these client-side.
@@ -23,7 +25,16 @@
 //! Changing the shape is a breaking change for every consumer.
 
 use crate::config;
+use crate::model_upgrade::UpgradeStatus;
 use crate::setup;
+
+/// Environment variable naming the file `voxtype-gguf-worker` reports its
+/// bound backend in, and that file's name in the runtime directory.
+pub const GGUF_STATUS_ENV: &str = "VOXTYPE_GGUF_STATUS_FILE";
+pub const GGUF_STATUS_FILE: &str = "gguf_backend.json";
+
+/// Tooltip line shown while an offer is open (not declined).
+pub const MODEL_UPDATE_LINE: &str = "Model update available";
 
 /// Extended status info for JSON output. Three fields a status consumer
 /// typically wants in tooltips alongside the base state: which model,
@@ -33,6 +44,8 @@ pub struct ExtendedStatusInfo {
     pub model: String,
     pub device: String,
     pub backend: String,
+    /// `None` serializes as `null`: nothing to offer, notice or clean up.
+    pub model_upgrade: Option<UpgradeStatus>,
 }
 
 impl ExtendedStatusInfo {
@@ -54,16 +67,111 @@ impl ExtendedStatusInfo {
     pub fn from_config(config: &config::Config) -> Self {
         let inv = setup::binary::inventory();
         let daemon_exe = inv.daemon_pid.and_then(setup::binary::running_binary_path);
-        let backend =
+        // A GGUF model runs in voxtype-gguf-worker through transcribe.cpp
+        // whatever the main binary's variant is, so the variant label (for
+        // example "ONNX GPU (MIGraphX)") would describe a runtime that is not
+        // serving the model.
+        let backend = gguf_backend_label(
+            config,
+            inv.daemon_pid.is_some(),
+            &config::Config::runtime_dir(),
+        )
+        .unwrap_or_else(|| {
             daemon_backend_label(inv.running_variant, daemon_exe.as_deref(), &inv.binary_path)
-                .unwrap_or_else(|| install_backend_label(&inv));
+                .unwrap_or_else(|| install_backend_label(&inv))
+        });
 
         Self {
             model: config.model_name().to_string(),
             device: config.audio.device.clone(),
             backend,
+            model_upgrade: model_upgrade_for(config),
         }
     }
+
+    /// Recompute the upgrade object, for `status --follow` after an offer
+    /// was accepted, declined or cleaned up.
+    pub fn refresh_model_upgrade(&mut self, config: &config::Config) {
+        self.model_upgrade = model_upgrade_for(config);
+    }
+}
+
+fn model_upgrade_for(config: &config::Config) -> Option<UpgradeStatus> {
+    Some(crate::model_upgrade::status_for_config(config)).filter(UpgradeStatus::has_anything)
+}
+
+/// The configured GGUF model and its `gguf_backend` setting, if the active
+/// engine runs one.
+fn active_gguf(config: &config::Config) -> Option<(&str, &str)> {
+    use config::TranscriptionEngine;
+    let model = config.model_name();
+    match config.engine {
+        TranscriptionEngine::Gguf => config
+            .gguf
+            .as_ref()
+            .map(|gguf| (gguf.model.as_str(), gguf.gguf_backend.as_str())),
+        TranscriptionEngine::Parakeet if crate::model_selection::is_gguf(model) => config
+            .parakeet
+            .as_ref()
+            .map(|p| (p.model.as_str(), p.gguf_backend.as_str())),
+        TranscriptionEngine::Cohere if crate::model_selection::is_gguf(model) => config
+            .cohere
+            .as_ref()
+            .map(|c| (c.model.as_str(), c.gguf_backend.as_str())),
+        _ => None,
+    }
+}
+
+/// "GGUF Vulkan (transcribe.cpp)" from a transcribe.cpp backend name.
+fn gguf_label(backend: &str) -> String {
+    let lower = backend.to_ascii_lowercase();
+    let name = if lower.contains("vulkan") {
+        "Vulkan"
+    } else if lower.contains("cuda") {
+        "CUDA"
+    } else if lower.contains("rocm") || lower.contains("hip") {
+        "ROCm"
+    } else if lower.contains("metal") {
+        "Metal"
+    } else if lower.starts_with("cpu") {
+        "CPU"
+    } else {
+        return "GGUF (transcribe.cpp)".to_string();
+    };
+    format!("GGUF {name} (transcribe.cpp)")
+}
+
+/// Backend label for a GGUF model, or `None` when the active model is not
+/// GGUF. A running daemon's worker reports the backend it bound in the
+/// runtime directory; that report wins because `auto` can resolve to Vulkan
+/// or fall back to the CPU. Without one, an explicit `gguf_backend` setting
+/// is the best answer, and `auto` stays unqualified.
+fn gguf_backend_label(
+    config: &config::Config,
+    daemon_running: bool,
+    runtime_dir: &std::path::Path,
+) -> Option<String> {
+    let (model, configured) = active_gguf(config)?;
+    let basename = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    if daemon_running {
+        let reported = std::fs::read_to_string(runtime_dir.join(GGUF_STATUS_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .filter(|report| report["model"].as_str().and_then(basename) == basename(model))
+            .and_then(|report| report["backend"].as_str().map(str::to_string));
+        if let Some(backend) = reported {
+            return Some(gguf_label(&backend));
+        }
+    }
+    Some(if configured.eq_ignore_ascii_case("auto") {
+        "GGUF (transcribe.cpp)".to_string()
+    } else {
+        gguf_label(configured)
+    })
 }
 
 /// Backend label settled by the live daemon, or `None` when the caller
@@ -166,12 +274,25 @@ pub fn format_state_json(
         Some(info) => {
             // Use real newlines in the tooltip — serde_json encodes each as
             // the two-byte `\n` escape, which is what waybar expects.
-            let tooltip = format!(
+            let mut tooltip = format!(
                 "{}\nModel: {}\nDevice: {}\nBackend: {}",
                 base_tooltip, info.model, info.device, info.backend
             );
+            if info
+                .model_upgrade
+                .as_ref()
+                .is_some_and(UpgradeStatus::has_open_offer)
+            {
+                tooltip.push('\n');
+                tooltip.push_str(MODEL_UPDATE_LINE);
+            }
+            let upgrade = info
+                .model_upgrade
+                .as_ref()
+                .and_then(|status| serde_json::to_string(status).ok())
+                .unwrap_or_else(|| "null".to_string());
             format!(
-                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}}}"#,
+                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}, "model_upgrade": {}}}"#,
                 json_str(text),
                 json_str(alt),
                 json_str(class),
@@ -179,6 +300,7 @@ pub fn format_state_json(
                 json_str(&info.model),
                 json_str(&info.device),
                 json_str(&info.backend),
+                upgrade,
             )
         }
         None => format!(
@@ -330,14 +452,15 @@ mod tests {
             model: "base.en".to_string(),
             device: "default".to_string(),
             backend: "CPU (AVX2)".to_string(),
+            model_upgrade: None,
         };
         assert_eq!(
             format_state_json("recording", &icons, Some(&ext)),
-            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)"}"#,
+            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null}"#,
         );
         assert_eq!(
             format_state_json("idle", &icons, Some(&ext)),
-            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)"}"#,
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null}"#,
         );
     }
 
@@ -358,6 +481,7 @@ mod tests {
             model: r#"large-v3-"turbo""#.to_string(),
             device: r#"PulseAudio "Main" \ Loopback"#.to_string(),
             backend: r#"GPU \\ CUDA"#.to_string(),
+            model_upgrade: None,
         };
 
         let json = format_state_json("recording", &icons, Some(&ext));
@@ -378,5 +502,115 @@ mod tests {
             .expect("tooltip must be a JSON string");
         assert!(tooltip.contains(r#"large-v3-"turbo""#));
         assert!(tooltip.contains(r#"PulseAudio "Main" \ Loopback"#));
+    }
+
+    fn upgrade(declined: bool) -> UpgradeStatus {
+        use crate::model_upgrade::{CurrentModel, Offer, RemovalNotice};
+        UpgradeStatus {
+            schema: 1,
+            current: CurrentModel {
+                engine: "parakeet".into(),
+                model: "parakeet-tdt-0.6b-v3".into(),
+                format: "onnx".into(),
+            },
+            offers: vec![Offer {
+                id: "parakeet-ultra".into(),
+                kind: "model".into(),
+                engine: "parakeet".into(),
+                model: "parakeet-ultra-Q8_0.gguf".into(),
+                title: "Parakeet Ultra is now available".into(),
+                detail: "d".into(),
+                download_bytes: 740363168,
+                recommended: true,
+                declined,
+            }],
+            removal_notice: Some(RemovalNotice {
+                version: "2.0".into(),
+                message: "m".into(),
+                pin_command: "p".into(),
+            }),
+            cleanup: None,
+        }
+    }
+
+    /// Existing keys keep their order and values; `model_upgrade` is
+    /// appended, and the tooltip gains one line only while an offer is open.
+    #[test]
+    fn model_upgrade_is_appended_and_flagged_in_the_tooltip() {
+        let icons = config::ResolvedIcons {
+            idle: "I".to_string(),
+            recording: "R".to_string(),
+            streaming: "S".to_string(),
+            transcribing: "T".to_string(),
+            stopped: "X".to_string(),
+        };
+        let mut ext = ExtendedStatusInfo {
+            model: "parakeet-tdt-0.6b-v3".to_string(),
+            device: "default".to_string(),
+            backend: "ONNX CPU (AVX2)".to_string(),
+            model_upgrade: Some(upgrade(false)),
+        };
+        let json = format_state_json("idle", &icons, Some(&ext));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.as_object().unwrap().contains_key("model_upgrade"));
+        assert!(json.starts_with(
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: parakeet-tdt-0.6b-v3\nDevice: default\nBackend: ONNX CPU (AVX2)\nModel update available", "model": "parakeet-tdt-0.6b-v3", "device": "default", "backend": "ONNX CPU (AVX2)", "model_upgrade": {"schema":1,"#
+        ));
+        assert_eq!(value["model_upgrade"]["offers"][0]["id"], "parakeet-ultra");
+        assert_eq!(value["model_upgrade"]["cleanup"], serde_json::Value::Null);
+
+        ext.model_upgrade = Some(upgrade(true));
+        let declined = format_state_json("idle", &icons, Some(&ext));
+        assert!(!declined.contains(MODEL_UPDATE_LINE));
+        assert!(declined.contains(r#""declined":true"#));
+    }
+
+    fn gguf_config(engine: &str, model: &str, backend: &str) -> config::Config {
+        let text = format!(
+            "engine = \"{engine}\"\n[{engine}]\nmodel = \"{model}\"\ngguf_backend = \"{backend}\"\n{}",
+            if engine == "gguf" { "architecture = \"qwen3_asr\"\nlanguage = \"auto\"\n" } else { "" }
+        );
+        toml::from_str(&text).unwrap()
+    }
+
+    /// Release blocker: a GGUF model served by voxtype-gguf-worker must not be
+    /// labelled with the main binary's ONNX execution provider.
+    #[test]
+    fn gguf_models_report_the_worker_backend_not_the_variant() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config = gguf_config("parakeet", "parakeet-ultra-Q8_0.gguf", "auto");
+        assert_eq!(
+            gguf_backend_label(&config, true, runtime.path()).as_deref(),
+            Some("GGUF (transcribe.cpp)")
+        );
+        std::fs::write(
+            runtime.path().join(GGUF_STATUS_FILE),
+            r#"{"model":"/home/u/.local/share/voxtype/models/parakeet-ultra-Q8_0.gguf","backend":"Vulkan","device":"Vulkan0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            gguf_backend_label(&config, true, runtime.path()).as_deref(),
+            Some("GGUF Vulkan (transcribe.cpp)")
+        );
+        // A report from a stopped daemon, or about another model, is ignored.
+        assert_eq!(
+            gguf_backend_label(&config, false, runtime.path()).as_deref(),
+            Some("GGUF (transcribe.cpp)")
+        );
+        let other = gguf_config("cohere", "cohere-transcribe-03-2026-Q4_K_M.gguf", "cpu");
+        assert_eq!(
+            gguf_backend_label(&other, true, runtime.path()).as_deref(),
+            Some("GGUF CPU (transcribe.cpp)")
+        );
+        let generic = gguf_config("gguf", "Qwen3-ASR-0.6B-Q8_0.gguf", "vulkan");
+        assert_eq!(
+            gguf_backend_label(&generic, false, runtime.path()).as_deref(),
+            Some("GGUF Vulkan (transcribe.cpp)")
+        );
+        // ONNX and Whisper models keep the variant label.
+        let onnx = gguf_config("parakeet", "parakeet-tdt-0.6b-v3", "auto");
+        assert_eq!(gguf_backend_label(&onnx, true, runtime.path()), None);
+        assert_eq!(gguf_label("cpu"), "GGUF CPU (transcribe.cpp)");
+        assert_eq!(gguf_label("CUDA0"), "GGUF CUDA (transcribe.cpp)");
     }
 }

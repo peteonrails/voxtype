@@ -73,10 +73,16 @@ ENV TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CON
 # switching to itself.
 ENV VOXTYPE_VARIANT=baseline
 
-RUN cargo build --release \
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker; GPU GGUF on Whisper builds comes from the vulkan variant.
+RUN cargo build --release --features gguf,cohere-gguf,parakeet-gguf \
     && cp target/release/voxtype /tmp/voxtype-baseline \
     && cargo build --release -p voxtype-gguf-worker \
     && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --run \
+        /tmp/voxtype-baseline /tmp/voxtype-gguf-worker
 
 # What this can and cannot prove.
 #

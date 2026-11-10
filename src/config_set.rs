@@ -240,11 +240,17 @@ pub fn select_model(
     model: &str,
     language: Option<&str>,
 ) -> Result<PathBuf, ConfigSetError> {
-    // This additive transaction is intentionally limited to the generic GGUF
-    // catalog. Legacy engine/model writes keep their RC2 contracts.
-    if engine != "gguf" {
+    // The generic GGUF catalog plus the two engines whose model field selects
+    // between ONNX and GGUF weights (the format-update path). Every other
+    // engine keeps `config set`.
+    if !matches!(engine, "gguf" | "parakeet" | "cohere") {
         return Err(ConfigSetError::IncompatibleModel(
-            "select-model currently supports only engine gguf. Other engines retain config set. Config unchanged.".into(),
+            "select-model supports engines gguf, parakeet and cohere. Other engines retain config set. Config unchanged.".into(),
+        ));
+    }
+    if language.is_some() && engine != "gguf" {
+        return Err(ConfigSetError::IncompatibleModel(
+            "--language is only supported for a GGUF selection. Config unchanged.".into(),
         ));
     }
     crate::model_selection::validate_ready(engine, model)
@@ -253,11 +259,6 @@ pub fn select_model(
     let mut editor = ConfigEditor::load_from_path(path)?;
     editor.set_string(engine, "model", model);
     if let Some(language) = language {
-        if engine != "gguf" {
-            return Err(ConfigSetError::IncompatibleModel(
-                "--language is only supported for a GGUF selection. Config unchanged.".into(),
-            ));
-        }
         editor.set_string("gguf", "language", language);
     }
     if engine == "gguf" {
@@ -1102,5 +1103,35 @@ type_delay_ms = 5
             let cfg = crate::config::load_config(Some(&path)).unwrap();
             assert_eq!(cfg.engine.name(), *name);
         }
+    }
+
+    /// The format-update transaction generalized `select-model` to parakeet
+    /// and cohere. Every refusal must leave the file byte-identical.
+    #[test]
+    fn select_model_refusals_preserve_config_bytes() {
+        let original = "# mine\nengine = \"parakeet\"\n\n[parakeet]\nmodel = \"parakeet-tdt-0.6b-v3\" # keep\n";
+        let (_dir, path) = temp_config(original);
+        for (engine, model, language) in [
+            ("whisper", "base.en", None),
+            ("moonshine", "base", None),
+            ("parakeet", "parakeet-ultra-Q8_0.gguf", Some("en")),
+            // Not installed under any models directory a test can see.
+            ("parakeet", "/nonexistent/parakeet-ultra-Q8_0.gguf", None),
+            (
+                "cohere",
+                "/nonexistent/cohere-transcribe-03-2026-Q4_K_M.gguf",
+                None,
+            ),
+        ] {
+            let error = select_model(path.clone(), engine, model, language).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{engine} {model}: {error}");
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                original,
+                "{engine} {model}"
+            );
+        }
+        let error = select_model(path.clone(), "whisper", "base.en", None).unwrap_err();
+        assert!(error.to_string().contains("gguf, parakeet and cohere"));
     }
 }

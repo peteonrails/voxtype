@@ -687,6 +687,14 @@ Item {
   property string downloadEngine: ""
   readonly property bool downloading: downloadModel !== ""
 
+  // A model upgrade's `setup migrate --accept` downloads through this same slot
+  // and speaks the same NDJSON, so it shares the progress plumbing, the cancel
+  // and the progress-flag fallback. It reports through upgradeFinished instead
+  // of downloadFinished: the switch and restart it does afterwards are not a
+  // plain download, and its errors belong to the offer, not to a model row.
+  property string upgradeOfferId: ""
+  readonly property bool upgrading: upgradeOfferId !== ""
+
   // Negative until the child reports a percentage. A build whose `setup
   // --download` predates --progress-format json prints human-readable lines
   // that parse to nothing, which is what indeterminate means here: the UI shows
@@ -715,6 +723,7 @@ Item {
 
   function startDownload(name, argument, engine) {
     if (root.downloading || downloadProc.running) return
+    root.upgradeOfferId = ""
     root.downloadModel = String(name)
     root.downloadArgument = argument ? String(argument) : String(name)
     root.downloadEngine = engine ? String(engine) : ""
@@ -727,8 +736,28 @@ Item {
     root.launchDownload(String(name))
   }
 
+  // `model` is what the offer downloads; it only labels the busy slot. The
+  // engine is left empty so no catalog row claims the progress: the banner
+  // shows it, and every Download button still goes flat while it runs.
+  function startUpgrade(offerId, model) {
+    if (root.downloading || downloadProc.running || migrateProc.running) return
+    root.upgradeOfferId = String(offerId)
+    root.downloadModel = String(model || offerId)
+    root.downloadArgument = ""
+    root.downloadEngine = ""
+    root.downloadPct = -1
+    root.downloadFile = ""
+    root.downloadError = ""
+    root.downloadStderr = ""
+    root.downloadCancelling = false
+    root.downloadJsonMode = true
+    root.launchDownload(root.downloadModel)
+  }
+
   function launchDownload(name) {
-    var args = [root.bin, "setup", "--download", "--no-post-install", "--model", root.downloadArgument]
+    var args = root.upgrading
+      ? [root.bin, "setup", "migrate", "--accept", root.upgradeOfferId, "--yes"]
+      : [root.bin, "setup", "--download", "--no-post-install", "--model", root.downloadArgument]
     if (root.downloadJsonMode) {
       args.push("--progress-format")
       args.push("json")
@@ -808,13 +837,26 @@ Item {
       }
 
       var message = root.downloadError !== "" ? root.downloadError : root.downloadStderr
+      var offerId = root.upgradeOfferId
 
       root.downloadModel = ""
+      root.upgradeOfferId = ""
       root.downloadPct = -1
       root.downloadFile = ""
       root.downloadError = ""
       root.downloadStderr = ""
       root.downloadCancelling = false
+
+      if (offerId !== "") {
+        // Exit status first: once its download is verified, `--accept`
+        // ignores SIGTERM until the switch and restart finish, so a cancel
+        // that arrives late can still end in a successful switch.
+        if (exitCode === 0) root.upgradeFinished(offerId, true, "")
+        else if (cancelled) root.upgradeFinished(offerId, false, "")
+        else root.upgradeFinished(offerId, false,
+                                  message || ("voxtype setup migrate --accept exited " + exitCode))
+        return
+      }
 
       if (cancelled) {
         root.downloadFinished(model, false, "")
@@ -826,6 +868,95 @@ Item {
       }
       root.downloadFinished(model, false,
                             message || ("voxtype setup --download exited " + exitCode))
+    }
+  }
+
+  // ------------------------------------------------------- model upgrades
+  //
+  // `setup migrate --json` is the one place the offers come from; the panel
+  // only renders them. A build without the subcommand exits non-zero, which is
+  // the same answer as "nothing to offer": the banner stays hidden.
+
+  // ok=false with an empty message is a cancellation, as for downloads.
+  signal upgradeFinished(string offerId, bool ok, string message)
+  // null when there is nothing to offer or the answer could not be read.
+  signal upgradeLoaded(var status)
+  signal declineFinished(bool ok, string message)
+  signal cleanupFinished(bool ok, string message)
+
+  property bool pendingUpgrade: false
+  readonly property bool declining: migrateProc.running && migrateProc.action === "decline"
+  readonly property bool cleaningUp: migrateProc.running && migrateProc.action === "cleanup"
+
+  function fetchUpgrade() {
+    if (upgradeProc.running) {
+      root.pendingUpgrade = true
+      return
+    }
+    root.pendingUpgrade = false
+    upgradeProc.out = ""
+    upgradeProc.command = [root.bin, "setup", "migrate", "--json"]
+    upgradeProc.running = true
+  }
+
+  Process {
+    id: upgradeProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: upgradeProc.out = String(text || "")
+    }
+    onExited: function(exitCode) {
+      if (root.pendingUpgrade) {
+        root.pendingUpgrade = false
+        Qt.callLater(root.fetchUpgrade)
+        return
+      }
+      var parsed = null
+      if (exitCode === 0) {
+        try {
+          parsed = JSON.parse(upgradeProc.out)
+        } catch (e) {
+          parsed = null
+        }
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = null
+      root.upgradeLoaded(parsed)
+    }
+  }
+
+  function declineUpgrade() {
+    root.runMigrate("decline", [root.bin, "setup", "migrate", "--decline"])
+  }
+
+  function cleanupUpgrade() {
+    root.runMigrate("cleanup", [root.bin, "setup", "migrate", "--cleanup"])
+  }
+
+  function runMigrate(action, args) {
+    if (migrateProc.running || root.downloading) return
+    migrateProc.action = action
+    migrateProc.err = ""
+    migrateProc.command = args
+    migrateProc.running = true
+  }
+
+  Process {
+    id: migrateProc
+    property string action: ""
+    property string err: ""
+    stderr: SplitParser {
+      onRead: function(line) {
+        var text = String(line || "").trim()
+        if (text !== "") migrateProc.err = text
+      }
+    }
+    onExited: function(exitCode) {
+      var action = migrateProc.action
+      var message = exitCode === 0 ? ""
+        : (migrateProc.err || ("voxtype setup migrate --" + action + " exited " + exitCode))
+      if (action === "decline") root.declineFinished(exitCode === 0, message)
+      else root.cleanupFinished(exitCode === 0, message)
     }
   }
 

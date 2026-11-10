@@ -534,6 +534,19 @@ the .so files sit alongside the binary.
 
 Note: ONNX binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
+### GGUF Worker Companions
+
+Every release binary compiles the GGUF client (`gguf,cohere-gguf,parakeet-gguf`; `gpu-vulkan` implies them) and ships `voxtype-${VERSION}-linux-<arch>-<variant>.gguf-worker`, built in the same Dockerfile. The application looks beside its resolved executable for `voxtype-gguf-worker-<variant>` (the executable name minus `voxtype-`), then the generic `voxtype-gguf-worker`, then `PATH`; `VOXTYPE_GGUF_WORKER` overrides all of it.
+
+| Worker | Variants | Why |
+|--------|----------|-----|
+| Vulkan-capable (`-p voxtype-gguf-worker --features vulkan`) | vulkan, onnx-avx2, onnx-avx512, onnx-cuda-12, onnx-cuda-13, onnx-migraphx | Ubuntu 24.04 images have `glslc`; `gguf_backend = "auto"` falls back to the CPU, but the worker links `libvulkan.so.1`, so packages depend on the Vulkan loader |
+| CPU | baseline, avx2, avx512, aarch64 cpu/onnx | 22.04 images (glibc 2.35 cap) have no `glslc` and CMake 3.22, below the 3.24 that ggml-vulkan's `find_package(Vulkan COMPONENTS glslc)` needs |
+
+`scripts/verify-gguf-companion.sh` gates each pair (Vulkan linkage, Haswell floor on non-AVX-512 workers, and `info engines --json` reporting gguf/parakeet/cohere compiled) in the Dockerfiles, `build-linux.yml` and `package.sh`. deb/rpm install the baseline worker as the generic `/usr/lib/voxtype/voxtype-gguf-worker`, each other top-level variant's worker as `voxtype-gguf-worker-<variant>`, and each GPU ONNX variant's worker inside its provider subdirectory (`cuda-12/voxtype-gguf-worker-onnx-cuda-12`, etc.) next to a `voxtype-gguf-worker -> ../voxtype-gguf-worker` symlink.
+
+In `Dockerfile.onnx-avx512` the worker build unsets `CFLAGS`/`CXXFLAGS`: ggml-vulkan builds `vulkan-shaders-gen` as a host tool through ExternalProject, which would inherit `-march=x86-64-v4` and SIGILL on a non-AVX-512 builder.
+
 ### GPU Feature Flags
 
 GPU acceleration is enabled via Cargo features:

@@ -96,6 +96,9 @@ struct ModelStatus {
     download_arg: Option<String>,
     /// Only populated with `--verify`.
     verification: Option<ModelVerification>,
+    /// An ONNX checkpoint in an engine that also has GGUF models: model lists
+    /// show it only while it is the configured model.
+    legacy: bool,
 }
 
 impl ModelStatus {
@@ -112,6 +115,7 @@ impl ModelStatus {
             health,
             download_arg: model_catalog::download_arg(engine, name),
             verification,
+            legacy: voxtype::model_upgrade::is_legacy_model(engine, name),
         }
     }
 
@@ -167,7 +171,14 @@ impl ModelStatus {
             o.insert("languages".into(), serde_json::json!(metadata.languages));
             o.insert("architecture".into(), serde_json::json!(metadata.arch));
         }
+        if let Some((license, url)) = voxtype::setup::model::gguf_license(self.name) {
+            o.insert("license".into(), serde_json::json!(license));
+            o.insert("license_url".into(), serde_json::json!(url));
+        }
         o.insert("installed".into(), serde_json::json!(self.installed()));
+        if self.legacy {
+            o.insert("legacy".into(), serde_json::json!(true));
+        }
         // `name` is the config value; the argument that downloads it is not
         // always the same string, and for five engines there is no such
         // argument at all. Spelling both out keeps a UI from building

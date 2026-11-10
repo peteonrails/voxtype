@@ -138,7 +138,7 @@ Parakeet on CPU is significantly faster than Whisper on CPU, and competitive wit
 
 Voxtype can also run Parakeet TDT 0.6B v3 as a GGUF model through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) on a Vulkan GPU. It is the same `parakeet` engine: a `[parakeet] model` ending in `.gguf` selects transcribe.cpp, anything else selects ONNX Runtime. It needs no ONNX Runtime.
 
-transcribe.cpp runs in a helper process, `voxtype-gguf-worker`, which voxtype starts when it loads the model and keeps running so the model stays loaded between recordings. It is a separate program because transcribe.cpp and Whisper each bundle their own copy of the ggml library, and the two copies cannot share one process. Release packages install the worker next to `voxtype`. Building from source, enable GGUF in voxtype with `--features gpu-vulkan` (or `--features parakeet-gguf`), then build the worker with the GPU backend you want:
+transcribe.cpp runs in a helper process, `voxtype-gguf-worker`, which voxtype starts when it loads the model and keeps running so the model stays loaded between recordings. It is a separate program because transcribe.cpp and Whisper each bundle their own copy of the ggml library, and the two copies cannot share one process. Every release binary includes the GGUF client, and release packages install a matching worker next to each binary: the `vulkan` and x86_64 ONNX binaries (`onnx-avx2`, `onnx-avx512`, `onnx-cuda-12`, `onnx-cuda-13`, `onnx-migraphx`) get a Vulkan-capable worker, so a Vulkan GPU runs GGUF whichever of those binaries you use, and with `gguf_backend = "auto"` it falls back to the CPU when no Vulkan device initializes. The Whisper CPU binaries (`baseline`, `avx2`, `avx512`) and the aarch64 binaries get a CPU worker. Building from source, enable GGUF in voxtype with `--features gpu-vulkan` (or `--features parakeet-gguf`), then build the worker with the GPU backend you want:
 
 ```sh
 cargo build --release -p voxtype-gguf-worker --features vulkan
@@ -175,7 +175,7 @@ Seconds to transcribe after the model is loaded, on a Ryzen AI 9 HX 370 with a R
 | 1 min | 0.95 | 0.91 | 3.83 | 2.81 |
 | 3 min | 3.43 | 3.42 | 12.3 | 9.30 |
 
-Word error rate on LibriSpeech test-clean was the same for all three: 1.7% on the 1-minute clip and 0.8% on the 3-minute clip. transcribe.cpp on its CPU backend was slower than ONNX (13.5 s for the 3-minute clip at 12 threads), so GGUF is the GPU path. Keep the ONNX model on machines without a hardware Vulkan device.
+Word error rate on LibriSpeech test-clean was the same for all three: 1.7% on the 1-minute clip and 0.8% on the 3-minute clip. In this test transcribe.cpp on its CPU backend was slower than ONNX (13.5 s for the 3-minute clip at 12 threads). New Parakeet selections default to the GGUF model in every build, because ONNX Runtime support is removed in voxtype 2.0. Until then, ONNX builds can still select an ONNX model explicitly, for example `voxtype config set parakeet.model parakeet-tdt-0.6b-v3`.
 
 ## Known Limitations
 

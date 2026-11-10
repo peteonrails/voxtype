@@ -86,6 +86,17 @@ Item {
   // model name → message from the download that failed on it.
   property var downloadErrors: ({})
 
+  // The `setup migrate --json` object, or null. See UpgradeOfferBanner.
+  property var upgradeStatus: null
+  // offer id → message from the accept that failed on it.
+  property var upgradeErrors: ({})
+  property bool upgradeDeclinedHere: false
+  property string upgradeActionError: ""
+  // When the last accept finished. An accept writes the config and restarts
+  // the daemon itself, so the file watcher's "restart needed" for that write
+  // would be a false claim.
+  property real upgradeSettledAt: 0
+
   readonly property string replacementsSectionName: "Replacements"
   readonly property bool degraded: schemaError !== ""
 
@@ -170,6 +181,8 @@ Item {
     root.replacementsError = ""
     root.restartError = ""
     root.schemaError = ""
+    root.upgradeDeclinedHere = false
+    root.upgradeActionError = ""
     if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
     cli.fetchSchema()
@@ -180,6 +193,7 @@ Item {
     cli.fetchEngines()
     cli.fetchDevices()
     cli.fetchStyles()
+    cli.fetchUpgrade()
 
     // The layer surface is mapped after this returns, so focus has to be taken
     // once the window exists or Escape and typing land nowhere. The card's key
@@ -269,6 +283,25 @@ Item {
     root.downloadErrors = next
   }
 
+  function noteUpgradeError(offerId, message) {
+    var next = ({})
+    for (var k in root.upgradeErrors) if (k !== offerId) next[k] = root.upgradeErrors[k]
+    if (message !== "") next[offerId] = message
+    root.upgradeErrors = next
+  }
+
+  function acceptUpgrade(offerId) {
+    if (cli.downloading) return
+    var model = ""
+    var offers = root.upgradeStatus ? root.upgradeStatus.offers : null
+    if (offers && offers.length !== undefined)
+      for (var i = 0; i < offers.length; i++)
+        if (offers[i] && String(offers[i].id) === offerId) model = String(offers[i].model || "")
+    root.noteUpgradeError(offerId, "")
+    root.upgradeActionError = ""
+    cli.startUpgrade(offerId, model)
+  }
+
   function startModelDownload(name) {
     var info = root.engines[root.catalogEngine]
     var argument = name
@@ -335,6 +368,8 @@ Item {
         root.searchText = ""
         sidebar.searchField.text = ""
         form.clearHighlight()
+        // The tray's "Model update available" lands here on an open panel.
+        cli.fetchUpgrade()
         return "ok"
       }
       return root.requestOpen(JSON.stringify({ section: wanted }))
@@ -535,8 +570,37 @@ Item {
       // partial state worth reflecting.
       cli.fetchModels()
     }
+    onUpgradeLoaded: function(status) { root.upgradeStatus = status }
+    onUpgradeFinished: function(offerId, ok, message) {
+      // Cancel reports no message, and a cancel or a failure leaves the
+      // current model and config as they were, so the offer is retried with
+      // the same button.
+      root.noteUpgradeError(offerId, ok ? "" : message)
+      if (ok) {
+        // `--accept` switched the model and restarted the daemon itself.
+        root.upgradeSettledAt = Date.now()
+        root.restartNeeded = false
+        root.restartError = ""
+        cli.fetchSchema()
+        cli.fetchStatus()
+        accelAfterRestart.restart()
+      }
+      cli.fetchModels()
+      cli.fetchUpgrade()
+    }
+    onDeclineFinished: function(ok, message) {
+      if (ok) root.upgradeDeclinedHere = true
+      root.upgradeActionError = message
+      cli.fetchUpgrade()
+    }
+    onCleanupFinished: function(ok, message) {
+      root.upgradeActionError = message
+      cli.fetchModels()
+      cli.fetchUpgrade()
+    }
     onRestarted: function(ok, message) {
       if (ok) {
+        cli.fetchUpgrade()
         root.restartNeeded = false
         root.restartError = ""
         // A restart is the one moment acceleration can change: the daemon has
@@ -613,8 +677,10 @@ Item {
       // The banner's claim is that the file on disk no longer matches what the
       // daemon loaded at startup, which an edit from the CLI or the TUI makes
       // just as true as one made here. Without this the panel would quietly
-      // refresh to show a setting the running daemon is not using.
-      root.restartNeeded = true
+      // refresh to show a setting the running daemon is not using. An accepted
+      // upgrade is the exception: it restarted the daemon after its own write.
+      if (!cli.upgrading && Date.now() - root.upgradeSettledAt > 2000)
+        root.restartNeeded = true
     }
   }
 
@@ -875,6 +941,16 @@ Item {
               root.startModelDownload(name)
             }
             onCancelDownloadRequested: cli.cancelDownload()
+            upgradeStatus: root.upgradeStatus
+            upgradeBusyOfferId: cli.upgradeOfferId
+            upgradeErrors: root.upgradeErrors
+            upgradeDeclining: cli.declining
+            upgradeCleaningUp: cli.cleaningUp
+            upgradeDeclinedHere: root.upgradeDeclinedHere
+            upgradeActionError: root.upgradeActionError
+            onUpgradeAcceptRequested: function(offerId) { root.acceptUpgrade(offerId) }
+            onUpgradeDeclineRequested: { root.upgradeActionError = ""; cli.declineUpgrade() }
+            onUpgradeCleanupRequested: { root.upgradeActionError = ""; cli.cleanupUpgrade() }
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }
             onReplacementUnsetRequested: function(from) { cli.unsetReplacement(from) }
           }

@@ -362,6 +362,33 @@ pub(crate) async fn dispatch(
                         setup::icons::install()?;
                     }
                 }
+                Some(SetupAction::Migrate {
+                    json,
+                    accept,
+                    decline,
+                    cleanup,
+                    yes,
+                    progress_format: migrate_progress,
+                }) => {
+                    warn_if_root("migrate");
+                    let json_progress =
+                        json_progress || migrate_progress.as_deref() == Some("json");
+                    if json_progress {
+                        setup::progress::set_format(setup::progress::ProgressFormat::Json);
+                    }
+                    super::migrate::run(
+                        &config,
+                        cli.config.clone(),
+                        super::migrate::MigrateArgs {
+                            json,
+                            accept,
+                            decline,
+                            cleanup,
+                            yes,
+                            json_progress,
+                        },
+                    )?;
+                }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");
                     if status {

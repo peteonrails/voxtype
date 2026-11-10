@@ -61,10 +61,16 @@ ENV CMAKE_C_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-a
 ENV CMAKE_CXX_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-gfni -mno-avxvnni"
 
 # Build AVX2 binary
-RUN cargo build --release \
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker; GPU GGUF on Whisper builds comes from the vulkan variant.
+RUN cargo build --release --features gguf,cohere-gguf,parakeet-gguf \
     && cp target/release/voxtype /tmp/voxtype-avx2 \
     && cargo build --release -p voxtype-gguf-worker \
     && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --haswell-floor --run \
+        /tmp/voxtype-avx2 /tmp/voxtype-gguf-worker
 
 # Verify no AVX-512 or GFNI instructions
 RUN echo "=== Verifying AVX2 binary ===" \

@@ -7,6 +7,7 @@ Run: python3 testing/test-gguf-worker-packaging.py
 
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -40,15 +41,44 @@ class WorkerPackagingTests(unittest.TestCase):
         )
         return result.returncode
 
-    def test_legacy_gpu_subdirectories_keep_workers_and_provider_libraries(self):
+    def package_function(self, signature):
         source = (ROOT / "scripts/package.sh").read_text()
-        start = source.index("    install_onnx_gpu_variant() {")
+        start = source.index("    " + signature + "() {")
         end = source.index("\n    }\n", start) + 7
-        function = source[start:end]
+        return source[start:end]
+
+    def stage(self, script, *args):
+        functions = (self.package_function("install_gguf_worker") + "\n"
+                     + self.package_function("install_onnx_gpu_variant"))
+        return subprocess.run(
+            ["bash", "-ec", functions + "\n" + script, "probe", *args],
+            env=dict(os.environ, STAGING=str(self.root / "stage"),
+                     RELEASE_DIR=str(self.root / "releases"), VERSION="probe"),
+            capture_output=True, text=True, check=False,
+        )
+
+    def release_worker(self, variant):
         release = self.root / "releases"
-        stage = self.root / "stage"
+        release.mkdir(exist_ok=True)
+        worker = release / ("voxtype-probe-linux-x86_64-" + variant + ".gguf-worker")
+        # Explicit staging fixture, not a compiled or release artifact.
+        worker.write_bytes(("worker fixture " + variant).encode())
+        return worker
+
+    def test_top_level_variants_install_their_own_workers(self):
+        lib = self.root / "stage/usr/lib/voxtype"
+        for variant in ("avx2", "avx512", "vulkan", "onnx-avx2", "onnx-avx512"):
+            self.release_worker(variant)
+            result = self.stage('install_gguf_worker "$1" "$STAGING/usr/lib/voxtype"', variant)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = lib / ("voxtype-gguf-worker-" + variant)
+            self.assertEqual(installed.read_bytes(), ("worker fixture " + variant).encode())
+            self.assertTrue(os.access(installed, os.X_OK), variant)
+
+    def test_gpu_subdirectories_keep_workers_and_provider_libraries(self):
+        release = self.root / "releases"
         release.mkdir()
-        lib = stage / "usr/lib/voxtype"
+        lib = self.root / "stage/usr/lib/voxtype"
         lib.mkdir(parents=True)
         generic = lib / "voxtype-gguf-worker"
         generic.write_text("#!/bin/sh\nexit 0\n")
@@ -61,21 +91,22 @@ class WorkerPackagingTests(unittest.TestCase):
             prefix = release / ("voxtype-probe-linux-x86_64-onnx-" + variant)
             # Explicit staging fixtures, not compiled or release artifacts.
             prefix.write_bytes(b"staging executable fixture")
+            self.release_worker("onnx-" + variant)
             for suffix in (".libonnxruntime_providers_" + provider + ".so",
                            ".libonnxruntime_providers_shared.so"):
                 Path(str(prefix) + suffix).write_bytes(suffix.encode())
             if runtime:
                 Path(str(prefix) + "." + runtime).write_bytes(b"runtime fixture")
-            result = subprocess.run(
-                ["bash", "-ec", function + '\ninstall_onnx_gpu_variant "$1" "$2" "$3"',
-                 "probe", variant, provider, runtime],
-                env=dict(os.environ, STAGING=str(stage), RELEASE_DIR=str(release), VERSION="probe"),
-                capture_output=True, text=True, check=False,
-            )
+            result = self.stage('install_onnx_gpu_variant "$1" "$2" "$3"', variant, provider, runtime)
             self.assertEqual(result.returncode, 0, result.stderr)
             nested = lib / variant
             self.assertEqual((lib / ("voxtype-onnx-" + variant)).resolve(),
                              nested / ("voxtype-onnx-" + variant))
+            # The variant's own worker sits beside the real binary, where the
+            # application looks first; the generic CPU worker stays reachable.
+            own = nested / ("voxtype-gguf-worker-onnx-" + variant)
+            self.assertEqual(own.read_bytes(), ("worker fixture onnx-" + variant).encode())
+            self.assertTrue(os.access(own, os.X_OK), variant)
             self.assertTrue((nested / "voxtype-gguf-worker").is_file(), variant)
             self.assertTrue(os.access(nested / "voxtype-gguf-worker", os.X_OK), variant)
             self.assertEqual((nested / "voxtype-gguf-worker").resolve(), generic)
@@ -84,6 +115,44 @@ class WorkerPackagingTests(unittest.TestCase):
             self.assertTrue((nested / "libonnxruntime_providers_shared.so").is_file())
             if runtime:
                 self.assertEqual((nested / "libonnxruntime.so").resolve(), nested / runtime)
+
+    def test_every_dockerfile_ships_the_gguf_client_and_matching_worker(self):
+        # Vulkan-capable workers on x86_64 vulkan and ONNX images; CPU workers
+        # on the 22.04 Whisper CPU tiers (no glslc, CMake < 3.24) and aarch64.
+        vulkan_workers = {"Dockerfile.vulkan", "Dockerfile.onnx", "Dockerfile.onnx-avx512",
+                          "Dockerfile.onnx-cuda-12", "Dockerfile.onnx-cuda-13",
+                          "Dockerfile.onnx-migraphx"}
+        cpu_workers = {"Dockerfile.build", "Dockerfile.avx512", "Dockerfile.baseline",
+                       "Dockerfile.aarch64-cpu", "Dockerfile.aarch64-onnx"}
+        for name in sorted(vulkan_workers | cpu_workers):
+            with self.subTest(name):
+                text = (ROOT / name).read_text().replace("\\\n", " ")
+                # One cargo invocation per segment, up to its `&&` or line end.
+                builds = [part.split("&&")[0].split("\n")[0]
+                          for part in text.split("cargo build --release")[1:]]
+                builds = [b for b in builds if "--bin voxtype-osd" not in b]
+                app = [line for line in builds if "-p voxtype-gguf-worker" not in line]
+                worker = [line for line in builds if "-p voxtype-gguf-worker" in line]
+                self.assertTrue(app and worker, name)
+                features = app[0].split("--features", 1)[1].split()[0] if "--features" in app[0] else ""
+                features = set(features.split(","))
+                self.assertTrue({"gguf", "cohere-gguf", "parakeet-gguf"} <= features
+                                or "gpu-vulkan" in features, (name, features))
+                wants_vulkan = name in vulkan_workers
+                self.assertEqual("--features vulkan" in worker[0], wants_vulkan, name)
+                self.assertEqual("glslc" in text and "libvulkan-dev" in text, wants_vulkan, name)
+                gate = re.search(r"verify-gguf-companion\.sh((?:\s+--[\w-]+)+)", text)
+                self.assertIsNotNone(gate, name)
+                self.assertIn("--vulkan" if wants_vulkan else "--cpu-only", gate.group(1).split(), name)
+
+    def test_verify_script_rejects_a_missing_worker(self):
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/verify-gguf-companion.sh"), "--cpu-only",
+             str(self.root / "voxtype"), str(self.root / "voxtype.gguf-worker")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing", result.stderr)
 
     def test_cpu_only_lib_layout(self):
         self.install("usr/lib/voxtype/voxtype-gguf-worker")
@@ -112,6 +181,28 @@ class WorkerPackagingTests(unittest.TestCase):
         self.install("usr/lib/voxtype/voxtype-vulkan")
         self.install("usr/lib/voxtype/voxtype-gguf-worker-vulkan", executable=False)
         self.assertNotEqual(self.check_workers(), 0)
+
+    def test_onnx_binaries_require_their_own_workers(self):
+        self.install("usr/lib/voxtype/voxtype-gguf-worker")
+        self.install("usr/lib/voxtype/voxtype-onnx-avx2")
+        self.assertNotEqual(self.check_workers(), 0)
+        self.install("usr/lib/voxtype/voxtype-gguf-worker-onnx-avx2")
+        self.assertEqual(self.check_workers(), 0)
+
+    def test_gpu_subdirectory_binary_requires_nested_worker(self):
+        self.install("usr/lib/voxtype/voxtype-gguf-worker")
+        self.install("usr/lib/voxtype/cuda-12/voxtype-onnx-cuda-12")
+        top = self.root / "usr/lib/voxtype/voxtype-onnx-cuda-12"
+        top.symlink_to("cuda-12/voxtype-onnx-cuda-12")
+        self.assertNotEqual(self.check_workers(), 0)
+        self.install("usr/lib/voxtype/cuda-12/voxtype-gguf-worker-onnx-cuda-12")
+        self.assertEqual(self.check_workers(), 0)
+
+    def test_cpu_tier_binaries_use_the_generic_worker(self):
+        self.install("usr/lib/voxtype/voxtype-gguf-worker")
+        for name in ("baseline", "avx2", "avx512"):
+            self.install("usr/lib/voxtype/voxtype-" + name)
+        self.assertEqual(self.check_workers(), 0)
 
     def test_vulkan_bin_layout_requires_its_companion(self):
         self.install("usr/bin/voxtype-gguf-worker")

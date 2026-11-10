@@ -65,7 +65,8 @@ jobs:
           # Build AVX2 baseline (disable AVX-512 via compiler flags)
           # Note: WHISPER_NO_AVX512=ON doesn't work with whisper-rs-sys 0.14.1
           echo "Building AVX2 baseline..."
-          CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release
+          # Release binaries all compile the GGUF client; mirror that here.
+          CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --features gguf,cohere-gguf,parakeet-gguf
           mkdir -p releases/test
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx2
           cargo build --release -p voxtype-gguf-worker
@@ -75,7 +76,7 @@ jobs:
           # Clean build cache to ensure whisper.cpp recompiles with different flags
           echo "Building AVX-512 optimized..."
           cargo clean
-          cargo build --release
+          cargo build --release --features gguf,cohere-gguf,parakeet-gguf
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx512
 
       - name: Build packages with fpm

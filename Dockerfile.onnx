@@ -48,6 +48,11 @@ RUN apt-get update && apt-get install -y \
     python3 \
     meson \
     ninja-build \
+    libvulkan-dev \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
     && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu 24.04 doesn't package gtk4-layer-shell. Build the C library from
@@ -90,12 +95,17 @@ ENV GGML_AVX512_VNNI=OFF
 ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds (can hang on TrueNAS)
-# Build with all ONNX engines
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
+# Build with all ONNX engines plus the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf): every release binary routes `.gguf` models to the worker.
+# The worker is built with Vulkan, the same as Dockerfile.vulkan's, so a GPU
+# user gets GPU GGUF whichever binary they run. `gguf_backend = "auto"` falls
+# back to the CPU when no Vulkan device exists; the worker only needs the
+# libvulkan.so.1 loader to start.
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-avx2 \
-    && cargo build --release -p voxtype-gguf-worker \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
@@ -141,6 +151,9 @@ RUN echo "=== Verifying ONNX AVX2 binary ===" \
        else \
          echo "✓ Binary is clean (no AVX-512)"; \
        fi \
+    && echo "=== Verifying GGUF client and Vulkan worker ===" \
+    && scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-onnx-avx2 /tmp/voxtype-gguf-worker \
     && echo "=== Binary size ===" \
     && ls -lh /tmp/voxtype-onnx-avx2 /tmp/voxtype-gguf-worker
 

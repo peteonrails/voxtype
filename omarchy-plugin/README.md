@@ -190,6 +190,11 @@ Inside the panel:
   dismissing the panel and switching sections — the process is owned at the top
   of the panel, not by the row that started it, so the row rebuilding does not
   interrupt it.
+- A model whose catalog entry carries `license_url` (from `voxtype info models
+  --json`, alongside an optional `license` name) shows a small "License: <name>"
+  link under its row that opens the page in your browser. It is information
+  only; nothing asks you to accept it. Entries without a URL, and older builds
+  without the fields, show no link.
 - Progress comes from `voxtype setup --download --model <name> --progress-format
   json`, read as NDJSON (`{"event":"progress","file":…,"pct":…}`,
   `{"event":"done"}`, `{"event":"error","message":…}`). A voxtype that rejects
@@ -205,6 +210,22 @@ Inside the panel:
   immediately, a catalog read that arrives while one is already running is queued
   rather than dropped (and retried once if it fails), and the panel re-reads the
   catalog on a timer while it is open so stale state heals on its own.
+- When a better model is available for the one you run, the Engine section
+  opens with a **model update** banner: each offer with its download size and
+  an **Update** button (Parakeet Ultra first when it is the recommended one),
+  plus **Keep current model**. Update runs `voxtype setup migrate --accept <id>
+  --yes` with the same in-panel progress bar, cancel and inline error as a
+  model Download; a failed or cancelled update leaves the current model in
+  place and the button offers **Retry**. On success the CLI switches the model
+  and restarts the daemon itself, so no restart banner follows. Keep current
+  model records the decline through `voxtype setup migrate --decline` and then
+  shows the 2.0 removal notice and the pin command for your install as
+  selectable text (nothing is copied to the clipboard for you). The banner
+  stays while offers exist, declined or not, so a kept model can still be
+  updated later. After an update, **Remove old model files** runs `voxtype
+  setup migrate --cleanup`. The offers come from `voxtype setup migrate
+  --json`; a voxtype without that command shows no banner. The tray's "Model
+  update available..." item opens the panel here.
 - Voxtype reads its config at startup, so a banner appears after the first
   successful write and stays until a restart succeeds.
 - The Advanced section leads with **Release GPU memory when idle**, one switch
@@ -235,11 +256,25 @@ Inside the panel:
 | GPU memory (AMD) | `rocm-smi --showmeminfo vram --json` |
 | Restart the daemon | `systemctl --user restart voxtype` |
 | Download a model | `voxtype setup --download --model <name> --progress-format json` (in panel) |
+| Model upgrade offers | `voxtype setup migrate --json` |
+| Accept / keep / clean up | `voxtype setup migrate --accept <id> --yes --progress-format json`, `--decline`, `--cleanup` (in panel) |
 | Open the TUI | `voxtype configure` (floating terminal) |
 | Edit the config file | `omarchy-launch-config-editor <config path>` |
 | Install / update voxtype | `omarchy-voxtype-install` (floating terminal) |
 
 ## Development
+
+### Model upgrade banner test
+
+```bash
+python3 omarchy-plugin/tests/test-upgrade-offers.py [--evidence DIR]
+```
+
+Runs the real panel offscreen (`QT_QPA_PLATFORM=offscreen`; the test copy
+swaps the layer-shell window for a plain one) against
+`tests/fake-voxtype-migrate.py`, so it needs Quickshell and the Omarchy shell
+but no compositor, daemon, config or network. It refuses to run with
+`WAYLAND_DISPLAY` or `DISPLAY` set; run it in a desktop-isolated sandbox.
 
 ### Schema boundary regression test
 
@@ -324,6 +359,7 @@ Layout of the QML:
 | `components/RuntimeFacts.qml` | the measured-facts line under the title |
 | `components/AccelBadge.qml` | the GPU / CPU-fallback acceleration badge |
 | `components/DownloadProgress.qml` | the in-row bar, percentage, and cancel |
+| `components/UpgradeOfferBanner.qml` | model upgrade offers at the top of the Engine section |
 | `components/SectionSidebar.qml` | search box + section list |
 | `components/SchemaForm.qml` | the scrolling pane and what goes in it |
 | `components/SettingDelegate.qml` | one form row, one control per schema type |

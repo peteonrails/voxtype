@@ -86,7 +86,10 @@ ENV GGML_NATIVE=OFF
 ENV ORT_STRATEGY=download
 
 # Build with all ONNX engines. CPU-only on aarch64 — no GPU EPs.
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker: aarch64 has no Vulkan worker.
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-aarch64-onnx \
@@ -94,6 +97,9 @@ RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,do
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --run \
+        /tmp/voxtype-aarch64-onnx /tmp/voxtype-gguf-worker
 
 # Build the OSD launcher and frontends in a separate cargo invocation so the
 # daemon binary stays clean of GTK4 / layer-shell baggage. Matches the binary

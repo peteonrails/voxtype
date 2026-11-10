@@ -30,11 +30,24 @@ Item {
   property real downloadPct: -1
   property string downloadFile: ""
   property bool downloadCancelling: false
-  readonly property bool downloadBusy: downloadingModel !== ""
+  // A download this card does not show (a model upgrade's, reported in the
+  // banner above) still holds the one slot.
+  property bool otherDownloadBusy: false
+  readonly property bool downloadBusy: downloadingModel !== "" || otherDownloadBusy
 
   // model name → message from the download that failed. Cleared when a new one
   // starts on that model.
   property var downloadErrors: ({})
+
+  // Only an https link is offered; anything else in the catalog is ignored
+  // rather than handed to the desktop's URL opener.
+  function licenseLink(url) {
+    var text = url ? String(url).trim() : ""
+    return /^https:\/\/\S+$/.test(text) ? text : ""
+  }
+
+  // Indirected so a test can observe the click without opening a browser.
+  property var openUrl: function(url) { Qt.openUrlExternally(url) }
 
   signal modelChangeRequested(string name, string language)
   signal downloadRequested(string name)
@@ -64,10 +77,16 @@ Item {
     for (var i = 0; i < info.models.length; i++) {
       var entry = info.models[i]
       if (!entry) continue
+      // Legacy ONNX checkpoints of an engine that has GGUF models are listed
+      // only while one is configured: moving to GGUF is one way.
+      if (entry.legacy === true && String(entry.name) !== root.modelValue) continue
       out.push({
         name: String(entry.name),
         language: root.selectionLanguage(entry.languages),
-        installed: entry.installed === true
+        installed: entry.installed === true,
+        // Optional: older builds omit both, and the row then shows no link.
+        license: entry.license ? String(entry.license) : "",
+        licenseUrl: root.licenseLink(entry.license_url)
       })
     }
     return out
@@ -216,6 +235,27 @@ Item {
                   cancelling: root.downloadCancelling
                   onCancelRequested: root.cancelDownloadRequested()
                 }
+              }
+            }
+
+            // Informational only: no acceptance step, nothing gated on it.
+            Text {
+              objectName: "modelLicense:" + entry.modelName
+              visible: String(entry.modelData.licenseUrl || "") !== ""
+              leftPadding: Style.spacing.controlPaddingX
+              text: "License: " + (String(entry.modelData.license || "") !== ""
+                                   ? entry.modelData.license : "terms")
+              color: licenseMouse.containsMouse ? ShellTheme.Color.accent : root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.underline: true
+
+              MouseArea {
+                id: licenseMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openUrl(String(entry.modelData.licenseUrl))
               }
             }
 
