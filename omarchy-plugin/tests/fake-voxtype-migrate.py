@@ -10,6 +10,13 @@ follows the contract the real CLI implements:
   --decline                       mark offers declined
   --cleanup                       forget the cleanup offer
 
+`setup omarchy --status --json` answers from state["omarchy"]: a link state
+such as "copy" or "linked" (contract 2.2 of the 1.2.1 plan), or absent for a
+build without the subcommand, which exits 2 like an unknown subcommand does.
+
+state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
+the stderr it should fail with (exit 1).
+
 Accept behavior is scripted per attempt by state["accept_script"]: "fail",
 "slow" (one progress line, then wait to be cancelled) or "ok". After the script
 runs out, attempts succeed.
@@ -132,19 +139,48 @@ def accept(state, args):
     return 0
 
 
+def omarchy_status(state):
+    link = state["omarchy"]
+    packaged = "/usr/share/voxtype/omarchy-plugin/io.voxtype.settings"
+    return {
+        "omarchy": True,
+        "packaged_dir": packaged,
+        "packaged_version": "1.2.1",
+        "state": link,
+        "path": "/home/u/.config/omarchy/plugins/io.voxtype.settings",
+        "installed_version": "1.2.0" if link == "copy" else "1.2.1",
+    }
+
+
 def main():
     args = sys.argv[1:]
     with open(LOG, "a") as f:
         f.write(json.dumps(args) + "\n")
     state = load()
+    failing = state.get("info_fail", {})
+    if args[:1] == ["info"] and len(args) > 1 and args[1] in failing:
+        print(failing[args[1]], file=sys.stderr)
+        return 1
     if args[:3] == ["config", "schema", "--json"]:
         print(json.dumps(schema(state)))
     elif args[:3] == ["info", "models", "--json"]:
         print(json.dumps(models(state)))
     elif args[:3] == ["info", "engines", "--json"]:
         print(json.dumps([{"name": "whisper", "compiled": True}, {"name": "parakeet", "compiled": True}]))
+    elif args[:3] == ["info", "devices", "--json"]:
+        print(json.dumps([{"name": "Built-in Microphone", "default": True}]))
+    elif args[:3] == ["info", "styles", "--json"]:
+        print(json.dumps([{"name": "hud", "description": "Heads-up display"}]))
     elif args[:3] == ["status", "--format", "json"]:
         print(json.dumps({"class": "idle"}))
+    elif args[:2] == ["setup", "omarchy"]:
+        if state.get("omarchy") is None:
+            print("error: unrecognized subcommand 'omarchy'", file=sys.stderr)
+            return 2
+        if args[2:] == ["--status", "--json"]:
+            print(json.dumps(omarchy_status(state)))
+        else:
+            return 2
     elif args[:2] == ["setup", "migrate"]:
         if state.get("no_migrate"):
             print("error: unrecognized subcommand 'migrate'", file=sys.stderr)
@@ -164,7 +200,7 @@ def main():
         else:
             return 2
     else:
-        # info devices/styles/accel and anything else: "not in this build".
+        # info accel and anything else: "not in this build".
         return 2
     return 0
 
