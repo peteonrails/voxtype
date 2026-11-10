@@ -628,6 +628,20 @@ if [[ -d quickshell ]]; then
     find "$STAGING/usr/share/voxtype/quickshell" -type d -exec chmod 755 {} \;
 fi
 
+# Omarchy Settings plugin, in the versioned layout that `voxtype setup
+# omarchy` links into ~/.config/omarchy/plugins. The AUR PKGBUILD calls the
+# same script, so every package ships the same tree. The manifest version
+# names the QML directory, so it has to match the release: a stale one would
+# ship the new QML under an old path and Omarchy would keep its cached copy.
+"$SCRIPT_DIR/stage-omarchy-plugin.sh" "$PROJECT_DIR/omarchy-plugin" "$STAGING/usr/share/voxtype/omarchy-plugin"
+PLUGIN_VERSION=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$STAGING/usr/share/voxtype/omarchy-plugin/io.voxtype.settings/manifest.json")
+if [[ "$PLUGIN_VERSION" != "$VERSION" ]]; then
+    echo "Error: omarchy-plugin/manifest.json version is '$PLUGIN_VERSION', expected '$VERSION'."
+    echo "Bump it together with Cargo.toml."
+    exit 1
+fi
+
 # OSD style packages and recipes. The style resolver searches
 # /usr/share/voxtype/osd/<name> after the user paths, so shipping the
 # examples gives `[osd] style = "<name>"` something to resolve out of the

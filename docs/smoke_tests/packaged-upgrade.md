@@ -35,6 +35,12 @@ What the script asserts, in order:
    exist, the baseline binary is in `/usr/lib/voxtype`, style packages are
    at `/usr/share/voxtype/osd` with `aegis-hud` discoverable, recipes and
    the quickshell tree shipped.
+7. The Omarchy Settings plugin ships in its versioned layout:
+   `/usr/share/voxtype/omarchy-plugin/io.voxtype.settings/manifest.json`
+   has `"version": "<NEXT>"` and `"panel": "<NEXT>/Panel.qml"`, and
+   `<NEXT>/Panel.qml` and `<NEXT>/components/*.qml` exist beside it. `NEXT`
+   must be the full version string, including any `-rcN` suffix, because
+   that is the directory name.
 
 Harness lessons from the 1.1.0 run, so they are not relearned:
 
