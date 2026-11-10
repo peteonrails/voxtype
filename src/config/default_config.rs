@@ -182,6 +182,12 @@ translate = false
 #   - OpenAI API: "https://api.openai.com"
 # remote_endpoint = "http://192.168.1.100:8080"
 #
+# Request path appended to remote_endpoint
+# Defaults to "/v1/audio/transcriptions" ("/v1/audio/translations" when
+# translate = true). A stock whisper.cpp server only serves "/inference";
+# when this is set the same path is used for transcription and translation.
+# remote_path = "/inference"
+#
 # Model name to send to remote server (default: "whisper-1")
 # remote_model = "whisper-1"
 #
