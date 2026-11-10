@@ -1,0 +1,169 @@
+name: Build AppImage
+
+# AppImages are assembled from the release binaries rather than compiled here:
+# `scripts/build-appimage.sh` bundles the already-built variants behind the
+# dispatch wrapper in `packaging/appimage/`, so this workflow only needs the
+# artifacts that Build Linux produced.
+#
+# History worth knowing: the AppImage tooling landed in April 2026 but was
+# never wired into any release process, so no release has ever carried an
+# AppImage asset even though INSTALL.md and the website advertised one (#622).
+# The .deb/.rpm steps had the same failure mode until v0.7.5 moved them into
+# CI. This workflow closes the same gap for AppImages.
+#
+# Triggers:
+#   - workflow_run: fires after "Build Linux" succeeds, so the release assets
+#     this job downloads already exist.
+#   - workflow_dispatch: build for any published tag on demand, which is how
+#     an existing release gets backfilled.
+#
+# Signing uses the same dedicated CI release primary as every other artifact
+# (9CCF7915...), via the GPG_PRIVATE_KEY / GPG_PASSPHRASE secrets.
+
+on:
+  workflow_run:
+    workflows: ["Build Linux"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build AppImages for, without the leading v (e.g. 1.0.0)"
+        required: true
+        type: string
+
+# Required to upload assets onto an existing release.
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    name: build-appimage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # On workflow_run, only proceed when the upstream build actually succeeded
+    # and it was a tag build; a branch build has no release to upload to.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and tag
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then
+            VERSION='${{ inputs.version }}'
+          else
+            # head_branch is the tag name for a tag-triggered run (e.g. v1.0.0).
+            VERSION='${{ github.event.workflow_run.head_branch }}'
+            VERSION="${VERSION#v}"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]]; then
+            echo "::error::Unexpected version '$VERSION'"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building AppImages for v${VERSION}"
+
+      # AppImages need FUSE to run, but appimagetool only needs to write the
+      # squashfs image; --appimage-extract-and-run avoids requiring FUSE on
+      # the runner.
+      - name: Install appimagetool dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils zsync
+
+      # Pull the binaries this release already published. The build script
+      # expects them under releases/<version>/ with their published names.
+      - name: Download release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          TAG='${{ steps.version.outputs.tag }}'
+          mkdir -p "releases/${VERSION}"
+          cd "releases/${VERSION}"
+          # Only the x86_64 engine binaries feed the AppImages; skip
+          # signatures, packages, and the OSD/bridge companions.
+          for v in avx2 avx512 vulkan onnx-avx2 onnx-avx512 onnx-cuda-12 onnx-cuda-13; do
+            name="voxtype-${VERSION}-linux-x86_64-${v}"
+            if gh release download "${TAG}" --repo '${{ github.repository }}' \
+                 --pattern "${name}" --clobber 2>/dev/null; then
+              chmod +x "${name}"
+              echo "fetched ${name}"
+            else
+              echo "::warning::${name} not present on ${TAG}; its AppImage will be skipped"
+            fi
+          done
+          ls -1
+
+      - name: Build AppImages
+        run: |
+          set -euo pipefail
+          ./scripts/build-appimage.sh '${{ steps.version.outputs.version }}'
+          echo "Produced:"
+          ls -lh "releases/${{ steps.version.outputs.version }}"/*.AppImage
+
+      # Same ephemeral-keyring plumbing as the binary signing step in
+      # build-linux.yml. Skipped with a warning when secrets are unavailable
+      # (e.g. a fork), so the build itself still validates.
+      - name: Sign AppImages
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GPG_PRIVATE_KEY:-}" || -z "${GPG_PASSPHRASE:-}" ]]; then
+            echo "::warning::GPG secrets not set; skipping AppImage signing."
+            exit 0
+          fi
+          VERSION='${{ steps.version.outputs.version }}'
+          SIGNING_KEY="9CCF7915B750CAE8B095ED1AA3FC9F33FD209279"
+          WORK=$(mktemp -d)
+          trap 'rm -rf "${WORK}"' EXIT
+          export GNUPGHOME="${WORK}/gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          printf 'allow-loopback-pinentry\n' > "${GNUPGHOME}/gpg-agent.conf"
+          printf 'pinentry-mode loopback\n' > "${GNUPGHOME}/gpg.conf"
+          gpgconf --kill gpg-agent || true
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
+          cd "releases/${VERSION}"
+          shopt -s nullglob
+          for f in *.AppImage; do
+            printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
+                --pinentry-mode loopback --passphrase-fd 0 \
+                --local-user "${SIGNING_KEY}!" \
+                --detach-sign --armor --output "${f}.asc" "${f}"
+            echo "Signed ${f}"
+          done
+
+      - name: Upload AppImages to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          TAG='${{ steps.version.outputs.tag }}'
+          cd "releases/${VERSION}"
+          shopt -s nullglob
+          files=(*.AppImage *.AppImage.asc)
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "::error::No AppImages were produced"
+            exit 1
+          fi
+          gh release upload "${TAG}" "${files[@]}" \
+            --repo '${{ github.repository }}' --clobber
+          echo "Uploaded: ${files[*]}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxtype-${{ steps.version.outputs.version }}-appimages
+          path: releases/${{ steps.version.outputs.version }}/*.AppImage*
+          if-no-files-found: error
+          retention-days: 30
