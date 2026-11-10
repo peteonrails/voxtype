@@ -89,7 +89,7 @@ Pick your distro from the list below. The fastest path on each:
 - **Fedora:** `sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm`
 - **macOS:** `brew install --cask peteonrails/voxtype/voxtype`
 - **NixOS:** `nix profile install github:peteonrails/voxtype#vulkan`
-- **AppImage:** download, `chmod +x`, run.
+- **AppImage:** not currently published; see [available alternatives](#appimage).
 
 After install, see [Post-Install Setup](#post-install-setup) for the model download, hotkey, and systemd-service steps.
 
@@ -234,16 +234,13 @@ tooling.
 
 ### AppImage
 
-Self-contained binary for distros that don't have a packaged voxtype.
+AppImage builds are not currently published. The download commands in older
+versions of this guide point to assets that do not exist.
 
-```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.5/voxtype-0.7.5-x86_64.AppImage
-chmod +x voxtype-0.7.5-x86_64.AppImage
-mkdir -p ~/.local/bin
-mv voxtype-0.7.5-x86_64.AppImage ~/.local/bin/voxtype
-```
-
-Three AppImage variants ship: CPU, Vulkan, ONNX engines. The CPU one is the smallest and the right default for most users.
+For now, use one of the packaged installation methods above or
+[build from source](#build-from-source). Check the release's asset list before
+following any AppImage download instructions; do not construct a filename from
+the version number.
 
 ### Build from Source
 
