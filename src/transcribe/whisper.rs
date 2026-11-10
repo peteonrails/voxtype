@@ -28,6 +28,8 @@ pub struct WhisperTranscriber {
     context_window_optimization: bool,
     /// Initial prompt to provide context for transcription
     initial_prompt: Option<String>,
+    /// Profile vocabulary selected for the current recording.
+    active_vocabulary: Mutex<Vec<String>>,
     /// Two-letter code for the language used during the most recent
     /// `transcribe()` call. Populated for single-language and constrained
     /// auto-detection modes; left empty for unconstrained auto-detection
@@ -100,15 +102,17 @@ impl WhisperTranscriber {
             threads,
             context_window_optimization: config.context_window_optimization,
             initial_prompt: config.initial_prompt.clone(),
+            active_vocabulary: Mutex::new(Vec::new()),
             last_language: Mutex::new(None),
         })
     }
 
     fn build_params<'a, 'b>(
-        &'a self,
+        &self,
         selected_language: Option<&'a str>,
         duration_secs: f32,
         retry: bool,
+        prompt: Option<&'a str>,
     ) -> FullParams<'a, 'b> {
         let mut params = if retry {
             FullParams::new(SamplingStrategy::BeamSearch {
@@ -141,7 +145,7 @@ impl WhisperTranscriber {
         params.set_no_context(true);
 
         // Set initial prompt if configured
-        if let Some(prompt) = &self.initial_prompt {
+        if let Some(prompt) = prompt {
             params.set_initial_prompt(prompt);
             tracing::debug!("Using initial prompt: {:?}", prompt);
         }
@@ -180,7 +184,13 @@ impl WhisperTranscriber {
             .ctx
             .create_state()
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-        let params = self.build_params(selected_language, duration_secs, retry);
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        let prompt = super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary);
+        let params = self.build_params(selected_language, duration_secs, retry, prompt.as_deref());
 
         state
             .full(params, samples)
@@ -260,6 +270,13 @@ impl WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -276,21 +293,23 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-
         // Determine language based on configuration mode
         let selected_language: Option<String> = if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
             tracing::debug!("Using unconstrained language auto-detection");
             None
         } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only
+            // Constrained auto-detection: detect from allowed set only.
+            // The detection state is scoped to this branch so it is freed
+            // before run_full() allocates its own. Each state carries its own
+            // GPU compute buffers, so creating one up front for every request
+            // doubled per-request GPU allocations for no use (#814).
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            let mut state = self
+                .ctx
+                .create_state()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
             Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
         } else {
             // Single language: use it directly

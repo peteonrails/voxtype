@@ -46,8 +46,11 @@
 
 use crate::error::OutputError;
 use crate::output::{output_with_fallback, OutputOptions, TextOutput};
+use crate::text::vocabulary::Vocabulary;
 use crate::text::TextProcessor;
+#[cfg(not(test))]
 use std::process::Stdio;
+#[cfg(not(test))]
 use tokio::process::Command;
 
 /// A streaming output session: types finalized segments incrementally,
@@ -168,8 +171,9 @@ impl StreamingSession {
     /// counts that reference the raw text, and transforming them would
     /// desynchronize that accounting.
     ///
-    /// On output error, the session's internal state is **not**
-    /// updated; the caller can retry or surface the error.
+    /// An append error leaves state unchanged. If a provisional tail was
+    /// deleted before replacement output failed, bookkeeping reflects that
+    /// deletion so cancel-rewind cannot erase earlier finalized text.
     ///
     /// The `pre_output_command` and `post_output_command` hooks fire
     /// *once per segment*, just like end-of-utterance batch output. This
@@ -179,14 +183,61 @@ impl StreamingSession {
         &mut self,
         chain: &[Box<dyn TextOutput>],
         text: &str,
-        text_processor: Option<&TextProcessor>,
+        text_processing: Option<(&TextProcessor, Option<&Vocabulary>)>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        // A backend can finalize text that was already typed as a provisional
+        // partial without adding a new tail (Soniox does this commonly). Only
+        // now, at Final, may the cleanup pipeline rewrite it. If correction is
+        // needed, replace the provisional tail; otherwise retain
+        // the existing append-only fast path.
+        let mut text_processing = text_processing;
+        if let Some((tp, vocabulary)) = text_processing {
+            if !self.partial.is_empty() {
+                let raw = format!("{}{}", self.partial, text);
+                let processed = tp.process_with_vocabulary(&raw, vocabulary);
+                if processed != raw {
+                    let provisional_chars = self.partial.chars().count();
+                    let emitted = emit_backspaces(provisional_chars).await;
+                    if emitted == provisional_chars {
+                        let opts = OutputOptions {
+                            pre_output_command,
+                            post_output_command,
+                            wait_for_modifier_release: false,
+                            modifier_release_timeout: std::time::Duration::from_millis(0),
+                        };
+                        // Deletion is already visible even if output fails.
+                        // Account for it before attempting the replacement.
+                        self.typed_chars = self.typed_chars.saturating_sub(emitted);
+                        self.clear_partial();
+                        output_with_fallback(chain, &processed, opts).await?;
+                        self.typed_chars =
+                            self.typed_chars.saturating_add(processed.chars().count());
+                        self.finalized_text.push_str(&processed);
+                        return Ok(());
+                    }
+                    text_processing = None;
+                    tracing::warn!(
+                        "Streaming cleanup could not replace provisional text; \
+                         leaving the finalized segment unchanged"
+                    );
+                }
+            }
+        }
+
+        // An empty Final still commits a provisional tail. It types nothing,
+        // but the raw partial must move into finalized bookkeeping.
+        if text.is_empty() && !self.partial.is_empty() {
+            self.finalized_text.push_str(&self.partial);
+            self.clear_partial();
+            return Ok(());
+        }
+
         let processed;
-        let text = match text_processor {
-            Some(tp) => {
-                processed = tp.process(text);
+        let text = match text_processing {
+            Some((tp, vocabulary)) => {
+                processed = tp.process_with_vocabulary(text, vocabulary);
                 processed.as_str()
             }
             None => text,
@@ -273,12 +324,14 @@ impl StreamingSession {
         chain: &[Box<dyn TextOutput>],
         backspace: usize,
         text: &str,
-        text_processor: Option<&TextProcessor>,
+        text_processing: Option<(&TextProcessor, Option<&Vocabulary>)>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
-        // Cap backspace at what we've actually typed.
-        let n = backspace.min(self.typed_chars);
+        // Revisions may remove only provisional text, never a prior Final.
+        let n = backspace
+            .min(self.partial.chars().count())
+            .min(self.typed_chars);
         if n > 0 {
             let emitted = emit_backspaces(n).await;
             if emitted == 0 {
@@ -301,30 +354,14 @@ impl StreamingSession {
             }
         }
 
-        let processed;
-        let text = match text_processor {
-            Some(tp) => {
-                processed = tp.process(text);
-                processed.as_str()
-            }
-            None => text,
-        };
-        if !text.is_empty() {
-            let opts = OutputOptions {
-                pre_output_command,
-                post_output_command,
-                wait_for_modifier_release: false,
-                modifier_release_timeout: std::time::Duration::from_millis(0),
-            };
-            output_with_fallback(chain, text, opts).await?;
-            self.typed_chars += text.chars().count();
-            // Treat the (now-truncated) partial + new text as committed,
-            // matching commit_segment's accounting.
-            let finalized_tail = format!("{}{}", self.partial, text);
-            self.finalized_text.push_str(&finalized_tail);
-        }
-        self.clear_partial();
-        Ok(())
+        self.commit_segment(
+            chain,
+            text,
+            text_processing,
+            pre_output_command,
+            post_output_command,
+        )
+        .await
     }
 
     /// File-output counterpart to `replace_and_commit`: no real cursor to
@@ -390,6 +427,15 @@ impl Default for StreamingSession {
 
 /// Backspace `count` chars using the first available method.
 /// Returns the actual number of backspaces emitted.
+// Unit tests exercise bookkeeping with an in-memory output, never the real
+// focused application. Treat backspaces as successful in that test surface.
+#[cfg(test)]
+async fn emit_backspaces(count: usize) -> usize {
+    tests::BACKSPACES.with(|counts| counts.borrow_mut().push(count));
+    count
+}
+
+#[cfg(not(test))]
 async fn emit_backspaces(count: usize) -> usize {
     if count == 0 {
         return 0;
@@ -406,6 +452,7 @@ async fn emit_backspaces(count: usize) -> usize {
     0
 }
 
+#[cfg(not(test))]
 async fn try_wtype_backspaces(count: usize) -> bool {
     // wtype invocation: `wtype -k BackSpace` repeated. Build args
     // dynamically to send N keypresses in a single subprocess.
@@ -417,6 +464,7 @@ async fn try_wtype_backspaces(count: usize) -> bool {
     matches!(cmd.status().await, Ok(s) if s.success())
 }
 
+#[cfg(not(test))]
 async fn try_dotool_backspaces(count: usize) -> bool {
     // Prefer `dotoolc` whenever dotoold is actually accepting input.
     // Spawning raw `dotool` creates a *new* uinput keyboard per call;
@@ -452,6 +500,7 @@ async fn try_dotool_backspaces(count: usize) -> bool {
     matches!(child.wait().await, Ok(s) if s.success())
 }
 
+#[cfg(not(test))]
 async fn try_ydotool_backspaces(count: usize) -> bool {
     // ydotool key 14:1 14:0 sends BackSpace press+release. Linux key
     // codes: BackSpace = 14.
@@ -469,6 +518,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::sync::Mutex;
+
+    thread_local! {
+        pub(super) static BACKSPACES: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
 
     /// In-memory output that records every typed string. Used to
     /// verify session bookkeeping without spawning subprocesses.
@@ -541,6 +594,98 @@ mod tests {
         assert_eq!(session.finalized_text(), "hello world");
     }
 
+    #[tokio::test]
+    async fn default_cleanup_preserves_final_delta_separators() {
+        let tp = TextProcessor::new(&crate::config::TextConfig::default());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        for delta in ["hello", " world"] {
+            session
+                .commit_segment(&chain, delta, Some((&tp, None)), None, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(rec.typed().concat(), "hello world");
+        assert_eq!(session.finalized_text(), "hello world");
+        assert_eq!(session.typed_chars(), 11);
+    }
+
+    #[tokio::test]
+    async fn default_cleanup_preserves_separators_around_removed_fillers() {
+        let tp = TextProcessor::new(&crate::config::TextConfig::default());
+        for deltas in [
+            vec!["hello", " um world"],
+            vec!["hello um ", "world"],
+            vec!["hello", "", " um ", " world"],
+            vec!["hello  ", "world"],
+        ] {
+            let rec = std::sync::Arc::new(RecordingOutput::new());
+            let chain = chain_with(rec.clone());
+            let mut session = StreamingSession::new();
+            for delta in &deltas {
+                session
+                    .commit_segment(&chain, delta, Some((&tp, None)), None, None)
+                    .await
+                    .unwrap();
+            }
+            let expected = if deltas[0] == "hello  " {
+                "hello  world"
+            } else {
+                "hello world"
+            };
+            assert_eq!(session.finalized_text(), expected, "{deltas:?}");
+            assert_eq!(rec.typed().concat(), expected);
+            assert_eq!(session.typed_chars(), expected.chars().count());
+        }
+    }
+
+    #[tokio::test]
+    async fn default_cleanup_revisions_preserve_prior_final_and_split_vocabulary() {
+        let vocabulary = Vocabulary::load(&crate::config::VocabularyConfig {
+            terms: vec!["Voxtype".into()],
+            terms_file: None,
+        })
+        .unwrap();
+        let tp = TextProcessor::new(&crate::config::TextConfig::default());
+        for (partial, backspace, tail, expected, deletions) in [
+            (" wor", 0, "ld", "hello world", vec![]),
+            (" wrong", 999, " world", "hello world", vec![6]),
+            (" Vox ty", 2, "tipe", "hello Voxtype", vec![2, 5]),
+            (" um", 0, "", "hello", vec![3]),
+            (" world", 0, "", "hello world", vec![]),
+        ] {
+            BACKSPACES.with(|counts| counts.borrow_mut().clear());
+            let rec = std::sync::Arc::new(RecordingOutput::new());
+            let chain = chain_with(rec.clone());
+            let mut session = StreamingSession::new();
+            session
+                .commit_segment(&chain, "hello", Some((&tp, None)), None, None)
+                .await
+                .unwrap();
+            session
+                .type_partial_delta(&chain, partial.into(), None, None)
+                .await
+                .unwrap();
+            session
+                .replace_and_commit(
+                    &chain,
+                    backspace,
+                    tail,
+                    Some((&tp, Some(&vocabulary))),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(session.finalized_text(), expected, "{partial:?}, {tail:?}");
+            assert_eq!(session.typed_chars(), expected.chars().count());
+            assert!(session.finalized_text().starts_with("hello"));
+            assert_eq!(session.partial(), "");
+            BACKSPACES.with(|counts| assert_eq!(*counts.borrow(), deletions));
+        }
+    }
+
     /// #669: a segment becoming final is where streaming text stops being
     /// provisional, so the daemon's replacements and spoken punctuation
     /// apply there — what reaches the cursor is the processed text, and
@@ -560,7 +705,13 @@ mod tests {
         let chain = chain_with(rec.clone());
         let mut session = StreamingSession::new();
         session
-            .commit_segment(&chain, "I use vox type period", Some(&tp), None, None)
+            .commit_segment(
+                &chain,
+                "I use vox type period",
+                Some((&tp, None)),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(rec.typed(), vec!["I use voxtype.".to_string()]);
@@ -570,12 +721,155 @@ mod tests {
         // Replace commits are finals too: the correction text is processed,
         // while the backspace count still refers to the raw partial tail.
         let mut session = StreamingSession::new();
-        session.observe_partial_delta("raw partial");
         session
-            .replace_and_commit(&chain, 8, "vox type comma", Some(&tp), None, None)
+            .type_partial_delta(&chain, "raw tail".into(), None, None)
             .await
             .unwrap();
-        assert_eq!(rec.typed().last().unwrap(), "voxtype,");
+        session
+            .replace_and_commit(&chain, 4, "vox type comma", Some((&tp, None)), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed().last().unwrap(), "raw voxtype,");
+    }
+
+    #[tokio::test]
+    async fn profile_vocabulary_only_changes_final_streaming_text() {
+        let vocabulary =
+            crate::text::vocabulary::Vocabulary::load(&crate::config::VocabularyConfig {
+                terms: vec!["Voxtype".into()],
+                terms_file: None,
+            })
+            .unwrap();
+        let config = crate::config::TextConfig {
+            replacements: [("Voxtype".to_string(), "VOXTYPE".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let tp = TextProcessor::new(&config);
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+
+        session
+            .type_partial_delta(&chain, "draft ".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed(), vec!["draft "]);
+
+        // A separate final segment is corrected. The provisional call above
+        // deliberately had no processor/vocabulary input and stayed raw.
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(
+                &chain,
+                "Vox tipe",
+                Some((&tp, Some(&vocabulary))),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rec.typed(), vec!["draft ", "VOXTYPE"]);
+        assert_eq!(session.finalized_text(), "VOXTYPE");
+    }
+
+    #[tokio::test]
+    async fn finalized_partial_runs_lard_without_a_vocabulary() {
+        let tp = TextProcessor::new_for_language(
+            &crate::config::TextConfig {
+                lard_disfluency: true,
+                lard_model_path: Some(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("assets/models/lard-disfluency-v1.vxdf"),
+                ),
+                filter_filler_words: false,
+                ..Default::default()
+            },
+            Some("en"),
+        );
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(
+                &chain,
+                "I need a flight no I need a hotel".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        session
+            .commit_segment(&chain, "", Some((&tp, None)), None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.finalized_text(), "I need a hotel");
+        assert_eq!(rec.typed().last().unwrap(), "I need a hotel");
+        assert_eq!(session.typed_chars(), "I need a hotel".chars().count());
+    }
+
+    #[tokio::test]
+    async fn replacement_final_corrects_vocabulary_across_provisional_boundary() {
+        let vocabulary = Vocabulary::load(&crate::config::VocabularyConfig {
+            terms: vec!["Voxtype".into()],
+            terms_file: None,
+        })
+        .unwrap();
+        let tp = TextProcessor::new(&crate::config::TextConfig::default());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "previous. ", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, "Vox typo".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(
+                &chain,
+                4,
+                "tipe",
+                Some((&tp, Some(&vocabulary))),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.finalized_text(), "previous. Voxtype");
+        assert_eq!(rec.typed().last().unwrap(), "Voxtype");
+        assert_eq!(session.typed_chars(), "previous. Voxtype".chars().count());
+    }
+
+    #[tokio::test]
+    async fn failed_retyping_accounts_for_deleted_provisional_text() {
+        let vocabulary = Vocabulary::load(&crate::config::VocabularyConfig {
+            terms: vec!["Voxtype".into()],
+            terms_file: None,
+        })
+        .unwrap();
+        let tp = TextProcessor::new(&crate::config::TextConfig::default());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec);
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "previous. ", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, "Vox tipe".into(), None, None)
+            .await
+            .unwrap();
+        assert!(session
+            .commit_segment(&[], "", Some((&tp, Some(&vocabulary))), None, None)
+            .await
+            .is_err());
+        assert_eq!(session.typed_chars(), "previous. ".chars().count());
+        assert_eq!(session.finalized_text(), "previous. ");
+        assert_eq!(session.partial(), "");
     }
 
     #[tokio::test]
@@ -657,6 +951,26 @@ mod tests {
         session.commit_segment_silent("hello");
         session.finalize_pending_partial();
         assert_eq!(session.finalized_text(), "hello");
+    }
+
+    #[tokio::test]
+    async fn empty_final_commits_provisional_text_without_reprocessing_it() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "already typed".into(), None, None)
+            .await
+            .unwrap();
+
+        session
+            .commit_segment(&chain, "", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(rec.typed(), vec!["already typed"]);
+        assert_eq!(session.finalized_text(), "already typed");
+        assert_eq!(session.partial(), "");
     }
 
     #[test]

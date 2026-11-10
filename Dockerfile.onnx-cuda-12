@@ -41,6 +41,11 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     git \
     binutils \
+    libvulkan-dev \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
@@ -61,10 +66,20 @@ ENV ORT_CUDA_VERSION=12
 
 # Build with all ONNX engines + CUDA support for NVIDIA GPUs
 # Disable LTO for faster builds
-RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,openvino-whisper,ml-diarization \
+RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,openvino-whisper,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-onnx-cuda-12
+    && cp target/release/voxtype /tmp/voxtype-onnx-cuda-12 \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+# Every release binary carries the GGUF client, and every x86_64 ONNX variant
+# ships a Vulkan-capable worker (gguf_backend = "auto" falls back to the CPU
+# when no Vulkan device initializes). See scripts/verify-gguf-companion.sh.
+RUN scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-onnx-cuda-12 /tmp/voxtype-gguf-worker
 
 # The CUDA execution provider in ort 2.0.0-rc.12 dlopen's its companion
 # shared libs at runtime instead of being statically linked. They must be
@@ -91,6 +106,7 @@ RUN echo "=== Verifying ONNX CUDA 12 binary ===" \
 # Output stage: copy binary and companion .so files
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-cuda-12 /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-12 \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-12.gguf-worker \
     && cp /tmp/onnx-cuda-12-libs/libonnxruntime_providers_cuda.so /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-12.libonnxruntime_providers_cuda.so \
     && cp /tmp/onnx-cuda-12-libs/libonnxruntime_providers_shared.so /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-12.libonnxruntime_providers_shared.so \
     && echo "Output:" \

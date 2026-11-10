@@ -17,8 +17,9 @@
 //      idle), so it's the source of truth for which buttons should be
 //      enabled.
 //
-//   2. `voxtype meeting show <id>` (Process, polled at 2 Hz while a
-//      meeting is active) - parses the human-readable output to
+//   2. `voxtype meeting show <id>` (Process, polled every 2 s while a
+//      meeting is active and the panel is open) - parses the
+//      human-readable output to
 //      extract the meeting title and chunk count. Cheaper alternatives
 //      (a JSON status command, or a runtime metadata.json with a
 //      stable path) don't exist yet; if they land later, swap this
@@ -27,7 +28,7 @@
 //   3. Wall-clock elapsed time (client-side Timer, 1 Hz) - the
 //      meeting started_at is read out of `meeting show` once and the
 //      ticker updates the displayed mm:ss locally so the duration
-//      doesn't visibly stutter at the 2 Hz poll boundary.
+//      doesn't visibly stutter at the poll boundary.
 //
 // ## Open/close trigger
 //
@@ -249,14 +250,15 @@ PanelWindow {
         }
     }
 
-    // 2 Hz poll while a meeting is active. Stops itself when the
-    // meeting ends so an idle voxtype install doesn't spawn a
-    // subprocess every 500 ms forever.
+    // Poll every 2 s while a meeting is active and the panel is open.
+    // Nothing reads the result while the panel is closed, and a meeting
+    // can run for hours, so a closed panel spawns no subprocesses.
     Timer {
         id: showPollTimer
         interval: 2000
         repeat: true
-        running: root._meetingId.length > 0
+        running: root.open
+                 && root._meetingId.length > 0
                  && (root._meetingStatus === "recording"
                      || root._meetingStatus === "paused")
         onTriggered: showProcess.refresh()
@@ -268,8 +270,17 @@ PanelWindow {
         id: elapsedTimer
         interval: 1000
         repeat: true
-        running: root._meetingStatus === "recording" && root._startedAtMs > 0
+        running: root.open && root._meetingStatus === "recording" && root._startedAtMs > 0
         onTriggered: root._recomputeElapsed()
+    }
+
+    // The poll is paused while closed, so catch up as soon as the panel
+    // opens instead of showing stale numbers until the first tick.
+    onOpenChanged: {
+        if (root.open) {
+            root._recomputeElapsed();
+            showProcess.refresh();
+        }
     }
 
     // Transient status text fades after 3 s so a successful "Stop
@@ -287,28 +298,28 @@ PanelWindow {
         id: startProcess
         command: [root.voxtypeBinary, "meeting", "start"]
         running: false
-        onRunningChanged: if (!startProcess.running) root._actionDone("Start requested")
+        onExited: function(exitCode) { root._actionDone("Start", exitCode); }
     }
 
     Process {
         id: stopProcess
         command: [root.voxtypeBinary, "meeting", "stop"]
         running: false
-        onRunningChanged: if (!stopProcess.running) root._actionDone("Stop requested")
+        onExited: function(exitCode) { root._actionDone("Stop", exitCode); }
     }
 
     Process {
         id: pauseProcess
         command: [root.voxtypeBinary, "meeting", "pause"]
         running: false
-        onRunningChanged: if (!pauseProcess.running) root._actionDone("Pause requested")
+        onExited: function(exitCode) { root._actionDone("Pause", exitCode); }
     }
 
     Process {
         id: resumeProcess
         command: [root.voxtypeBinary, "meeting", "resume"]
         running: false
-        onRunningChanged: if (!resumeProcess.running) root._actionDone("Resume requested")
+        onExited: function(exitCode) { root._actionDone("Resume", exitCode); }
     }
 
     // ----- helpers -----
@@ -394,8 +405,13 @@ PanelWindow {
         }
     }
 
-    function _actionDone(label) {
-        root._actionStatus = label;
+    function _actionDone(label, exitCode) {
+        // The CLI exits non-zero when the daemon rejects the action (no
+        // daemon running, no meeting to stop, ...). Say so instead of
+        // reporting a request that never landed.
+        root._actionStatus = exitCode === 0
+            ? label + " requested"
+            : label + " failed (exit " + exitCode + "); see voxtype logs";
         actionStatusTimer.restart();
         // Nudge the state machine so the buttons update without
         // waiting for the next inotify cycle.

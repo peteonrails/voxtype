@@ -435,6 +435,7 @@ mod tests {
         let pp = cfg.output.post_process.as_ref().unwrap();
         assert!(!pp.trim);
         assert!(pp.fallback_on_empty);
+        assert!(!pp.edit_list);
         assert!(cfg.output.active_post_process().is_none());
 
         let cfg: Config =

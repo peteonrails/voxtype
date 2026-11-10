@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // The text.replacements table, which is a map rather than a typed key and so
@@ -19,7 +20,7 @@ Item {
   signal unsetRequested(string from)
   signal editorFocusChanged(bool active)
 
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   readonly property var entries: {
     var keys = []
@@ -56,7 +57,7 @@ Item {
       visible: root.errorText !== ""
       width: parent.width
       text: root.errorText
-      color: Color.urgent
+      color: ShellTheme.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap
@@ -92,7 +93,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: Style.space(180)
             text: row.modelData.from
-            color: Color.foreground
+            color: ShellTheme.Color.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.body
             elide: Text.ElideRight
@@ -130,7 +131,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰆴"
             tooltipText: "Delete replacement"
-            hoverColor: Color.urgent
+            hoverColor: ShellTheme.Color.urgent
             onClicked: {
               root.pendingDelete = row.modelData.from
               confirm.opened = true

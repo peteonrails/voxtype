@@ -52,6 +52,7 @@
 
 use crate::config::CohereConfig;
 use crate::error::TranscribeError;
+use crate::transcribe::cohere_chunking::CohereChunking;
 use crate::transcribe::cohere_fbank::CohereFbank;
 use crate::transcribe::Transcriber;
 use ort::session::Session;
@@ -99,9 +100,7 @@ fn lang_token(lang: &str) -> Option<i64> {
     })
 }
 
-const SUPPORTED_LANGUAGES: &[&str] = &[
-    "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
-];
+use crate::config::COHERE_LANGUAGES as SUPPORTED_LANGUAGES;
 
 const MAX_TOKENS_PER_SECOND: f32 = 8.0;
 const ABSOLUTE_MAX_TOKENS: usize = 1024;
@@ -133,13 +132,16 @@ pub struct CohereTranscriber {
     /// matching empty caches and we can extract the encoder output
     /// against the right primitive.
     float_dtype: TensorElementType,
+    chunking: CohereChunking,
 }
 
 impl CohereTranscriber {
     pub fn new(config: &CohereConfig) -> Result<Self, TranscribeError> {
         let model_dir = resolve_model_path(&config.model)?;
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
-        Self::with_threads_and_lang(&model_dir, threads, &config.language)
+        let mut transcriber = Self::with_threads_and_lang(&model_dir, threads, &config.language)?;
+        transcriber.chunking = CohereChunking::new(config)?;
+        Ok(transcriber)
     }
 
     pub fn from_dir(model_dir: &Path) -> Result<Self, TranscribeError> {
@@ -252,6 +254,7 @@ impl CohereTranscriber {
             fbank: CohereFbank::new(),
             prefix,
             float_dtype,
+            chunking: CohereChunking::new(&CohereConfig::default())?,
         })
     }
 
@@ -524,10 +527,14 @@ fn check_logits_shape(shape: &[i64]) -> Result<(), TranscribeError> {
     Ok(())
 }
 
+impl CohereTranscriber {}
+
 impl Transcriber for CohereTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
-        let text = self.transcribe_samples(samples)?;
+        let text = self
+            .chunking
+            .transcribe(samples, |chunk| self.transcribe_samples(chunk))?;
         tracing::info!(
             "Cohere transcription completed in {:.2}s: {:?}",
             start.elapsed().as_secs_f32(),

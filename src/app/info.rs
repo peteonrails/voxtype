@@ -96,6 +96,9 @@ struct ModelStatus {
     download_arg: Option<String>,
     /// Only populated with `--verify`.
     verification: Option<ModelVerification>,
+    /// An ONNX checkpoint in an engine that also has GGUF models: model lists
+    /// show it only while it is the configured model.
+    legacy: bool,
 }
 
 impl ModelStatus {
@@ -112,6 +115,7 @@ impl ModelStatus {
             health,
             download_arg: model_catalog::download_arg(engine, name),
             verification,
+            legacy: voxtype::model_upgrade::is_legacy_model(engine, name),
         }
     }
 
@@ -160,7 +164,21 @@ impl ModelStatus {
     fn json(&self) -> serde_json::Value {
         let mut o = serde_json::Map::new();
         o.insert("name".into(), serde_json::json!(self.name));
+        if let Some(metadata) = voxtype::setup::model::handy_pending_gguf_models()
+            .iter()
+            .find(|entry| entry.name == self.name)
+        {
+            o.insert("languages".into(), serde_json::json!(metadata.languages));
+            o.insert("architecture".into(), serde_json::json!(metadata.arch));
+        }
+        if let Some((license, url)) = voxtype::setup::model::gguf_license(self.name) {
+            o.insert("license".into(), serde_json::json!(license));
+            o.insert("license_url".into(), serde_json::json!(url));
+        }
         o.insert("installed".into(), serde_json::json!(self.installed()));
+        if self.legacy {
+            o.insert("legacy".into(), serde_json::json!(true));
+        }
         // `name` is the config value; the argument that downloads it is not
         // always the same string, and for five engines there is no such
         // argument at all. Spelling both out keeps a UI from building
@@ -217,7 +235,7 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
     let checked: Vec<(&str, Vec<ModelStatus>)> = engines
         .iter()
         .map(|engine| {
-            let statuses = model_catalog::model_catalog(engine)
+            let statuses = model_catalog::supported_model_catalog(engine)
                 .into_iter()
                 .map(|name| ModelStatus::check(engine, name, verify))
                 .collect();
@@ -240,6 +258,21 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
         let doc = serde_json::json!({
             "engines": serde_json::Value::Object(map),
             "verified": verify,
+            "pending_gguf": voxtype::setup::model::handy_pending_gguf_models()
+                .iter()
+                .map(|model| serde_json::json!({
+                    "name": model.name,
+                    "architecture": model.arch,
+                    "languages": model.languages,
+                    "origin_repo": model.origin_repo,
+                    "origin_revision": model.origin_revision,
+                    "size": model.size,
+                    "sha256": model.sha256,
+                    "r2_dir": model.r2_dir,
+                    "runnable": model.runnable,
+                    "license_gated": model.license_gated,
+                }))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(());

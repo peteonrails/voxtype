@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // The right-hand pane: one scroller holding whatever the current selection
@@ -17,6 +18,8 @@ Item {
 
   property var keys: []
   property string engine: ""
+  property string catalogEngine: engine
+  property string catalogLanguage: ""
   property string activeSection: ""
   property string searchText: ""
 
@@ -39,10 +42,14 @@ Item {
   signal setRequested(string key, var value)
   signal unsetRequested(string key)
   signal engineChangeRequested(string name)
+  signal modelSelectionRequested(string name, string language)
   signal downloadRequested(string name)
   signal replacementSetRequested(string from, string to)
   signal replacementUnsetRequested(string from)
   signal cancelDownloadRequested()
+  signal upgradeAcceptRequested(string offerId)
+  signal upgradeDeclineRequested()
+  signal upgradeCleanupRequested()
 
   // A row's field gave the keyboard back (Escape); the panel puts focus on the
   // card's key catcher so j/k drive the cursor again.
@@ -86,8 +93,19 @@ Item {
   // model card.
   property string downloadingModel: ""
   property real downloadPct: -1
+  property string downloadFile: ""
   property bool downloadCancelling: false
+  property bool downloadBusy: false
   property var downloadErrors: ({})
+
+  // Model upgrade offers (see UpgradeOfferBanner). Shown on the Engine section.
+  property var upgradeStatus: null
+  property string upgradeBusyOfferId: ""
+  property var upgradeErrors: ({})
+  property bool upgradeDeclining: false
+  property bool upgradeCleaningUp: false
+  property bool upgradeDeclinedHere: false
+  property string upgradeActionError: ""
 
   readonly property string engineSection: {
     for (var i = 0; i < root.keys.length; i++) {
@@ -105,6 +123,8 @@ Item {
   readonly property bool showEngineCard: !searching && activeSection === engineSection
 
   readonly property var visibleKeys: {
+    // Do not show editors for the configured engine below another catalog.
+    if (root.showEngineCard && root.catalogEngine !== root.engine) return []
     var out = []
     for (var i = 0; i < root.keys.length; i++) {
       var spec = root.keys[i]
@@ -118,7 +138,35 @@ Item {
       }
       out.push(spec)
     }
-    return out
+    // Stable grouping also works with older schemas: only advertised keys
+    // become controls. Preserve the backend's order inside each group.
+    var ordered = []
+    var groups = ["Clean up text", "LARD disfluency cleanup", "Other text options", ""]
+    for (var g = 0; g < groups.length; g++)
+      for (var j = 0; j < out.length; j++)
+        if (root.cleanupGroup(String(out[j].key)) === groups[g]) ordered.push(out[j])
+    return ordered
+  }
+
+  // These are independent canonical keys, not a synthetic master switch that
+  // would overwrite a user's individual choices. Learned stages stay separate.
+  function cleanupGroup(key) {
+    if (["text.spoken_punctuation", "text.filter_filler_words", "text.collapse_restarts",
+         "text.repair_sentence_breaks", "text.format_numbers"].indexOf(String(key)) !== -1)
+      return "Clean up text"
+    if (key === "text.lard_disfluency" || key === "text.lard_model_path")
+      return "LARD disfluency cleanup"
+    if (String(key).indexOf("text.") === 0) return "Other text options"
+    return ""
+  }
+
+  // Canonical URL from assets/models/lard-disfluency-v1.MODEL_CARD.md.
+  readonly property string lardLicenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/"
+
+  function cleanupHeading(index) {
+    var group = cleanupGroup(visibleKeys[index].key)
+    if (group === "") return ""
+    return index === 0 || cleanupGroup(visibleKeys[index - 1].key) !== group ? group : ""
   }
 
   function optionsForSource(source) {
@@ -249,10 +297,12 @@ Item {
     EnginePicker {
       Layout.fillWidth: true
       visible: root.showEngineCard
-      engine: root.engine
+      engine: root.catalogEngine
+      activeEngine: root.engine
       engineChoices: root.engineChoices
       engineAvailability: root.engineAvailability
       errorText: root.engineError
+      downloadBusy: root.downloadBusy
       onEngineChangeRequested: function(name) { root.engineChangeRequested(name) }
     }
 
@@ -268,19 +318,45 @@ Item {
         width: scroller.availableWidth
         spacing: Style.spacing.panelGap
 
+        // First thing in the Engine section, above the catalog it would change.
+        UpgradeOfferBanner {
+          id: upgradeBanner
+          objectName: "upgradeOfferBanner"
+          width: parent.width
+          visible: root.showEngineCard && active
+          status: root.upgradeStatus
+          busyOfferId: root.upgradeBusyOfferId
+          downloadPct: root.downloadPct
+          downloadFile: root.downloadFile
+          downloadCancelling: root.downloadCancelling
+          downloadBusy: root.downloadBusy
+          offerErrors: root.upgradeErrors
+          declining: root.upgradeDeclining
+          cleaningUp: root.upgradeCleaningUp
+          declinedHere: root.upgradeDeclinedHere
+          actionError: root.upgradeActionError
+          onAcceptRequested: function(offerId) { root.upgradeAcceptRequested(offerId) }
+          onCancelRequested: root.cancelDownloadRequested()
+          onDeclineRequested: root.upgradeDeclineRequested()
+          onCleanupRequested: root.upgradeCleanupRequested()
+        }
+
         EngineModelCard {
           width: parent.width
           visible: root.showEngineCard
-          engine: root.engine
+          engine: root.catalogEngine
           engines: root.engines
-          modelKey: root.modelKey
-          modelValue: root.modelValue
+          modelKey: root.catalogEngine === "gguf" ? "gguf.model" : (root.catalogEngine === root.engine ? root.modelKey : "")
+          modelValue: root.catalogEngine === root.engine ? root.modelValue : ""
+          language: root.catalogLanguage
           downloadingModel: root.downloadingModel
+          otherDownloadBusy: root.downloadBusy
           downloadPct: root.downloadPct
+          downloadFile: root.downloadFile
           downloadCancelling: root.downloadCancelling
           downloadErrors: root.downloadErrors
-          onModelChangeRequested: function(name) {
-            if (root.modelKey !== "") root.setRequested(root.modelKey, name)
+          onModelChangeRequested: function(name, language) {
+            root.modelSelectionRequested(name, language)
           }
           onDownloadRequested: function(name) { root.downloadRequested(name) }
           onCancelDownloadRequested: root.cancelDownloadRequested()
@@ -313,11 +389,11 @@ Item {
 
         Text {
           width: parent.width
-          visible: !root.showReplacements && root.visibleKeys.length === 0
+          visible: !root.showReplacements && root.visibleKeys.length === 0 && !(root.showEngineCard && root.catalogEngine !== root.engine)
           text: root.searching
             ? ("Nothing matches \"" + root.searchText.trim() + "\".")
             : "This section has no settings for the current engine."
-          color: Qt.darker(Color.foreground, 1.5)
+          color: Qt.darker(ShellTheme.Color.foreground, 1.5)
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -343,6 +419,35 @@ Item {
             PanelSectionHeader {
               visible: root.searching
               text: String(entry.modelData.section || "").toUpperCase()
+            }
+
+            PanelSectionHeader {
+              visible: root.cleanupHeading(entry.index) !== ""
+              text: root.cleanupHeading(entry.index)
+            }
+
+            Text {
+              width: parent.width
+              visible: root.cleanupHeading(entry.index) === "Clean up text"
+              text: "Deterministic rules, no model download. Choose each stage independently; these controls do not enable LARD. Restart collapse is optional and stays off unless you enable it."
+              color: Qt.darker(ShellTheme.Color.foreground, 1.5)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              objectName: "lardModelLicense"
+              width: parent.width
+              visible: root.cleanupHeading(entry.index) === "LARD disfluency cleanup"
+              text: "Optional local English-only model, off by default. Requires an explicit English language setting and separate model setup with voxtype setup lard --source /path/to/model.vxdf. Enabling the switch does not download a model. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; VoxType source remains MIT."
+              textFormat: Text.RichText
+              onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+              color: Qt.darker(ShellTheme.Color.foreground, 1.5)
+              // RichText ignores linkColor; the anchor's font color follows the theme above.
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             // The cursor paints the whole row, not just its control, because

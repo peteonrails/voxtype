@@ -7,6 +7,10 @@ VOXTYPE_LIB="${VOXTYPE_LIB:-/usr/lib/voxtype}"
 # GPU mode: use Vulkan binary if available and requested
 # Set VOXTYPE_GPU=1 to prefer the Vulkan binary
 if [ "$VOXTYPE_GPU" = "1" ] && [ -x "$VOXTYPE_LIB/voxtype-vulkan" ]; then
+    if [ -z "${VOXTYPE_GGUF_WORKER:-}" ] && [ -x "$VOXTYPE_LIB/voxtype-gguf-worker-vulkan" ]; then
+        VOXTYPE_GGUF_WORKER="$VOXTYPE_LIB/voxtype-gguf-worker-vulkan"
+        export VOXTYPE_GGUF_WORKER
+    fi
     exec "$VOXTYPE_LIB/voxtype-vulkan" "$@"
 fi
 

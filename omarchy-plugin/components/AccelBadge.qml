@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // Whether transcription is actually running on the GPU, from `voxtype info accel
@@ -33,7 +34,7 @@ Item {
   // the ordinary one.
   readonly property bool chipped: isGpu || isFallback
 
-  readonly property color tint: isFallback ? Color.urgent : Color.accent
+  readonly property color tint: isFallback ? ShellTheme.Color.urgent : ShellTheme.Color.accent
 
   // The contract's backend names are lowercase; these are how they are written.
   // Anything unrecognised is shown as reported rather than dropped.
@@ -88,8 +89,8 @@ Item {
     anchors.centerIn: parent
     text: root.label
     color: root.isFallback
-      ? Color.urgent
-      : (root.isGpu ? Color.foreground : Qt.darker(Color.foreground, 1.5))
+      ? ShellTheme.Color.urgent
+      : (root.isGpu ? ShellTheme.Color.foreground : Qt.darker(ShellTheme.Color.foreground, 1.5))
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
     font.bold: root.isFallback
@@ -121,9 +122,9 @@ Item {
     anchors.left: parent.left
     width: evidenceLabel.implicitWidth + Style.spacing.controlPaddingX * 2
     height: evidenceLabel.implicitHeight + Style.spacing.controlPaddingY * 2
-    color: Qt.rgba(Color.tooltip.background.r, Color.tooltip.background.g,
-                   Color.tooltip.background.b, 1.0)
-    border.color: Color.tooltip.border
+    color: Qt.rgba(ShellTheme.Color.tooltip.background.r, ShellTheme.Color.tooltip.background.g,
+                   ShellTheme.Color.tooltip.background.b, 1.0)
+    border.color: ShellTheme.Color.tooltip.border
     border.width: Math.max(1, Style.normalBorderWidth)
     radius: Style.cornerRadius
 
@@ -131,7 +132,7 @@ Item {
       id: evidenceLabel
       anchors.centerIn: parent
       text: root.evidenceText
-      color: Color.tooltip.text
+      color: ShellTheme.Color.tooltip.text
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }

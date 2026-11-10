@@ -1,0 +1,25 @@
+name = "halo"
+version = "0.1.0"
+description = "Halo: a round badge with a gradient edge and a voice line across it."
+palette = "omarchy"
+layout = "orb"
+
+[frame]
+background = "background"
+border = "aura"
+glow = false
+halo = false
+
+[[visual.layers]]
+type = "line"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.14
+y = 0.22
+width = 0.72
+height = 0.56
+gain = 1.0
+opacity = 1.0
+radius = 2.4

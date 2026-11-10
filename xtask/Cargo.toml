@@ -6,3 +6,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+# `cargo xtask man` renders the man pages from src/cli without building
+# voxtype; keep clap and clap_mangen in step with voxtype's [build-dependencies].
+clap = { version = "4", features = ["derive"] }
+clap_mangen = "0.2"
+toml = "0.8"

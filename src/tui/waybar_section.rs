@@ -16,6 +16,7 @@ use super::config_editor::{ConfigEditor, EditorError};
 #[derive(Debug, Clone)]
 pub struct WaybarState {
     pub icon_theme: String,
+    pub tray_enabled: bool,
     pub icon_idle: Option<String>,
     pub icon_recording: Option<String>,
     pub icon_transcribing: Option<String>,
@@ -34,6 +35,7 @@ pub struct TextEdit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
+    TrayEnabled,
     Theme,
     IconIdle,
     IconRecording,
@@ -43,6 +45,7 @@ pub enum Field {
 
 impl Field {
     const ALL: &'static [Field] = &[
+        Field::TrayEnabled,
         Field::Theme,
         Field::IconIdle,
         Field::IconRecording,
@@ -75,7 +78,10 @@ impl WaybarState {
             icon_recording: ed.get_string("status.icons", "recording"),
             icon_transcribing: ed.get_string("status.icons", "transcribing"),
             icon_stopped: ed.get_string("status.icons", "stopped"),
-            field: Field::Theme,
+            tray_enabled: ed
+                .get_bool("tray", "enabled")
+                .unwrap_or_else(|| crate::config::TrayConfig::default().enabled),
+            field: Field::TrayEnabled,
             feedback: None,
             dirty_since_load: false,
             editing: None,
@@ -90,6 +96,14 @@ impl WaybarState {
                 return Action::None;
             }
         };
+        // Do not materialize an omitted default key while saving unrelated status settings.
+        if self.tray_enabled
+            != ed
+                .get_bool("tray", "enabled")
+                .unwrap_or_else(|| crate::config::TrayConfig::default().enabled)
+        {
+            ed.set_bool("tray", "enabled", self.tray_enabled);
+        }
         ed.set_string("status", "icon_theme", &self.icon_theme);
         for (key, val) in [
             ("idle", &self.icon_idle),
@@ -135,6 +149,7 @@ impl WaybarState {
 
     fn cycle(&mut self, delta: i32) {
         match self.field {
+            Field::TrayEnabled => self.tray_enabled = !self.tray_enabled,
             Field::Theme => {
                 let idx = THEMES
                     .iter()
@@ -225,6 +240,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let rows = vec![
+        FormRowSpec::new(
+            state.field == Field::TrayEnabled,
+            "Native system tray",
+            if state.tray_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
+        ),
         FormRowSpec::new(state.field == Field::Theme, "Icon theme", &state.icon_theme),
         FormRowSpec::new(
             state.field == Field::IconIdle,
@@ -275,6 +299,14 @@ fn heading(text: impl Into<String>) -> Line<'static> {
 
 fn guidance(state: &WaybarState) -> Vec<Line<'static>> {
     match state.field {
+        Field::TrayEnabled => vec![
+            heading("Native system tray"),
+            Line::from("Linux StatusNotifierItem tray: status, app access, recording and cancel."),
+            Line::from("Enabled by default. Requires a compatible tray host. Restart the daemon after saving."),
+            Line::from(
+                "Waybar icon themes below affect the text status output, not the native tray.",
+            ),
+        ],
         Field::Theme => vec![
             heading("Icon theme"),
             Line::from(""),

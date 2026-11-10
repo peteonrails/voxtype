@@ -71,6 +71,14 @@ pub enum SetupAction {
         toggle: bool,
     },
 
+    /// Install bundled Linux tray theme icons (embedded pixmaps work without this).
+    #[cfg(target_os = "linux")]
+    Icons {
+        /// Remove the installed theme icons
+        #[arg(long)]
+        uninstall: bool,
+    },
+
     /// Show Waybar configuration snippets
     Waybar {
         /// Output only the JSON config (for scripting)
@@ -192,9 +200,102 @@ pub enum SetupAction {
         compositor_type: CompositorType,
     },
 
+    /// Show, accept or decline model upgrade offers (ONNX to GGUF, Parakeet Ultra)
+    #[command(long_about = "\
+        Show, accept or decline model upgrade offers\n\n\
+        Voxtype offers two kinds of upgrade. A format update redownloads the \
+        model you already use in the GGUF format, for better performance. \
+        Parakeet v2 and v3 users are also offered Parakeet Ultra, a different \
+        model covering the same 25 European languages as Parakeet v3. Nothing \
+        changes until you accept an offer.\n\n\
+        With no action, prints the offers for the configured model and, in \
+        a terminal, asks which one to take. Models \
+        that run on ONNX Runtime also get a notice: ONNX support is removed in \
+        voxtype 2.0, and the notice gives the command that pins voxtype to \
+        this version for your install method.\n\n\
+        --accept downloads the model (showing its size and asking first \
+        unless --yes is given), verifies its sha256, switches engine and model \
+        in one validated write and restarts the daemon if it is running. Any \
+        failure, including a cancelled download, leaves config.toml exactly \
+        as it was and keeps the offer. The previous model's files are kept.\n\n\
+        --decline records \"keep current model\" in \
+        ~/.local/state/voxtype/model_upgrade.json, never in config.toml. \
+        Declined offers stay listed, marked declined, so you can accept them \
+        later.\n\n\
+        --cleanup deletes the previous model's files from the models \
+        directory, and only after voxtype has transcribed successfully with \
+        the accepted model.\n\n\
+        Exit codes: 0 on success, 2 for an unknown offer id, 1 for any other \
+        failure.\n\n\
+        Examples:\n  \
+        voxtype setup migrate\n  \
+        voxtype setup migrate --json\n  \
+        voxtype setup migrate --accept parakeet-ultra\n  \
+        voxtype setup migrate --accept format-gguf --yes --progress-format json\n  \
+        voxtype setup migrate --decline\n  \
+        voxtype setup migrate --decline parakeet-ultra\n  \
+        voxtype setup migrate --cleanup")]
+    Migrate {
+        /// Print the upgrade status object as JSON (the same object as
+        /// `voxtype status --format json --extended` reports as model_upgrade)
+        #[arg(long)]
+        json: bool,
+
+        /// Accept an offer by id (parakeet-ultra or format-gguf)
+        #[arg(long, value_name = "OFFER", conflicts_with_all = ["decline", "cleanup"])]
+        accept: Option<String>,
+
+        /// Keep the current model. With no OFFER, declines every current offer
+        #[arg(
+            long,
+            value_name = "OFFER",
+            num_args = 0..=1,
+            default_missing_value = "",
+            conflicts_with = "cleanup"
+        )]
+        decline: Option<String>,
+
+        /// Delete the previous model's files after a successful switch
+        #[arg(long)]
+        cleanup: bool,
+
+        /// Accept without asking for confirmation (required without a terminal)
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Download progress: human, or json for NDJSON events on stdout
+        /// (the same events as `voxtype setup --download --progress-format json`)
+        #[arg(
+            long,
+            value_name = "FORMAT",
+            value_parser = clap::builder::PossibleValuesParser::new(super::PROGRESS_FORMATS),
+        )]
+        progress_format: Option<String>,
+    },
+
     /// Download the Silero VAD model for speech detection
     Vad {
         /// Show VAD model status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Install or inspect the optional English LARD disfluency model
+    Lard {
+        /// Install a local model with the pinned release checksum
+        #[arg(long, conflicts_with = "url")]
+        source: Option<std::path::PathBuf>,
+        /// Explicit HTTPS model URL (publication is a separate release approval)
+        #[arg(long)]
+        url: Option<String>,
+        /// Inspect the local model without downloading
+        #[arg(long, conflicts_with_all = ["source", "url"])]
+        status: bool,
+    },
+
+    /// Download the optional punctuation/casing model
+    Punctuation {
+        /// Show model status without downloading it
         #[arg(long)]
         status: bool,
     },
@@ -338,6 +439,18 @@ mod tests {
     use super::*;
     use crate::cli::*;
     use clap::Parser;
+
+    #[test]
+    fn punctuation_setup_status_parses() {
+        let cli = Cli::parse_from(["voxtype", "setup", "punctuation", "--status"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Punctuation { status }),
+                ..
+            }) => assert!(status),
+            _ => panic!("Expected setup punctuation --status"),
+        }
+    }
 
     #[test]
     fn test_setup_quiet_flag() {

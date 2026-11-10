@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y \
     libappindicator3-dev \
     git \
     binutils \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup
@@ -63,16 +64,36 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v4"
 ENV CFLAGS="-march=x86-64-v4"
 ENV CXXFLAGS="-march=x86-64-v4"
 ENV WHISPER_CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON"
+# The workspace default deliberately caps transcribe.cpp at x86-64-v3.
+# This variant promises v4, so compile the GGUF worker's ggml tiers to match.
+ENV TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON"
 
-RUN cargo build --release --target x86_64-unknown-linux-gnu \
-    && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-avx512
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker; GPU GGUF on Whisper builds comes from the vulkan variant.
+RUN cargo build --release --target x86_64-unknown-linux-gnu --features gguf,cohere-gguf,parakeet-gguf \
+    && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-avx512 \
+    && cargo build --release --target x86_64-unknown-linux-gnu -p voxtype-gguf-worker \
+    && cp target/x86_64-unknown-linux-gnu/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only \
+        /tmp/voxtype-avx512 /tmp/voxtype-gguf-worker
+
+# Preserve exact build-stage version evidence for collection on another runner.
+# Cross-version metadata is not a claim that AVX-512 executed here.
+RUN mkdir -p /tmp/release-proof \
+    && cp /tmp/voxtype-avx512 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-avx512 \
+    && python3 scripts/release-artifacts.py record-cross \
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-avx512 "${VERSION}" --source /build
 
 # Verify AVX-512 instructions ARE present. Fail the build if not, so the
 # pipeline never produces a mislabeled binary.
-RUN echo "=== Verifying AVX-512 binary ===" \
-    && avx512_count=$(objdump -d /tmp/voxtype-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || echo 0) \
+RUN echo "=== Verifying AVX-512 binary and GGUF worker ===" \
+    && avx512_count=$(objdump -d /tmp/voxtype-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || true) \
+    && worker_avx512_count=$(objdump -d /tmp/voxtype-gguf-worker | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || true) \
     && echo "  AVX-512 instructions: $avx512_count" \
-    && if [ "$avx512_count" -eq 0 ]; then \
+    && echo "  Worker AVX-512 instructions: $worker_avx512_count" \
+    && if [ "$avx512_count" -eq 0 ] || [ "$worker_avx512_count" -eq 0 ]; then \
          echo "ERROR: AVX-512 binary contains zero AVX-512 instructions." \
          && echo "  Likely cause: target-cpu and/or CMake march flags reverted to host detection." \
          && exit 1; \
@@ -81,5 +102,7 @@ RUN echo "=== Verifying AVX-512 binary ===" \
 
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx512 /output/voxtype-${VERSION}-linux-x86_64-avx512 \
+    && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-avx512.version-proof.json /output/ \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*-avx512

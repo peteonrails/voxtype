@@ -23,6 +23,7 @@ pub const CATALOG_ENGINES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gguf",
     "openvino",
 ];
 
@@ -30,21 +31,43 @@ pub const CATALOG_ENGINES: &[&str] = &[
 pub fn model_catalog(engine: &str) -> Vec<&'static str> {
     match engine {
         "whisper" => model::valid_model_names(),
-        "parakeet" => model::valid_parakeet_model_names(),
+        "parakeet" => {
+            let mut models = model::valid_parakeet_model_names();
+            models.extend(model::parakeet_gguf_models().iter().map(|entry| entry.name));
+            models
+        }
         "moonshine" => model::valid_moonshine_model_names(),
         "sensevoice" => model::valid_sensevoice_model_names(),
         "paraformer" => vec!["paraformer-zh", "paraformer-en"],
         "dolphin" => vec!["dolphin-base"],
         "omnilingual" => vec!["omnilingual-300m"],
-        "cohere" => vec![
-            "cohere-transcribe-q4f16",
-            "cohere-transcribe-q4",
-            "cohere-transcribe-int8",
-            "cohere-transcribe-fp16",
-        ],
+        "cohere" => {
+            let mut models = vec![
+                "cohere-transcribe-q4f16",
+                "cohere-transcribe-q4",
+                "cohere-transcribe-int8",
+                "cohere-transcribe-fp16",
+            ];
+            models.extend(model::cohere_gguf_models().iter().map(|entry| entry.name));
+            models
+        }
+        "gguf" => model::handy_gguf_models()
+            .iter()
+            .map(|entry| entry.name)
+            .collect(),
         "openvino" => model::valid_openvino_model_names(),
         _ => Vec::new(),
     }
+}
+
+/// Choices runnable by this application's compiled backend, not the full registry.
+pub fn supported_model_catalog(engine: &str) -> Vec<&'static str> {
+    model_catalog(engine)
+        .into_iter()
+        .filter(|model| {
+            crate::model_selection::BackendCapabilities::compiled().supports(engine, model)
+        })
+        .collect()
 }
 
 /// Default model name baked into voxtype for each engine. Used when a fresh
@@ -53,13 +76,16 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
 pub const fn default_model(engine: &str) -> &'static str {
     match engine.as_bytes() {
         b"whisper" => "base.en",
+        b"parakeet" if cfg!(feature = "parakeet-gguf") => "parakeet-ultra-Q8_0.gguf",
         b"parakeet" => "parakeet-tdt-0.6b-v3",
         b"moonshine" => "base",
         b"sensevoice" => "sensevoice-small",
         b"paraformer" => "paraformer-zh",
         b"dolphin" => "dolphin-base",
         b"omnilingual" => "omnilingual-300m",
+        b"cohere" if cfg!(feature = "cohere-gguf") => "cohere-transcribe-03-2026-Q4_K_M.gguf",
         b"cohere" => "cohere-transcribe-q4f16",
+        b"gguf" => "Qwen3-ASR-0.6B-Q8_0.gguf",
         b"openvino" => "base.en-int8",
         _ => "",
     }
@@ -96,7 +122,7 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 /// The remaining engines' catalog names are already directory names.
 pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     match engine {
-        "whisper" | "parakeet" | "openvino" => Some(model.to_string()),
+        "whisper" | "parakeet" | "openvino" | "gguf" => Some(model.to_string()),
         "sensevoice" | "moonshine" => Some(model_dir_name(engine, model)),
         "paraformer" | "dolphin" | "omnilingual" | "cohere" => Some(model.to_string()),
         _ => None,
@@ -112,9 +138,12 @@ pub fn download_command(engine: &str, model: &str) -> String {
     format!("voxtype setup --download --model {arg}")
 }
 
-/// On-disk location of a model: a single `ggml-<name>.bin` file for whisper,
+/// On-disk location of a model: a single file for Whisper and GGUF models,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
+    if engine == "gguf" {
+        return crate::model_selection::model_path_in(models_dir, model);
+    }
     if engine == "whisper" {
         models_dir.join(format!("ggml-{}.bin", model))
     } else {
@@ -176,6 +205,13 @@ pub(crate) fn model_health_in(models_dir: &Path, engine: &str, model: &str) -> M
 
     if engine == "whisper" {
         return match model::validate_download(&path, None, model::ContentCheck::Ggml) {
+            Ok(()) => ModelHealth::Present,
+            Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
+    }
+
+    if let Some(gguf) = model::find_gguf_model(model).filter(|gguf| gguf.engine == engine) {
+        return match model::validate_gguf_model(&path, gguf) {
             Ok(()) => ModelHealth::Present,
             Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
         };
@@ -245,6 +281,13 @@ pub(crate) fn verify_model_in(models_dir: &Path, engine: &str, model: &str) -> M
             "whisper models are published without checksums, so only their \
              ggml header could be checked",
         );
+    }
+
+    if let Some(gguf) = model::find_gguf_model(model).filter(|gguf| gguf.engine == engine) {
+        return match model::verify_gguf_model(&path, gguf) {
+            Ok(()) => ModelVerification::Ok,
+            Err(e) => ModelVerification::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
     }
 
     let Some(manifest) = read_cached_manifest(&path) else {
@@ -582,6 +625,45 @@ mod tests {
         assert!(!model_installed_in(tmp.path(), "whisper", "tiny"));
     }
 
+    /// A Parakeet GGUF is one file, checked by its header and pinned size,
+    /// and listed under the parakeet engine only. Without the GGUF branch the
+    /// ONNX checks would look for encoder files inside it and call it corrupt.
+    #[test]
+    fn parakeet_gguf_health_rests_on_header_and_size() {
+        let name = "parakeet-tdt-0.6b-v3-Q8_0.gguf";
+        assert!(model_catalog("parakeet").contains(&name));
+        assert!(!model_catalog("cohere").contains(&name));
+        assert_eq!(
+            resolve_model(name),
+            Some(ResolvedModel {
+                engine: "parakeet",
+                model: name.to_string(),
+            })
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Missing
+        );
+
+        // Sparse, so the test does not write the real 740 MB.
+        let size = model::find_gguf_model(name).unwrap().size;
+        let file = std::fs::File::create(tmp.path().join(name)).unwrap();
+        std::io::Write::write_all(&mut &file, b"GGUF").unwrap();
+        file.set_len(size).unwrap();
+        assert_eq!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Present
+        );
+
+        file.set_len(size - 1).unwrap();
+        assert!(matches!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Corrupt(_)
+        ));
+    }
+
     /// Why the slow tier exists: content can rot without the size changing,
     /// and only hashing sees that.
     #[test]
@@ -638,6 +720,27 @@ mod tests {
                 assert!(why.contains("without checksums"), "{}", why)
             }
             other => panic!("expected unverifiable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fresh_engine_defaults_match_compiled_backends() {
+        for (engine, gguf_enabled, gguf, legacy) in [
+            (
+                "cohere",
+                cfg!(feature = "cohere-gguf"),
+                "cohere-transcribe-03-2026-Q4_K_M.gguf",
+                "cohere-transcribe-q4f16",
+            ),
+            (
+                "parakeet",
+                cfg!(feature = "parakeet-gguf"),
+                "parakeet-ultra-Q8_0.gguf",
+                "parakeet-tdt-0.6b-v3",
+            ),
+        ] {
+            let expected = if gguf_enabled { gguf } else { legacy };
+            assert_eq!(default_model(engine), expected, "{engine}");
         }
     }
 

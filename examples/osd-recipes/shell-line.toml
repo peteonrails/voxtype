@@ -1,0 +1,33 @@
+# Shell Line: Capsule's flowing voice strands in an Omarchy Shell panel.
+#
+# The shell layout follows Hyprland rounding and Omarchy's popup border,
+# monospace typography, and spacing scale. Like the shell's own OSD, the
+# background stays steady at 97% opacity, with no halo or animated edge.
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "shell"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "accent"
+glow = false
+halo = false
+
+[[osd.visual.layers]]
+type = "line"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0
+radius = 2.2

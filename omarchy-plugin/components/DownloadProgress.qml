@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // What a model row shows while it is downloading: a slim bar, the percentage,
@@ -40,7 +41,7 @@ Item {
       width: Style.space(150)
       horizontalAlignment: Text.AlignRight
       text: root.file
-      color: Qt.darker(Color.foreground, 2.0)
+      color: Qt.darker(ShellTheme.Color.foreground, 2.0)
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       elide: Text.ElideMiddle
@@ -55,14 +56,14 @@ Item {
       Rectangle {
         anchors.fill: parent
         radius: height / 2
-        color: Util.alpha(Color.foreground, 0.15)
+        color: Util.alpha(ShellTheme.Color.foreground, 0.15)
       }
 
       Rectangle {
         id: fill
         height: parent.height
         radius: height / 2
-        color: Color.accent
+        color: ShellTheme.Color.accent
         // A third of the track, swept back and forth, when there is no figure
         // to fill to.
         width: root.indeterminate
@@ -95,7 +96,7 @@ Item {
       text: root.cancelling
         ? "stopping"
         : (root.indeterminate ? "working" : Math.round(root.pct) + "%")
-      color: Qt.darker(Color.foreground, 1.5)
+      color: Qt.darker(ShellTheme.Color.foreground, 1.5)
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }

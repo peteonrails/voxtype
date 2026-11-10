@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // One row of the form: label + description on the left, the control for this
@@ -47,7 +48,9 @@ Item {
 
   readonly property string specKey: spec ? String(spec.key) : ""
   readonly property string specType: spec ? String(spec.type) : "string"
-  readonly property string specLabel: (spec && spec.label) ? String(spec.label) : specKey
+  readonly property string specLabel: specKey === "text.lard_disfluency"
+    ? "LARD disfluency cleanup"
+    : ((spec && spec.label) ? String(spec.label) : specKey)
   readonly property string specDescription: (spec && spec.description) ? String(spec.description) : ""
   readonly property bool compiled: !spec || spec.compiled !== false
   readonly property bool modified: spec !== null && spec.file_value !== null && spec.file_value !== undefined
@@ -128,7 +131,7 @@ Item {
   }
 
   readonly property int controlAreaHeight: Math.max(Style.space(34), Style.spacing.controlHeight + Style.spacing.md)
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   function apply(value) {
     root.pendingValue = value
@@ -179,7 +182,7 @@ Item {
 
       Text {
         text: root.specLabel
-        color: Color.foreground
+        color: ShellTheme.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
@@ -208,7 +211,7 @@ Item {
       visible: root.errorText !== ""
       width: parent.width
       text: root.errorText
-      color: Color.urgent
+      color: ShellTheme.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap
@@ -216,7 +219,7 @@ Item {
 
     Text {
       text: root.specKey
-      color: Qt.darker(Color.foreground, 2.0)
+      color: Qt.darker(ShellTheme.Color.foreground, 2.0)
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       elide: Text.ElideRight
@@ -238,7 +241,7 @@ Item {
       width: Style.space(6)
       height: width
       radius: width / 2
-      color: Color.accent
+      color: ShellTheme.Color.accent
     }
 
     PanelActionButton {
@@ -409,9 +412,9 @@ Item {
   // hands over the theme colors directly — the same shim the shell's own dev
   // gallery uses.
   readonly property var sliderBar: QtObject {
-    readonly property color foreground: Color.foreground
-    readonly property color background: Color.popups.background
-    readonly property color urgent: Color.urgent
+    readonly property color foreground: ShellTheme.Color.foreground
+    readonly property color background: ShellTheme.Color.popups.background
+    readonly property color urgent: ShellTheme.Color.urgent
     readonly property string fontFamily: Style.font.family
     readonly property string position: "top"
     readonly property bool vertical: false

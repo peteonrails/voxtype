@@ -178,6 +178,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",  // 🐬
         crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
         crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",   // 📝
+        crate::config::TranscriptionEngine::Gguf => "\u{2699}\u{FE0F}", // ⚙️
         crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
         crate::config::TranscriptionEngine::OpenVino => "\u{1F9E0}", // 🧠
     }
@@ -196,22 +197,51 @@ pub fn sanitize_urgency(urgency: &str) -> &str {
 /// Send a transcription notification with optional engine icon
 pub async fn send_transcription_notification(
     text: &str,
+    original: Option<&str>,
     show_engine_icon: bool,
     engine: crate::config::TranscriptionEngine,
     urgency: &str,
 ) {
-    // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-    let preview = if text.chars().count() > 80 {
-        format!("{}...", text.chars().take(80).collect::<String>())
-    } else {
-        text.to_string()
-    };
+    use crate::text::diff;
 
-    let title = if show_engine_icon {
+    // When cleanup changed the transcription, show *what* it changed rather
+    // than only the result: deletions struck through, replacements coloured.
+    // Falls back to a plain preview when nothing changed, or when the
+    // notification server does not parse markup.
+    let changed = original
+        .map(|o| o.split_whitespace().ne(text.split_whitespace()))
+        .unwrap_or(false);
+
+    let (body, edits) = if changed {
+        let markup = crate::notification::body_markup().await;
+        let spans = diff::word_diff(original.unwrap_or_default(), text);
+        (
+            diff::render_for_notification(&spans, markup, 160),
+            diff::edit_count(&spans),
+        )
+    } else {
+        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
+        let preview = if text.chars().count() > 80 {
+            format!("{}...", text.chars().take(80).collect::<String>())
+        } else {
+            text.to_string()
+        };
+        (preview, 0)
+    };
+    let preview = body;
+
+    let mut title = if show_engine_icon {
         format!("{} Transcribed", engine_icon(engine))
     } else {
         "Transcribed".to_string()
     };
+    if edits > 0 {
+        title.push_str(&format!(
+            " \u{270e} {} edit{}",
+            edits,
+            if edits == 1 { "" } else { "s" }
+        ));
+    }
 
     // Through the notification module rather than straight to notify-send:
     // that module owns the --replace-id bookkeeping that keeps every Voxtype
@@ -228,6 +258,10 @@ pub async fn send_transcription_notification(
 
 /// Trait for text output implementations
 #[async_trait::async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds #[must_use] to methods returning must-use futures"
+)]
 pub trait TextOutput: Send + Sync {
     /// Output text (type it or copy to clipboard)
     async fn output(&self, text: &str) -> Result<(), OutputError>;
@@ -282,6 +316,7 @@ fn create_driver_output(
             config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
+            config.shift_enter_newlines,
         )),
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
@@ -473,6 +508,7 @@ fn is_keystroke_method(name: &str) -> bool {
 /// (clipboard mode, or a `driver_order` of clipboard drivers) never press a
 /// key, and building the guard costs hundreds of milliseconds on hosts with
 /// many input devices (#543), so they skip it.
+#[cfg(target_os = "linux")]
 fn chain_synthesizes_keystrokes<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
     names.into_iter().any(is_keystroke_method)
 }
@@ -492,6 +528,7 @@ pub async fn output_with_fallback(
     // from combining with Super/Ctrl/Alt/Shift and firing compositor or
     // application keybindings. Disabled and timed-out cases both leave the
     // chain runnable; only the latter skips keystroke-synthesizing methods.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut skip_keystroke_methods = false;
     // The evdev-based modifier_guard is Linux-only. macOS uses its own
     // wait_for_modifiers_release in osascript.rs and gets called separately
@@ -655,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_chain_synthesizes_keystrokes() {
         assert!(!chain_synthesizes_keystrokes(["clipboard (wl-copy)"]));
         assert!(!chain_synthesizes_keystrokes([

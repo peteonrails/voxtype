@@ -1,0 +1,36 @@
+# Aura: a pill with a living gradient edge and voice-assistant dots.
+#
+# Design intent:
+# - the edge carries the state: it turns slowly while listening, quickens
+#   and brightens with your voice, and spins up while transcribing
+# - five dots in the middle stretch with each syllable, rippling outward
+#   from the center, and bounce in turn while transcribing
+# - gradient colors come from the theme's accent and state roles, so it
+#   follows Omarchy theme switches
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "pill"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "aura"
+glow = false
+halo = false
+
+[[osd.visual.layers]]
+type = "dots"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0

@@ -15,23 +15,58 @@ pub enum ParakeetModelType {
     Tdt,
 }
 
-/// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
-/// Requires: cargo build --features parakeet
+/// Parakeet speech-to-text configuration (ONNX or GGUF, alternative to Whisper)
+/// Requires `parakeet` for ONNX or `parakeet-gguf` for GGUF.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ParakeetConfig {
-    /// Path to model directory containing ONNX model files
+    /// Model name, ONNX model directory, or path to a transcribe.cpp GGUF file.
     /// For TDT: encoder-model.onnx, decoder_joint-model.onnx, vocab.txt
     /// For CTC: model.onnx, tokenizer.json
+    /// A name ending in `.gguf` runs through transcribe.cpp instead.
     pub model: String,
+
+    /// transcribe.cpp compute backend for GGUF models (auto, cpu, vulkan, etc.).
+    #[serde(default = "default_gguf_backend")]
+    pub gguf_backend: String,
 
     /// Model architecture type: "tdt" (default, recommended) or "ctc"
     /// Auto-detected from model directory structure if not specified
     #[serde(default)]
     pub model_type: Option<ParakeetModelType>,
 
+    /// Number of CPU threads for ONNX Runtime intra-op parallelism
+    /// (default: 4, parakeet-rs's). Long dictations on the CPU are fastest
+    /// at the physical core count. For GGUF models, transcribe.cpp's CPU
+    /// threads (default: the library's).
+    #[serde(default)]
+    pub threads: Option<usize>,
+
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Longest stretch of audio handed to the model in one pass, in seconds
+    /// (default: 240). Longer recordings are split into overlapping windows
+    /// and the transcripts are stitched back together.
+    ///
+    /// The TDT ONNX exports carry a fixed-size attention bias, and exceeding
+    /// it does not degrade gracefully — ONNX Runtime aborts the run with
+    /// "Attempting to broadcast an axis by a dimension other than 1" and the
+    /// transcription is lost (#288). The reported failure was an 11-minute
+    /// file whose 8691 encoder frames met a bias sized for 3691, which is
+    /// about 295 seconds at the 80ms frame rate these models use. 240 leaves
+    /// margin under that without cutting ordinary dictation into pieces.
+    ///
+    /// Set to 0 to disable windowing and send the whole buffer, which is the
+    /// pre-#288 behavior.
+    #[serde(default = "default_parakeet_max_window_secs")]
+    pub max_window_secs: f32,
+
+    /// Overlap between consecutive windows, in seconds (default: 5).
+    /// The stitcher uses this shared audio to find where two windows agree,
+    /// so it must be long enough to contain a few words.
+    #[serde(default = "default_parakeet_window_overlap_secs")]
+    pub window_overlap_secs: f32,
 
     /// Use the cache-aware streaming pipeline (parakeet-rs `ParakeetUnified`)
     /// instead of the batch CTC/TDT models. When true, voxtype emits live
@@ -58,6 +93,21 @@ pub struct ParakeetConfig {
     pub streaming_right_context_secs: f32,
 }
 
+fn default_gguf_backend() -> String {
+    "auto".to_string()
+}
+
+/// Under the ~295s ceiling inferred from the #288 report, with margin.
+fn default_parakeet_max_window_secs() -> f32 {
+    240.0
+}
+
+/// Matches the overlap the Cohere checkpoint asks for; long enough to hold
+/// several words for the stitcher to match on.
+fn default_parakeet_window_overlap_secs() -> f32 {
+    5.0
+}
+
 fn default_streaming_chunk_secs() -> f32 {
     0.5
 }
@@ -73,9 +123,13 @@ fn default_streaming_right_context_secs() -> f32 {
 impl Default for ParakeetConfig {
     fn default() -> Self {
         Self {
-            model: "parakeet-tdt-0.6b-v3".to_string(),
+            model: crate::model_catalog::default_model("parakeet").to_string(),
+            gguf_backend: default_gguf_backend(),
             model_type: None, // Auto-detect
+            threads: None,
             on_demand_loading: false,
+            max_window_secs: default_parakeet_max_window_secs(),
+            window_overlap_secs: default_parakeet_window_overlap_secs(),
             streaming: false,
             streaming_chunk_secs: default_streaming_chunk_secs(),
             streaming_left_context_secs: default_streaming_left_context_secs(),
@@ -184,7 +238,10 @@ mod tests {
     #[test]
     fn test_parakeet_config_default() {
         let config = ParakeetConfig::default();
-        assert_eq!(config.model, "parakeet-tdt-0.6b-v3");
+        assert_eq!(
+            config.model,
+            crate::model_catalog::default_model("parakeet")
+        );
         assert!(config.model_type.is_none());
         assert!(!config.on_demand_loading);
     }

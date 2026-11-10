@@ -39,12 +39,12 @@ impl Section {
             Section::Hotkey => "Hotkey",
             Section::Audio => "Audio",
             Section::Output => "Output",
-            Section::Text => "Text",
+            Section::Text => "Text Cleanup",
             Section::Vad => "VAD",
             Section::Meeting => "Meeting",
             Section::Notifications => "Notifications",
             Section::Osd => "OSD",
-            Section::Waybar => "Waybar",
+            Section::Waybar => "Status",
             Section::Advanced => "Advanced",
         }
     }
@@ -58,12 +58,12 @@ impl Section {
             Section::Hotkey => "Push-to-talk key, mode, modifier, cancel key",
             Section::Audio => "Input device, max duration, feedback, MPRIS",
             Section::Output => "Mode, driver order, post-processing, profiles",
-            Section::Text => "Spoken punctuation, replacements",
+            Section::Text => "Deterministic cleanup, optional LARD model, replacements",
             Section::Vad => "Silero VAD, energy thresholds, eager processing",
             Section::Meeting => "Meeting mode: audio source, diarization, summary",
             Section::Notifications => "Desktop notifications and expire times",
             Section::Osd => "Floating waveform OSD: frontend, position, size, opacity",
-            Section::Waybar => "Status integration: icon theme, overrides",
+            Section::Waybar => "Native Linux tray, Waybar icon theme and overrides",
             Section::Advanced => "GPU isolation, flash attention, on-demand loading",
         }
     }

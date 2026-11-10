@@ -1,0 +1,25 @@
+name = "capsule"
+version = "0.1.0"
+description = "Capsule: a small dark pill with one flowing voice line."
+palette = "omarchy"
+layout = "pill"
+
+[frame]
+background = "background"
+border = "rgba(255, 255, 255, 0.08)"
+glow = false
+halo = false
+
+[[visual.layers]]
+type = "line"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0
+radius = 2.2

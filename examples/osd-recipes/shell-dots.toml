@@ -1,0 +1,32 @@
+# Shell Dots: voice-assistant dots in an Omarchy Shell panel.
+#
+# Aura's five dots stretch with each syllable and bounce while transcribing,
+# without its animated aura edge. The shell frame follows live Hyprland
+# rounding, popup borders, monospace typography, and shell-scaled padding.
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "shell"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "accent"
+glow = false
+halo = false
+
+[[osd.visual.layers]]
+type = "dots"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0

@@ -20,7 +20,9 @@ use super::common::{
 };
 use super::config_editor::{ConfigEditor, EditorError};
 use crate::config::TranscriptionEngine;
-use crate::model_catalog::{default_model, installed_models_for, model_catalog};
+use crate::model_catalog::{
+    default_model, installed_models_for, supported_model_catalog as model_catalog,
+};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
 use crate::setup::model;
 use strum::IntoEnumIterator;
@@ -43,6 +45,10 @@ pub struct EngineState {
     /// Active inline text edit. While `Some`, all keypresses route to the
     /// TextInput; navigation and cycle are suspended.
     pub editing: Option<TextEdit>,
+    /// Model upgrade offer titles from `voxtype setup migrate --json`,
+    /// recommended first. Shown in the guidance pane with the command that
+    /// acts on them; the TUI itself never downloads or switches.
+    pub upgrade_offers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +77,7 @@ pub struct AllFields {
     // Parakeet
     pub pk_model: String,
     pub pk_model_type: Option<String>, // "tdt", "ctc", or None for auto-detect
+    pub pk_threads: Option<i64>,
     pub pk_on_demand_loading: bool,
     /// True if the [parakeet] table existed in the config at load time. We
     /// only write back to it on save if either this is true or parakeet is
@@ -118,6 +125,16 @@ pub struct AllFields {
     pub co_on_demand_loading: bool,
     pub co_section_existed: bool,
 
+    // Shared native GGUF
+    pub gg_model: String,
+    pub gg_architecture: String,
+    pub gg_language: String,
+    pub gg_backend: String,
+    pub gg_threads: Option<i64>,
+    pub gg_on_demand_loading: bool,
+    pub gg_streaming: bool,
+    pub gg_section_existed: bool,
+
     // OpenVINO GenAI Whisper (Intel NPU/GPU/CPU)
     pub ov_model: String,
     pub ov_device: String,
@@ -159,6 +176,7 @@ pub enum FieldId {
     // Parakeet
     PkModel,
     PkModelType,
+    PkThreads,
     PkOnDemandLoading,
 
     // Moonshine
@@ -195,6 +213,15 @@ pub enum FieldId {
     CoThreads,
     CoOnDemandLoading,
 
+    // Shared GGUF
+    GgModel,
+    GgArchitecture,
+    GgLanguage,
+    GgBackend,
+    GgThreads,
+    GgOnDemandLoading,
+    GgStreaming,
+
     // OpenVINO
     OvModel,
     OvDevice,
@@ -221,6 +248,15 @@ const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
 /// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
 /// own AUTO arm) — included here so it's reachable from the picker.
 const OV_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
+const GGUF_BACKEND_CHOICES: &[&str] = &[
+    "auto",
+    "cpu",
+    "cpu_accel",
+    "vulkan",
+    "metal",
+    "cuda",
+    "rocm",
+];
 
 fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
     let mut rows = vec![FieldId::Engine];
@@ -248,6 +284,7 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
         "parakeet" => rows.extend_from_slice(&[
             FieldId::PkModel,
             FieldId::PkModelType,
+            FieldId::PkThreads,
             FieldId::PkOnDemandLoading,
         ]),
         "moonshine" => rows.extend_from_slice(&[
@@ -284,6 +321,15 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::CoThreads,
             FieldId::CoOnDemandLoading,
         ]),
+        "gguf" => rows.extend_from_slice(&[
+            FieldId::GgModel,
+            FieldId::GgArchitecture,
+            FieldId::GgLanguage,
+            FieldId::GgBackend,
+            FieldId::GgThreads,
+            FieldId::GgOnDemandLoading,
+            FieldId::GgStreaming,
+        ]),
         "openvino" => rows.extend_from_slice(&[
             FieldId::OvModel,
             FieldId::OvDevice,
@@ -299,6 +345,12 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
 impl EngineState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
+        let mut state = Self::from_editor(&ed);
+        state.upgrade_offers = read_upgrade_offers();
+        Ok(state)
+    }
+
+    fn from_editor(ed: &ConfigEditor) -> Self {
         let engine = ed
             .get_string("", "engine")
             .unwrap_or_else(|| "whisper".to_string());
@@ -328,6 +380,7 @@ impl EngineState {
                 .get_string("parakeet", "model")
                 .unwrap_or_else(|| default_model("parakeet").to_string()),
             pk_model_type: ed.get_string("parakeet", "model_type"),
+            pk_threads: ed.get_int("parakeet", "threads"),
             pk_on_demand_loading: ed
                 .get_bool("parakeet", "on_demand_loading")
                 .unwrap_or(false),
@@ -397,6 +450,20 @@ impl EngineState {
             co_on_demand_loading: ed.get_bool("cohere", "on_demand_loading").unwrap_or(false),
             co_section_existed: ed.get_string("cohere", "model").is_some(),
 
+            // Shared GGUF
+            gg_model: ed.get_string("gguf", "model").unwrap_or_default(),
+            gg_architecture: ed.get_string("gguf", "architecture").unwrap_or_default(),
+            gg_language: ed
+                .get_string("gguf", "language")
+                .unwrap_or_else(|| "auto".to_string()),
+            gg_backend: ed
+                .get_string("gguf", "gguf_backend")
+                .unwrap_or_else(|| "auto".to_string()),
+            gg_threads: ed.get_int("gguf", "threads"),
+            gg_on_demand_loading: ed.get_bool("gguf", "on_demand_loading").unwrap_or(false),
+            gg_streaming: ed.get_bool("gguf", "streaming").unwrap_or(false),
+            gg_section_existed: ed.get_string("gguf", "model").is_some(),
+
             // OpenVINO
             ov_model: ed
                 .get_string("openvino", "model")
@@ -422,9 +489,10 @@ impl EngineState {
             pending_variant_switch: None,
             binary_switch_blocked: None,
             editing: None,
+            upgrade_offers: Vec::new(),
         };
         state.refresh_binary_match();
-        Ok(state)
+        state
     }
 
     /// Required binary family for an engine name. Whisper needs a Whisper
@@ -440,10 +508,33 @@ impl EngineState {
     /// Recompute pending_variant_switch / binary_switch_blocked based on the
     /// current engine selection. Called whenever the engine field changes.
     fn refresh_binary_match(&mut self) {
+        self.refresh_binary_match_with_inventory(&binary::inventory());
+    }
+
+    fn refresh_binary_match_with_inventory(&mut self, inv: &binary::Inventory) {
         self.pending_variant_switch = None;
         self.binary_switch_blocked = None;
 
-        let inv = binary::inventory();
+        // A GGUF client can run in the Vulkan/Whisper binary. Engine family
+        // alone is not enough: explicit ONNX models still need ONNX binaries.
+        let gguf_supported = match self.engine.as_str() {
+            "cohere" if self.fields.co_model.to_ascii_lowercase().ends_with(".gguf") => {
+                Some(cfg!(feature = "cohere-gguf"))
+            }
+            "parakeet" if self.fields.pk_model.to_ascii_lowercase().ends_with(".gguf") => {
+                Some(cfg!(feature = "parakeet-gguf"))
+            }
+            "gguf" => Some(cfg!(feature = "gguf")),
+            _ => None,
+        };
+        if let Some(supported) = gguf_supported {
+            if !supported {
+                self.binary_switch_blocked = Some(
+                    "This binary does not support the selected GGUF model. Use a GGUF-capable voxtype build and matching voxtype-gguf-worker.",
+                );
+            }
+            return;
+        }
 
         // OpenVINO isn't part of the prebuilt binary distribution: no
         // Whisper or ONNX variant links against openvino-genai (it's an
@@ -531,6 +622,43 @@ impl EngineState {
             }
         };
 
+        self.save_to_editor(&mut ed)
+    }
+
+    fn save_to_editor(&mut self, ed: &mut ConfigEditor) -> Action {
+        if let Some(model) = active_model_for_engine(&self.engine, &self.fields) {
+            if matches!(self.engine.as_str(), "parakeet" | "cohere") {
+                let ready = crate::model_selection::validate_mode(
+                    &self.engine,
+                    &model,
+                    ed.get_bool(&self.engine, "streaming").unwrap_or(false),
+                )
+                .and_then(|()| crate::model_selection::validate_ready(&self.engine, &model));
+                if let Err(message) = ready {
+                    self.feedback = Some(Feedback {
+                        level: FeedbackLevel::Err,
+                        message,
+                    });
+                    return Action::None;
+                }
+            }
+            if self.engine == "gguf" {
+                let ready = crate::model_selection::validate_gguf_choice(
+                    &model,
+                    &self.fields.gg_architecture,
+                    &self.fields.gg_language,
+                    self.fields.gg_streaming,
+                )
+                .and_then(|()| crate::model_selection::validate_ready("gguf", &model));
+                if let Err(message) = ready {
+                    self.feedback = Some(Feedback {
+                        level: FeedbackLevel::Err,
+                        message,
+                    });
+                    return Action::None;
+                }
+            }
+        }
         // Active engine at root.
         ed.set_string("", "engine", &self.engine);
 
@@ -574,6 +702,10 @@ impl EngineState {
             match &f.pk_model_type {
                 Some(m) => ed.set_string("parakeet", "model_type", m),
                 None => ed.unset("parakeet", "model_type"),
+            }
+            match f.pk_threads {
+                Some(n) => ed.set_int("parakeet", "threads", n),
+                None => ed.unset("parakeet", "threads"),
             }
             ed.set_bool("parakeet", "on_demand_loading", f.pk_on_demand_loading);
         }
@@ -640,6 +772,20 @@ impl EngineState {
                 None => ed.unset("cohere", "threads"),
             }
             ed.set_bool("cohere", "on_demand_loading", f.co_on_demand_loading);
+        }
+
+        // Shared native GGUF
+        if self.engine == "gguf" || f.gg_section_existed {
+            ed.set_string("gguf", "model", &f.gg_model);
+            ed.set_string("gguf", "architecture", &f.gg_architecture);
+            ed.set_string("gguf", "language", &f.gg_language);
+            ed.set_string("gguf", "gguf_backend", &f.gg_backend);
+            match f.gg_threads {
+                Some(n) => ed.set_int("gguf", "threads", n),
+                None => ed.unset("gguf", "threads"),
+            }
+            ed.set_bool("gguf", "on_demand_loading", f.gg_on_demand_loading);
+            ed.set_bool("gguf", "streaming", f.gg_streaming);
         }
 
         // OpenVINO
@@ -760,6 +906,9 @@ impl EngineState {
                 | FieldId::WRemoteEndpoint
                 | FieldId::WRemoteApiKey
                 | FieldId::WRemoteModel
+                | FieldId::GgModel
+                | FieldId::GgArchitecture
+                | FieldId::GgLanguage
         )
     }
 
@@ -773,6 +922,9 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint.clone().unwrap_or_default(),
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key.clone().unwrap_or_default(),
             FieldId::WRemoteModel => self.fields.w_remote_model.clone().unwrap_or_default(),
+            FieldId::GgModel => self.fields.gg_model.clone(),
+            FieldId::GgArchitecture => self.fields.gg_architecture.clone(),
+            FieldId::GgLanguage => self.fields.gg_language.clone(),
             _ => String::new(),
         };
         self.editing = Some(TextEdit {
@@ -794,6 +946,9 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint = opt,
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key = opt,
             FieldId::WRemoteModel => self.fields.w_remote_model = opt,
+            FieldId::GgModel => self.fields.gg_model = buffer,
+            FieldId::GgArchitecture => self.fields.gg_architecture = buffer,
+            FieldId::GgLanguage => self.fields.gg_language = buffer,
             _ => {}
         }
         self.dirty_since_load = true;
@@ -813,7 +968,9 @@ impl EngineState {
                 let installed = installed_engine_choices();
                 let filtered: Vec<&'static str> = TranscriptionEngine::iter()
                     .map(|e| e.name())
-                    .filter(|e| installed.contains(e))
+                    .filter(|e| {
+                        installed.contains(e) && crate::config_set::engine_feature_compiled(e)
+                    })
                     .collect();
                 if filtered.is_empty() {
                     // Nothing to cycle through; leave the engine unchanged.
@@ -826,6 +983,26 @@ impl EngineState {
                     .unwrap_or(0);
                 let n = (idx + delta).rem_euclid(filtered.len() as i32);
                 self.engine = filtered[n as usize].to_string();
+                if self.engine == "gguf" {
+                    let retained = (!f.gg_model.is_empty()).then_some(f.gg_model.as_str());
+                    if let Ok(model) = crate::model_selection::select_engine_model_in(
+                        "gguf",
+                        retained,
+                        &crate::config::Config::models_dir(),
+                    ) {
+                        let model_changed = f.gg_model != model;
+                        f.gg_model = model;
+                        if let Some(metadata) =
+                            crate::setup::model::find_pending_gguf_model(&f.gg_model)
+                        {
+                            f.gg_architecture = metadata.arch.to_string();
+                            if model_changed {
+                                f.gg_language =
+                                    metadata.languages.first().copied().unwrap_or("auto").into();
+                            }
+                        }
+                    }
+                }
                 let max = self.rows().len().saturating_sub(1);
                 self.cursor = self.cursor.min(max);
                 self.refresh_binary_match();
@@ -852,7 +1029,10 @@ impl EngineState {
                 return;
             }
 
-            FieldId::PkModel => f.pk_model = cycle_model("parakeet", &f.pk_model, delta),
+            FieldId::PkModel => {
+                f.pk_model = cycle_model("parakeet", &f.pk_model, delta);
+                self.refresh_binary_match();
+            }
             FieldId::PkModelType => {
                 let idx = PARAKEET_MODEL_TYPES
                     .iter()
@@ -862,6 +1042,7 @@ impl EngineState {
                 let n = (idx + delta).rem_euclid(PARAKEET_MODEL_TYPES.len() as i32);
                 f.pk_model_type = PARAKEET_MODEL_TYPES[n as usize].map(|s| s.to_string());
             }
+            FieldId::PkThreads => f.pk_threads = cycle_threads(f.pk_threads, delta),
             FieldId::PkOnDemandLoading => f.pk_on_demand_loading = !f.pk_on_demand_loading,
 
             FieldId::MnModel => f.mn_model = cycle_model("moonshine", &f.mn_model, delta),
@@ -889,12 +1070,34 @@ impl EngineState {
             FieldId::OmThreads => f.om_threads = cycle_threads(f.om_threads, delta),
             FieldId::OmOnDemandLoading => f.om_on_demand_loading = !f.om_on_demand_loading,
 
-            FieldId::CoModel => f.co_model = cycle_model("cohere", &f.co_model, delta),
+            FieldId::CoModel => {
+                f.co_model = cycle_model("cohere", &f.co_model, delta);
+                self.refresh_binary_match();
+            }
             FieldId::CoLanguage => {
                 f.co_language = cycle_str(CO_LANG_CHOICES, &f.co_language, delta)
             }
             FieldId::CoThreads => f.co_threads = cycle_threads(f.co_threads, delta),
             FieldId::CoOnDemandLoading => f.co_on_demand_loading = !f.co_on_demand_loading,
+
+            FieldId::GgModel => {
+                f.gg_model = cycle_model("gguf", &f.gg_model, delta);
+                if let Some(metadata) = crate::setup::model::find_pending_gguf_model(&f.gg_model) {
+                    f.gg_architecture = metadata.arch.to_string();
+                    f.gg_language = metadata.languages.first().copied().unwrap_or("auto").into();
+                }
+                self.refresh_binary_match();
+            }
+            FieldId::GgArchitecture | FieldId::GgLanguage => {
+                self.start_edit_if_text_field();
+                return;
+            }
+            FieldId::GgBackend => {
+                f.gg_backend = cycle_str(GGUF_BACKEND_CHOICES, &f.gg_backend, delta)
+            }
+            FieldId::GgThreads => f.gg_threads = cycle_threads(f.gg_threads, delta),
+            FieldId::GgOnDemandLoading => f.gg_on_demand_loading = !f.gg_on_demand_loading,
+            FieldId::GgStreaming => f.gg_streaming = !f.gg_streaming,
 
             FieldId::OvModel => f.ov_model = cycle_model("openvino", &f.ov_model, delta),
             FieldId::OvDevice => f.ov_device = cycle_str(OV_DEVICE_CHOICES, &f.ov_device, delta),
@@ -923,6 +1126,7 @@ fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
         "dolphin" => Some(f.dol_model.clone()),
         "omnilingual" => Some(f.om_model.clone()),
         "cohere" => Some(f.co_model.clone()),
+        "gguf" => Some(f.gg_model.clone()),
         "openvino" => Some(f.ov_model.clone()),
         _ => None,
     }
@@ -959,6 +1163,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gguf",
             "openvino",
         ] {
             if variant.supports_engine(engine) {
@@ -982,6 +1187,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gguf",
             // OpenVINO isn't checked against `variant.supports_engine()`
             // above — it has no prebuilt binary variant at all (Intel-only
             // runtime, unrelated to the Whisper/ONNX distribution). Source
@@ -1031,7 +1237,12 @@ fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
 }
 
 fn cycle_model(engine: &str, current: &str, delta: i32) -> String {
-    let names = model_catalog(engine);
+    // Legacy ONNX checkpoints stay reachable only while one is selected:
+    // moving to a GGUF model is one way, as in the Settings model list.
+    let names: Vec<&str> = crate::model_catalog::supported_model_catalog(engine)
+        .into_iter()
+        .filter(|name| !crate::model_upgrade::is_legacy_model(engine, name) || *name == current)
+        .collect();
     if names.is_empty() {
         return current.to_string();
     }
@@ -1213,6 +1424,12 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .unwrap_or("auto-detect")
                 .to_string(),
         ),
+        FieldId::PkThreads => (
+            "Parakeet · threads",
+            f.pk_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
         FieldId::PkOnDemandLoading => (
             "Parakeet · on-demand model load",
             yesno(f.pk_on_demand_loading),
@@ -1296,6 +1513,21 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "Cohere · on-demand model load",
             yesno(f.co_on_demand_loading),
         ),
+
+        FieldId::GgModel => ("GGUF · model path", f.gg_model.clone()),
+        FieldId::GgArchitecture => ("GGUF · architecture", f.gg_architecture.clone()),
+        FieldId::GgLanguage => ("GGUF · language", f.gg_language.clone()),
+        FieldId::GgBackend => ("GGUF · backend", f.gg_backend.clone()),
+        FieldId::GgThreads => (
+            "GGUF · threads",
+            f.gg_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
+        FieldId::GgOnDemandLoading => {
+            ("GGUF · on-demand model load", yesno(f.gg_on_demand_loading))
+        }
+        FieldId::GgStreaming => ("GGUF · native streaming", yesno(f.gg_streaming)),
 
         FieldId::OvModel => ("OpenVINO · model", f.ov_model.clone()),
         FieldId::OvDevice => ("OpenVINO · device", f.ov_device.clone()),
@@ -1434,7 +1666,134 @@ fn family_name(family: EngineFamily) -> &'static str {
     }
 }
 
+/// Offer titles from the status object `voxtype setup migrate --json` prints,
+/// recommended first. Empty for anything unexpected.
+fn upgrade_offer_titles(value: &serde_json::Value) -> Vec<String> {
+    let mut recommended = Vec::new();
+    let mut rest = Vec::new();
+    for offer in value
+        .get("offers")
+        .and_then(|o| o.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = offer.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let title = ["title", "model"]
+            .iter()
+            .find_map(|k| offer.get(*k).and_then(|v| v.as_str()))
+            .unwrap_or(id)
+            .to_string();
+        if offer.get("recommended").and_then(|v| v.as_bool()) == Some(true) {
+            recommended.push(title);
+        } else {
+            rest.push(title);
+        }
+    }
+    recommended.extend(rest);
+    recommended
+}
+
+/// Asks this same binary, against the config the TUI is editing. Bounded so a
+/// stuck child cannot hold the Engine screen; a build without `setup
+/// migrate` exits non-zero and shows nothing.
+fn read_upgrade_offers() -> Vec<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    // Unit tests run as the test harness binary, which must not be re-entered.
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let mut command = Command::new(exe);
+    if let Some(path) = super::config_editor::tui_config_path() {
+        command.arg("--config").arg(path);
+    }
+    let Ok(mut child) = command
+        .args(["setup", "migrate", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    };
+    let mut out = String::new();
+    let read = match child.stdout.take() {
+        Some(mut stdout) => stdout.read_to_string(&mut out).is_ok(),
+        None => false,
+    };
+    if !status.success() || !read {
+        return Vec::new();
+    }
+    serde_json::from_str(&out)
+        .map(|v: serde_json::Value| upgrade_offer_titles(&v))
+        .unwrap_or_default()
+}
+
+fn upgrade_offer_lines(offers: &[String]) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "⬆ Model update available",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for title in offers {
+        lines.push(Line::from(format!("  • {title}")));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("Run "),
+        Span::styled("voxtype setup migrate", Style::default().fg(Color::Cyan)),
+        Span::raw(" to update, or to keep your current model."),
+    ]));
+    lines.push(Line::from(""));
+    lines
+}
+
 fn guidance(state: &EngineState) -> Vec<Line<'_>> {
+    let lines = field_guidance(state);
+    let on_offer_field = matches!(state.current_field(), FieldId::Engine)
+        || model_field_for_engine(&state.engine) == Some(state.current_field());
+    if state.upgrade_offers.is_empty() || !on_offer_field {
+        return lines;
+    }
+    let mut out = upgrade_offer_lines(&state.upgrade_offers);
+    out.extend(lines);
+    out
+}
+
+fn model_field_for_engine(engine: &str) -> Option<FieldId> {
+    Some(match engine {
+        "whisper" => FieldId::WModel,
+        "parakeet" => FieldId::PkModel,
+        "moonshine" => FieldId::MnModel,
+        "sensevoice" => FieldId::SvModel,
+        "paraformer" => FieldId::PfModel,
+        "dolphin" => FieldId::DolModel,
+        "omnilingual" => FieldId::OmModel,
+        "cohere" => FieldId::CoModel,
+        "gguf" => FieldId::GgModel,
+        _ => return None,
+    })
+}
+
+fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
     let f = &state.fields;
     match state.current_field() {
         FieldId::Engine => engine_guidance(state),
@@ -1447,6 +1806,27 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::DolModel => model_guidance("dolphin", &f.dol_model),
         FieldId::OmModel => model_guidance("omnilingual", &f.om_model),
         FieldId::CoModel => model_guidance("cohere", &f.co_model),
+        FieldId::GgModel | FieldId::GgArchitecture | FieldId::GgLanguage => vec![
+            heading("GGUF · curated offline checkpoint"),
+            Line::from(""),
+            Line::from("Enter the exact model path, native general.architecture, and language hint."),
+            Line::from("Pending publication models remain absent from the runnable picker."),
+        ],
+        FieldId::GgBackend => vec![
+            heading("GGUF · compute backend"),
+            Line::from(""),
+            Line::from("auto selects an available backend; vulkan requires the matching hardware worker."),
+        ],
+        FieldId::GgThreads => threads_guidance("GGUF"),
+        FieldId::GgOnDemandLoading => on_demand_guidance("GGUF"),
+        FieldId::GgStreaming => vec![
+            heading("GGUF · native streaming"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Not implemented: true is rejected rather than silently running offline.",
+                Style::default().fg(Color::Yellow),
+            )),
+        ],
         FieldId::OvModel => model_guidance("openvino", &f.ov_model),
 
         FieldId::WMode => vec![
@@ -1634,6 +2014,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
                 Style::default().fg(Color::Gray),
             )),
         ],
+        FieldId::PkThreads => threads_guidance("Parakeet"),
         FieldId::PkOnDemandLoading => vec![
             heading("Parakeet · on-demand model loading"),
             Line::from(""),
@@ -1933,6 +2314,7 @@ fn display_engine(engine: &str) -> &'static str {
         "dolphin" => "Dolphin",
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
+        "gguf" => "GGUF",
         "openvino" => "OpenVINO",
         _ => "Engine",
     }
@@ -2038,6 +2420,39 @@ fn handle_edit_key(state: &mut EngineState, key: KeyEvent) -> Action {
 mod tests {
     use super::*;
 
+    /// Once on a GGUF model, cycling never reaches a legacy ONNX checkpoint;
+    /// a configured ONNX model is still listed until the user moves off it.
+    #[test]
+    fn cycle_model_skips_legacy_onnx_once_on_gguf() {
+        let catalog = crate::model_catalog::supported_model_catalog("parakeet");
+        if !catalog.iter().any(|name| name.ends_with(".gguf")) {
+            return; // GGUF Parakeet not compiled into this test build.
+        }
+        let mut current = "parakeet-ultra-Q8_0.gguf".to_string();
+        for _ in 0..(catalog.len() * 2) {
+            current = cycle_model("parakeet", &current, 1);
+            assert!(
+                !crate::model_upgrade::is_legacy_model("parakeet", &current),
+                "cycled onto legacy {current}"
+            );
+        }
+        if catalog.contains(&"parakeet-tdt-0.6b-v3") {
+            let next = cycle_model("parakeet", "parakeet-tdt-0.6b-v3", 1);
+            assert_ne!(next, "parakeet-tdt-0.6b-v3");
+            assert_eq!(
+                (0..catalog.len())
+                    .scan(next, |model, _| {
+                        *model = cycle_model("parakeet", model, 1);
+                        Some(model.clone())
+                    })
+                    .filter(|model| model == "parakeet-tdt-0.6b-v3")
+                    .count(),
+                0,
+                "a legacy model is unreachable once the user moves off it"
+            );
+        }
+    }
+
     fn line_text(lines: &[Line<'_>]) -> String {
         lines
             .iter()
@@ -2045,6 +2460,198 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn parakeet_state() -> (tempfile::TempDir, EngineState) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "engine = \"parakeet\"\n").unwrap();
+        let ed = ConfigEditor::load_from_path(path).unwrap();
+        (dir, EngineState::from_editor(&ed))
+    }
+
+    #[test]
+    fn upgrade_offer_titles_put_recommended_first() {
+        let status = serde_json::json!({
+            "schema": 1,
+            "offers": [
+                {"id": "format-gguf", "title": "Your model format has been updated", "recommended": false},
+                {"id": "parakeet-ultra", "title": "Parakeet Ultra is now available", "recommended": true},
+                {"title": "no id is not an offer"}
+            ],
+            "removal_notice": null,
+            "cleanup": null
+        });
+        assert_eq!(
+            upgrade_offer_titles(&status),
+            vec![
+                "Parakeet Ultra is now available".to_string(),
+                "Your model format has been updated".to_string()
+            ]
+        );
+        assert!(upgrade_offer_titles(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn engine_screen_shows_offers_and_the_migrate_command() {
+        let (_dir, mut state) = parakeet_state();
+        assert!(
+            state.upgrade_offers.is_empty(),
+            "loading from an editor must not spawn the CLI"
+        );
+        assert!(!line_text(&guidance(&state)).contains("Model update available"));
+
+        state.upgrade_offers = vec![
+            "Parakeet Ultra is now available".into(),
+            "Your model format has been updated".into(),
+        ];
+        state.cursor = state
+            .rows()
+            .iter()
+            .position(|f| *f == FieldId::Engine)
+            .unwrap();
+        let text = line_text(&guidance(&state));
+        assert!(text.starts_with("⬆ Model update available"), "{text}");
+        assert!(text.contains("Parakeet Ultra is now available"));
+        assert!(text.contains("voxtype setup migrate"));
+        assert!(
+            text.find("Parakeet Ultra").unwrap() < text.find("Your model format").unwrap(),
+            "Ultra first"
+        );
+
+        state.cursor = state
+            .rows()
+            .iter()
+            .position(|f| *f == FieldId::PkModel)
+            .unwrap();
+        assert!(line_text(&guidance(&state)).contains("voxtype setup migrate"));
+
+        if let Some(other) = state
+            .rows()
+            .iter()
+            .position(|f| !matches!(f, FieldId::Engine | FieldId::PkModel))
+        {
+            state.cursor = other;
+            assert!(!line_text(&guidance(&state)).contains("Model update available"));
+        }
+    }
+
+    #[test]
+    fn fresh_gguf_selection_does_not_request_an_onnx_binary() {
+        for (engine, compiled) in [
+            ("cohere", cfg!(feature = "cohere-gguf")),
+            ("parakeet", cfg!(feature = "parakeet-gguf")),
+        ] {
+            if !compiled {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+            let mut state = EngineState::from_editor(&ed);
+            state.engine = engine.to_string();
+            state.refresh_binary_match();
+            assert!(
+                state.binary_switch_blocked.is_none(),
+                "{}: {:?}",
+                engine,
+                state.binary_switch_blocked
+            );
+            assert!(
+                state.pending_variant_switch.is_none(),
+                "GGUF must stay on the compatible running binary"
+            );
+            state.save_to_editor(&mut ed);
+            assert!(
+                !path.exists(),
+                "missing weights must not be saved or downloaded without consent"
+            );
+            assert!(matches!(
+                state.feedback.as_ref().map(|value| value.level),
+                Some(FeedbackLevel::Err)
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "cohere-gguf", feature = "parakeet-gguf"))]
+    fn cycling_model_refreshes_binary_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        for (engine, field) in [("cohere", FieldId::CoModel), ("parakeet", FieldId::PkModel)] {
+            state.engine = engine.to_string();
+            state.cursor = state.rows().iter().position(|id| *id == field).unwrap();
+            state.binary_switch_blocked = Some("stale ONNX mismatch");
+            state.pending_variant_switch = Some(Variant::OnnxMigraphx);
+            state.cycle(0);
+            assert!(state.binary_switch_blocked.is_none());
+            assert!(state.pending_variant_switch.is_none());
+        }
+    }
+
+    #[test]
+    fn packaged_gguf_selection_stays_on_running_vulkan_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        let mut inv = binary::inventory();
+        inv.install_kind = InstallKind::Package;
+        inv.active_variant = Some(Variant::WhisperVulkan);
+        inv.variants.clear(); // No ONNX variant is installed.
+        for (engine, compiled) in [
+            ("cohere", cfg!(feature = "cohere-gguf")),
+            ("parakeet", cfg!(feature = "parakeet-gguf")),
+        ] {
+            if !compiled {
+                continue;
+            }
+            state.engine = engine.to_string();
+            state.refresh_binary_match_with_inventory(&inv);
+            assert!(
+                state.binary_switch_blocked.is_none(),
+                "{engine}: {:?}",
+                state.binary_switch_blocked
+            );
+            assert!(state.pending_variant_switch.is_none());
+        }
+        // An explicit legacy model must still require the ONNX family.
+        state.engine = "parakeet".to_string();
+        state.fields.pk_model = "/models/parakeet-migraphx".to_string();
+        state.refresh_binary_match_with_inventory(&inv);
+        assert!(state.binary_switch_blocked.is_some());
+    }
+
+    #[test]
+    fn existing_legacy_models_survive_tui_open_save() {
+        for (engine, model) in [
+            ("parakeet", "/models/parakeet-migraphx"),
+            ("parakeet", "parakeet-unified-en-0.6b"),
+            ("cohere", "/models/cohere-onnx"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let source = format!("engine = \"{engine}\"\n[parakeet]\nmodel = \"{}\"\nstreaming = true\nstreaming_chunk_secs = 0.8\nexecution_provider = \"migraphx\"\n[cohere]\nmodel = \"{}\"\n[custom]\nprovider = \"migraphx\"\n", if engine == "parakeet" { model } else { "parakeet-tdt-0.6b-v3" }, if engine == "cohere" { model } else { "cohere-transcribe-q4f16" });
+            std::fs::write(&path, &source).unwrap();
+            let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+            let mut state = EngineState::from_editor(&ed);
+            state.pending_variant_switch = None;
+            state.save_to_editor(&mut ed);
+            let result = std::fs::read_to_string(&path).unwrap();
+            let before: toml::Value = toml::from_str(&source).unwrap();
+            let after: toml::Value = toml::from_str(&result).unwrap();
+            for section in ["parakeet", "cohere", "custom"] {
+                for (key, value) in before[section].as_table().unwrap() {
+                    assert_eq!(&after[section][key], value, "{section}.{key}");
+                }
+            }
+            assert_eq!(
+                crate::config::load_config(Some(&path))
+                    .unwrap()
+                    .model_name(),
+                model
+            );
+        }
     }
 
     #[test]
