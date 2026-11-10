@@ -69,6 +69,25 @@ bundled theme icons under `$XDG_DATA_HOME/icons/hicolor` (`--uninstall` removes 
 The daemon never installs icons or rewrites configuration at startup.
 
 
+## Omarchy Settings panel link
+
+```toml
+[omarchy]
+link_settings_plugin = true # default
+```
+
+On Omarchy, lets the daemon link the packaged Voxtype Settings panel into
+`~/.config/omarchy/plugins` on its first start and ask the shell to rescan it
+after upgrades. It never replaces your own copy of the panel and never re-adds
+a panel you removed. Set `false` to leave `~/.config/omarchy` untouched;
+`voxtype setup omarchy` still works by hand. Setting it to `false` also turns
+off the one-time notification about an old copy of the panel.
+
+Also settable as `VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN=false`, the daemon flag
+`--omarchy-link-settings-plugin=false`, or
+`voxtype config set omarchy.link_settings_plugin false`. Voxtype records what it
+has done in `~/.local/state/voxtype/omarchy-plugin.json`, not in `config.toml`.
+
 > **Tip**: For interactive editing, run `voxtype configure` — it edits the
 > same `config.toml` this document describes, preserves comments and unknown
 > fields, and validates each save before swapping the file in. The reference
@@ -1245,7 +1264,11 @@ The following options are used when `backend = "remote"`. They have no effect wh
 **Default:** None
 **Required:** Yes (when `backend = "remote"`)
 
-The base URL of the remote Whisper server. Must include the protocol (`http://` or `https://`).
+The base URL of the remote Whisper server. Must include the protocol (`http://` or `https://`). Voxtype appends `/v1/audio/transcriptions` (or `/v1/audio/translations` when translating). A final `/v1` in the base URL is reused rather than duplicated; trailing slashes are accepted.
+
+For example, `https://api.openai.com` and `https://api.openai.com/v1/` both target `/v1/audio/transcriptions`. An OpenAI-compatible router base of `https://openrouter.ai/api` or `https://openrouter.ai/api/v1` targets `/api/v1/audio/transcriptions`. Prefix paths are preserved, and any query string remains after the completed request path.
+
+Use a base URL, not a full request URL such as one ending in `/audio/transcriptions` or `/inference`. This setting does not override the request path or switch to `chat/completions`; the provider and selected `remote_model` must support the audio transcription or translation route.
 
 **Examples:**
 ```toml

@@ -65,6 +65,16 @@ ls /usr/lib/voxtype/ | grep -q baseline && ok "baseline binary shipped" || bad "
 [ -d /usr/share/voxtype/quickshell ] && ok "quickshell tree shipped" || bad "quickshell tree missing"
 voxtype info styles 2>/dev/null | grep -q "aegis-hud" && ok "aegis-hud discoverable" || bad "aegis-hud not discovered"
 
+echo "=== Phase 6: Omarchy Settings plugin shipped in the versioned layout ==="
+PLUGIN=/usr/share/voxtype/omarchy-plugin/io.voxtype.settings
+[ -f "$PLUGIN/manifest.json" ] && ok "plugin manifest shipped" || bad "$PLUGIN/manifest.json missing"
+[ -f "$PLUGIN/${NEXT}/Panel.qml" ] && ok "Panel.qml under ${NEXT}/" || bad "$PLUGIN/${NEXT}/Panel.qml missing"
+ls "$PLUGIN/${NEXT}/components/"*.qml >/dev/null 2>&1 && ok "plugin components shipped" || bad "plugin components missing"
+grep -qF "\"version\": \"${NEXT}\"" "$PLUGIN/manifest.json" 2>/dev/null \
+  && ok "plugin manifest version is ${NEXT}" || bad "plugin manifest version is not ${NEXT}"
+grep -qF "\"panel\": \"${NEXT}/Panel.qml\"" "$PLUGIN/manifest.json" 2>/dev/null \
+  && ok "panel entry point is ${NEXT}/Panel.qml" || bad "panel entry point is not ${NEXT}/Panel.qml"
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

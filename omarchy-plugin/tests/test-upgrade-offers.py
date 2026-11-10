@@ -12,7 +12,13 @@ model shows the selectable removal notice and pin command, the banner persists
 after a decline, accept failure then Retry, cancel mid-download, accept success
 (switch, no false restart prompt), cleanup offer, banner hidden when there is
 nothing to offer, the --progress-format fallback, and a CLI without `setup
-migrate`.
+migrate`. The link* scenarios cover the "replace your copy" banner against a
+fake `setup omarchy --status --json`: shown for a hand-installed copy (and its
+button launches the replace in a terminal), hidden when linked, and hidden for
+a CLI without the subcommand. linkcopy's CLI predates `copy_dismissed`, so it
+also covers an older CLI; linkdismissed hides the banner from the status
+alone; linknotnow records the dismissal and the banner goes after the re-read;
+linknotnowfail hides it for the session even though recording failed.
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -52,6 +58,12 @@ SCENARIOS = {
     "noflag": {"reject_progress_flag": True},
     "latecancel": {"accept_script": ["late"]},
     "nomigrate": {"no_migrate": True},
+    "linkcopy": {"omarchy": "copy"},
+    "linklinked": {"omarchy": "linked"},
+    "linkunknown": {},
+    "linkdismissed": {"omarchy": "copy", "copy_dismissed": True},
+    "linknotnow": {"omarchy": "copy", "copy_dismissed": False},
+    "linknotnowfail": {"omarchy": "copy", "copy_dismissed": False, "dismiss_fail": True},
 }
 
 
@@ -77,7 +89,7 @@ def run(scenario, shell, evidence):
 
         state = root / "state.json"
         log = root / "commands.jsonl"
-        initial = {"model": "parakeet-tdt-0.6b-v3", "cleanup": None, "accept_script": [],
+        initial = {"model": "parakeet-tdt-0.6b-v3", "cleanup": None, "accept_script": [], "omarchy": None,
                    # The CLI lists Ultra second on purpose: the banner must sort it first.
                    "offers": [
                        {"id": "format-gguf", "kind": "format", "engine": "parakeet",
@@ -98,6 +110,16 @@ def run(scenario, shell, evidence):
         fake.write_text("#!/bin/sh\nexec " + sys.executable + " -I " + str(HERE / "fake-voxtype-migrate.py") + ' "$@"\n')
         fake.chmod(0o755)
         (plugin / "dev.json").write_text(json.dumps({"voxtypeBin": str(fake)}))
+        # Anything the panel would open a terminal for is logged instead.
+        terminal_log = root / "terminal.jsonl"
+        terminal_log.write_text("")
+        terminal = root / "terminal-fake"
+        terminal.write_text("#!/bin/sh\nexec " + sys.executable + " -I -c 'import json,sys; "
+                            "open(sys.argv[1], \"a\").write(json.dumps(sys.argv[2:]) + \"\\n\")' "
+                            + str(terminal_log) + ' "$@"\n')
+        terminal.chmod(0o755)
+        patch(plugin / "components/VoxtypeCli.qml", '"omarchy-launch-floating-terminal-with-presentation"',
+              json.dumps(str(terminal)))
 
         qml = (HERE / "upgrade-offers.qml").read_text()
         qml = qml.replace("__PLUGIN__", json.dumps(str(plugin))).replace("__SCENARIO__", json.dumps(scenario))
@@ -115,6 +137,7 @@ def run(scenario, shell, evidence):
             output += "\nTIMEOUT"
             code = -1
         calls = [json.loads(line) for line in log.read_text().splitlines() if line]
+        launched = [json.loads(line) for line in terminal_log.read_text().splitlines() if line]
         final = json.loads(state.read_text())
         if evidence:
             out = evidence / scenario
@@ -132,7 +155,14 @@ def run(scenario, shell, evidence):
     migrate = [c for c in calls if c[:2] == ["setup", "migrate"] and "--json" not in c]
     # The panel must never write config or download through any other route.
     stray = [c for c in calls if c[:2] in (["config", "set"], ["config", "select-model"], ["config", "unset"])
-             or (c[:1] == ["setup"] and c[:2] != ["setup", "migrate"])]
+             or (c[:1] == ["setup"] and c[:2] != ["setup", "migrate"]
+                 and c[:2] != ["setup", "omarchy"])]
+    # Of `setup omarchy`, only the status read, plus the dismissal where Not now
+    # is clicked. Switch goes to the terminal, never through here.
+    omarchy = [c for c in calls if c[:2] == ["setup", "omarchy"] and c != ["setup", "omarchy", "--status", "--json"]]
+    expected_omarchy = [["setup", "omarchy", "--dismiss-copy"]] if scenario.startswith("linknotnow") else []
+    if omarchy != expected_omarchy:
+        problems.append("setup omarchy calls " + json.dumps(omarchy))
     if stray:
         problems.append("unexpected writes/downloads: " + json.dumps(stray))
     if scenario == "main":
@@ -154,6 +184,23 @@ def run(scenario, shell, evidence):
     elif scenario == "nomigrate":
         if migrate:
             problems.append("no migrate action expected: " + json.dumps(migrate))
+    if scenario.startswith("link"):
+        if ["setup", "omarchy", "--status", "--json"] not in calls:
+            problems.append("setup omarchy --status --json was never asked")
+        # VoxtypeCli.quote() always single-quotes.
+        expected = [["'" + str(fake) + "' setup omarchy --replace --yes --restart-shell"]]
+        if scenario != "linkcopy":
+            expected = []
+        if scenario == "linknotnow" and final.get("copy_dismissed") is not True:
+            problems.append("dismissal not recorded: " + json.dumps(final))
+        if scenario == "linknotnowfail" and "could not record Not now" not in output:
+            problems.append("failed dismissal was not logged")
+        if scenario.startswith("linknotnow") and calls.count(["setup", "omarchy", "--status", "--json"]) < 2:
+            problems.append("link status not re-read after Not now")
+        if launched != expected:
+            problems.append("terminal launches " + json.dumps(launched))
+    elif launched:
+        problems.append("unexpected terminal launches " + json.dumps(launched))
     return output, problems
 
 
@@ -168,7 +215,7 @@ def main():
     if not shutil.which("qs") or not (args.shell / "Commons").is_dir():
         parser.error("Quickshell and an Omarchy shell checkout are required (--shell PATH)")
     failed = False
-    for scenario in args.scenario or ["main", "noflag", "latecancel", "nomigrate"]:
+    for scenario in args.scenario or list(SCENARIOS):
         output, problems = run(scenario, args.shell, args.evidence)
         if problems:
             failed = True

@@ -89,7 +89,7 @@ Pick your distro from the list below. The fastest path on each:
 - **Fedora:** `sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm`
 - **macOS:** `brew install --cask peteonrails/voxtype/voxtype`
 - **NixOS:** `nix profile install github:peteonrails/voxtype#vulkan`
-- **AppImage:** download, `chmod +x`, run.
+- **AppImage:** not currently published; see [available alternatives](#appimage).
 
 After install, see [Post-Install Setup](#post-install-setup) for the model download, hotkey, and systemd-service steps.
 
@@ -137,6 +137,33 @@ sudo pacman -S wtype wl-clipboard libnotify gtk4-layer-shell pipewire-alsa
 ```
 
 The post-install hook auto-picks the right CUDA variant (`cuda-12` vs `cuda-13`) based on your installed libcudart, and sets up `/usr/bin/voxtype` as a wrapper that dispatches to the matching binary.
+
+`voxtype-bin` downloads only the variants your machine uses: the CPU build for
+your processor, the baseline build, the Vulkan build, and whichever variant
+`/usr/bin/voxtype` runs now. That is about 170 MB instead of 914 MB. Variants
+you ask for are remembered for later upgrades in
+`/usr/lib/voxtype/package-variants`. To add one, set `VOXTYPE_VARIANTS` when
+you build:
+
+```bash
+VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin
+VOXTYPE_VARIANTS=onnx-migraphx paru -S --rebuild voxtype-bin
+VOXTYPE_VARIANTS=onnx-avx2 makepkg -si      # from a clone of the AUR repo
+```
+
+Names: `baseline`, `avx2`, `avx512`, `vulkan`, `onnx-avx2`, `onnx-avx512`,
+`onnx-cuda-12`, `onnx-cuda-13`, `onnx-migraphx` (aarch64: `cpu`, `onnx`).
+Separate several with commas. `all` downloads every variant, as before 1.2.1;
+`default` forgets the variants you asked for earlier. Clean-chroot builds
+(`makechrootpkg`, `pkgctl build`, `paru --chroot`, `aurutils --chroot`) pass no
+environment and cannot see your current backend, so they build the default
+set. Build on the host, or set the variable in your helper's chroot
+environment. Repackagers should build with `VOXTYPE_VARIANTS=all`.
+
+The deb, rpm and AUR packages also install the Omarchy Settings panel at
+`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings`. On Omarchy the daemon
+links it into `~/.config/omarchy/plugins` on first start, or run
+`voxtype setup omarchy`. See the user manual's "Omarchy Settings panel" section.
 
 ### Debian / Ubuntu
 
@@ -234,16 +261,13 @@ tooling.
 
 ### AppImage
 
-Self-contained binary for distros that don't have a packaged voxtype.
+AppImage builds are not currently published. The download commands in older
+versions of this guide point to assets that do not exist.
 
-```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.5/voxtype-0.7.5-x86_64.AppImage
-chmod +x voxtype-0.7.5-x86_64.AppImage
-mkdir -p ~/.local/bin
-mv voxtype-0.7.5-x86_64.AppImage ~/.local/bin/voxtype
-```
-
-Three AppImage variants ship: CPU, Vulkan, ONNX engines. The CPU one is the smallest and the right default for most users.
+For now, use one of the packaged installation methods above or
+[build from source](#build-from-source). Check the release's asset list before
+following any AppImage download instructions; do not construct a filename from
+the version number.
 
 ### Build from Source
 

@@ -22,18 +22,21 @@ Item {
   property var manifest: null
 
   readonly property string manifestDir: (manifest && manifest.__sourceDir) ? String(manifest.__sourceDir) : ""
-  readonly property string bin: {
+  readonly property string devBin: {
     // The host assigns manifest after constructing the asynchronous Loader.
     // Resolve on the first command read, not an onLoaded callback which may
     // run after a queued open() has already fetched the schema from PATH.
-    if (devConfig.path === "") return "voxtype"
+    if (devConfig.path === "") return ""
     try {
       var parsed = JSON.parse(devConfig.text())
       if (parsed && typeof parsed.voxtypeBin === "string" && parsed.voxtypeBin.length > 0)
         return parsed.voxtypeBin
     } catch (e) {}
-    return "voxtype"
+    return ""
   }
+  readonly property string bin: devBin !== "" ? devBin : "voxtype"
+  // Where the binary came from, so an error about it can say which file to fix.
+  readonly property string binSource: devBin !== "" ? devConfig.path : ""
 
   // Command used for anything that wants a terminal the user can watch.
   readonly property string terminalLauncher: "omarchy-launch-floating-terminal-with-presentation"
@@ -64,6 +67,13 @@ Item {
   signal writeSucceeded(string key)
   signal writeFailed(string key, string message)
   signal restarted(bool ok, string message)
+  // A voxtype command could not be started at all: the binary is missing or
+  // not executable. Every reader that fails this way reports it, so the panel
+  // hears about it from whichever call was first.
+  signal cliUnavailable(string bin)
+  // A list reader ran and exited non-zero. `what` is the subcommand
+  // ("engines", "devices", "styles") and `message` its stderr.
+  signal infoFailed(string what, string message)
 
   // ------------------------------------------------------------- helpers
 
@@ -94,11 +104,10 @@ Item {
     }
     root.schemaLoading = true
     schemaProc.refetch = false
-    schemaProc.command = [root.bin, "config", "schema", "--json"]
-    schemaProc.running = true
+    schemaProc.launch([root.bin, "config", "schema", "--json"])
   }
 
-  Process {
+  CliProcess {
     id: schemaProc
     property bool refetch: false
     property string out: ""
@@ -136,6 +145,11 @@ Item {
       }
       root.schemaLoaded(parsed)
     }
+    onFailedToStart: {
+      schemaProc.refetch = false
+      root.schemaLoading = false
+      root.cliUnavailable(root.bin)
+    }
   }
 
   // ------------------------------------------------------------- writes
@@ -165,8 +179,7 @@ Item {
     var op = writeQueue[0]
     writeProc.activeKey = op.key
     writeProc.err = ""
-    writeProc.command = op.args
-    writeProc.running = true
+    writeProc.launch(op.args)
   }
 
   function setKey(key, value) {
@@ -191,7 +204,7 @@ Item {
     unsetKey("text.replacements." + from)
   }
 
-  Process {
+  CliProcess {
     id: writeProc
     property string activeKey: ""
     property string err: ""
@@ -208,6 +221,14 @@ Item {
       else if (exitCode === 2) root.writeFailed(key, message || "voxtype rejected that value")
       else root.writeFailed(key, message || "voxtype could not write the config file")
       root.pumpWrites()
+    }
+    // Every queued write would fail the same way, so drop them all rather than
+    // fail them one by one.
+    onFailedToStart: {
+      var key = writeProc.activeKey
+      root.writeQueue = []
+      root.writeFailed(key, "Could not run " + root.bin)
+      root.cliUnavailable(root.bin)
     }
   }
 
@@ -232,8 +253,7 @@ Item {
     root.pendingModels = false
     modelsRetry.stop()
     modelsProc.out = ""
-    modelsProc.command = [root.bin, "info", "models", "--json"]
-    modelsProc.running = true
+    modelsProc.launch([root.bin, "info", "models", "--json"])
   }
 
   Timer {
@@ -243,7 +263,7 @@ Item {
     onTriggered: root.fetchModels()
   }
 
-  Process {
+  CliProcess {
     id: modelsProc
     property string out: ""
     stdout: StdioCollector {
@@ -282,25 +302,40 @@ Item {
         modelsRetry.restart()
       }
     }
+    // No retry: a missing binary does not heal in a second.
+    onFailedToStart: {
+      root.pendingModels = false
+      root.cliUnavailable(root.bin)
+    }
   }
 
   // `info engines --json` is the authority on which engines this binary can
   // actually run: [{ name, compiled, active }, ...].
   function fetchEngines() {
     if (enginesProc.running) return
-    enginesProc.command = [root.bin, "info", "engines", "--json"]
-    enginesProc.running = true
+    enginesProc.out = ""
+    enginesProc.err = ""
+    enginesProc.launch([root.bin, "info", "engines", "--json"])
   }
 
-  Process {
+  CliProcess {
     id: enginesProc
     property string out: ""
+    property string err: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: enginesProc.out = String(text || "")
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: enginesProc.err = String(text || "").trim()
+    }
+    onFailedToStart: root.cliUnavailable(root.bin)
     onExited: function(exitCode) {
-      if (exitCode !== 0) return
+      if (exitCode !== 0) {
+        root.infoFailed("engines", enginesProc.err || ("voxtype info engines --json exited " + exitCode))
+        return
+      }
       try {
         var parsed = JSON.parse(enginesProc.out)
         if (Array.isArray(parsed)) root.enginesLoaded(parsed)
@@ -313,19 +348,29 @@ Item {
 
   function fetchDevices() {
     if (devicesProc.running) return
-    devicesProc.command = [root.bin, "info", "devices", "--json"]
-    devicesProc.running = true
+    devicesProc.out = ""
+    devicesProc.err = ""
+    devicesProc.launch([root.bin, "info", "devices", "--json"])
   }
 
-  Process {
+  CliProcess {
     id: devicesProc
     property string out: ""
+    property string err: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: devicesProc.out = String(text || "")
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: devicesProc.err = String(text || "").trim()
+    }
+    onFailedToStart: root.cliUnavailable(root.bin)
     onExited: function(exitCode) {
-      if (exitCode !== 0) return
+      if (exitCode !== 0) {
+        root.infoFailed("devices", devicesProc.err || ("voxtype info devices --json exited " + exitCode))
+        return
+      }
       try {
         var parsed = JSON.parse(devicesProc.out)
         if (Array.isArray(parsed)) root.devicesLoaded(parsed)
@@ -337,19 +382,29 @@ Item {
 
   function fetchStyles() {
     if (stylesProc.running) return
-    stylesProc.command = [root.bin, "info", "styles", "--json"]
-    stylesProc.running = true
+    stylesProc.out = ""
+    stylesProc.err = ""
+    stylesProc.launch([root.bin, "info", "styles", "--json"])
   }
 
-  Process {
+  CliProcess {
     id: stylesProc
     property string out: ""
+    property string err: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: stylesProc.out = String(text || "")
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: stylesProc.err = String(text || "").trim()
+    }
+    onFailedToStart: root.cliUnavailable(root.bin)
     onExited: function(exitCode) {
-      if (exitCode !== 0) return
+      if (exitCode !== 0) {
+        root.infoFailed("styles", stylesProc.err || ("voxtype info styles --json exited " + exitCode))
+        return
+      }
       try {
         var parsed = JSON.parse(stylesProc.out)
         if (Array.isArray(parsed)) root.stylesLoaded(parsed)
@@ -363,13 +418,14 @@ Item {
 
   function fetchStatus() {
     if (statusProc.running) return
-    statusProc.command = [root.bin, "status", "--format", "json"]
-    statusProc.running = true
+    statusProc.out = ""
+    statusProc.launch([root.bin, "status", "--format", "json"])
   }
 
-  Process {
+  CliProcess {
     id: statusProc
     property string out: ""
+    onFailedToStart: root.cliUnavailable(root.bin)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: statusProc.out = String(text || "")
@@ -401,13 +457,13 @@ Item {
   function fetchUnit() {
     if (unitProc.running) return
     unitProc.out = ""
-    unitProc.command = ["systemctl", "--user", "show", "voxtype", "-p", "ActiveState", "-p", "MainPID", "--value"]
-    unitProc.running = true
+    unitProc.launch(["systemctl", "--user", "show", "voxtype", "-p", "ActiveState", "-p", "MainPID", "--value"])
   }
 
-  Process {
+  CliProcess {
     id: unitProc
     property string out: ""
+    onFailedToStart: root.unitLoaded("", "")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: unitProc.out = String(text || "")
@@ -438,13 +494,16 @@ Item {
   function fetchAccel() {
     if (accelProc.running) return
     accelProc.out = ""
-    accelProc.command = [root.bin, "info", "accel", "--json"]
-    accelProc.running = true
+    accelProc.launch([root.bin, "info", "accel", "--json"])
   }
 
-  Process {
+  CliProcess {
     id: accelProc
     property string out: ""
+    onFailedToStart: {
+      root.accelLoaded("unknown", "", "")
+      root.cliUnavailable(root.bin)
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: accelProc.out = String(text || "")
@@ -501,15 +560,13 @@ Item {
     if (nvidiaProc.running || rocmProc.running) return
     root.vramPid = String(mainPid || "")
     nvidiaProc.out = ""
-    nvidiaProc.command = ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader"]
-    nvidiaProc.running = true
+    nvidiaProc.launch(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader"])
   }
 
   function tryRocm() {
     if (rocmProc.running) return
     rocmProc.out = ""
-    rocmProc.command = ["rocm-smi", "--showmeminfo", "vram", "--json"]
-    rocmProc.running = true
+    rocmProc.launch(["rocm-smi", "--showmeminfo", "vram", "--json"])
   }
 
   function formatBytes(bytes) {
@@ -520,9 +577,11 @@ Item {
     return Math.round(n / (1024 * 1024)) + " MiB"
   }
 
-  Process {
+  CliProcess {
     id: nvidiaProc
     property string out: ""
+    // Not installed at all, which is the usual case on an AMD machine.
+    onFailedToStart: root.tryRocm()
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: nvidiaProc.out = String(text || "")
@@ -553,9 +612,10 @@ Item {
     }
   }
 
-  Process {
+  CliProcess {
     id: rocmProc
     property string out: ""
+    onFailedToStart: root.vramLoaded("", "")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: rocmProc.out = String(text || "")
@@ -625,13 +685,17 @@ Item {
     }
     root.restarting = true
     restartCheck.err = ""
-    restartCheck.command = [root.bin, "config", "validate-selection", "--require-idle"]
-    restartCheck.running = true
+    restartCheck.launch([root.bin, "config", "validate-selection", "--require-idle"])
   }
 
-  Process {
+  CliProcess {
     id: restartCheck
     property string err: ""
+    onFailedToStart: {
+      root.restarting = false
+      root.restarted(false, "Could not run " + root.bin + "; no restart performed.")
+      root.cliUnavailable(root.bin)
+    }
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: restartCheck.err = String(text || "").trim()
@@ -653,13 +717,16 @@ Item {
 
   function performRestart() {
     restartProc.err = ""
-    restartProc.command = ["systemctl", "--user", "restart", "voxtype"]
-    restartProc.running = true
+    restartProc.launch(["systemctl", "--user", "restart", "voxtype"])
   }
 
-  Process {
+  CliProcess {
     id: restartProc
     property string err: ""
+    onFailedToStart: {
+      root.restarting = false
+      root.restarted(false, "Could not run systemctl to restart voxtype.")
+    }
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: restartProc.err = String(text || "").trim()
@@ -762,8 +829,7 @@ Item {
       args.push("--progress-format")
       args.push("json")
     }
-    downloadProc.command = args
-    downloadProc.running = true
+    downloadProc.launch(args)
   }
 
   // Only the specific "this build has never heard of that flag" failure, so a
@@ -780,6 +846,8 @@ Item {
     // read back in onExited, where a non-zero exit would otherwise look like a
     // failure worth reporting.
     root.downloadCancelling = true
+    // Not a failed start if the child had not reported in yet.
+    downloadProc.startPending = false
     downloadProc.running = false
   }
 
@@ -809,8 +877,24 @@ Item {
     if (event === "done") root.downloadPct = 100
   }
 
-  Process {
+  CliProcess {
     id: downloadProc
+
+    onFailedToStart: {
+      var model = root.downloadModel
+      var offerId = root.upgradeOfferId
+      var message = "Could not run " + root.bin
+      root.downloadModel = ""
+      root.upgradeOfferId = ""
+      root.downloadPct = -1
+      root.downloadFile = ""
+      root.downloadError = ""
+      root.downloadStderr = ""
+      root.downloadCancelling = false
+      if (offerId !== "") root.upgradeFinished(offerId, false, message)
+      else root.downloadFinished(model, false, message)
+      root.cliUnavailable(root.bin)
+    }
 
     stdout: SplitParser { onRead: function(line) { root.handleDownloadLine(line) } }
     // Kept as the fallback message for a non-zero exit that reported no error
@@ -895,13 +979,17 @@ Item {
     }
     root.pendingUpgrade = false
     upgradeProc.out = ""
-    upgradeProc.command = [root.bin, "setup", "migrate", "--json"]
-    upgradeProc.running = true
+    upgradeProc.launch([root.bin, "setup", "migrate", "--json"])
   }
 
-  Process {
+  CliProcess {
     id: upgradeProc
     property string out: ""
+    onFailedToStart: {
+      root.pendingUpgrade = false
+      root.upgradeLoaded(null)
+      root.cliUnavailable(root.bin)
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: upgradeProc.out = String(text || "")
@@ -937,14 +1025,19 @@ Item {
     if (migrateProc.running || root.downloading) return
     migrateProc.action = action
     migrateProc.err = ""
-    migrateProc.command = args
-    migrateProc.running = true
+    migrateProc.launch(args)
   }
 
-  Process {
+  CliProcess {
     id: migrateProc
     property string action: ""
     property string err: ""
+    onFailedToStart: {
+      var message = "Could not run " + root.bin
+      if (migrateProc.action === "decline") root.declineFinished(false, message)
+      else root.cleanupFinished(false, message)
+      root.cliUnavailable(root.bin)
+    }
     stderr: SplitParser {
       onRead: function(line) {
         var text = String(line || "").trim()
@@ -960,6 +1053,76 @@ Item {
     }
   }
 
+  // ------------------------------------------------------- plugin link
+  //
+  // `setup omarchy --status --json` says whether this plugin is the packaged
+  // copy, linked into ~/.config/omarchy/plugins, or something the user put
+  // there by hand. A build without the subcommand exits non-zero, which reads
+  // as "no answer": the panel shows nothing about it.
+
+  // null when the answer could not be read.
+  signal pluginLinkLoaded(var status)
+
+  function fetchPluginLink() {
+    if (linkProc.running) return
+    linkProc.out = ""
+    linkProc.launch([root.bin, "setup", "omarchy", "--status", "--json"])
+  }
+
+  CliProcess {
+    id: linkProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: linkProc.out = String(text || "")
+    }
+    onFailedToStart: {
+      root.pluginLinkLoaded(null)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      var parsed = null
+      if (exitCode === 0) {
+        try {
+          parsed = JSON.parse(linkProc.out)
+        } catch (e) {
+          parsed = null
+        }
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = null
+      root.pluginLinkLoaded(parsed)
+    }
+  }
+
+  // "Not now" on the copy banner. `setup omarchy --dismiss-copy` records it so
+  // the next status read reports copy_dismissed. Not a terminal launch: it
+  // asks nothing and finishes at once.
+  signal copyDismissFinished(bool ok, string message)
+  readonly property bool dismissingCopy: dismissProc.running
+
+  function dismissPluginCopy() {
+    if (dismissProc.running) return
+    dismissProc.err = ""
+    dismissProc.launch([root.bin, "setup", "omarchy", "--dismiss-copy"])
+  }
+
+  CliProcess {
+    id: dismissProc
+    property string err: ""
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: dismissProc.err = String(text || "").trim()
+    }
+    onFailedToStart: {
+      root.copyDismissFinished(false, "Could not run " + root.bin)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      root.copyDismissFinished(exitCode === 0, exitCode === 0 ? ""
+        : (dismissProc.err || ("voxtype setup omarchy --dismiss-copy exited " + exitCode)))
+    }
+  }
+
   // --------------------------------------------- things that want a terminal
   //
   // Every one of these has to be launched *after* the panel is dismissed. The
@@ -972,8 +1135,17 @@ Item {
     launchInTerminal(quote(root.bin) + " configure")
   }
 
+  // Omarchy's installer is omarchy-install-dictation-voxtype. The older name is
+  // kept as a fallback for Omarchy releases that predate it.
   function runInstaller() {
-    launchInTerminal("omarchy-voxtype-install")
+    launchInTerminal("if command -v omarchy-install-dictation-voxtype >/dev/null 2>&1; "
+                     + "then omarchy-install-dictation-voxtype; else omarchy-voxtype-install; fi")
+  }
+
+  // Swaps a hand-installed copy of this plugin for a link to the packaged one,
+  // then restarts the shell so the link is what loads.
+  function replacePluginCopy() {
+    launchInTerminal(quote(root.bin) + " setup omarchy --replace --yes --restart-shell")
   }
 
   // Not a terminal launch: omarchy-launch-config-editor picks the user's editor

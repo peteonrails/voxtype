@@ -103,6 +103,10 @@ pub struct Config {
     #[serde(default)]
     pub tray: TrayConfig,
 
+    /// Omarchy desktop integration (the packaged Settings panel).
+    #[serde(default)]
+    pub omarchy: OmarchyConfig,
+
     /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
@@ -140,6 +144,28 @@ impl Default for TrayConfig {
     }
 }
 
+/// Omarchy integration preferences. Ignored on desktops without Omarchy.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OmarchyConfig {
+    /// Let the daemon link the packaged Settings panel into
+    /// `~/.config/omarchy/plugins` on its first start, and refresh it after a
+    /// package upgrade. `voxtype setup omarchy` works either way.
+    #[serde(default = "default_link_settings_plugin")]
+    pub link_settings_plugin: bool,
+}
+
+fn default_link_settings_plugin() -> bool {
+    true
+}
+
+impl Default for OmarchyConfig {
+    fn default() -> Self {
+        Self {
+            link_settings_plugin: default_link_settings_plugin(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -164,6 +190,7 @@ impl Default for Config {
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
             tray: TrayConfig::default(),
+            omarchy: OmarchyConfig::default(),
             meeting: MeetingConfig::default(),
             state_file: default_state_file(),
             profiles: HashMap::new(),
@@ -639,6 +666,18 @@ mod tests {
     use super::super::hotkey::default_hotkey_key;
     use super::super::{ActivationMode, OutputMode};
     use super::*;
+
+    #[test]
+    fn omarchy_panel_linking_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().omarchy.link_settings_plugin);
+        let old: Config = toml::from_str("[tray]\nenabled = true\n").unwrap();
+        assert!(
+            old.omarchy.link_settings_plugin,
+            "configs without [omarchy] keep it on"
+        );
+        let off: Config = toml::from_str("[omarchy]\nlink_settings_plugin = false\n").unwrap();
+        assert!(!off.omarchy.link_settings_plugin);
+    }
 
     #[test]
     fn punctuation_casing_tracks_exact_engine_output_capability() {

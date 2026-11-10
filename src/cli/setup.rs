@@ -113,6 +113,75 @@ pub enum SetupAction {
         qml: bool,
     },
 
+    /// Link the packaged Voxtype Settings panel into Omarchy
+    #[command(long_about = "\
+        Link the packaged Voxtype Settings panel into Omarchy\n\n\
+        Packages install the panel at \
+        /usr/share/voxtype/omarchy-plugin/io.voxtype.settings. This command \
+        links it into ~/.config/omarchy/plugins/io.voxtype.settings, asks \
+        Omarchy's shell to rescan its plugins and enables the panel. The link \
+        follows package upgrades: each release loads from its own directory, \
+        so a rescan shows the new panel without restarting the shell.\n\n\
+        The daemon does the same on its first start on Omarchy, and rescans \
+        after an upgrade. Opt out with [omarchy] link_settings_plugin = false, \
+        VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN=false or \
+        --omarchy-link-settings-plugin=false. Once the panel has been linked, \
+        the daemon never adds it back after you remove it.\n\n\
+        Your own copy (for example from `omarchy plugin add`) or a link to \
+        somewhere else is never overwritten. --replace moves it to a hidden \
+        backup beside it (.io.voxtype.settings.backup-<time>) and links the \
+        packaged panel; it asks first in a terminal and needs --yes \
+        otherwise. --yes alone never replaces a copy. --remove removes \
+        voxtype's link only, never a copy.\n\n\
+        --dismiss-copy answers \"Not now\" to the Settings panel's offer to \
+        replace your copy: the panel stops showing it for that copy. \
+        --replace, or removing the copy, clears it.\n\n\
+        --status --json prints {omarchy, packaged_dir, packaged_version, \
+        state, path, installed_version, copy_dismissed}, where state is one \
+        of not-omarchy, no-package, absent, linked, linked-stale, copy or \
+        foreign-link, and copy_dismissed is true only while a copy you \
+        dismissed is present.\n\n\
+        Exit codes: 0 on success or when there is nothing to do (no packaged \
+        panel, or a copy left in place), 1 when Omarchy is not detected or an \
+        action fails.\n\n\
+        Examples:\n  \
+        voxtype setup omarchy\n  \
+        voxtype setup omarchy --status\n  \
+        voxtype setup omarchy --status --json\n  \
+        voxtype setup omarchy --replace\n  \
+        voxtype setup omarchy --replace --yes --restart-shell\n  \
+        voxtype setup omarchy --dismiss-copy\n  \
+        voxtype setup omarchy --remove")]
+    Omarchy {
+        /// Show the link state instead of changing anything
+        #[arg(long, conflicts_with_all = ["replace", "remove", "restart_shell", "yes"])]
+        status: bool,
+
+        /// With --status, print the state as JSON
+        #[arg(long, requires = "status")]
+        json: bool,
+
+        /// Replace your own copy or link (backed up, never deleted)
+        #[arg(long, conflicts_with = "remove")]
+        replace: bool,
+
+        /// Remove voxtype's link (never a copy)
+        #[arg(long)]
+        remove: bool,
+
+        /// Run omarchy-restart-shell afterwards
+        #[arg(long)]
+        restart_shell: bool,
+
+        /// Answer yes to prompts (required for --replace without a terminal)
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Stop offering to replace your copy ("Not now"); --replace clears it
+        #[arg(long, conflicts_with_all = ["status", "replace", "remove", "restart_shell"])]
+        dismiss_copy: bool,
+    },
+
     /// Interactive model selection and download
     Model {
         /// List installed models instead of interactive selection
@@ -697,6 +766,122 @@ mod tests {
             }
             _ => panic!("Expected Setup command"),
         }
+    }
+
+    // =========================================================================
+    // Omarchy setup tests
+    // =========================================================================
+
+    /// (status, json, replace, remove, restart_shell, yes)
+    fn parse_omarchy(args: &[&str]) -> Result<(bool, bool, bool, bool, bool, bool), clap::Error> {
+        let argv = ["voxtype", "setup", "omarchy"].iter().chain(args);
+        match Cli::try_parse_from(argv)?.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Omarchy {
+                        status,
+                        json,
+                        replace,
+                        remove,
+                        restart_shell,
+                        yes,
+                        ..
+                    }),
+                ..
+            }) => Ok((status, json, replace, remove, restart_shell, yes)),
+            _ => panic!("Expected Setup Omarchy command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_omarchy_default_links() {
+        assert_eq!(
+            parse_omarchy(&[]).unwrap(),
+            (false, false, false, false, false, false)
+        );
+    }
+
+    #[test]
+    fn test_setup_omarchy_status_json() {
+        assert_eq!(
+            parse_omarchy(&["--status", "--json"]).unwrap(),
+            (true, true, false, false, false, false)
+        );
+        assert!(parse_omarchy(&["--status"]).unwrap().0);
+    }
+
+    #[test]
+    fn test_setup_omarchy_replace_yes_restart_shell() {
+        assert_eq!(
+            parse_omarchy(&["--replace", "--yes", "--restart-shell"]).unwrap(),
+            (false, false, true, false, true, true)
+        );
+        assert!(parse_omarchy(&["--replace", "-y"]).unwrap().5);
+    }
+
+    #[test]
+    fn test_setup_omarchy_remove() {
+        assert_eq!(
+            parse_omarchy(&["--remove"]).unwrap(),
+            (false, false, false, true, false, false)
+        );
+    }
+
+    #[test]
+    fn test_setup_omarchy_dismiss_copy() {
+        let dismiss = |args: &[&str]| -> Result<bool, clap::Error> {
+            let argv = ["voxtype", "setup", "omarchy"].iter().chain(args);
+            match Cli::try_parse_from(argv)?.command {
+                Some(Commands::Setup {
+                    action: Some(SetupAction::Omarchy { dismiss_copy, .. }),
+                    ..
+                }) => Ok(dismiss_copy),
+                _ => panic!("Expected Setup Omarchy command"),
+            }
+        };
+        assert!(dismiss(&["--dismiss-copy"]).unwrap());
+        assert!(!dismiss(&[]).unwrap());
+        for other in ["--status", "--replace", "--remove", "--restart-shell"] {
+            assert!(dismiss(&["--dismiss-copy", other]).is_err(), "{other}");
+        }
+    }
+
+    #[test]
+    fn test_setup_omarchy_rejects_conflicting_flags() {
+        assert!(parse_omarchy(&["--json"]).is_err(), "--json needs --status");
+        assert!(parse_omarchy(&["--replace", "--remove"]).is_err());
+        assert!(parse_omarchy(&["--status", "--replace"]).is_err());
+        assert!(parse_omarchy(&["--status", "--remove"]).is_err());
+    }
+
+    #[test]
+    fn test_setup_omarchy_help_has_examples() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let setup = cmd.find_subcommand_mut("setup").unwrap();
+        let omarchy = setup.find_subcommand_mut("omarchy").unwrap();
+        let help = omarchy.render_long_help().to_string();
+        assert!(
+            help.contains("voxtype setup omarchy --status --json"),
+            "{help}"
+        );
+        assert!(help.contains("link_settings_plugin"), "{help}");
+        assert!(help.contains("--restart-shell"), "{help}");
+        assert!(
+            help.contains("voxtype setup omarchy --dismiss-copy"),
+            "{help}"
+        );
+        assert!(help.contains("copy_dismissed"), "{help}");
+    }
+
+    #[test]
+    fn test_omarchy_link_opt_out_flag() {
+        let cli = Cli::parse_from(["voxtype", "--omarchy-link-settings-plugin=false", "daemon"]);
+        assert_eq!(cli.omarchy_link_settings_plugin, Some(false));
+        let cli = Cli::parse_from(["voxtype", "--omarchy-link-settings-plugin", "daemon"]);
+        assert_eq!(cli.omarchy_link_settings_plugin, Some(true));
+        let cli = Cli::parse_from(["voxtype", "daemon"]);
+        assert_eq!(cli.omarchy_link_settings_plugin, None);
     }
 
     // =========================================================================

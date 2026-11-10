@@ -49,6 +49,46 @@ no selectable language hint for Parakeet. No translation or streaming is added.
   successfully with the accepted model, and it only deletes the previous model
   when it sits directly in the models directory. Symbolic links and files
   elsewhere are never removed.
+- **No Parakeet Ultra or GGUF format offer, only the ONNX notice.** Voxtype
+  only offers a GGUF model when it can find the GGUF worker
+  (`voxtype-gguf-worker` beside the voxtype binary, on `PATH`, or set with
+  `VOXTYPE_GGUF_WORKER`). A package built without the worker files shows no
+  offer, because accepting it could not work. The notice that ONNX support ends
+  in 2.0 still shows. Install a voxtype package that includes the GGUF worker.
+
+## "not available" next to an engine in `voxtype setup model`
+
+The binary you are running was built without that engine. Voxtype prints the
+fix for your install:
+
+- **`run sudo voxtype setup onnx --enable`**: the ONNX build is already
+  installed. This switches to it; switch back with `sudo voxtype setup onnx --disable`.
+- **`rebuild voxtype-bin with the <variant> variant`**: your AUR `voxtype-bin`
+  was built for this machine and left that variant out. Run
+  `VOXTYPE_VARIANTS=<variant> yay -S --rebuild voxtype-bin`, or
+  `VOXTYPE_VARIANTS=<variant> makepkg -si` from a clone of the AUR repo.
+- **`reinstall the voxtype package`**: the package is missing a file it should
+  have. Reinstall it with your package manager.
+- **`rebuild with --features <name>`**: you built voxtype from source. Rebuild
+  with that Cargo feature.
+
+Whisper builds since 1.2.0 run Parakeet and Cohere as GGUF models with no ONNX
+build at all. `voxtype setup model` lists them under "Parakeet GGUF" and
+"Cohere Transcribe GGUF".
+
+## Backend changed after upgrading voxtype-bin
+
+The upgrade prints "Your previous backend (voxtype-X) is not in this build of
+voxtype-bin." This happens when the package was built in a clean chroot or on a
+different machine, so the build could not see the backend you use. Dictation
+keeps working on the CPU build. Get your backend back with
+`VOXTYPE_VARIANTS=X yay -S --rebuild voxtype-bin` (X is the name in the message
+without `voxtype-`), then `sudo voxtype setup onnx --enable` or
+`sudo voxtype setup gpu --enable` if needed.
+
+If `voxtype setup onnx --enable` (or `setup gpu --enable`) says the variant is
+not installed, check `/usr/lib/voxtype/package-variants` and rebuild with the
+one you need, for example `VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin`.
 
 ## Status reports an ONNX backend for a GGUF model
 
@@ -117,6 +157,39 @@ There is no bundled GTK settings app, and the GTK OSD is never used as one. If n
 graphical frontend is installed, install a supported terminal or run
 `voxtype configure` directly. Tray action failures are logged, not ignored.
 
+
+## Omarchy Settings panel
+
+`voxtype setup omarchy --status` shows how the panel is installed: `linked`
+(the packaged copy, updated with voxtype), `linked-stale`, `copy`,
+`foreign-link`, `absent`, `no-package` or `not-omarchy`.
+
+- **Still shows the old version after an upgrade** (`linked-stale`). Restart the
+  daemon (`systemctl --user restart voxtype`), which asks Omarchy to rescan. Or
+  run `omarchy-shell shell rescanPlugins` yourself, or as a last resort
+  `omarchy-restart-shell`.
+- **Does not update with voxtype** (`copy`). The panel came from
+  `omarchy plugin add`. Switch with `voxtype setup omarchy --replace`; your copy
+  is backed up. `foreign-link` means the panel is a symlink to somewhere else,
+  such as a development checkout, and voxtype leaves it alone in the same way.
+  If you chose **Not now** on the Switch banner, it stays hidden for that copy;
+  `--status` still shows `copy`, and `--replace` still switches.
+- **Did not appear on first start.** If Omarchy's shell was not running yet, the
+  daemon links the panel and enables it at its next start. To do it now, run
+  `voxtype setup omarchy --restart-shell`.
+- **Removed it and want it back.** Run `voxtype setup omarchy`. The daemon never
+  re-adds it on its own.
+- **"Voxtype Settings could not run ..."** The panel could not start the voxtype
+  binary it names, so it shows nothing rather than stale values. If the message
+  names a `dev.json` (next to the plugin's `manifest.json`), that file points at
+  a build that no longer exists: fix the path, or delete the file to use
+  `voxtype` from `PATH`. Otherwise voxtype is not installed or not on `PATH` for
+  the shell. On Omarchy, run `omarchy-install-dictation-voxtype` (the panel's
+  Install / Update button runs it). Reopen the panel after fixing it.
+- **A red "voxtype info ... failed" strip.** `voxtype info engines`,
+  `info devices` or `info styles` exited with the error shown. That list (engine
+  availability, input devices, OSD styles) is left empty rather than showing old
+  entries. Run the same command with `--json` in a terminal for the full error.
 
 ## Table of Contents
 

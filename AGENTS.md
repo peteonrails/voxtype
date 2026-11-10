@@ -464,19 +464,22 @@ Multiple co-authors are fine when several people contributed to the work.
 
 ## Version Bumping
 
-**When bumping the version in Cargo.toml, ALWAYS update Cargo.lock before committing.**
+**When bumping the version in Cargo.toml, ALWAYS update Cargo.lock and `omarchy-plugin/manifest.json` before committing.**
+
+The plugin manifest's `version` names the directory packages install the Settings panel's QML into (`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings/<version>/`). Omarchy only reloads a panel whose entry path changed, so a stale manifest version ships new QML that users never see. Use the full version string, including any `-rcN` suffix. `cargo test` (`tests/omarchy_plugin_manifest.rs`) and `scripts/package.sh` both fail when it differs from Cargo.toml.
 
 The AUR source package (`voxtype`) uses `cargo fetch --locked` and `cargo build --frozen`, which require Cargo.lock to exactly match Cargo.toml. If the version in Cargo.lock doesn't match Cargo.toml, the build fails.
 
 ```bash
 # Correct version bump process:
 # 1. Edit Cargo.toml to set new version
-# 2. Run cargo build to update Cargo.lock
+# 2. Set "version" in omarchy-plugin/manifest.json to the same string
+# 3. Run cargo build to update Cargo.lock
 cargo build
-# 3. Verify Cargo.lock was updated
+# 4. Verify Cargo.lock was updated
 grep -A2 'name = "voxtype"' Cargo.lock  # Should show new version
-# 4. Commit BOTH files together
-git add Cargo.toml Cargo.lock
+# 5. Commit all three files together
+git add Cargo.toml Cargo.lock omarchy-plugin/manifest.json
 git commit -S -m "Bump version to X.Y.Z"
 ```
 
@@ -817,6 +820,10 @@ Requirements: `fpm` (gem install fpm), `rpmbuild` for RPM, and `cargo`: the man 
 - These directories are ignored by the main repo (in `.gitignore`)
 - To publish to AUR: `cd packaging/arch && git add -A && git commit -m "message" && git push`
 - GPG signing key for AUR repos: `E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6`
+
+### voxtype-bin variant selection
+
+`voxtype-bin` selects variants at makepkg time (`VOXTYPE_VARIANTS`, the variant `/usr/bin/voxtype` runs, and `/usr/lib/voxtype/package-variants`). Generate `.SRCINFO` with `VOXTYPE_VARIANTS=all makepkg --printsrcinfo > .SRCINFO` (the PKGBUILD also forces `all` under `--printsrcinfo`). Do not use `updpkgsums`: fill checksums with `scripts/aur-fill-sums.sh <version> packaging/arch-bin`, which takes binary sums only from a `SHA256SUMS.txt` signed by the CI release key `9CCF7915...` and checks every raw source against the signed source archive. Before pushing, run `scripts/test-aur-bin.sh --sums <SHA256SUMS.txt> packaging/arch-bin`. For an rc, set `pkgver=X.Y.Z.rcN`; `_vt_ver` derives the tag. `package()` stages the Omarchy Settings plugin with `scripts/stage-omarchy-plugin.sh` from the source archive.
 
 ### Two AUR channels: voxtype-bin vs voxtype-bin-rc
 

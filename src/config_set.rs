@@ -161,6 +161,17 @@ pub fn engine_feature_compiled(name: &str) -> bool {
 /// `engine` key and seeds the model only when absent, preserving explicit
 /// models, comments and other fields.
 pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> {
+    set_engine_with_models(path, name, &crate::config::Config::models_dir())
+}
+
+/// `set_engine` with the directory an engine switch searches for an installed
+/// model to adopt. Tests pass a tempdir so the outcome does not depend on
+/// which models the machine running them happens to have.
+fn set_engine_with_models(
+    path: PathBuf,
+    name: &str,
+    models_dir: &std::path::Path,
+) -> Result<PathBuf, ConfigSetError> {
     if parse_engine(name).is_none() {
         return Err(ConfigSetError::UnknownEngine(name.to_string()));
     }
@@ -171,12 +182,9 @@ pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> 
     let mut editor = ConfigEditor::load_from_path(path)?;
     if matches!(name, "parakeet" | "cohere") {
         let retained = editor.get_string(name, "model");
-        let model = crate::model_selection::select_engine_model_in(
-            name,
-            retained.as_deref(),
-            &crate::config::Config::models_dir(),
-        )
-        .map_err(ConfigSetError::IncompatibleModel)?;
+        let model =
+            crate::model_selection::select_engine_model_in(name, retained.as_deref(), models_dir)
+                .map_err(ConfigSetError::IncompatibleModel)?;
         crate::model_selection::validate_mode(
             name,
             &model,
@@ -189,12 +197,9 @@ pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> 
     }
     if name == "gguf" {
         let retained = editor.get_string("gguf", "model");
-        let model = crate::model_selection::select_engine_model_in(
-            "gguf",
-            retained.as_deref(),
-            &crate::config::Config::models_dir(),
-        )
-        .map_err(ConfigSetError::IncompatibleModel)?;
+        let model =
+            crate::model_selection::select_engine_model_in("gguf", retained.as_deref(), models_dir)
+                .map_err(ConfigSetError::IncompatibleModel)?;
         let metadata =
             crate::setup::model::find_pending_gguf_model(&model).filter(|entry| entry.runnable);
         let architecture = metadata
@@ -586,23 +591,13 @@ gguf_backend = "cpu"
             }
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.toml");
-            let result = set_engine(path.clone(), engine);
-            if let Err(error) = result {
-                assert!(matches!(error, ConfigSetError::IncompatibleModel(_)));
-                assert!(!path.exists(), "failed selection must not create config");
-                continue;
-            }
-            let text = fs::read_to_string(&path).unwrap();
-            let doc: toml::Value = toml::from_str(&text).unwrap();
-            assert_eq!(
-                doc[engine]["model"].as_str(),
-                Some(crate::model_catalog::default_model(engine))
+            let models = dir.path().join("models");
+            let error = set_engine_with_models(path.clone(), engine, &models).unwrap_err();
+            assert!(
+                matches!(error, ConfigSetError::IncompatibleModel(_)),
+                "{engine}: {error}"
             );
-            let cfg = crate::config::load_config(Some(&path)).unwrap();
-            assert_eq!(
-                cfg.model_name(),
-                crate::model_catalog::default_model(engine)
-            );
+            assert!(!path.exists(), "failed selection must not create config");
         }
     }
 

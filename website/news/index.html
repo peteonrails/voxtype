@@ -77,6 +77,57 @@
 
             <!-- v0.7.x Era Posts -->
 
+            <article class="news-article" id="v121">
+                <div class="article-meta">
+                    <time datetime="2026-11-10">November 10, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.2.1: Omarchy Settings Panel in the Packages, Smaller AUR Downloads</h2>
+                <div class="article-body">
+                    <p>Voxtype 1.2.1 packages the Omarchy Settings panel, cuts the AUR <code>voxtype-bin</code> download to the variants your machine uses, and replaces "rebuild with --features" with install hints that fit how you installed voxtype. AUR <code>voxtype-bin</code> users move straight from 1.1.1 to 1.2.1, so the <a href="#v120">1.2.0 changes</a> arrive with this release too.</p>
+
+                    <h3>Omarchy Settings panel ships with voxtype</h3>
+                    <p>The deb, rpm and AUR packages now install the Settings panel at <code>/usr/share/voxtype/omarchy-plugin/io.voxtype.settings</code>. On Omarchy, the daemon links it into <code>~/.config/omarchy/plugins</code> the first time it starts and enables it. The link points at the packaged copy, so the panel upgrades with voxtype, and the QML lives under a versioned path so Omarchy loads the new panel instead of a cached one.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup omarchy            # link it now
+voxtype setup omarchy --status   # linked, copy, linked-stale, ...
+voxtype setup omarchy --replace  # swap a hand-installed copy for the packaged one</code></pre>
+                    </div>
+                    <p>Voxtype never replaces a copy you installed with <code>omarchy plugin add</code> and never re-adds a panel you removed. If you installed the panel by hand before 1.2.1, the daemon tells you once, with a desktop notification, how to switch. Newer copies show a Switch banner with a <strong>Not now</strong> that is remembered. Opt out of the automatic link with:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[omarchy]
+link_settings_plugin = false</code></pre>
+                    </div>
+                    <p><strong>Why use it:</strong> the panel now arrives with the package and stays in step with the daemon it configures.</p>
+
+                    <h3>The panel tells you when it cannot run voxtype</h3>
+                    <p>If the panel cannot start the voxtype binary, it now says which binary and why, instead of showing settings from the last time it worked. Opening it from the tray's "Model update available" item re-reads everything. The tray's <strong>Settings</strong> item opens the panel when it is installed.</p>
+
+                    <h3>AUR voxtype-bin downloads only what you use</h3>
+                    <p><code>voxtype-bin</code> picks variants when it builds: the CPU build for your processor, the baseline build, Vulkan, and whatever <code>/usr/bin/voxtype</code> runs now. That is about 170 MB instead of 914 MB. Add a variant with:</p>
+                    <div class="code-block">
+                        <pre><code>VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin</code></pre>
+                    </div>
+                    <p><code>VOXTYPE_VARIANTS=all</code> gets the old full set. If an upgrade cannot keep your backend (a clean-chroot build, for example), it says so loudly instead of switching you to the CPU quietly.</p>
+
+                    <h3>Install hints that match your install</h3>
+                    <p><code>voxtype setup model</code>, <code>setup onnx --enable</code> and the daemon's engine warning used to tell package users to rebuild with <code>--features</code>. They now print the fix for your install: <code>sudo voxtype setup onnx --enable</code>, a <code>VOXTYPE_VARIANTS</code> rebuild, or a reinstall. On a Whisper package, the Parakeet section lists the GGUF Parakeet models that binary already runs.</p>
+                    <p>GGUF upgrade offers only appear when the GGUF worker is installed, so a package without the worker no longer offers an upgrade that cannot work.</p>
+
+                    <h3>Bug fixes</h3>
+                    <ul>
+                        <li>Remote Whisper: a base URL ending in <code>/v1</code>, such as <code>https://openrouter.ai/api/v1</code>, no longer produces <code>/v1/v1/audio/transcriptions</code> (#603). Thanks to software-atelier.</li>
+                        <li>The install guide and README no longer give download commands for AppImages that are not published (#622).</li>
+                        <li>"Decoder type" is hidden for GGUF Parakeet models, which do not use it.</li>
+                        <li>Docker and CI builds retry apt during Ubuntu mirror syncs, which broke three 1.2.0 release builds.</li>
+                    </ul>
+
+                    <h3>Upgrading</h3>
+                    <p>AUR <code>voxtype-bin</code> 1.2.1 depends on <code>vulkan-icd-loader</code>, because the GGUF workers link the Vulkan loader. Downgrading to 1.1.1 removes the packaged panel; the link in <code>~/.config/omarchy/plugins</code> then points at nothing and Omarchy skips it.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v120">
                 <div class="article-meta">
                     <time datetime="2026-11-09">November 9, 2026</time>

@@ -887,9 +887,15 @@ impl EngineState {
     }
 
     /// Visible rows for the current engine. Whisper has extra rows when
-    /// running in remote mode; everything else is constant per engine.
+    /// running in remote mode, and Parakeet drops its decoder type for a GGUF
+    /// model (the schema's `onnx_model_only`): the file carries its own
+    /// architecture and the setting is ignored there.
     fn rows(&self) -> Vec<FieldId> {
-        rows_for_engine_with_mode(&self.engine, &self.fields.w_mode)
+        let mut rows = rows_for_engine_with_mode(&self.engine, &self.fields.w_mode);
+        if crate::model_selection::is_gguf(&self.fields.pk_model) {
+            rows.retain(|field| *field != FieldId::PkModelType);
+        }
+        rows
     }
 
     fn current_field(&self) -> FieldId {
@@ -2534,6 +2540,22 @@ mod tests {
             state.cursor = other;
             assert!(!line_text(&guidance(&state)).contains("Model update available"));
         }
+    }
+
+    #[test]
+    fn parakeet_decoder_type_row_is_hidden_for_a_gguf_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        state.engine = "parakeet".to_string();
+
+        state.fields.pk_model = "parakeet-tdt-0.6b-v3".to_string();
+        assert!(state.rows().contains(&FieldId::PkModelType));
+
+        state.fields.pk_model = "parakeet-ultra-Q8_0.GGUF".to_string();
+        let rows = state.rows();
+        assert!(!rows.contains(&FieldId::PkModelType), "{:?}", rows);
+        assert!(rows.contains(&FieldId::PkModel) && rows.contains(&FieldId::PkThreads));
     }
 
     #[test]

@@ -329,6 +329,12 @@ icon_theme = "emoji"
 # [tray]
 # enabled = true
 #
+# On Omarchy, the daemon links the packaged Voxtype Settings panel into
+# ~/.config/omarchy/plugins on first start. Set false to opt out; run
+# `voxtype setup omarchy` to link it by hand.
+# [omarchy]
+# link_settings_plugin = true
+#
 # Per-state icon overrides (optional, takes precedence over theme)
 # [status.icons]
 # idle = "🎙️"

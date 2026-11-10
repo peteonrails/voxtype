@@ -113,6 +113,10 @@ pub struct KeySpec {
     /// Cargo feature that must be compiled in for the key to do anything.
     pub requires_feature: Option<&'static str>,
     pub restart_required: bool,
+    /// Set when the key only applies to an ONNX model of its engine and has no
+    /// effect while that engine's configured model is a `.gguf` file. UIs hide
+    /// such keys for a GGUF model.
+    pub onnx_model_only: bool,
 }
 
 const fn spec(
@@ -135,6 +139,7 @@ const fn spec(
         engine: None,
         requires_feature: None,
         restart_required: true,
+        onnx_model_only: false,
     }
 }
 
@@ -149,6 +154,11 @@ impl KeySpec {
     const fn for_onnx_engine(mut self, engine: &'static str) -> Self {
         self.engine = Some(engine);
         self.requires_feature = Some(engine);
+        self
+    }
+
+    const fn onnx_model_only(mut self) -> Self {
+        self.onnx_model_only = true;
         self
     }
 
@@ -441,7 +451,9 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Decoder type",
         "Force the decoder family instead of auto-detecting it from the model directory.",
     )
-    .for_onnx_engine("parakeet"),
+    .for_onnx_engine("parakeet")
+    // A GGUF file carries its own architecture; the setting is ignored there.
+    .onnx_model_only(),
     spec(
         "parakeet.threads",
         "parakeet",
@@ -1431,6 +1443,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "tray.enabled", "tray", "enabled", KeyType::Bool, "Status",
         "Native system tray",
         "Show the Linux system tray icon and recording controls. Enabled by default; restart the daemon after changing. Requires a StatusNotifierItem host, such as Omarchy, KDE, Waybar or GNOME AppIndicator.",
+    ),
+    spec(
+        "omarchy.link_settings_plugin",
+        "omarchy",
+        "link_settings_plugin",
+        KeyType::Bool,
+        "Status",
+        "Link Omarchy Settings panel",
+        "On Omarchy, let the daemon link the packaged Voxtype Settings panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
     ),
     // -- OSD ----------------------------------------------------------------
     spec(
@@ -2868,6 +2889,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
         "tray.enabled" => json!(cfg.tray.enabled),
+        "omarchy.link_settings_plugin" => json!(cfg.omarchy.link_settings_plugin),
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
@@ -3056,6 +3078,10 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
     o.insert("engine".into(), json!(spec.engine));
     o.insert("compiled".into(), json!(spec.compiled()));
     o.insert("restart_required".into(), json!(spec.restart_required));
+    // Additive and only present when set, like `open`: older consumers ignore it.
+    if spec.onnx_model_only {
+        o.insert("onnx_model_only".into(), json!(true));
+    }
     Json::Object(o)
 }
 
@@ -3616,6 +3642,32 @@ mod tests {
             .find(|k| k["key"] == json!("whisper.initial_prompt"))
             .unwrap();
         assert_eq!(prompt["file_value"], Json::Null);
+    }
+
+    #[test]
+    fn decoder_type_is_flagged_onnx_model_only_and_nothing_else_is() {
+        let (_dir, path) = temp_config();
+        let cfg = load_config(Some(&path)).unwrap();
+        let ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let doc = schema_json(&cfg, &path, &ed);
+        let flagged: Vec<&str> = doc["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|k| k.get("onnx_model_only").is_some())
+            .map(|k| {
+                // Only ever emitted as `true`; absence means "applies to any model".
+                assert_eq!(k["onnx_model_only"], json!(true), "{}", k);
+                k["key"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(flagged, ["parakeet.model_type"]);
+
+        let spec = scalar_keys()
+            .find(|s| s.key == "parakeet.model_type")
+            .unwrap();
+        assert!(spec.onnx_model_only);
+        assert_eq!(spec.engine, Some("parakeet"));
     }
 
     #[test]

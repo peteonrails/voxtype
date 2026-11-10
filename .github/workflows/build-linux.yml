@@ -361,8 +361,16 @@ jobs:
           # (SSE4.2+POPCNT, no AVX: the v2 floor) is a true behavioral test
           # of the exact artifact being shipped. Slow under TCG, but tiny.en
           # on a two-second clip stays well inside the step timeout.
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static libasound2 || \
-            sudo apt-get install -y -qq qemu-user-static libasound2t64
+          for attempt in 1 2 3 4; do
+            sudo apt-get update -qq -o Acquire::Retries=5 \
+              && { sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2 || \
+                   sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2t64; } \
+              && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep 90
+          done
           chmod +x "${BIN}"
           export XDG_DATA_HOME="${RUNNER_TEMP}/xdg-data"
           export XDG_CONFIG_HOME="${RUNNER_TEMP}/xdg-config"
@@ -424,8 +432,16 @@ jobs:
           # get an OSD too (#740 reported them SIGILLing at --version).
           # They are pure Rust with no ggml, so a startup check under a
           # v2-floor CPU model covers their whole risk surface.
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static libasound2t64 || \
-            sudo apt-get install -y -qq qemu-user-static libasound2
+          for attempt in 1 2 3 4; do
+            sudo apt-get update -qq -o Acquire::Retries=5 \
+              && { sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2t64 || \
+                   sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2; } \
+              && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep 90
+          done
           for suffix in osd osd-quickshell audio-bridge; do
             BIN="releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-${suffix}"
             chmod +x "${BIN}"
@@ -596,8 +612,15 @@ jobs:
       - name: Install fpm and rpmbuild
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm ruby ruby-dev build-essential
+          for attempt in 1 2 3 4; do
+            sudo apt-get update -o Acquire::Retries=5 \
+              && sudo apt-get install -y -o Acquire::Retries=5 rpm ruby ruby-dev build-essential \
+              && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep 90
+          done
           sudo gem install --no-document fpm
 
       - name: Build .deb and .rpm packages

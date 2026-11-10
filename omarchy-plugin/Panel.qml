@@ -97,8 +97,28 @@ Item {
   // would be a false claim.
   property real upgradeSettledAt: 0
 
+  // The voxtype binary that could not be started, and the dev.json that named
+  // it if one did. Set by any call that fails to start; cleared by the next
+  // schema read that gets an answer, which only a running binary can give.
+  property string cliMissing: ""
+  property string cliMissingSource: ""
+  // subcommand ("engines", "devices", "styles") → message from its failed run.
+  property var infoErrors: ({})
+
+  // The `setup omarchy --status --json` object, or null.
+  property var pluginLink: null
+  // "Not now" whose recording failed: hidden anyway, for as long as the shell
+  // keeps this panel loaded, rather than asking again on every summon.
+  property bool copyDismissedHere: false
+  // A CLI that predates `copy_dismissed` omits it, which reads as not dismissed.
+  readonly property bool offerReplaceCopy: root.pluginLink !== null
+    && String(root.pluginLink.state || "") === "copy"
+    && String(root.pluginLink.packaged_dir || "") !== ""
+    && root.pluginLink.copy_dismissed !== true
+    && !root.copyDismissedHere
+
   readonly property string replacementsSectionName: "Replacements"
-  readonly property bool degraded: schemaError !== ""
+  readonly property bool degraded: schemaError !== "" || cliMissing !== ""
 
   readonly property var modelOptions: {
     var info = root.engines[root.engine]
@@ -185,15 +205,7 @@ Item {
     root.upgradeActionError = ""
     if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
-    cli.fetchSchema()
-    cli.fetchStatus()
-    cli.fetchUnit()
-    cli.fetchAccel()
-    cli.fetchModels()
-    cli.fetchEngines()
-    cli.fetchDevices()
-    cli.fetchStyles()
-    cli.fetchUpgrade()
+    root.refreshAll()
 
     // The layer surface is mapped after this returns, so focus has to be taken
     // once the window exists or Escape and typing land nowhere. The card's key
@@ -204,6 +216,66 @@ Item {
       settingsCard.keyCatcher.forceActiveFocus()
       if (!root.degraded) sidebar.focusSearch()
     })
+  }
+
+  // Everything the panel shows comes from one of these. A summon and the
+  // `section` verb on an open panel both re-read all of it: either can follow a
+  // change made behind the panel's back (an upgrade, a new binary, a tray
+  // click after a model update).
+  function refreshAll() {
+    cli.fetchSchema()
+    cli.fetchStatus()
+    cli.fetchUnit()
+    cli.fetchAccel()
+    cli.fetchModels()
+    cli.fetchEngines()
+    cli.fetchDevices()
+    cli.fetchStyles()
+    cli.fetchUpgrade()
+    cli.fetchPluginLink()
+  }
+
+  // A binary that cannot be run cannot vouch for anything shown from its last
+  // answers: the version, the configured model, the daemon state. Showing them
+  // anyway is how a stale dev.json once left the panel presenting an old
+  // release as current, with no error at all.
+  function clearCliState() {
+    root.schema = null
+    root.keys = []
+    root.sections = []
+    root.engine = ""
+    root.voxtypeVersion = ""
+    root.daemonVersionLabel = ""
+    root.daemonVersionDiffers = false
+    root.configPath = ""
+    root.replacements = ({})
+    root.engineChoices = []
+    root.engines = ({})
+    root.engineAvailability = ({})
+    root.devices = []
+    root.styles = []
+    root.daemonState = ""
+    root.daemonRunning = false
+    root.statusKnown = false
+    root.accelState = ""
+    root.accelBackend = ""
+    root.accelEvidence = ""
+    root.upgradeStatus = null
+    root.pluginLink = null
+    root.infoErrors = ({})
+  }
+
+  function noteInfoError(what, message) {
+    var next = ({})
+    for (var k in root.infoErrors) if (k !== what) next[k] = root.infoErrors[k]
+    if (message !== "") next[what] = message
+    root.infoErrors = next
+  }
+
+  readonly property string infoErrorText: {
+    var lines = []
+    for (var k in root.infoErrors) lines.push("voxtype info " + k + " failed: " + root.infoErrors[k])
+    return lines.join("\n")
   }
 
   // The sidebar is hidden in the degraded state, and a hidden item cannot hold
@@ -363,13 +435,22 @@ Item {
       var wanted = root.canonicalSection(name || "")
       if (wanted === "") return "usage: section <name>"
       if (root.opened) {
+        // The tray's "Model update available" lands here on an open panel,
+        // and so can a jump made after the binary or config changed. Re-read
+        // everything, as a summon does, not just the upgrade offers.
+        root.refreshAll()
+        // With no schema there are no sections to check against yet. Aim at
+        // the one asked for; the schema read lands on it if it exists, or on
+        // the first section if not, as a summon with a stale payload does.
+        if (root.degraded) {
+          root.activeSection = wanted
+          return "ok"
+        }
         if (root.sections.indexOf(wanted) === -1) return "unknown section: " + wanted
         root.activeSection = wanted
         root.searchText = ""
         sidebar.searchField.text = ""
         form.clearHighlight()
-        // The tray's "Model update available" lands here on an open panel.
-        cli.fetchUpgrade()
         return "ok"
       }
       return root.requestOpen(JSON.stringify({ section: wanted }))
@@ -413,6 +494,8 @@ Item {
 
   function applySchema(next) {
     root.schemaError = ""
+    root.cliMissing = ""
+    root.cliMissingSource = ""
     root.schema = next
     // VoxtypeCli validates the parsed JSON array before emitting it. Crossing
     // its signal(var) can wrap it as a QML sequence: length/indexing survive,
@@ -507,15 +590,48 @@ Item {
 
     onSchemaLoaded: function(next) { root.applySchema(next) }
     onSchemaFailed: function(message) {
+      // It ran, so whatever it said is the error now, not a missing binary.
+      root.cliMissing = ""
+      root.cliMissingSource = ""
       root.schemaError = message
       root.keys = []
       root.sections = []
       root.refocusCard()
     }
+    onCliUnavailable: function(bin) {
+      var wasDegraded = root.degraded
+      root.cliMissing = bin
+      root.cliMissingSource = cli.binSource
+      root.clearCliState()
+      if (!wasDegraded) root.refocusCard()
+    }
+    onInfoFailed: function(what, message) {
+      root.noteInfoError(what, message)
+      // An empty list is what the panel already survives when a build lacks
+      // the reader; a stale one is a claim about a binary that just failed.
+      if (what === "engines") root.engineAvailability = ({})
+      else if (what === "devices") root.devices = []
+      else if (what === "styles") root.styles = []
+    }
+    onPluginLinkLoaded: function(status) { root.pluginLink = status }
+    onCopyDismissFinished: function(ok, message) {
+      if (!ok) {
+        console.warn("Voxtype Settings: could not record Not now (" + message + "); hiding the banner for this session")
+        root.copyDismissedHere = true
+      }
+      cli.fetchPluginLink()
+    }
     onModelsLoaded: function(engines) { root.engines = engines }
-    onDevicesLoaded: function(devices) { root.devices = devices }
-    onStylesLoaded: function(styles) { root.styles = styles }
+    onDevicesLoaded: function(devices) {
+      root.noteInfoError("devices", "")
+      root.devices = devices
+    }
+    onStylesLoaded: function(styles) {
+      root.noteInfoError("styles", "")
+      root.styles = styles
+    }
     onEnginesLoaded: function(list) {
+      root.noteInfoError("engines", "")
       var next = ({})
       for (var i = 0; i < list.length; i++) {
         var entry = list[i]
@@ -782,6 +898,20 @@ Item {
           onRestartRequested: cli.restartDaemon()
         }
 
+        PluginCopyBanner {
+          Layout.fillWidth: true
+          active: root.offerReplaceCopy
+          dismissing: cli.dismissingCopy
+          onReplaceRequested: root.dismissThen(function() { cli.replacePluginCopy() })
+          onNotNowRequested: cli.dismissPluginCopy()
+        }
+
+        CliErrorBanner {
+          Layout.fillWidth: true
+          active: !root.degraded && root.infoErrorText !== ""
+          message: root.infoErrorText
+        }
+
         // ------------------------------------------------ degraded state
         //
         // Everything here depends on `config schema --json`, which older
@@ -804,6 +934,7 @@ Item {
 
             Column {
               id: degradedBody
+              objectName: "degradedState"
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
@@ -811,26 +942,34 @@ Item {
               spacing: Style.spacing.xxl
 
               Text {
+                objectName: "degradedTitle"
                 width: parent.width
-                text: "This panel requires voxtype 0.8 or newer."
+                text: root.cliMissing !== ""
+                  ? "Voxtype Settings could not run " + root.cliMissing + "."
+                  : "This panel requires voxtype 0.8 or newer."
                 color: ShellTheme.Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.title
-                wrapMode: Text.WordWrap
+                wrapMode: Text.WrapAnywhere
               }
 
               Text {
+                objectName: "degradedDetail"
                 width: parent.width
-                text: "It reads every setting from `voxtype config schema --json`, which earlier builds do not provide."
+                text: root.cliMissing === ""
+                  ? "It reads every setting from `voxtype config schema --json`, which earlier builds do not provide."
+                  : root.cliMissingSource !== ""
+                    ? "That path is set in " + root.cliMissingSource + ". Point it at a voxtype binary that exists, or delete the file to use voxtype from PATH."
+                    : "Is voxtype installed? Install it, or make sure voxtype is on PATH."
                 color: Qt.darker(ShellTheme.Color.foreground, 1.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
-                wrapMode: Text.WordWrap
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
               }
 
               Text {
                 width: parent.width
-                visible: root.schemaError !== ""
+                visible: root.cliMissing === "" && root.schemaError !== ""
                 text: root.schemaError
                 color: ShellTheme.Color.urgent
                 font.family: Style.font.family
@@ -842,6 +981,7 @@ Item {
                 spacing: Style.spacing.controlGap
 
                 Button {
+                  objectName: "installButton"
                   text: "Install / Update"
                   iconText: "󰇚"
                   bordered: true

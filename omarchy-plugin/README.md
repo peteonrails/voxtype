@@ -12,9 +12,30 @@ without keeping a second copy of the schema.
 - **voxtype 0.8 or newer.** The panel is built entirely on `voxtype config
   schema --json`, which earlier builds do not have. On an older voxtype the
   panel opens onto a card offering to install/update or to open the TUI
-  instead.
+  instead. If voxtype cannot be run at all, the same card names the binary it
+  tried (and the `dev.json` that named it, if one did) instead of showing the
+  last answers it got.
 
 ## Install
+
+**Packaged (recommended).** The voxtype deb, rpm and AUR packages install this
+plugin at `/usr/share/voxtype/omarchy-plugin/io.voxtype.settings`. Link it into
+Omarchy with:
+
+```bash
+voxtype setup omarchy
+```
+
+The daemon also links it on first run. The link follows the packaged copy, so
+each voxtype upgrade brings the matching panel. Packages lay the QML out under a
+versioned directory (`<version>/Panel.qml`), so Omarchy loads the new panel
+after an upgrade instead of a cached one.
+
+**From git (development).** This installs the flat tree as a copy that does not
+follow package upgrades. Use it to work on the panel, with `dev.json` naming the
+voxtype binary to drive (see Development). Only one copy should be installed at
+a time. Remove a git copy with `omarchy plugin remove io.voxtype.settings`
+before switching to the packaged one.
 
 ```bash
 omarchy plugin add https://github.com/peteonrails/omarchy-voxtype-settings.git --enable --yes
@@ -63,7 +84,7 @@ keybind or a script because it takes no JSON:
 | `omarchy-shell io.voxtype.settings open` | open the panel (no-op if already open) |
 | `omarchy-shell io.voxtype.settings close` | close it |
 | `omarchy-shell io.voxtype.settings toggle` | open or close |
-| `omarchy-shell io.voxtype.settings section Hotkey` | open on a section, or jump to it if already open |
+| `omarchy-shell io.voxtype.settings section Hotkey` | open on a section, or jump to it if already open (re-reading everything, as opening does) |
 | `omarchy-shell io.voxtype.settings restart` | restart the voxtype daemon without opening anything |
 | `omarchy-shell io.voxtype.settings download <model>` | start the same download the model row's button starts |
 | `omarchy-shell io.voxtype.settings cancelDownload` | stop the download in progress |
@@ -179,6 +200,9 @@ Inside the panel:
   next to it removes the override (`voxtype config unset`).
 - Settings for engines that are not compiled into your binary render dimmed, and
   the engine picker marks those engines "not in this build".
+- Keys the schema flags `onnx_model_only` (today Parakeet's **Decoder type**) are
+  hidden while the engine's model is a `.gguf` file, which carries its own
+  architecture. A voxtype that predates the flag shows the key as before.
 - Enums the schema marks `open` (an evdev key name, a language list, a sound
   theme that may be a path) carry a **Custom value…** row that turns the picker
   into a text field. Escape backs out of it without writing.
@@ -228,6 +252,23 @@ Inside the panel:
   update available..." item opens the panel here.
 - Voxtype reads its config at startup, so a banner appears after the first
   successful write and stays until a restart succeeds.
+- If a voxtype command cannot be started at all (voxtype is not installed, or a
+  `dev.json` names a binary that is gone), the panel says so: "Voxtype Settings
+  could not run `<binary>`", plus the `dev.json` path when that is where the
+  binary came from. It also drops everything it was showing from earlier
+  answers (version, configured model, model list, daemon state, upgrade offers)
+  rather than presenting them as current. The next summon or `section` call
+  tries again, and the settings come back as soon as the binary answers.
+- If `voxtype info engines`, `info devices` or `info styles` runs but fails, a
+  red strip above the form names the command and its error, and that list is
+  emptied. The rest of the panel keeps working.
+- If this panel is a copy you installed by hand (with `omarchy plugin add` or
+  `cp -r`) and your voxtype package ships its own, a banner offers to **Switch**
+  to the packaged one, which updates with voxtype. The button runs `voxtype
+  setup omarchy --replace --yes --restart-shell` in a terminal. A voxtype
+  without `setup omarchy` shows no banner. **Not now** records the choice with
+  `voxtype setup omarchy --dismiss-copy` so later opens do not ask again; if
+  recording fails, the banner stays hidden until the shell restarts.
 - The Advanced section leads with **Release GPU memory when idle**, one switch
   over two keys (`whisper.on_demand_loading` and `whisper.gpu_isolation`). Both
   are needed before the driver actually hands VRAM back between dictations, which
@@ -249,6 +290,7 @@ Inside the panel:
 | Model list per engine | `voxtype info models --json` |
 | Which engines this build has | `voxtype info engines --json` |
 | Input device list | `voxtype info devices --json` |
+| OSD style list | `voxtype info styles --json` |
 | Daemon liveness | `voxtype status --format json` |
 | Unit state and main pid | `systemctl --user show voxtype -p ActiveState -p MainPID --value` |
 | Whether the GPU is actually in use | `voxtype info accel --json` |
@@ -260,7 +302,10 @@ Inside the panel:
 | Accept / keep / clean up | `voxtype setup migrate --accept <id> --yes --progress-format json`, `--decline`, `--cleanup` (in panel) |
 | Open the TUI | `voxtype configure` (floating terminal) |
 | Edit the config file | `omarchy-launch-config-editor <config path>` |
-| Install / update voxtype | `omarchy-voxtype-install` (floating terminal) |
+| Install / update voxtype | `omarchy-install-dictation-voxtype`, or `omarchy-voxtype-install` on an Omarchy that predates it (floating terminal) |
+| Is this the packaged copy of the panel | `voxtype setup omarchy --status --json` |
+| Switch to the packaged copy | `voxtype setup omarchy --replace --yes --restart-shell` (floating terminal) |
+| Not now on that banner | `voxtype setup omarchy --dismiss-copy` |
 
 ## Development
 
@@ -274,7 +319,26 @@ Runs the real panel offscreen (`QT_QPA_PLATFORM=offscreen`; the test copy
 swaps the layer-shell window for a plain one) against
 `tests/fake-voxtype-migrate.py`, so it needs Quickshell and the Omarchy shell
 but no compositor, daemon, config or network. It refuses to run with
-`WAYLAND_DISPLAY` or `DISPLAY` set; run it in a desktop-isolated sandbox.
+`WAYLAND_DISPLAY` or `DISPLAY` set; run it in a desktop-isolated sandbox. The
+`link*` scenarios cover the "Switch to the packaged copy" banner.
+
+### CLI failure and section refresh tests
+
+```bash
+python3 omarchy-plugin/tests/test-cli-missing.py [--evidence DIR]
+python3 omarchy-plugin/tests/test-section-refresh.py [--evidence DIR]
+python3 omarchy-plugin/tests/test-onnx-model-only.py [--evidence DIR]
+```
+
+Same harness (`tests/panel_harness.py`) and the same isolation rules as the
+upgrade banner test. `test-cli-missing.py` points `dev.json` at a binary that
+does not exist, removes the binary between two summons, empties `PATH`, and
+makes the `info` readers fail; it checks the error names the binary and that
+nothing stale stays on screen. `test-section-refresh.py` changes the fake CLI's
+answers behind an open panel and checks that `section` re-reads all of them.
+`test-onnx-model-only.py` checks Decoder type is hidden for a GGUF model, shown
+for an ONNX one, and shown by a schema without the flag.
+Terminal launches are logged by a stand-in, never opened.
 
 ### Schema boundary regression test
 
@@ -308,8 +372,13 @@ it:
   component itself where it is used, not just on the overflowing child.
 
 `components/VoxtypeCli.qml` owns every subprocess; the rest of the QML never
-spawns anything. Two rules there are load-bearing:
+spawns anything. Three rules there are load-bearing:
 
+- Every subprocess is a `CliProcess`, started with `launch()`. Quickshell's
+  `Process` emits neither `started` nor `exited` for a command that cannot
+  start, so an `onExited` handler alone never learns about a missing binary.
+  `CliProcess` turns that into `failedToStart()`, and each voxtype call reports
+  it as `cliUnavailable`.
 - A download's `Process` lives in `VoxtypeCli`, never in the row whose button
   started it. Section switches, schema refetches, and dismissals all rebuild
   those rows, and a download has to outlive every one of them.
@@ -368,7 +437,10 @@ Layout of the QML:
 | `components/EngineModelCard.qml` | the model catalog for the engine in effect |
 | `components/ReplacementsEditor.qml` | the `text.replacements` map |
 | `components/RestartBanner.qml` | "changes take effect after restart" |
+| `components/CliErrorBanner.qml` | an `info` reader that ran and failed |
+| `components/PluginCopyBanner.qml` | "switch to the packaged copy" |
 | `components/VoxtypeCli.qml` | every subprocess |
+| `components/CliProcess.qml` | a `Process` that also reports a command that never started |
 
 ## Uninstall
 

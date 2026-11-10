@@ -416,6 +416,12 @@ min_speech_duration_ms = 100  # Minimum speech required
 # [tray]
 # enabled = true
 
+# On Omarchy, the daemon links the packaged Voxtype Settings panel into
+# ~/.config/omarchy/plugins on first start. Set false to opt out; run
+# `voxtype setup omarchy` to link it by hand.
+# [omarchy]
+# link_settings_plugin = true
+
 # [status]
 # Status display icons for Waybar/tray integrations
 #

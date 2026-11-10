@@ -57,6 +57,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(enabled) = cli.tray {
         config.tray.enabled = enabled;
     }
+    if let Some(enabled) = cli.omarchy_link_settings_plugin {
+        config.omarchy.link_settings_plugin = enabled;
+    }
 
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;

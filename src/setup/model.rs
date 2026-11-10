@@ -1933,6 +1933,211 @@ pub fn whisper_model_english_only(name: &str) -> Option<bool> {
         .map(|model| model.english_only)
 }
 
+/// Which engines this binary lists in the interactive picker.
+#[derive(Debug, Clone, Copy)]
+struct PickerAvailability {
+    parakeet: bool,
+    moonshine: bool,
+    sensevoice: bool,
+    paraformer: bool,
+    dolphin: bool,
+    omnilingual: bool,
+    cohere: bool,
+    cohere_gguf: bool,
+    parakeet_gguf: bool,
+    gguf: bool,
+    openvino: bool,
+}
+
+impl PickerAvailability {
+    const fn compiled() -> Self {
+        Self {
+            parakeet: cfg!(feature = "parakeet"),
+            moonshine: cfg!(feature = "moonshine"),
+            sensevoice: cfg!(feature = "sensevoice"),
+            paraformer: cfg!(feature = "paraformer"),
+            dolphin: cfg!(feature = "dolphin"),
+            omnilingual: cfg!(feature = "omnilingual"),
+            cohere: cfg!(feature = "cohere"),
+            cohere_gguf: cfg!(feature = "cohere-gguf"),
+            parakeet_gguf: cfg!(feature = "parakeet-gguf"),
+            gguf: cfg!(feature = "gguf"),
+            openvino: cfg!(feature = "openvino-whisper"),
+        }
+    }
+
+    /// Selection number of the first Parakeet GGUF row, minus one. Mirrors
+    /// the running offsets in `interactive_select`.
+    fn parakeet_gguf_offset(&self) -> usize {
+        let count = |available: bool, count: usize| if available { count } else { 0 };
+        MODELS.len()
+            + count(self.parakeet, PARAKEET_MODELS.len())
+            + count(self.moonshine, MOONSHINE_MODELS.len())
+            + count(self.sensevoice, SENSEVOICE_MODELS.len())
+            + count(self.paraformer, PARAFORMER_MODELS.len())
+            + count(self.dolphin, DOLPHIN_MODELS.len())
+            + count(self.omnilingual, OMNILINGUAL_MODELS.len())
+            + count(self.cohere, COHERE_MODELS.len())
+            + count(self.cohere_gguf, COHERE_GGUF_MODELS.len())
+    }
+}
+
+/// The picker's sections, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerSection {
+    Whisper,
+    Parakeet,
+    Moonshine,
+    SenseVoice,
+    Paraformer,
+    Dolphin,
+    Omnilingual,
+    Cohere,
+    CohereGguf,
+    ParakeetGguf,
+    HandyGguf,
+    OpenVino,
+}
+
+impl PickerSection {
+    #[cfg(test)]
+    const ALL: [PickerSection; 12] = [
+        PickerSection::Whisper,
+        PickerSection::Parakeet,
+        PickerSection::Moonshine,
+        PickerSection::SenseVoice,
+        PickerSection::Paraformer,
+        PickerSection::Dolphin,
+        PickerSection::Omnilingual,
+        PickerSection::Cohere,
+        PickerSection::CohereGguf,
+        PickerSection::ParakeetGguf,
+        PickerSection::HandyGguf,
+        PickerSection::OpenVino,
+    ];
+
+    fn title(self, amd_tag: &str) -> String {
+        match self {
+            PickerSection::Whisper => "--- Whisper (OpenAI, 99+ languages) ---".into(),
+            PickerSection::Parakeet => "--- Parakeet (NVIDIA FastConformer, English) ---".into(),
+            PickerSection::Moonshine => {
+                format!("--- Moonshine (Moonshine AI, encoder-decoder ASR){amd_tag} ---")
+            }
+            PickerSection::SenseVoice => {
+                format!("--- SenseVoice (Alibaba FunAudioLLM, CJK + English){amd_tag} ---")
+            }
+            PickerSection::Paraformer => {
+                format!("--- Paraformer (FunASR, Chinese + English){amd_tag} ---")
+            }
+            PickerSection::Dolphin => format!("--- Dolphin (dictation-optimized CTC){amd_tag} ---"),
+            PickerSection::Omnilingual => {
+                format!("--- Omnilingual (FunASR, 50+ languages){amd_tag} ---")
+            }
+            PickerSection::Cohere => format!("--- Cohere Transcribe ONNX{amd_tag} ---"),
+            PickerSection::CohereGguf => {
+                "--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---".into()
+            }
+            PickerSection::ParakeetGguf => {
+                "--- Parakeet GGUF (transcribe.cpp, Vulkan-capable) ---".into()
+            }
+            PickerSection::HandyGguf => {
+                "--- Handy GGUF families (offline transcribe.cpp) ---".into()
+            }
+            PickerSection::OpenVino => {
+                "--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---".into()
+            }
+        }
+    }
+
+    /// The Cargo feature that puts this section's engine in a binary.
+    fn feature(self) -> Option<&'static str> {
+        match self {
+            PickerSection::Whisper => None,
+            PickerSection::Parakeet => Some("parakeet"),
+            PickerSection::Moonshine => Some("moonshine"),
+            PickerSection::SenseVoice => Some("sensevoice"),
+            PickerSection::Paraformer => Some("paraformer"),
+            PickerSection::Dolphin => Some("dolphin"),
+            PickerSection::Omnilingual => Some("omnilingual"),
+            PickerSection::Cohere => Some("cohere"),
+            PickerSection::CohereGguf => Some("cohere-gguf"),
+            PickerSection::ParakeetGguf => Some("parakeet-gguf"),
+            PickerSection::HandyGguf => Some("gguf"),
+            PickerSection::OpenVino => Some("openvino-whisper"),
+        }
+    }
+
+    fn available(self, a: &PickerAvailability) -> bool {
+        match self {
+            PickerSection::Whisper => true,
+            PickerSection::Parakeet => a.parakeet,
+            PickerSection::Moonshine => a.moonshine,
+            PickerSection::SenseVoice => a.sensevoice,
+            PickerSection::Paraformer => a.paraformer,
+            PickerSection::Dolphin => a.dolphin,
+            PickerSection::Omnilingual => a.omnilingual,
+            PickerSection::Cohere => a.cohere,
+            PickerSection::CohereGguf => a.cohere_gguf,
+            PickerSection::ParakeetGguf => a.parakeet_gguf,
+            PickerSection::HandyGguf => a.gguf,
+            PickerSection::OpenVino => a.openvino,
+        }
+    }
+
+    /// The section header and, when this binary lacks the engine, the lines
+    /// shown instead of its rows: where the same engine is listed as GGUF,
+    /// and how to get the missing build for this install.
+    fn intro(
+        self,
+        availability: &PickerAvailability,
+        host: &super::install_hint::Host,
+        amd_tag: &str,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self != PickerSection::Whisper {
+            lines.push(String::new());
+        }
+        lines.push(self.title(amd_tag));
+        lines.push(String::new());
+        if self.available(availability) {
+            return lines;
+        }
+        let Some(feature) = self.feature() else {
+            return lines;
+        };
+        let hint = host.hint(super::install_hint::Need::Feature(feature));
+        let gray = |text: String| format!("  \x1b[90m{text}\x1b[0m");
+        match self {
+            PickerSection::Parakeet if availability.parakeet_gguf => {
+                lines.push(gray(
+                    "This binary runs Parakeet as GGUF. Pick one of these, also listed under Parakeet GGUF below:"
+                        .into(),
+                ));
+                let offset = availability.parakeet_gguf_offset();
+                for (i, model) in PARAKEET_GGUF_MODELS.iter().enumerate() {
+                    lines.push(gray(format!("  [{:>2}] {}", offset + i + 1, model.name)));
+                }
+                lines.push(gray(format!("(ONNX Parakeet models: {hint})")));
+            }
+            PickerSection::Cohere if availability.cohere_gguf => {
+                lines.push(gray(
+                    "This binary runs Cohere Transcribe as GGUF; see Cohere Transcribe GGUF below."
+                        .into(),
+                ));
+                lines.push(gray(format!("(ONNX Cohere models: {hint})")));
+            }
+            _ => lines.push(gray(format!("(not available - {hint})"))),
+        }
+        lines
+    }
+}
+
+fn print_lines(lines: &[String]) {
+    for line in lines {
+        println!("{line}");
+    }
+}
+
 /// Run interactive model selection (single menu with all models)
 pub async fn interactive_select() -> anyhow::Result<()> {
     println!("Voxtype Model Selection\n");
@@ -1964,17 +2169,22 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_cohere_model = config.cohere.as_ref().map(|c| c.model.as_str());
     let current_gguf_model = config.gguf.as_ref().map(|g| g.model.as_str());
     let current_openvino_model = config.openvino.as_ref().map(|o| o.model.as_str());
-    let parakeet_available = cfg!(feature = "parakeet");
-    let moonshine_available = cfg!(feature = "moonshine");
-    let sensevoice_available = cfg!(feature = "sensevoice");
-    let paraformer_available = cfg!(feature = "paraformer");
-    let dolphin_available = cfg!(feature = "dolphin");
-    let omnilingual_available = cfg!(feature = "omnilingual");
-    let cohere_available = cfg!(feature = "cohere");
-    let cohere_gguf_available = cfg!(feature = "cohere-gguf");
-    let parakeet_gguf_available = cfg!(feature = "parakeet-gguf");
-    let gguf_available = cfg!(feature = "gguf");
-    let openvino_available = cfg!(feature = "openvino-whisper");
+    let availability = PickerAvailability::compiled();
+    let host = super::install_hint::Host::system();
+    let intro = |section: PickerSection| {
+        print_lines(&section.intro(&availability, &host, AMD_CPU_ONLY_TAG));
+    };
+    let parakeet_available = availability.parakeet;
+    let moonshine_available = availability.moonshine;
+    let sensevoice_available = availability.sensevoice;
+    let paraformer_available = availability.paraformer;
+    let dolphin_available = availability.dolphin;
+    let omnilingual_available = availability.omnilingual;
+    let cohere_available = availability.cohere;
+    let cohere_gguf_available = availability.cohere_gguf;
+    let parakeet_gguf_available = availability.parakeet_gguf;
+    let gguf_available = availability.gguf;
+    let openvino_available = availability.openvino;
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
@@ -2003,7 +2213,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
-    println!("--- Whisper (OpenAI, 99+ languages) ---\n");
+    intro(PickerSection::Whisper);
 
     for (i, model) in MODELS.iter().enumerate() {
         let filename = get_model_filename(model.name);
@@ -2034,7 +2244,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // --- Parakeet Section ---
-    println!("\n--- Parakeet (NVIDIA FastConformer, English) ---\n");
+    intro(PickerSection::Parakeet);
 
     if parakeet_available {
         for (i, model) in PARAKEET_MODELS.iter().enumerate() {
@@ -2060,8 +2270,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features parakeet)\x1b[0m");
     }
 
     // --- Moonshine Section ---
@@ -2071,10 +2279,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         } else {
             0
         };
-    println!(
-        "\n--- Moonshine (Moonshine AI, encoder-decoder ASR){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Moonshine);
 
     if moonshine_available {
         for (i, model) in MOONSHINE_MODELS.iter().enumerate() {
@@ -2108,8 +2313,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features moonshine)\x1b[0m");
     }
 
     // --- SenseVoice Section ---
@@ -2119,10 +2322,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         } else {
             0
         };
-    println!(
-        "\n--- SenseVoice (Alibaba FunAudioLLM, CJK + English){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::SenseVoice);
 
     if sensevoice_available {
         for (i, model) in SENSEVOICE_MODELS.iter().enumerate() {
@@ -2149,17 +2349,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features sensevoice)\x1b[0m");
     }
 
     // --- Paraformer Section ---
     let paraformer_offset =
         sensevoice_offset + available_count(sensevoice_available, sensevoice_count);
-    println!(
-        "\n--- Paraformer (FunASR, Chinese + English){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Paraformer);
 
     if paraformer_available {
         for (i, model) in PARAFORMER_MODELS.iter().enumerate() {
@@ -2186,17 +2381,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features paraformer)\x1b[0m");
     }
 
     // --- Dolphin Section ---
     let dolphin_offset =
         paraformer_offset + available_count(paraformer_available, paraformer_count);
-    println!(
-        "\n--- Dolphin (dictation-optimized CTC){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Dolphin);
 
     if dolphin_available {
         for (i, model) in DOLPHIN_MODELS.iter().enumerate() {
@@ -2223,16 +2413,11 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features dolphin)\x1b[0m");
     }
 
     // --- Omnilingual Section ---
     let omnilingual_offset = dolphin_offset + available_count(dolphin_available, dolphin_count);
-    println!(
-        "\n--- Omnilingual (FunASR, 50+ languages){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Omnilingual);
 
     if omnilingual_available {
         for (i, model) in OMNILINGUAL_MODELS.iter().enumerate() {
@@ -2259,14 +2444,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features omnilingual)\x1b[0m");
     }
 
     // --- Cohere Section ---
     let cohere_offset =
         omnilingual_offset + available_count(omnilingual_available, omnilingual_count);
-    println!("\n--- Cohere Transcribe ONNX{} ---\n", AMD_CPU_ONLY_TAG);
+    intro(PickerSection::Cohere);
 
     if cohere_available {
         for (i, model) in COHERE_MODELS.iter().enumerate() {
@@ -2293,12 +2476,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features cohere)\x1b[0m");
     }
 
     let cohere_gguf_offset = cohere_offset + available_count(cohere_available, cohere_count);
-    println!("\n--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---\n");
+    intro(PickerSection::CohereGguf);
     print_gguf_section(
         COHERE_GGUF_MODELS,
         cohere_gguf_available,
@@ -2308,7 +2489,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
 
     let parakeet_gguf_offset =
         cohere_gguf_offset + available_count(cohere_gguf_available, cohere_gguf_count);
-    println!("\n--- Parakeet GGUF (transcribe.cpp, Vulkan-capable) ---\n");
+    intro(PickerSection::ParakeetGguf);
     print_gguf_section(
         PARAKEET_GGUF_MODELS,
         parakeet_gguf_available,
@@ -2320,7 +2501,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
 
     let gguf_offset =
         parakeet_gguf_offset + available_count(parakeet_gguf_available, parakeet_gguf_count);
-    println!("\n--- Handy GGUF families (offline transcribe.cpp) ---\n");
+    intro(PickerSection::HandyGguf);
     print_gguf_section(
         HANDY_GGUF_MODELS,
         gguf_available,
@@ -2330,7 +2511,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
 
     // --- OpenVINO Section ---
     let openvino_offset = gguf_offset + available_count(gguf_available, gguf_count);
-    println!("\n--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---\n");
+    intro(PickerSection::OpenVino);
 
     if openvino_available {
         for (i, model) in OPENVINO_MODELS.iter().enumerate() {
@@ -2363,8 +2544,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features openvino-whisper)\x1b[0m");
     }
 
     println!("\n  [ 0] Cancel\n");
@@ -2439,14 +2618,8 @@ fn print_gguf_section(
     offset: usize,
     current: Option<&str>,
 ) {
-    let Some(first) = models.first() else {
-        return;
-    };
+    // The section intro already said how to get this engine.
     if !available {
-        println!(
-            "  \x1b[90m(not available - rebuild with --features {})\x1b[0m",
-            first.feature()
-        );
         return;
     }
     let models_dir = Config::models_dir();
@@ -6235,5 +6408,157 @@ on_demand_loading = false
             );
             assert_eq!(Some(entry.r2_dir), model.r2_dir, "{}", model.name);
         }
+    }
+
+    struct NoPackageManager;
+
+    impl crate::model_upgrade::CommandRunner for NoPackageManager {
+        fn output(&self, _program: &str, _args: &[&str]) -> Option<String> {
+            None
+        }
+    }
+
+    fn pick_avx512() -> crate::setup::binary::Variant {
+        crate::setup::binary::Variant::OnnxAvx512
+    }
+
+    /// What every release Whisper binary is built with since 1.2.0: the GGUF
+    /// clients, no ONNX engines.
+    const WHISPER_PACKAGE: PickerAvailability = PickerAvailability {
+        parakeet: false,
+        moonshine: false,
+        sensevoice: false,
+        paraformer: false,
+        dolphin: false,
+        omnilingual: false,
+        cohere: false,
+        cohere_gguf: true,
+        parakeet_gguf: true,
+        gguf: true,
+        openvino: false,
+    };
+
+    /// Section headers and notes, without the color codes. Model rows are
+    /// not part of the intro, so this is the picker minus its rows.
+    fn picker_outline(
+        availability: &PickerAvailability,
+        installed: &[crate::setup::binary::Variant],
+        record: Option<&str>,
+    ) -> String {
+        use crate::setup::binary::Variant;
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        for variant in std::iter::once(&Variant::WhisperAvx2).chain(installed) {
+            std::fs::write(lib.join(variant.binary_name()), []).unwrap();
+        }
+        if let Some(record) = record {
+            std::fs::write(
+                lib.join(crate::setup::install_hint::PACKAGE_VARIANTS_FILE),
+                record,
+            )
+            .unwrap();
+        }
+        let host = crate::setup::install_hint::Host::new(
+            lib.join(Variant::WhisperAvx2.binary_name()),
+            lib.clone(),
+            &NoPackageManager,
+            pick_avx512,
+        );
+        PickerSection::ALL
+            .iter()
+            .flat_map(|section| section.intro(availability, &host, ""))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("\x1b[90m", "")
+            .replace("\x1b[0m", "")
+    }
+
+    /// The Whisper package picker outline, with `fix` as the remediation
+    /// for every engine the binary lacks.
+    fn whisper_package_outline(fix: &str) -> String {
+        format!(
+            "\
+--- Whisper (OpenAI, 99+ languages) ---
+
+
+--- Parakeet (NVIDIA FastConformer, English) ---
+
+  This binary runs Parakeet as GGUF. Pick one of these, also listed under Parakeet GGUF below:
+    [13] parakeet-tdt-0.6b-v3-F16.gguf
+    [14] parakeet-tdt-0.6b-v3-Q8_0.gguf
+    [15] parakeet-ultra-F16.gguf
+    [16] parakeet-ultra-Q8_0.gguf
+    [17] parakeet-ultra-Q4_K_M.gguf
+  (ONNX Parakeet models: {fix})
+
+--- Moonshine (Moonshine AI, encoder-decoder ASR) ---
+
+  (not available - {fix})
+
+--- SenseVoice (Alibaba FunAudioLLM, CJK + English) ---
+
+  (not available - {fix})
+
+--- Paraformer (FunASR, Chinese + English) ---
+
+  (not available - {fix})
+
+--- Dolphin (dictation-optimized CTC) ---
+
+  (not available - {fix})
+
+--- Omnilingual (FunASR, 50+ languages) ---
+
+  (not available - {fix})
+
+--- Cohere Transcribe ONNX ---
+
+  This binary runs Cohere Transcribe as GGUF; see Cohere Transcribe GGUF below.
+  (ONNX Cohere models: {fix})
+
+--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---
+
+
+--- Parakeet GGUF (transcribe.cpp, Vulkan-capable) ---
+
+
+--- Handy GGUF families (offline transcribe.cpp) ---
+
+
+--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---
+
+  (not available - {fix})"
+        )
+    }
+
+    #[test]
+    fn whisper_package_picker_points_at_gguf_and_the_onnx_switch() {
+        let outline = picker_outline(
+            &WHISPER_PACKAGE,
+            &[crate::setup::binary::Variant::OnnxAvx512],
+            None,
+        );
+        let expected = whisper_package_outline("run `sudo voxtype setup onnx --enable`");
+        assert_eq!(outline, expected, "\n{outline}");
+        assert_eq!(
+            WHISPER_PACKAGE.parakeet_gguf_offset(),
+            MODELS.len() + COHERE_GGUF_MODELS.len()
+        );
+    }
+
+    #[test]
+    fn aur_whisper_package_picker_names_the_missing_variant() {
+        let outline = picker_outline(
+            &WHISPER_PACKAGE,
+            &[],
+            Some("install_method=aur-bin\nincluded=avx2 baseline vulkan\n"),
+        );
+        let expected = whisper_package_outline(
+            "rebuild voxtype-bin with the onnx-avx512 variant, which this build left out: \
+             `VOXTYPE_VARIANTS=onnx-avx512 yay -S --rebuild voxtype-bin` \
+             (or `VOXTYPE_VARIANTS=onnx-avx512 makepkg -si` in a clone of the AUR repo)",
+        );
+        assert_eq!(outline, expected, "\n{outline}");
     }
 }
