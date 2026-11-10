@@ -4153,6 +4153,11 @@ impl Daemon {
         // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
         self.warn_on_variant_mismatch();
 
+        // On Omarchy, link the packaged Settings panel on first start and
+        // rescan it after a package upgrade. Runs on its own thread; it never
+        // blocks startup or fails the daemon.
+        crate::setup::omarchy::spawn_auto_link(&self.config);
+
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
         // (Hyprland, Sway, River) those synthetic key events clobber the held-

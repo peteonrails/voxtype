@@ -9,6 +9,7 @@
 //! - NPU backend management (Intel NPU via OpenVINO)
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
+//! - Omarchy Settings panel linking
 
 pub mod accel;
 #[cfg(target_os = "macos")]
@@ -28,6 +29,7 @@ pub mod macos;
 pub mod manifest;
 pub mod model;
 pub mod npu;
+pub mod omarchy;
 pub mod parakeet;
 pub mod progress;
 pub mod punctuation;

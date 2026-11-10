@@ -535,6 +535,12 @@ fn dispatch_action(action: TrayAction) {
         return;
     }
     tokio::spawn(async move {
+        // On Omarchy with the Settings panel loaded, open the panel; anything
+        // else (no shell, panel not linked, hung shell) opens the TUI.
+        if action == TrayAction::OpenSettings && open_settings_plugin(&["open"]).await {
+            OPENING.store(false, Ordering::Release);
+            return;
+        }
         let result = async {
             let bin = std::env::current_exe()?;
             let mut command = if action == TrayAction::OpenSettings {
@@ -663,16 +669,33 @@ fn find_terminal() -> Option<std::path::PathBuf> {
         .find_map(find_in_path)
 }
 
-/// Asks the Omarchy Settings plugin to open on its Engine section. Only a
-/// literal `ok` from its IPC target counts: a missing shell, a missing plugin
-/// and a hung shell all fall through to the terminal.
+/// Asks the Omarchy Settings plugin to open on its Engine section.
 async fn open_settings_engine_section() -> bool {
-    let Some(shell) = find_in_path("omarchy-shell") else {
+    open_settings_plugin(&["section", "Engine"]).await
+}
+
+/// Calls the Omarchy Settings plugin's IPC target (`omarchy-shell
+/// io.voxtype.settings <args>`). Only a literal `ok` counts: a missing
+/// shell, a missing plugin and a hung shell all fall through to the caller's
+/// terminal fallback.
+async fn open_settings_plugin(args: &[&str]) -> bool {
+    open_settings_plugin_with(find_omarchy_shell(), args).await
+}
+
+/// `omarchy-shell` on PATH, then in Omarchy's bin directory: the daemon runs
+/// under systemd, whose PATH usually lacks it.
+fn find_omarchy_shell() -> Option<std::path::PathBuf> {
+    find_in_path("omarchy-shell").or_else(|| find_in_path("/usr/share/omarchy/bin/omarchy-shell"))
+}
+
+async fn open_settings_plugin_with(shell: Option<std::path::PathBuf>, args: &[&str]) -> bool {
+    let Some(shell) = shell else {
         return false;
     };
     let mut command = Command::new(shell);
     command
-        .args(["io.voxtype.settings", "section", "Engine"])
+        .arg("io.voxtype.settings")
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -913,6 +936,37 @@ impl Drop for TrayRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fake `omarchy-shell` that logs its arguments and prints `answer`.
+    fn fake_shell(dir: &std::path::Path, answer: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("omarchy-shell");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"$*\" >> \"$0.log\"\necho {answer}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn settings_opens_the_omarchy_panel_when_it_answers_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = fake_shell(dir.path(), "ok");
+        assert!(open_settings_plugin_with(Some(shell.clone()), &["open"]).await);
+        let log = std::fs::read_to_string(dir.path().join("omarchy-shell.log")).unwrap();
+        assert_eq!(log.trim(), "io.voxtype.settings open");
+    }
+
+    #[tokio::test]
+    async fn settings_falls_back_when_the_panel_is_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = fake_shell(dir.path(), "unknown");
+        assert!(!open_settings_plugin_with(Some(shell), &["open"]).await);
+        assert!(!open_settings_plugin_with(None, &["open"]).await);
+        assert!(!open_settings_plugin_with(Some(dir.path().join("missing")), &["open"]).await);
+    }
 
     #[test]
     fn language_context_preserves_model_identifier_underscores() {

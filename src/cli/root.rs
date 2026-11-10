@@ -59,6 +59,17 @@ pub struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     pub tray: Option<bool>,
 
+    /// On Omarchy, link the packaged Settings panel on daemon start (enabled
+    /// by default). Use --omarchy-link-settings-plugin=false to opt out.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub omarchy_link_settings_plugin: Option<bool>,
+
     /// Quiet mode (errors only)
     #[arg(short, long)]
     pub quiet: bool,

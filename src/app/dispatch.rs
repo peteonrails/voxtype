@@ -270,6 +270,26 @@ pub(crate) async fn dispatch(
                         setup::dms::print_config();
                     }
                 }
+                Some(SetupAction::Omarchy {
+                    status,
+                    json,
+                    replace,
+                    remove,
+                    restart_shell,
+                    yes,
+                }) => {
+                    if !json {
+                        warn_if_root("omarchy");
+                    }
+                    setup::omarchy::run(setup::omarchy::CliArgs {
+                        status,
+                        json,
+                        replace,
+                        remove,
+                        restart_shell,
+                        yes,
+                    })?;
+                }
                 Some(SetupAction::Model { list, set, restart }) => {
                     warn_if_root("model");
                     if list {

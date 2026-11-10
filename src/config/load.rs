@@ -105,6 +105,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(value) = std::env::var("VOXTYPE_TRAY_ENABLED") {
         config.tray.enabled = parse_bool_env(&value);
     }
+    if let Ok(value) = std::env::var("VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN") {
+        config.omarchy.link_settings_plugin = parse_bool_env(&value);
+    }
 
     // Override from environment variables
     // Hotkey

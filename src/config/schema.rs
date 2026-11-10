@@ -1432,6 +1432,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Native system tray",
         "Show the Linux system tray icon and recording controls. Enabled by default; restart the daemon after changing. Requires a StatusNotifierItem host, such as Omarchy, KDE, Waybar or GNOME AppIndicator.",
     ),
+    spec(
+        "omarchy.link_settings_plugin",
+        "omarchy",
+        "link_settings_plugin",
+        KeyType::Bool,
+        "Status",
+        "Link Omarchy Settings panel",
+        "On Omarchy, let the daemon link the packaged Voxtype Settings panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
+    ),
     // -- OSD ----------------------------------------------------------------
     spec(
         "osd.enabled",
@@ -2868,6 +2877,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
         "tray.enabled" => json!(cfg.tray.enabled),
+        "omarchy.link_settings_plugin" => json!(cfg.omarchy.link_settings_plugin),
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
