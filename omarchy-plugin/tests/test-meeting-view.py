@@ -51,6 +51,8 @@ Scenarios:
   past-reassign   moving a line of a past meeting sticks
   start-while-browsing  a meeting that starts while a past one is open takes
               over; when it ends, Back shows it at the top of the list
+  list-old    a voxtype whose list has no has_summary/speaker_count: the rows
+              read their folders instead
   ask-error   an ask that fails shows the error event's message
   summary-error  a summary that fails after the meeting shows its error
   autoopen    a meeting started elsewhere opens the closed view
@@ -83,7 +85,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-             "ask-error", "summary-error")
+             "ask-error", "summary-error", "list-old")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 STANDALONE = h.PLUGIN.parent / "quickshell"
@@ -218,7 +220,16 @@ def past_meetings(data, scenario):
                 "storage_path": str(folder), "audio_retained": False}
         if title is None:
             meta.pop("title")
-        entries.append(dict(meta))
+        entry = dict(meta)
+        if scenario == "list-old":
+            pass
+        else:
+            # What `meeting list --json` adds. The folder is out of reach here,
+            # so the row can only have these from the list.
+            entry["has_summary"] = summary is not None
+            entry["speaker_count"] = len({s.get("speaker_id") or s["source"] for s in segs})
+            entry["storage_path"] = "/nonexistent/" + mid
+        entries.append(entry)
         if summary:
             meta["summary"] = summary
             (folder / "summary.md").write_text("## Overview\n")
@@ -244,7 +255,8 @@ def past_meetings(data, scenario):
     return entries
 
 
-PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing"}
+PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
+                  "list-old"}
 
 
 def run(scenario, host, shell, evidence):
@@ -423,7 +435,7 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call(regenerate=True)], "meeting commands")
     elif scenario == "scroll-tabs":
         expect(meeting, [["meeting", "stop"], summarize_call()], "meeting commands")
-    elif scenario in ("list", "past-view", "past-summary"):
+    elif scenario in ("list", "past-view", "past-summary", "list-old"):
         expect(meeting, [], "meeting commands")
         lists = [c for c in calls if c[:2] == ["meeting", "list"]]
         if not lists or any(c[2:4] != ["--json", "--limit"] for c in lists):

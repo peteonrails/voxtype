@@ -115,6 +115,7 @@ Item {
           else if (s === "scroll-tabs") tc.driveScrollTabs()
           else if (s === "view-request") tc.driveViewRequest()
           else if (s === "list") tc.driveList()
+          else if (s === "list-old") tc.driveListOld()
           else if (s === "past-view") tc.drivePastView()
           else if (s === "past-summary") tc.drivePastSummary()
           else if (s === "past-summarize") tc.drivePastSummarize()
@@ -1081,6 +1082,17 @@ Item {
       click(more, "Show older meetings")
       waitFor(function() { return pastList().count === 60 }, "all 60 after the second page: " + pastList().count)
       waitFor(function() { return !shown(find(view(), "meetingListMore")) }, "no more to show")
+    }
+
+    // An older voxtype: no has_summary or speaker_count, so the rows read
+    // their own folders.
+    function driveListOld() {
+      openList()
+      check(pastList().count === 2, "two meetings: " + pastList().count)
+      waitFor(function() { return rowText(0, "meetingRowDetails").indexOf("3 speakers") !== -1 }, "speakers from transcript.json: " + rowText(0, "meetingRowDetails"))
+      check(rowText(1, "meetingRowDetails").indexOf("25 min · 2 speakers") !== -1, "second row: " + rowText(1, "meetingRowDetails"))
+      waitFor(function() { return find(row(0), "meetingRowSummary").visible }, "badge from metadata.json or summary.md")
+      check(!find(row(1), "meetingRowSummary").visible, "no badge without a summary")
     }
 
     function drivePastView() {

@@ -44,7 +44,9 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
                                     (state["summary_json"] or a default); refused
                                     on stderr while consent is missing
   meeting list --json [--limit N]   the socket's last meeting, then
-                                    state["meetings"], newest first
+                                    state["meetings"] (with or without
+                                    has_summary/speaker_count, as the test
+                                    wrote them), newest first
   meeting show M --json             MeetingData for M: a past meeting's folder,
                                     or the fake socket's snapshot with its summary
   meeting notes M [--set-file F] [--json]
@@ -460,7 +462,9 @@ def list_meetings(state, args):
     stored = snapshot().get("stored")
     if stored and stored.get("meeting_id"):
         out.append({"id": stored["meeting_id"], "title": stored.get("title"), "started_at": stored.get("started_at"),
-                    "duration_secs": 70, "status": "completed", "chunk_count": 3, "audio_retained": False})
+                    "duration_secs": 70, "status": "completed", "chunk_count": 3, "audio_retained": False,
+                    "has_summary": False,
+                    "speaker_count": len({segment_key(s) for s in stored.get("segments", [])})})
     out += sorted(state.get("meetings", []), key=lambda m: m["started_at"], reverse=True)
     print(json.dumps(out[:limit], indent=2))
     return 0
