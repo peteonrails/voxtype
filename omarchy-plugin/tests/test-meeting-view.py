@@ -18,7 +18,8 @@ Scenarios:
   new-speaker     a typed name moves the line to a new speaker, or to an
                   existing one matched case-insensitively
   restore     Restore original runs `meeting reassign --reset`
-  external-update segment_updated from elsewhere (tagged `type` or `event`)
+  external-update segment_updated from elsewhere: original_speaker drives the
+                  mark and Restore, and survives a reconnect
   ended-edit  an ended meeting stays on screen and can still be edited, until a
               new meeting starts or the view closes
   autoopen    a meeting started elsewhere opens the closed view

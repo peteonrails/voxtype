@@ -145,8 +145,7 @@ Item {
       speaker: key,
       source: String(segment.source || ""),
       chunkId: Number(segment.chunk_id) || 0,
-      originalSpeaker: root.originalOf(segment, ""),
-      reassigned: root.originalOf(segment, "") !== "" || segment.reassigned === true
+      originalSpeaker: root.originalOf(segment)
     }
     if (row.text === "") return
     for (var d = model.count - 1; d >= 0; d--) {
@@ -173,13 +172,13 @@ Item {
     root.labels = next
   }
 
-  // The speaker a reassigned segment came from, if the segment says so.
-  // `fallback` is what the feed already knew (a reassignment made here).
-  function originalOf(segment, fallback) {
-    if (segment.original_speaker_id !== undefined && segment.original_speaker_id !== null
-        && segment.original_speaker_id !== "") return String(segment.original_speaker_id)
-    if (segment.reassigned === false) return ""
-    return fallback
+  // The pipeline's own speaker key for a line someone moved. The daemon puts
+  // `original_speaker` on every segment with an override (hello, segments,
+  // segment_updated, `show --json`) and leaves it off otherwise, so it alone
+  // says whether a line is moved, and the mark survives a reconnect.
+  function originalOf(segment) {
+    var o = segment.original_speaker
+    return o !== undefined && o !== null && o !== "" ? String(o) : ""
   }
 
   function rowIndex(segId) {
@@ -193,7 +192,7 @@ Item {
     var i = root.rowIndex(segId)
     if (i === -1) return null
     var r = model.get(i)
-    return { segId: segId, speaker: r.speaker, originalSpeaker: r.originalSpeaker, reassigned: r.reassigned,
+    return { segId: segId, speaker: r.speaker, originalSpeaker: r.originalSpeaker,
              speakerOrder: root.speakerOrder.slice() }
   }
 
@@ -203,7 +202,6 @@ Item {
     if (i === -1) return
     model.setProperty(i, "speaker", snap.speaker)
     model.setProperty(i, "originalSpeaker", snap.originalSpeaker)
-    model.setProperty(i, "reassigned", snap.reassigned)
     root.speakerOrder = snap.speakerOrder
   }
 
@@ -215,7 +213,6 @@ Item {
     var original = r.originalSpeaker !== "" ? r.originalSpeaker : r.speaker
     model.setProperty(i, "speaker", key)
     model.setProperty(i, "originalSpeaker", key === original ? "" : original)
-    model.setProperty(i, "reassigned", key !== original)
     root.noteSpeaker(key)
     root.pruneSpeakers()
   }
@@ -229,15 +226,13 @@ Item {
     if (r.originalSpeaker === "") return
     model.setProperty(i, "speaker", r.originalSpeaker)
     model.setProperty(i, "originalSpeaker", "")
-    model.setProperty(i, "reassigned", false)
     root.noteSpeaker(r.speaker)
     root.pruneSpeakers()
   }
 
   // A changed segment, from `segment_updated` or the CLI's --json answer.
-  // `restored` says the change was a reset, so the line is no longer moved
-  // even if the segment does not say so itself.
-  function updateSegment(segment, restored) {
+  // It is the daemon's word on the line, override and all.
+  function updateSegment(segment) {
     if (!segment || segment.id === undefined) return
     var i = root.rowIndex(Number(segment.id))
     if (i === -1) {
@@ -246,13 +241,10 @@ Item {
     }
     var r = model.get(i)
     var key = root.speakerKey(segment)
-    var original = restored ? root.originalOf(segment, "")
-      : root.originalOf(segment, r.originalSpeaker !== "" ? r.originalSpeaker : (key !== r.speaker ? r.speaker : ""))
-    if (original === key) original = ""
+    var original = root.originalOf(segment)
     model.setProperty(i, "speaker", key)
     if (segment.text !== undefined && String(segment.text).trim() !== "") model.setProperty(i, "text", String(segment.text).trim())
     model.setProperty(i, "originalSpeaker", original)
-    model.setProperty(i, "reassigned", original !== "" || (!restored && segment.reassigned === true))
     root.noteSpeaker(key)
     root.noteLabel(key, segment)
     root.pruneSpeakers()
@@ -335,8 +327,8 @@ Item {
   }
 
   function handleEvent(ev) {
-    // Every event is tagged `event`; segment_updated is also accepted under
-    // `type`, the name its contract was written with.
+    // Every event is tagged `event`. `type` is accepted too: an early draft
+    // of the segment_updated contract used it.
     var kind = String(ev.event || ev.type || "")
     if (kind === "hello") {
       root.handleHello(ev)
@@ -346,7 +338,7 @@ Item {
       if (ev.chunk_id !== undefined) root.chunkCount = Math.max(root.chunkCount, Number(ev.chunk_id) + 1)
       root.lastSegmentsAt = Date.now()
     } else if (kind === "segment_updated") {
-      root.updateSegment(ev.segment, false)
+      root.updateSegment(ev.segment)
     } else if (kind === "speaker_renamed") {
       root.renameSpeaker(String(ev.from || ""), String(ev.to || ""))
     } else if (kind === "status") {

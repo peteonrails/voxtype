@@ -523,25 +523,41 @@ Item {
     function driveExternalUpdate() {
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
-      // As the contract writes it: tagged `type`.
-      ctl({ cmd: "update", key: "type", segment: seg(4, 35, "The build went green overnight.", "loopback", "You", 1) })
-      waitFor(function() { return lines()[3][1] === "You" }, "segment_updated (type) applied: " + JSON.stringify(lines()))
+      // The daemon's form: tagged `event`, the override in original_speaker.
+      var s4 = seg(4, 35, "The build went green overnight.", "loopback", "You", 1)
+      s4.original_speaker = "Remote"
+      ctl({ cmd: "update", key: "event", segment: s4 })
+      waitFor(function() { return lines()[3][1] === "You" }, "segment_updated applied: " + JSON.stringify(lines()))
       check(moved(3) === "moved from Remote", "marked moved: " + moved(3))
-      // Tagged `event` like every other event, saying where it came from.
-      var s3 = seg(3, 21, "Great, let's start with the release.", "microphone", "Remote", 0)
-      s3.original_speaker_id = "You"
-      ctl({ cmd: "update", key: "event", segment: s3 })
-      waitFor(function() { return lines()[2][1] === "Remote" }, "segment_updated (event) applied")
-      check(moved(2) === "moved from You", "original from the segment: " + moved(2))
-      openChooser(2)
-      check(String(find(popup(), "restoreButton").text) === "Restore original (You)", "Restore offered from the segment")
+      openChooser(3)
+      check(String(find(popup(), "restoreButton").text) === "Restore original (Remote)", "Restore offered from the segment")
       shot("external-update")
       keyClick(Qt.Key_Escape)
-      // A segment saying it is no longer reassigned clears the mark.
-      var back = seg(3, 21, "Great, let's start with the release.", "microphone", "You", 0)
-      back.reassigned = false
-      ctl({ cmd: "update", key: "event", segment: back })
-      waitFor(function() { return lines()[2][1] === "You" && moved(2) === "" }, "reset from elsewhere")
+
+      // A segment without original_speaker has no override, whatever it
+      // was before: no mark, no Restore.
+      ctl({ cmd: "update", key: "event", segment: seg(3, 21, "Great, let's start with the release.", "microphone", "Remote", 0) })
+      waitFor(function() { return lines()[2][1] === "Remote" }, "plain update applied")
+      check(moved(2) === "", "no mark without original_speaker: " + moved(2))
+      openChooser(2)
+      check(!shown(find(popup(), "restoreButton")), "no Restore without original_speaker")
+      keyClick(Qt.Key_Escape)
+
+      // The mark comes back with the hello after a reconnect.
+      ctl({ cmd: "drop" })
+      wait(300)
+      waitFor(function() { return feed().connected && lines().length === 4 }, "reconnected", 6000)
+      check(lines()[3][1] === "You" && moved(3) === "moved from Remote", "mark survives a reconnect: " + moved(3))
+
+      // A reset from elsewhere arrives without the field.
+      ctl({ cmd: "update", key: "event", segment: seg(4, 35, "The build went green overnight.", "loopback", "Remote", 1) })
+      waitFor(function() { return lines()[3][1] === "Remote" && moved(3) === "" }, "reset from elsewhere")
+
+      // An early draft of the contract tagged it `type`; still understood.
+      var s1 = seg(1, 4, "Morning. Can everyone hear me?", "microphone", "Remote", 0)
+      s1.original_speaker = "You"
+      ctl({ cmd: "update", key: "type", segment: s1 })
+      waitFor(function() { return lines()[0][1] === "Remote" && moved(0) === "moved from You" }, "type-tagged update")
       check(lines().length === 4, "no line added or lost")
     }
 

@@ -45,7 +45,7 @@ Item {
         feed.restoreSnapshot(extra ? extra.snapshot : null)
         return
       }
-      if (segment) feed.updateSegment(segment, extra && extra.restore === true)
+      if (segment) feed.updateSegment(segment)
     }
     // `[meeting] show_view_on_start`, read at the moment it is needed so a
     // change made with `voxtype config set` applies to the next meeting.
@@ -68,7 +68,7 @@ Item {
     if (!snap) return
     root.actionError = ""
     feed.applyReassign(segId, key)
-    meetingCli.reassign(feed.meetingId, segId, speaker, { snapshot: snap, restore: false })
+    meetingCli.reassign(feed.meetingId, segId, speaker, { snapshot: snap })
   }
 
   function restoreSpeaker(segId) {
@@ -76,7 +76,7 @@ Item {
     if (!snap) return
     root.actionError = ""
     feed.applyRestore(segId)
-    meetingCli.restoreSpeaker(feed.meetingId, segId, { snapshot: snap, restore: true })
+    meetingCli.restoreSpeaker(feed.meetingId, segId, { snapshot: snap })
   }
 
   onShownChanged: {

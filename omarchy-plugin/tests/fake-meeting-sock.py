@@ -21,12 +21,13 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
   {"cmd": "stop"}                  status finalizing, then idle 1 s later
   {"cmd": "error", "message": M}
   {"cmd": "label", "key": K, "name": N}  later segments with K carry N
-  {"cmd": "update", "segment": S, "originals": {...}, "key": "event"|"type",
-   "meeting_id": M}               replace segment S (by id). In the live meeting
+  {"cmd": "update", "segment": S, "key": "event"|"type", "meeting_id": M}
+                                   replace segment S (by id). In the live meeting
                                    it is broadcast as segment_updated, tagged
-                                   with `key`; in the stored one (after the
-                                   meeting ended) nothing is sent, as the daemon
-                                   only announces live changes
+                                   with `key` (default `event`, the daemon's);
+                                   in the stored one (after the meeting ended)
+                                   nothing is sent, as the daemon only announces
+                                   live changes
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -34,7 +35,7 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
 
 Each handled command is appended to LOG, so a driver can wait for it. After
 each one, SNAPSHOT holds {"live": ..., "stored": ...}: the running meeting and
-the last one that ended, each {meeting_id, segments, originals}, which is what
+the last one that ended, each {meeting_id, segments}, which is what
 fake-voxtype-meeting.py edits for `meeting reassign`.
 """
 import json
@@ -59,7 +60,6 @@ class Server:
         self.log = log
         self.snapshot = snapshot
         self.stored = None
-        self.originals = {}
         self.offset = 0
         self.sel = selectors.DefaultSelector()
         self.listener = None
@@ -71,9 +71,7 @@ class Server:
 
     def idle(self):
         if getattr(self, "state", None) and self.state.get("meeting_id"):
-            self.stored = {"meeting_id": self.state["meeting_id"], "segments": self.state["segments"],
-                           "originals": self.originals}
-        self.originals = {}
+            self.stored = {"meeting_id": self.state["meeting_id"], "segments": self.state["segments"]}
         self.state = {"status": "idle", "meeting_id": None, "title": None, "started_at": None,
                       "chunk_count": 0, "diarization": {"enabled": False}, "segments": []}
         self.labels = {}
@@ -183,12 +181,8 @@ class Server:
             target = None
             if not cmd.get("meeting_id") or cmd.get("meeting_id") == self.state.get("meeting_id"):
                 target = self.state
-                if "originals" in cmd:
-                    self.originals = cmd["originals"]
             elif self.stored and cmd.get("meeting_id") == self.stored["meeting_id"]:
                 target = self.stored
-                if "originals" in cmd:
-                    self.stored["originals"] = cmd["originals"]
             if target is not None:
                 target["segments"] = [seg if s["id"] == seg["id"] else s for s in target["segments"]]
                 if target is self.state:
@@ -203,8 +197,7 @@ class Server:
             return False
         with open(self.log, "a") as f:
             f.write(json.dumps(cmd) + "\n")
-        live = {"meeting_id": self.state.get("meeting_id"), "segments": self.state["segments"],
-                "originals": self.originals}
+        live = {"meeting_id": self.state.get("meeting_id"), "segments": self.state["segments"]}
         tmp = self.snapshot + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"live": live, "stored": self.stored}, f)

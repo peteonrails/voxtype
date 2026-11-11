@@ -17,8 +17,9 @@ fake meeting.sock's control file (FAKE_MEETING_CTL; see fake-meeting-sock.py):
                                 it back. Edits the fake socket's snapshot
                                 (FAKE_MEETING_SNAPSHOT) through its control
                                 file, waits until the socket applied it, and
-                                with --json prints the updated segment. The
-                                segment carries no original-speaker field.
+                                with --json prints the updated segment, which
+                                carries `original_speaker` (the pipeline's key)
+                                while it is overridden, as the daemon's does
   config get meeting.show_view_on_start
                                 state["show_view_on_start"] (default true);
                                 state["no_show_key"] exits 2 like a CLI that
@@ -86,14 +87,14 @@ def reassign(args):
     if seg is None:
         print("error: no segment %s in meeting %s" % (seg_arg, meeting), file=sys.stderr)
         return 1
-    originals = dict(target.get("originals") or {})
     current = segment_key(seg)
     seg = dict(seg)
+    original = seg.pop("original_speaker", None)
     if speaker == "--reset":
-        if seg_arg not in originals:
+        if original is None:
             print("error: segment %s has not been reassigned" % seg_arg, file=sys.stderr)
             return 1
-        new = originals.pop(seg_arg)
+        new = original
         seg.pop("speaker_label", None)
     else:
         new = None
@@ -107,13 +108,13 @@ def reassign(args):
         if new is None:
             new = speaker
             seg.pop("speaker_label", None)
-        originals.setdefault(seg_arg, current)
-        if originals[seg_arg] == new:
-            originals.pop(seg_arg)
+        if original is None:
+            original = current
+        if original != new:
+            seg["original_speaker"] = original
     seg["speaker_id"] = new
     nonce = "reassign-%f" % time.time()
-    control({"cmd": "update", "meeting_id": meeting, "segment": seg, "originals": originals, "key": "event",
-             "nonce": nonce})
+    control({"cmd": "update", "meeting_id": meeting, "segment": seg, "key": "event", "nonce": nonce})
     if not wait_applied(nonce):
         print("error: the fake socket did not apply the change", file=sys.stderr)
         return 1

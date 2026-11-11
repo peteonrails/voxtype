@@ -128,7 +128,6 @@ Item {
   function openReassign(line, anchor) {
     reassignPopup.segId = line.segId
     reassignPopup.speaker = line.speaker
-    reassignPopup.reassigned = line.reassigned
     reassignPopup.originalSpeaker = line.originalSpeaker
     reassignPopup.lineText = line.text
     newSpeakerField.text = ""
@@ -567,7 +566,6 @@ Item {
             required property string speaker
             required property real startMs
             required property int segId
-            required property bool reassigned
             required property string originalSpeaker
             objectName: "transcriptLine"
             width: ListView.view.width
@@ -619,10 +617,9 @@ Item {
 
                 Text {
                   objectName: "lineMoved"
-                  visible: line.reassigned
+                  visible: line.originalSpeaker !== ""
                   anchors.baseline: speakerLabel.baseline
-                  text: line.originalSpeaker !== ""
-                    ? "moved from " + root.feed.displayName(line.originalSpeaker) : "moved"
+                  text: "moved from " + root.feed.displayName(line.originalSpeaker)
                   color: root.dim
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
@@ -762,7 +759,6 @@ Item {
 
     property int segId: -1
     property string speaker: ""
-    property bool reassigned: false
     property string originalSpeaker: ""
     property string lineText: ""
     property real anchorTop: 0
@@ -885,10 +881,8 @@ Item {
 
       Button {
         objectName: "restoreButton"
-        visible: reassignPopup.reassigned
-        text: reassignPopup.originalSpeaker !== ""
-          ? "Restore original (" + root.feed.displayName(reassignPopup.originalSpeaker) + ")"
-          : "Restore original"
+        visible: reassignPopup.originalSpeaker !== ""
+        text: "Restore original (" + root.feed.displayName(reassignPopup.originalSpeaker) + ")"
         iconText: "󰕌"
         bordered: true
         onClicked: {
