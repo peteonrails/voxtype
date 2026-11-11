@@ -3345,8 +3345,15 @@ impl Daemon {
         let chunk_samples = self.meeting_chunk_samples();
 
         while self.meeting_mic_buffer.len() >= chunk_samples {
-            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
-            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
+            let cut = meeting::chunk::chunk_cut_point(
+                &self.meeting_mic_buffer,
+                &self.meeting_loopback_buffer,
+                chunk_samples,
+                16000,
+                self.config.meeting.audio.vad_threshold,
+            );
+            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..cut).collect();
+            let loopback_len = self.meeting_loopback_buffer.len().min(cut);
             let loopback_chunk: Vec<f32> =
                 self.meeting_loopback_buffer.drain(..loopback_len).collect();
             self.process_meeting_audio_pair(mic_chunk, loopback_chunk)

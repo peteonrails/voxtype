@@ -289,6 +289,53 @@ pub(crate) fn utterance_regions(
     regions
 }
 
+/// Shared silence that makes a good place to end a chunk.
+const CUT_SILENCE_SECS: f32 = 0.3;
+
+/// Where to end the next chunk of a meeting, given both tracks' buffered
+/// audio and the nominal chunk length `target` in samples.
+///
+/// Ending a chunk mid-utterance splits it in two on both tracks. On the
+/// microphone track that left the echo of a remote sentence as two
+/// fragments, each too short for the bleed-through dedup to recognise, and
+/// mangled the word the cut went through. So the chunk ends in the middle
+/// of the latest stretch, in the second half of the chunk, where both
+/// tracks are silent for [`CUT_SILENCE_SECS`]. With no such stretch it ends
+/// at `target`, as it always did.
+pub fn chunk_cut_point(
+    mic: &[f32],
+    loopback: &[f32],
+    target: usize,
+    sample_rate: u32,
+    vad_threshold: f32,
+) -> usize {
+    let target = target.min(mic.len());
+    let frame = (sample_rate as usize * 30 / 1000).max(1);
+    let needed = ((CUT_SILENCE_SECS * sample_rate as f32) as usize).div_ceil(frame);
+    let quiet = |track: &[f32], at: usize| {
+        track
+            .get(at..(at + frame).min(track.len()))
+            .is_none_or(|f| f.is_empty() || VoiceActivityDetector::calculate_rms(f) < vad_threshold)
+    };
+
+    let mut run = 0;
+    let mut end = target - target % frame;
+    while end >= frame && end > target / 2 {
+        let at = end - frame;
+        if quiet(mic, at) && quiet(loopback, at) {
+            run += 1;
+            if run == needed {
+                // Cut in the middle of the quiet stretch [at, at + run * frame).
+                return at + run * frame / 2;
+            }
+        } else {
+            run = 0;
+        }
+        end -= frame;
+    }
+    target
+}
+
 /// Processed chunk result
 #[derive(Debug)]
 pub struct ProcessedChunk {
@@ -562,6 +609,44 @@ mod tests {
         let vad = VoiceActivityDetector::new(0.01, 16000);
         assert!(!vad.contains_speech(&speech_at(30.0, &[(4.0, 4.1)])));
         assert!(vad.contains_speech(&speech_at(30.0, &[(4.0, 4.4)])));
+    }
+
+    #[test]
+    fn chunks_end_in_a_pause_shared_by_both_tracks() {
+        // The mic pauses at 6.5-7.5 s; the remote speaks 7.5-11 s across the
+        // nominal 10 s boundary. The only shared pause in the second half
+        // is 6.5-7.5, so the chunk ends there instead of mid-sentence.
+        let mic = speech_at(12.0, &[(1.0, 6.5), (11.5, 12.0)]);
+        let loopback = speech_at(12.0, &[(7.5, 11.0)]);
+        let cut = chunk_cut_point(&mic, &loopback, 160_000, 16000, 0.01);
+        assert!((104_000..=120_000).contains(&cut), "cut at {}", cut);
+    }
+
+    #[test]
+    fn chunks_end_at_the_target_without_a_shared_pause() {
+        // Someone is always talking from 4 s on.
+        let mic = speech_at(12.0, &[(4.0, 8.0)]);
+        let loopback = speech_at(12.0, &[(8.0, 12.0)]);
+        assert_eq!(
+            chunk_cut_point(&mic, &loopback, 160_000, 16000, 0.01),
+            160_000
+        );
+    }
+
+    #[test]
+    fn chunks_prefer_the_latest_shared_pause() {
+        let mic = speech_at(12.0, &[(5.0, 6.0), (7.0, 8.0)]);
+        let loopback = speech_at(12.0, &[(8.5, 12.0)]);
+        // Shared quiet: 6-7 s and 8-8.5 s; the later one wins.
+        let cut = chunk_cut_point(&mic, &loopback, 160_000, 16000, 0.01);
+        assert!((128_000..=136_000).contains(&cut), "cut at {}", cut);
+    }
+
+    #[test]
+    fn chunks_without_loopback_cut_on_mic_pauses() {
+        let mic = speech_at(12.0, &[(1.0, 8.0), (8.6, 12.0)]);
+        let cut = chunk_cut_point(&mic, &[], 160_000, 16000, 0.01);
+        assert!((128_000..=137_600).contains(&cut), "cut at {}", cut);
     }
 
     #[test]
