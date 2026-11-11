@@ -257,8 +257,14 @@ async fn notify(settings: &AssistantSettings, meeting_id: &str, record: &asks::A
             return;
         }
     };
-    let open = settings.open_command.as_ref().map(|command| OpenAction {
-        command: command.clone(),
+    let exe = std::env::current_exe().ok();
+    let command = assistant::open_action_command(
+        settings.open_command.as_deref(),
+        exe.as_deref(),
+        assistant::binary_has_meeting_view,
+    );
+    let open = command.map(|command| OpenAction {
+        command,
         meeting_id: meeting_id.to_string(),
         ask_id: record.id.clone(),
     });

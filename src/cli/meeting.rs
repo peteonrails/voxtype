@@ -318,8 +318,9 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
 
-        /// Also show the answer as a desktop notification, with an Open
-        /// action that runs [meeting.assistant] open_command
+        /// Also show the answer as a desktop notification. Its Open action
+        /// raises the meeting view on the Ask tab, or runs
+        /// [meeting.assistant] open_command when that is set
         #[arg(long)]
         notify: bool,
 

@@ -93,8 +93,16 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     let _ = writeln!(s, "  local_only = {}", a.local_only);
     let _ = writeln!(s, "  timeout_secs = {}", a.timeout_secs);
     let _ = writeln!(s, "  max_transcript_chars = {}", a.max_transcript_chars);
-    if let Some(ref cmd) = a.open_command {
-        let _ = writeln!(s, "  open_command = {:?}", cmd);
+    match a.open_command.as_deref() {
+        None => {
+            let _ = writeln!(s, "  open_command = (open the meeting view)");
+        }
+        Some(cmd) if cmd.trim().is_empty() => {
+            let _ = writeln!(s, "  open_command = \"\" (no Open action)");
+        }
+        Some(cmd) => {
+            let _ = writeln!(s, "  open_command = {:?}", cmd);
+        }
     }
 
     s
