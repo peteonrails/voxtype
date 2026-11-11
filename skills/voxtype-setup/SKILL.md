@@ -51,6 +51,46 @@ ls /sys/class/power_supply/ | grep -i '^BAT'                           # any out
 The `★` lines in `voxtype info variants` are Voxtype's own recommendation for
 this hardware. Start from them.
 
+### Older installs are probably not optimal
+
+Upgrading Voxtype never rewrites the user's `config.toml`, by design, so an
+upgrade can't change how someone's dictation behaves. The catch is that a user
+who installed an older version keeps that version's settings. Better defaults,
+new engines, GPU paths and cleanup features reach new installs through the
+config template, not existing users. Someone who has used Voxtype for a year
+is probably missing things they would want.
+
+So don't treat the existing config as a set of deliberate choices to protect.
+Look for improvements and suggest them. Packages ship the current template at
+`/etc/voxtype/config.toml`, and comparing against it shows what an older
+config lacks:
+
+```bash
+voxtype --config /etc/voxtype/config.toml config get --json   # current template
+voxtype config get --json                                     # this user
+```
+
+Most differences are personal choices: hotkey, engine, language, OSD style,
+output mode. Leave those alone unless the user wants to revisit them. What is
+worth raising:
+
+- **Settings the template now turns on**, such as `vad.enabled` (skips
+  transcribing silence and stops Whisper inventing text when the key is
+  pressed by accident), `text.format_numbers` and `text.repair_sentence_breaks`
+- **Model upgrade offers**: `voxtype setup migrate` lists them for the
+  configured model
+- **An OSD frontend pinned explicitly** (`gtk4` or `native`) when `auto`
+  would pick a better one: `voxtype setup osd --status` says so
+- **An ONNX engine or model** that has a Whisper or GGUF alternative, since
+  2.0 removes ONNX Runtime
+- **Settings tuned around an old bug or an old machine**, for example a
+  thread count from a previous CPU, or a short `audio.max_duration_secs`
+
+Present them as a short list: what each change does and why it helps. Apply
+only the ones the user picks. If `/etc/voxtype/config.toml` is missing (a
+manual or source install), compare against the recommendations in this skill
+instead.
+
 ## 2. Ask
 
 Ask only what the output can't tell you:
