@@ -118,6 +118,13 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "good bye",
     "see you next time",
     "subtitles by the amara.org community",
+    // French: Whisper's subtitle-credit hallucinations on near-silence,
+    // seen as the beam-search retry's output on a quiet first window.
+    "sous-titrage société radio-canada",
+    "sous-titrage st' 501",
+    "sous-titrage st’ 501",
+    "sous-titres réalisés par la communauté d'amara.org",
+    "merci d'avoir regardé",
 ];
 
 /// Minimum RMS energy for the whole buffer to be treated as speech.
@@ -962,10 +969,12 @@ fn rms(samples: &[f32]) -> f32 {
     (sum / samples.len() as f64).sqrt() as f32
 }
 
-/// Whisper hallucination check: lowercase, strip trailing `.,!?`, membership.
+/// Whisper hallucination check: lowercase, strip trailing `.,!?` (and the
+/// space French puts before `!` and `?`), membership.
 fn is_hallucination(text: &str) -> bool {
     let norm = text.trim().to_lowercase();
-    let norm = norm.trim_end_matches(['.', ',', '!', '?']);
+    let norm =
+        norm.trim_end_matches(|c: char| matches!(c, '.' | ',' | '!' | '?') || c.is_whitespace());
     HALLUCINATION_PATTERNS.contains(&norm)
 }
 
@@ -1374,6 +1383,14 @@ mod tests {
         assert!(is_hallucination("  YOU  "));
         assert!(!is_hallucination("hello world"));
         assert!(!is_hallucination("the quick brown fox"));
+    }
+
+    #[test]
+    fn is_hallucination_matches_french_subtitle_credits() {
+        assert!(is_hallucination("Sous-titrage Société Radio-Canada"));
+        assert!(is_hallucination("Sous-titrage ST' 501"));
+        assert!(is_hallucination("Merci d'avoir regardé !"));
+        assert!(!is_hallucination("Merci d'avoir regardé le dossier."));
     }
 
     #[test]
