@@ -155,13 +155,22 @@ pub enum MeetingAction {
     /// With a meeting ID other than the current one, the view opens on that
     /// meeting's saved transcript. --ask asks one of the view's quick
     /// questions; with --no-open the answer arrives as a notification instead.
+    ///
+    /// As `[meeting.assistant] open_command`, plain `voxtype meeting view`
+    /// is enough: the notification sets VOXTYPE_MEETING_ID and
+    /// VOXTYPE_ASK_ID, and the view opens on that answer.
     #[command(after_help = "Examples:\n  \
         voxtype meeting view\n  \
         voxtype meeting view latest --tab summary\n  \
         voxtype meeting view --ask last-5m --no-open")]
     View {
         /// Meeting ID (or "latest"); default: the current or last meeting
+        #[arg(env = "VOXTYPE_MEETING_ID")]
         meeting_id: Option<String>,
+
+        /// A saved answer to show on the Ask tab
+        #[arg(long, env = "VOXTYPE_ASK_ID")]
+        ask_id: Option<String>,
 
         /// Tab to open on
         #[arg(long, value_parser = ["transcript", "notes", "ask", "summary"])]
