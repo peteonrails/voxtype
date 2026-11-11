@@ -530,6 +530,10 @@ fn check_logits_shape(shape: &[i64]) -> Result<(), TranscribeError> {
 impl CohereTranscriber {}
 
 impl Transcriber for CohereTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
         let text = self

@@ -243,6 +243,10 @@ impl GgufSubprocessTranscriber {
 }
 
 impl Transcriber for GgufSubprocessTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn prepare(&self) {
         let Ok(mut guard) = self.lock() else { return };
         let alive = guard

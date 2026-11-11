@@ -125,6 +125,10 @@ impl SenseVoiceTranscriber {
 }
 
 impl Transcriber for SenseVoiceTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(

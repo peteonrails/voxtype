@@ -136,6 +136,15 @@ pub trait Transcriber: Send + Sync {
         }
     }
 
+    /// Whether transcribing a short clip costs proportionally less than a
+    /// long one. Meeting mode transcribes each utterance on its own, to give
+    /// it a timestamp, only for engines where that is so. Whisper pads every
+    /// call to a 30 s window, and a process or HTTP request per call has a
+    /// fixed cost, so the default is no.
+    fn short_clips_are_cheap(&self) -> bool {
+        false
+    }
+
     /// Prepare for transcription (optional, called when recording starts)
     ///
     /// For subprocess-based transcribers, this spawns the worker process

@@ -429,8 +429,15 @@ impl ChunkProcessor {
         // every utterance its own start time; on one track a pause is mostly
         // the other side talking, so the pieces are the turns. The Display
         // impl produces "You"/"Remote", matching the skip log above.
-        let regions =
-            utterance_regions(&samples, self.config.sample_rate, self.config.vad_threshold);
+        //
+        // Engines whose per-call cost does not shrink with the clip (Whisper,
+        // a process or request per call) keep one call per chunk, timed by
+        // whatever their transcribe_timed reports.
+        let regions = if self.transcriber.short_clips_are_cheap() {
+            utterance_regions(&samples, self.config.sample_rate, self.config.vad_threshold)
+        } else {
+            vec![(0, samples.len())]
+        };
         tracing::info!(
             "Transcribing {} chunk {} ({:.1}s of audio, {} utterance(s))",
             source,
@@ -519,6 +526,10 @@ mod tests {
     struct UntimedTranscriber;
 
     impl Transcriber for UntimedTranscriber {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
         fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
             let voiced = samples.iter().any(|s| s.abs() > 0.05);
             Ok(if voiced {
@@ -588,6 +599,28 @@ mod tests {
             );
             assert_eq!(seg.chunk_id, 3);
         }
+    }
+
+    /// Counts calls, and like Whisper says short clips are not cheaper.
+    struct FixedCostTranscriber(std::sync::atomic::AtomicU32);
+
+    impl Transcriber for FixedCostTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> Result<String, TranscribeError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("words".to_string())
+        }
+    }
+
+    #[test]
+    fn fixed_cost_engines_get_one_call_per_chunk() {
+        let transcriber = Arc::new(FixedCostTranscriber(Default::default()));
+        let mut processor = ChunkProcessor::new(ChunkConfig::default(), transcriber.clone());
+        let mut buffer = processor.new_buffer(0, AudioSource::Microphone, 0);
+        buffer.add_samples(&speech_at(30.0, &[(2.0, 4.0), (10.0, 12.5), (25.0, 27.0)]));
+
+        let result = processor.process_chunk(buffer).unwrap();
+        assert_eq!(transcriber.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(result.segments.len(), 1);
     }
 
     /// Bug: a chunk was transcribed only if over 10% of it was speech, so a

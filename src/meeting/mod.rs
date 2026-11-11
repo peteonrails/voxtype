@@ -602,6 +602,10 @@ mod tests {
     struct CountingTranscriber(AtomicU32);
 
     impl Transcriber for CountingTranscriber {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
         fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
             if samples.iter().all(|s| s.abs() < 0.05) {
                 return Ok(String::new());
@@ -730,6 +734,10 @@ mod tests {
     struct TwoVoices;
 
     impl Transcriber for TwoVoices {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
         fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
             let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
             Ok(if peak > 0.4 {
