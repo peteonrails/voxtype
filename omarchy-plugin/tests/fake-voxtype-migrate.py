@@ -21,6 +21,21 @@ state["dismiss_fail"] exits 1 and changes nothing.
 state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
 the stderr it should fail with (exit 1).
 
+`setup osd --status --json` answers from state["osd"] (contract C3 of the
+1.2.2 plan): {"configured", "quickshell_available", "offer_dismissed"}, with
+"active" and "offer" derived the way the real CLI derives them. Absent, it
+exits 2 like a CLI that predates --status. `--use-auto` and `--dismiss-offer`
+(C4) change it; state["osd_use_auto_fail"] / state["osd_dismiss_fail"] make
+them exit 1 instead.
+
+state["osd_keys"] adds the OSD section's Frontend and Style rows (and a
+second style) to the schema; state["threads_key"] adds parakeet.threads, unset
+unless state["values"] holds it. `config set` / `config unset` write
+state["values"] for exactly those keys and reject anything else (exit 2);
+`osd.frontend` writes go to state["osd"]["configured"] as well.
+`config validate-selection` exits 0, so the panel's restart flow runs through
+to `systemctl --user restart voxtype` (see fake-systemctl.py).
+
 Accept behavior is scripted per attempt by state["accept_script"]: "fail",
 "slow" (one progress line, then wait to be cancelled) or "ok". After the script
 runs out, attempts succeed.
@@ -70,6 +85,31 @@ def status(state):
     }
 
 
+FRONTENDS = ["auto", "gtk4", "native", "quickshell"]
+SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads"}
+
+
+def osd_status(state):
+    osd = state["osd"]
+    configured = osd["configured"]
+    available = osd["quickshell_available"]
+    if configured == "quickshell" or (configured == "auto" and available):
+        active = "quickshell" if available else "none"
+    elif configured == "auto":
+        active = "gtk4"
+    else:
+        active = configured
+    dismissed = osd.get("offer_dismissed", False)
+    return {"configured": configured, "active": active, "reason": "fake: " + active,
+            "quickshell_available": available,
+            "offer": configured in ("gtk4", "native") and available and not dismissed,
+            "offer_dismissed": dismissed}
+
+
+def value_of(state, key, default=None):
+    return state.get("values", {}).get(key, default)
+
+
 def schema(state):
     model_type = {"key": "parakeet.model_type", "type": "enum", "choices": ["tdt", "ctc"], "section": "Engine",
                   "label": "Decoder type", "description": "", "value": None, "file_value": None,
@@ -77,21 +117,39 @@ def schema(state):
     # Older CLIs never emitted the flag; state["legacy_schema"] reproduces them.
     if not state.get("legacy_schema"):
         model_type["onnx_model_only"] = True
+    keys = [
+        {"key": "engine", "type": "enum", "choices": ["whisper", "parakeet"], "section": "Engine",
+         "label": "Transcription engine", "description": "", "value": "parakeet",
+         "file_value": "parakeet", "engine": None, "compiled": True, "restart_required": True},
+        {"key": "parakeet.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+         "label": "Model", "description": "", "value": state["model"], "file_value": state["model"],
+         "engine": "parakeet", "compiled": True, "restart_required": True},
+        model_type,
+    ]
+    if state.get("threads_key"):
+        # Like the real schema: an unset Option<u32> is null in both fields.
+        threads = value_of(state, "parakeet.threads")
+        keys.append({"key": "parakeet.threads", "type": "int", "min": 1, "max": 256, "section": "Engine",
+                     "label": "Threads", "description": "ONNX Runtime intra-op threads. Unset uses 4.",
+                     "value": threads, "file_value": threads, "engine": "parakeet", "compiled": True,
+                     "restart_required": True})
+    keys.append({"key": "audio.device", "type": "string", "section": "Audio", "label": "Device",
+                 "description": "", "value": "default", "file_value": None, "engine": None,
+                 "compiled": True, "restart_required": True})
+    if state.get("osd_keys"):
+        frontend = state["osd"]["configured"] if state.get("osd") else value_of(state, "osd.frontend", "gtk4")
+        style = value_of(state, "osd.style")
+        keys += [
+            {"key": "osd.frontend", "type": "enum", "choices": FRONTENDS, "section": "OSD", "label": "Frontend",
+             "description": "Which OSD renderer the daemon launches.", "value": frontend,
+             "file_value": frontend, "engine": None, "compiled": True, "restart_required": True},
+            {"key": "osd.style", "type": "dynamic_enum", "source": "styles", "section": "OSD", "label": "Style",
+             "description": "Quickshell style name.", "value": style or "hud",
+             "file_value": style, "engine": None, "compiled": True, "restart_required": True},
+        ]
     return {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
-        "engine": "parakeet", "replacements": {},
-        "keys": [
-            {"key": "engine", "type": "enum", "choices": ["whisper", "parakeet"], "section": "Engine",
-             "label": "Transcription engine", "description": "", "value": "parakeet",
-             "file_value": "parakeet", "engine": None, "compiled": True, "restart_required": True},
-            {"key": "parakeet.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
-             "label": "Model", "description": "", "value": state["model"], "file_value": state["model"],
-             "engine": "parakeet", "compiled": True, "restart_required": True},
-            model_type,
-            {"key": "audio.device", "type": "string", "section": "Audio", "label": "Device",
-             "description": "", "value": "default", "file_value": None, "engine": None,
-             "compiled": True, "restart_required": True},
-        ],
+        "engine": "parakeet", "replacements": {}, "keys": keys,
     }
 
 
@@ -181,7 +239,48 @@ def main():
     elif args[:3] == ["info", "devices", "--json"]:
         print(json.dumps([{"name": "Built-in Microphone", "default": True}]))
     elif args[:3] == ["info", "styles", "--json"]:
-        print(json.dumps([{"name": "hud", "description": "Heads-up display"}]))
+        styles = [{"name": "hud", "description": "Heads-up display"}]
+        if state.get("osd_keys"):
+            styles.append({"name": "pill", "description": "Compact pill"})
+        print(json.dumps(styles))
+    elif args[:2] == ["config", "validate-selection"]:
+        return 0
+    elif args[:2] in (["config", "set"], ["config", "unset"]) and len(args) >= 3 and args[2] in SETTABLE:
+        key = args[2]
+        values = state.setdefault("values", {})
+        if args[1] == "unset":
+            values.pop(key, None)
+        elif key == "osd.frontend" and args[3] not in FRONTENDS:
+            print("error: invalid osd.frontend", file=sys.stderr)
+            return 2
+        elif key == "parakeet.threads":
+            values[key] = int(args[3])
+        else:
+            values[key] = args[3]
+        if key == "osd.frontend" and state.get("osd"):
+            state["osd"]["configured"] = values.get(key, "auto")
+        save(state)
+    elif args[:2] == ["setup", "osd"]:
+        if state.get("osd") is None:
+            print("error: unexpected argument found", file=sys.stderr)
+            return 2
+        if args[2:] == ["--status", "--json"]:
+            print(json.dumps(osd_status(state)))
+        elif args[2:] == ["--use-auto"]:
+            if state.get("osd_use_auto_fail"):
+                print("error: could not write osd.frontend", file=sys.stderr)
+                return 1
+            state["osd"]["configured"] = "auto"
+            state["osd"]["offer_dismissed"] = False
+            save(state)
+        elif args[2:] == ["--dismiss-offer"]:
+            if state.get("osd_dismiss_fail"):
+                print("error: could not write the dismissal", file=sys.stderr)
+                return 1
+            state["osd"]["offer_dismissed"] = True
+            save(state)
+        else:
+            return 2
     elif args[:3] == ["status", "--format", "json"]:
         print(json.dumps({"class": "idle"}))
     elif args[:2] == ["setup", "omarchy"]:

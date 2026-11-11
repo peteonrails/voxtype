@@ -50,6 +50,8 @@ Item {
   signal upgradeAcceptRequested(string offerId)
   signal upgradeDeclineRequested()
   signal upgradeCleanupRequested()
+  signal osdSwitchRequested()
+  signal osdNotNowRequested()
 
   // A row's field gave the keyboard back (Escape); the panel puts focus on the
   // card's key catcher so j/k drive the cursor again.
@@ -116,6 +118,30 @@ Item {
   property bool upgradeDeclinedHere: false
   property string upgradeActionError: ""
 
+  // The Quickshell OSD offer (see OsdOfferBanner). Shown at the top of the OSD
+  // section and, like the model upgrade offers, on the Engine section the
+  // panel opens on.
+  property bool osdOfferActive: false
+  property string osdConfigured: ""
+  property bool osdSwitching: false
+  property bool osdRestarting: false
+  property bool osdDismissing: false
+  property string osdOfferError: ""
+
+  // key → extra help line under a row's description, and key → a notice about
+  // what the panel just did with that row. Both are the panel's, not the
+  // schema's: the Style row names the OSD frontend its styles belong to.
+  property var rowNotes: ({})
+  property var rowNotices: ({})
+
+  readonly property string osdSection: {
+    for (var i = 0; i < root.keys.length; i++) {
+      var spec = root.keys[i]
+      if (spec && String(spec.key) === "osd.frontend") return String(spec.section || "OSD")
+    }
+    return "OSD"
+  }
+
   readonly property string engineSection: {
     for (var i = 0; i < root.keys.length; i++) {
       var spec = root.keys[i]
@@ -130,6 +156,8 @@ Item {
 
   readonly property bool showReplacements: !searching && activeSection === replacementsSectionName
   readonly property bool showEngineCard: !searching && activeSection === engineSection
+  readonly property bool showOsdOffer: !searching && osdOfferActive
+    && (activeSection === osdSection || showEngineCard)
 
   readonly property var visibleKeys: {
     // Do not show editors for the configured engine below another catalog.
@@ -274,6 +302,17 @@ Item {
     if (row && row.control && typeof row.control.activate === "function") row.control.activate()
   }
 
+  // Drops a row's optimistic value. A schema re-read does not do it when the
+  // key's spec comes back unchanged: the delegate is reused and an equal spec
+  // is no change, so a value the config never took stayed on screen.
+  function revertRow(key) {
+    for (var i = 0; i < rows.count; i++) {
+      var row = rows.itemAt(i)
+      if (row && row.control && row.control.specKey === String(key))
+        row.control.pendingValue = undefined
+    }
+  }
+
   function rowItem(index) {
     if (root.showGpuPreset && index === 0) return gpuPreset
     return rows.itemAt(index - root.leadingRows)
@@ -349,6 +388,19 @@ Item {
           onCancelRequested: root.cancelDownloadRequested()
           onDeclineRequested: root.upgradeDeclineRequested()
           onCleanupRequested: root.upgradeCleanupRequested()
+        }
+
+        OsdOfferBanner {
+          objectName: "osdOfferBanner"
+          width: parent.width
+          active: root.showOsdOffer
+          configured: root.osdConfigured
+          switching: root.osdSwitching
+          restarting: root.osdRestarting
+          dismissing: root.osdDismissing
+          errorText: root.osdOfferError
+          onSwitchRequested: root.osdSwitchRequested()
+          onNotNowRequested: root.osdNotNowRequested()
         }
 
         EngineModelCard {
@@ -479,6 +531,8 @@ Item {
                 choices: root.choicesFor(String(entry.modelData.key))
                 dynamicOptions: root.optionsForSource(entry.modelData.source)
                 errorText: root.errors[String(entry.modelData.key)] || ""
+                helpNote: root.rowNotes[String(entry.modelData.key)] || ""
+                noticeText: root.rowNotices[String(entry.modelData.key)] || ""
                 highlighted: entry.highlighted
                 onSetRequested: function(key, value) { root.setRequested(key, value) }
                 onUnsetRequested: function(key) { root.unsetRequested(key) }

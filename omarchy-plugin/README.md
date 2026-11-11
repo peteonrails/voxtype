@@ -251,7 +251,29 @@ Inside the panel:
   --json`; a voxtype without that command shows no banner. The tray's "Model
   update available..." item opens the panel here.
 - Voxtype reads its config at startup, so a banner appears after the first
-  successful write and stays until a restart succeeds.
+  successful write and stays until a restart succeeds. A restart made outside
+  the panel (`systemctl --user restart voxtype`, `voxtype setup model`) counts:
+  the panel notes the daemon's main pid when the banner goes up and clears the
+  banner once the unit reports a different one, on the next status poll or the
+  next summon.
+- When the OSD is set to GTK4 or native and the Quickshell OSD is available,
+  a banner at the top of the OSD section (and of the Engine section, where model
+  updates are offered) offers to **Switch**. Switch runs `voxtype setup osd
+  --use-auto` and then the panel's own restart, with its usual validation and
+  error banner. **Not now** runs `voxtype setup osd --dismiss-offer`; if that
+  cannot be recorded the banner stays hidden until the shell restarts. Whether
+  to offer is the CLI's answer (`offer` in `voxtype setup osd --status
+  --json`); a voxtype without `--status` shows no banner.
+- The OSD **Style** row says which frontend its styles belong to (the Quickshell
+  OSD) and which OSD is in use. Picking a style on another frontend is never a
+  silent no-op: with Quickshell available the panel also sets `osd.frontend` to
+  `auto` and says so under the row; without it nothing is written, the picker
+  goes back to the configured style, and the row says styles need the Quickshell
+  OSD. A voxtype without `setup osd --status` writes the style as before.
+- A number setting with no value in the config (Parakeet's **Threads**, for
+  one) shows an empty field marked "default" rather than the spin box's
+  minimum; the row's help states what the default is. Nothing is written until
+  you enter a number, and **Reset to default** returns it to that state.
 - If a voxtype command cannot be started at all (voxtype is not installed, or a
   `dev.json` names a binary that is gone), the panel says so: "Voxtype Settings
   could not run `<binary>`", plus the `dev.json` path when that is where the
@@ -306,6 +328,9 @@ Inside the panel:
 | Is this the packaged copy of the panel | `voxtype setup omarchy --status --json` |
 | Switch to the packaged copy | `voxtype setup omarchy --replace --yes --restart-shell` (floating terminal) |
 | Not now on that banner | `voxtype setup omarchy --dismiss-copy` |
+| OSD frontend, and whether to offer Quickshell | `voxtype setup osd --status --json` |
+| Switch on the OSD offer | `voxtype setup osd --use-auto`, then the restart above |
+| Not now on the OSD offer | `voxtype setup osd --dismiss-offer` |
 
 ## Development
 
@@ -321,6 +346,21 @@ swaps the layer-shell window for a plain one) against
 but no compositor, daemon, config or network. It refuses to run with
 `WAYLAND_DISPLAY` or `DISPLAY` set; run it in a desktop-isolated sandbox. The
 `link*` scenarios cover the "Switch to the packaged copy" banner.
+
+### OSD offer, style picker, restart banner and unset number tests
+
+```bash
+python3 omarchy-plugin/tests/test-osd-panel.py [--evidence DIR] [--scenario NAME]
+```
+
+Same harness and isolation rules. The fake CLI answers `setup osd --status
+--json`, `--use-auto` and `--dismiss-offer`, and `tests/fake-systemctl.py` is
+put first on `PATH` as `systemctl`, so the unit's main pid and the panel's own
+restart are under the test's control. Covers the offer (shown, hidden without
+Quickshell, hidden once dismissed, hidden for an older CLI, Switch, a failed
+Switch, Not now, a failed Not now), the Style row with and without Quickshell,
+the restart banner clearing when the pid changes (on the poll and on reopen,
+and not before), and an unset Threads row.
 
 ### CLI failure and section refresh tests
 
@@ -439,6 +479,7 @@ Layout of the QML:
 | `components/RestartBanner.qml` | "changes take effect after restart" |
 | `components/CliErrorBanner.qml` | an `info` reader that ran and failed |
 | `components/PluginCopyBanner.qml` | "switch to the packaged copy" |
+| `components/OsdOfferBanner.qml` | "switch to the Quickshell OSD" |
 | `components/VoxtypeCli.qml` | every subprocess |
 | `components/CliProcess.qml` | a `Process` that also reports a command that never started |
 

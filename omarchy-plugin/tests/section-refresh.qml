@@ -37,6 +37,7 @@ Item {
       function onAccelLoaded(s, b, e) { tc.bump("accel") }
       function onUpgradeLoaded(s) { tc.bump("upgrade") }
       function onPluginLinkLoaded(s) { tc.bump("link") }
+      function onOsdStatusLoaded(s) { tc.bump("osd") }
     }
 
     function bump(what) {
@@ -46,7 +47,7 @@ Item {
       tc.loads = next
     }
 
-    readonly property var readers: ["schema", "models", "engines", "devices", "styles", "status", "accel", "upgrade", "link"]
+    readonly property var readers: ["schema", "models", "engines", "devices", "styles", "status", "accel", "upgrade", "link", "osd"]
 
     function allAtLeast(n) {
       for (var i = 0; i < tc.readers.length; i++)

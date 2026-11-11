@@ -8,7 +8,7 @@ plugin copy), then calls the IpcHandler's section() directly, as
 
 Scenarios:
   open    every reader open() uses (schema, models, engines, devices, styles,
-          status, accel, upgrade offers, plugin link) is invoked again and the
+          status, accel, upgrade offers, plugin link, OSD status) is invoked again and the
           new answers are shown; an unknown section also re-reads.
   closed  on a closed panel the verb goes through the shell and reads nothing.
 
@@ -35,6 +35,7 @@ READERS = {
     "accel": ["info", "accel", "--json"],
     "upgrade": ["setup", "migrate", "--json"],
     "link": ["setup", "omarchy", "--status", "--json"],
+    "osd": ["setup", "osd", "--status", "--json"],
 }
 
 ULTRA_OFFER = {"id": "parakeet-ultra", "kind": "model", "engine": "parakeet", "model": "parakeet-ultra-Q8_0.gguf",

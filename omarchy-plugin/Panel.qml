@@ -82,6 +82,15 @@ Item {
 
   property bool restartNeeded: false
   property string restartError: ""
+  // The daemon that was running when the banner went up, by main pid. It read
+  // the config before the change, so a different pid means a restart happened
+  // (systemctl, `voxtype setup model`, anything outside the panel) and the
+  // banner's claim is no longer true. Pending until the first unit read after
+  // the change, so a pid from before the change is never taken as the new one.
+  property string restartBaselinePid: ""
+  property bool restartBaselinePending: false
+  // When the config file last changed on disk, for the file watcher's banner.
+  property real configChangedAt: 0
 
   // model name → message from the download that failed on it.
   property var downloadErrors: ({})
@@ -116,6 +125,45 @@ Item {
     && String(root.pluginLink.packaged_dir || "") !== ""
     && root.pluginLink.copy_dismissed !== true
     && !root.copyDismissedHere
+
+  // The `setup osd --status --json` object, or null (including a CLI that
+  // predates --status, which means no offer).
+  property var osdStatus: null
+  // "Not now" whose recording failed: hidden for as long as the shell keeps
+  // this panel loaded, as for the plugin copy banner.
+  property bool osdDismissedHere: false
+  property string osdOfferError: ""
+  // What the panel did (or refused to do) about the last style pick.
+  property string osdStyleNotice: ""
+  // A style pick asked for `osd.frontend = auto`; its write result says so.
+  property bool osdFrontendSwitchPending: false
+
+  readonly property bool offerQuickshellOsd: root.osdStatus !== null
+    && root.osdStatus.offer === true
+    && !root.osdDismissedHere
+
+  function osdFrontendLabel(name) {
+    if (name === "quickshell") return "the Quickshell OSD"
+    if (name === "gtk4") return "the GTK4 OSD"
+    if (name === "native") return "the native OSD"
+    return ""
+  }
+
+  // The Style row's help: which frontend its styles belong to, and what a pick
+  // will do given the frontend in use.
+  readonly property string osdStyleHelp: {
+    var s = root.osdStatus
+    if (!s) return "Styles belong to the Quickshell OSD."
+    var active = String(s.active || "")
+    if (active === "quickshell") return "Styles belong to the Quickshell OSD, which is the OSD in use."
+    var inUse = root.osdFrontendLabel(active)
+    var now = inUse !== "" ? " The OSD in use is " + inUse + "." : " No OSD is available to run."
+    if (s.quickshell_available === true)
+      return "Styles belong to the Quickshell OSD." + now
+        + " Picking a style also sets the OSD frontend to auto, which picks Quickshell."
+    return "Styles belong to the Quickshell OSD, which is not available on this system." + now
+      + " Picking a style changes nothing."
+  }
 
   readonly property string replacementsSectionName: "Replacements"
   readonly property bool degraded: schemaError !== "" || cliMissing !== ""
@@ -203,6 +251,8 @@ Item {
     root.schemaError = ""
     root.upgradeDeclinedHere = false
     root.upgradeActionError = ""
+    root.osdOfferError = ""
+    root.osdStyleNotice = ""
     if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
     root.refreshAll()
@@ -233,6 +283,7 @@ Item {
     cli.fetchStyles()
     cli.fetchUpgrade()
     cli.fetchPluginLink()
+    cli.fetchOsdStatus()
   }
 
   // A binary that cannot be run cannot vouch for anything shown from its last
@@ -262,6 +313,7 @@ Item {
     root.accelEvidence = ""
     root.upgradeStatus = null
     root.pluginLink = null
+    root.osdStatus = null
     root.infoErrors = ({})
   }
 
@@ -372,6 +424,48 @@ Item {
     root.noteUpgradeError(offerId, "")
     root.upgradeActionError = ""
     cli.startUpgrade(offerId, model)
+  }
+
+  // A config change the running daemon has not read.
+  function noteRestartNeeded() {
+    if (!root.restartNeeded) {
+      root.restartBaselinePending = true
+      cli.fetchUnit()
+    }
+    root.restartNeeded = true
+  }
+
+  // Styles belong to the Quickshell OSD. A pick on another frontend is never a
+  // silent no-op: with Quickshell available the frontend goes to auto as well
+  // (and the row says so); without it nothing is written and the row says why.
+  // A CLI without `setup osd --status` gives no answer, so the pick is written
+  // as it always was.
+  function setStyle(value) {
+    var s = root.osdStatus
+    root.osdStyleNotice = ""
+    if (!s || String(s.active || "") === "quickshell") {
+      cli.setKey("osd.style", value)
+      return
+    }
+    if (s.quickshell_available === true) {
+      root.osdFrontendSwitchPending = true
+      cli.setKey("osd.style", value)
+      cli.setKey("osd.frontend", "auto")
+      return
+    }
+    root.osdStyleNotice = "Not changed: styles need the Quickshell OSD, which is not available on this system."
+    // Put the picker back on the value the config actually holds.
+    form.revertRow("osd.style")
+  }
+
+  function requestSet(key, value) {
+    if (String(key) === "osd.style") root.setStyle(value)
+    else cli.setKey(key, value)
+  }
+
+  function switchToQuickshellOsd() {
+    root.osdOfferError = ""
+    cli.useAutoOsd()
   }
 
   function startModelDownload(name) {
@@ -614,6 +708,24 @@ Item {
       else if (what === "styles") root.styles = []
     }
     onPluginLinkLoaded: function(status) { root.pluginLink = status }
+    onOsdStatusLoaded: function(status) { root.osdStatus = status }
+    onOsdActionFinished: function(action, ok, message) {
+      if (action === "use-auto") {
+        if (ok) {
+          // The config changed; the panel's restart flow is what makes it
+          // live, with its own validation and error banner.
+          cli.restartDaemon()
+          cli.fetchSchema()
+        } else {
+          root.osdOfferError = message
+        }
+      } else if (!ok) {
+        console.warn("Voxtype Settings: could not record Not now for the OSD offer (" + message
+                     + "); hiding it for this session")
+        root.osdDismissedHere = true
+      }
+      cli.fetchOsdStatus()
+    }
     onCopyDismissFinished: function(ok, message) {
       if (!ok) {
         console.warn("Voxtype Settings: could not record Not now (" + message + "); hiding the banner for this session")
@@ -647,6 +759,17 @@ Item {
     onUnitLoaded: function(activeState, pid) {
       root.unitState = activeState
       root.mainPid = pid
+      if (root.restartNeeded) {
+        if (root.restartBaselinePending) {
+          root.restartBaselinePending = false
+          root.restartBaselinePid = pid
+        } else if (pid !== "" && pid !== root.restartBaselinePid) {
+          // Restarted outside the panel: the new process read the new config.
+          root.restartNeeded = false
+          root.restartError = ""
+          accelAfterRestart.restart()
+        }
+      }
       // The GPU query needs the pid to attribute memory to, so it follows the
       // unit rather than running beside it.
       cli.fetchVram(pid)
@@ -664,13 +787,23 @@ Item {
       root.clearError(key)
       // The daemon only reads config at startup, so a successful write is
       // exactly when the restart prompt becomes true.
-      root.restartNeeded = true
+      root.noteRestartNeeded()
       root.restartError = ""
       cli.fetchSchema()
       if (key === "engine") cli.fetchModels()
+      if (key.indexOf("osd.") === 0) cli.fetchOsdStatus()
+      if (key === "osd.frontend" && root.osdFrontendSwitchPending) {
+        root.osdFrontendSwitchPending = false
+        root.osdStyleNotice = "Styles belong to the Quickshell OSD, so the OSD frontend was also set to auto, which picks Quickshell."
+      }
     }
     onWriteFailed: function(key, message) {
       root.recordError(key, message)
+      form.revertRow(key)
+      if (key === "osd.frontend" && root.osdFrontendSwitchPending) {
+        root.osdFrontendSwitchPending = false
+        root.osdStyleNotice = "The style was saved, but the OSD frontend could not be set to auto, so it will not show: " + message
+      }
       // The control is showing a value the config never took; the schema is
       // the only thing that knows what it actually holds now.
       cli.fetchSchema()
@@ -775,6 +908,7 @@ Item {
     // `voxtype config set` writes atomically, so the path is replaced rather
     // than edited; reload() is what re-arms the watch on the new file.
     onFileChanged: {
+      root.configChangedAt = Date.now()
       reload()
       reloadDebounce.restart()
     }
@@ -790,13 +924,17 @@ Item {
       if (!root.opened) return
       cli.fetchSchema()
       cli.fetchModels()
+      cli.fetchOsdStatus()
       // The banner's claim is that the file on disk no longer matches what the
       // daemon loaded at startup, which an edit from the CLI or the TUI makes
       // just as true as one made here. Without this the panel would quietly
       // refresh to show a setting the running daemon is not using. An accepted
       // upgrade is the exception: it restarted the daemon after its own write.
-      if (!cli.upgrading && Date.now() - root.upgradeSettledAt > 2000)
-        root.restartNeeded = true
+      // A restart the panel started after the change (Switch on the OSD offer
+      // writes and restarts back to back) has already loaded it.
+      if (!cli.upgrading && Date.now() - root.upgradeSettledAt > 2000
+          && cli.restartRequestedAt < root.configChangedAt)
+        root.noteRestartNeeded()
     }
   }
 
@@ -889,6 +1027,7 @@ Item {
         }
 
         RestartBanner {
+          objectName: "restartBanner"
           Layout.fillWidth: true
           active: root.restartNeeded || root.restartError !== ""
           restarting: cli.restarting
@@ -1070,7 +1209,7 @@ Item {
 
             onFocusReturned: root.refocusCard()
 
-            onSetRequested: function(key, value) { cli.setKey(key, value) }
+            onSetRequested: function(key, value) { root.requestSet(key, value) }
             onUnsetRequested: function(key) { cli.unsetKey(key) }
             onEngineChangeRequested: function(name) { if (cli.downloading) return; root.browsingEngine = name; root.engineError = "" }
             onModelSelectionRequested: function(name, language) {
@@ -1091,6 +1230,16 @@ Item {
             onUpgradeAcceptRequested: function(offerId) { root.acceptUpgrade(offerId) }
             onUpgradeDeclineRequested: { root.upgradeActionError = ""; cli.declineUpgrade() }
             onUpgradeCleanupRequested: { root.upgradeActionError = ""; cli.cleanupUpgrade() }
+            osdOfferActive: root.offerQuickshellOsd
+            osdConfigured: root.osdStatus ? String(root.osdStatus.configured || "") : ""
+            osdSwitching: cli.osdSwitching
+            osdRestarting: cli.restarting
+            osdDismissing: cli.osdDismissing
+            osdOfferError: root.osdOfferError
+            onOsdSwitchRequested: root.switchToQuickshellOsd()
+            onOsdNotNowRequested: { root.osdOfferError = ""; cli.dismissOsdOffer() }
+            rowNotes: ({ "osd.style": root.osdStyleHelp })
+            rowNotices: ({ "osd.style": root.osdStyleNotice })
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }
             onReplacementUnsetRequested: function(from) { cli.unsetReplacement(from) }
           }

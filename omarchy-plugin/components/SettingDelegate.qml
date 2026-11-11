@@ -31,6 +31,10 @@ Item {
   property var choices: []
 
   property string errorText: ""
+  // A help line the panel adds under the schema's description, and a notice
+  // about what the panel just did on this row's behalf.
+  property string helpNote: ""
+  property string noticeText: ""
   property int labelColumnWidth: Style.space(280)
 
   // The form's keyboard cursor is on this row: ring the control so it is clear
@@ -80,6 +84,23 @@ Item {
 
   readonly property string currentText: currentValue === undefined || currentValue === null
     ? "" : String(currentValue)
+
+  // No value at all: the key is unset and the daemon applies its own default,
+  // which the description states. A spin box has no "nothing" to show, and
+  // clamping null to the minimum displayed a number (Threads: 1) that is not
+  // what runs. The field shows "default" instead and writes nothing until the
+  // user enters a number.
+  readonly property bool unsetNumber: specType === "int"
+    && (currentValue === undefined || currentValue === null)
+
+  function syncNumberText() {
+    var unset = root.unsetNumber
+    numberField.field.textFromValue = function(value, locale) {
+      return unset ? "" : Number(value).toLocaleString(locale, 'f', 0)
+    }
+  }
+  onUnsetNumberChanged: syncNumberText()
+  Component.onCompleted: syncNumberText()
 
   readonly property string controlKind: {
     if (specType === "bool") return "bool"
@@ -208,6 +229,28 @@ Item {
     }
 
     Text {
+      objectName: "settingHelpNote"
+      visible: root.helpNote !== ""
+      width: parent.width
+      text: root.helpNote
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+
+    Text {
+      objectName: "settingNotice"
+      visible: root.noticeText !== ""
+      width: parent.width
+      text: root.noticeText
+      color: ShellTheme.Color.accent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+
+    Text {
       visible: root.errorText !== ""
       width: parent.width
       text: root.errorText
@@ -302,6 +345,7 @@ Item {
 
     NumberField {
       id: numberField
+      objectName: "settingNumberField"
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       visible: root.controlKind === "int"
@@ -310,6 +354,7 @@ Item {
       from: root.bounded ? Math.round(root.specMin) : 0
       to: root.bounded ? Math.round(root.specMax) : 1000000
       value: {
+        if (root.unsetNumber) return from
         var n = Number(root.currentValue)
         return isFinite(n) ? Math.round(n) : 0
       }
@@ -328,6 +373,19 @@ Item {
         target: numberField.field
         function onActiveFocusChanged() { root.editorFocusChanged(numberField.field.activeFocus) }
       }
+    }
+
+    // A sibling of the field, not a child: NumberField is a Column, which
+    // would stack a child below the spin box.
+    Text {
+      objectName: "numberUnsetPlaceholder"
+      anchors.centerIn: numberField
+      visible: root.controlKind === "int" && root.unsetNumber
+        && numberField.field.displayText === "" && !numberField.field.activeFocus
+      text: "default"
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
     }
 
     Row {

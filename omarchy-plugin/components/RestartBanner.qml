@@ -5,7 +5,8 @@ import qs.Ui
 
 // Voxtype reads its config at startup, so a written setting is not a live
 // setting. The banner appears after the first successful write and stays until
-// a restart succeeds.
+// a restart succeeds, from this panel or anywhere else (the panel watches the
+// daemon's main pid for that).
 Item {
   id: root
 
