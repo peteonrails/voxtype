@@ -2204,7 +2204,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Meeting",
         "Keep audio",
-        "Keep the raw meeting audio after transcription.",
+        "Keep the meeting's mic, loopback and mixed audio as Opus in its folder.",
     ),
     spec(
         "meeting.storage_path",

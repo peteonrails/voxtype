@@ -20,7 +20,8 @@ pub struct MeetingConfig {
     #[serde(default = "default_storage_path")]
     pub storage_path: String,
 
-    /// Retain raw audio files after transcription
+    /// Keep the meeting's audio in its folder: mic.opus, loopback.opus and
+    /// mixed.opus (WAV when ffmpeg is missing)
     #[serde(default)]
     pub retain_audio: bool,
 

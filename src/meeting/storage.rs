@@ -7,6 +7,7 @@ use crate::meeting::data::{
     MeetingData, MeetingId, MeetingMetadata, MeetingStatus, SegmentAnnotation, Transcript,
     TranscriptSegment,
 };
+use crate::meeting::manifest::{Manifest, MeetingContext, MANIFEST_FILE};
 use crate::meeting::notes::MeetingNotes;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -225,6 +226,17 @@ impl MeetingStorage {
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (meeting_id, segment_id)
             );
+
+            -- What a meeting was recorded with, fixed at its start, for
+            -- meeting.json.
+            CREATE TABLE IF NOT EXISTS meeting_context (
+                meeting_id TEXT PRIMARY KEY,
+                engine TEXT,
+                model TEXT,
+                diarization TEXT,
+                url TEXT,
+                voxtype_version TEXT
+            );
             "#,
         )?;
         Ok(())
@@ -294,6 +306,7 @@ impl MeetingStorage {
             let metadata_path = path.join("metadata.json");
             let json = serde_json::to_string_pretty(metadata)?;
             std::fs::write(metadata_path, json)?;
+            self.refresh_manifest(&metadata.id);
         }
 
         Ok(())
@@ -302,6 +315,11 @@ impl MeetingStorage {
     /// Mark any active/paused meetings as completed.
     /// Called on daemon startup to clean up meetings orphaned by a previous crash or restart.
     pub fn complete_stale_meetings(&self) -> Result<u32, StorageError> {
+        let stale: Vec<String> = self
+            .conn
+            .prepare("SELECT id FROM meetings WHERE status IN ('active', 'paused')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
         let now = Utc::now().timestamp();
         let count = self.conn.execute(
             r#"
@@ -313,6 +331,11 @@ impl MeetingStorage {
             "#,
             params![now],
         )?;
+        // Their manifests still say "active"; the audio a crash left
+        // behind is already playable, so the manifest is all that is stale.
+        for id in stale.iter().filter_map(|id| MeetingId::parse(id).ok()) {
+            self.refresh_manifest(&id);
+        }
         Ok(count as u32)
     }
 
@@ -510,6 +533,10 @@ impl MeetingStorage {
         )?;
         self.conn.execute(
             "DELETE FROM segment_annotations WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM meeting_context WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
 
@@ -820,6 +847,7 @@ impl MeetingStorage {
         std::fs::write(&staged, notes)?;
         std::fs::rename(&staged, &path)?;
         self.refresh_transcript_markdown(meeting_id);
+        self.refresh_manifest(meeting_id);
         self.load_notes(meeting_id)
     }
 
@@ -848,6 +876,92 @@ impl MeetingStorage {
         });
         if let Err(e) = result {
             tracing::warn!("Failed to refresh transcript.md: {}", e);
+        }
+    }
+
+    /// Record what the meeting is recorded with, and rewrite its manifest.
+    pub fn set_context(
+        &self,
+        meeting_id: &MeetingId,
+        context: &MeetingContext,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO meeting_context
+                (meeting_id, engine, model, diarization, url, voxtype_version)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                meeting_id.to_string(),
+                context.engine,
+                context.model,
+                context.diarization,
+                context.url,
+                context.voxtype_version,
+            ],
+        )?;
+        self.refresh_manifest(meeting_id);
+        Ok(())
+    }
+
+    /// What the meeting was recorded with; empty for meetings recorded
+    /// before voxtype kept it.
+    pub fn get_context(&self, meeting_id: &MeetingId) -> Result<MeetingContext, StorageError> {
+        Ok(self
+            .conn
+            .query_row(
+                r#"
+                SELECT engine, model, diarization, url, voxtype_version
+                FROM meeting_context WHERE meeting_id = ?1
+                "#,
+                params![meeting_id.to_string()],
+                |row| {
+                    Ok(MeetingContext {
+                        engine: row.get(0)?,
+                        model: row.get(1)?,
+                        diarization: row.get(2)?,
+                        url: row.get(3)?,
+                        voxtype_version: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Write the meeting's `meeting.json` from what is saved, and return
+    /// its path.
+    pub fn write_manifest(&self, meeting_id: &MeetingId) -> Result<PathBuf, StorageError> {
+        let metadata = self
+            .get_meeting(meeting_id)?
+            .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
+        let dir = metadata
+            .storage_path
+            .clone()
+            .ok_or(StorageError::PathNotConfigured)?;
+        let transcript = match self.load_transcript(meeting_id) {
+            Ok(t) => t,
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                Transcript::new()
+            }
+            Err(e) => return Err(e),
+        };
+        let manifest = Manifest::build(
+            &dir,
+            &metadata,
+            &self.get_context(meeting_id)?,
+            &transcript.speaker_keys(),
+            &self.get_speaker_labels(meeting_id)?,
+        );
+        manifest.write(&dir)?;
+        Ok(dir.join(MANIFEST_FILE))
+    }
+
+    /// Rewrite `meeting.json` after a change. Best effort: a failure is
+    /// logged, and the next change writes it again.
+    pub fn refresh_manifest(&self, meeting_id: &MeetingId) {
+        if let Err(e) = self.write_manifest(meeting_id) {
+            tracing::warn!("Failed to write meeting.json for {}: {}", meeting_id, e);
         }
     }
 

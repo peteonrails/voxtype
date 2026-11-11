@@ -199,6 +199,84 @@ imitate word-by-word streaming it cannot actually deliver.
 `speakers` (live speaker naming) and `summary` (auto-generated meeting
 summary) events are planned for a later release and are not emitted yet.
 
+### The meeting folder and `meeting.json`
+
+Every meeting has a folder under the meeting storage path
+(`~/.local/share/voxtype/meetings/<date>-<title>/` by default), and every
+folder has a `meeting.json` manifest describing the meeting and the files
+beside it. Read the manifest rather than guessing at file names or at
+`metadata.json`, which is voxtype's internal record and may change.
+
+```json
+{
+  "manifest_version": 1,
+  "id": "b6b2e5b2-4c1e-4a57-9a0e-2f6f3c1d8e41",
+  "title": "Weekly standup",
+  "url": null,
+  "status": "completed",
+  "started_at": "2026-11-11T15:00:04Z",
+  "ended_at": "2026-11-11T15:31:12Z",
+  "duration_secs": 1868,
+  "engine": "parakeet",
+  "model": "parakeet-tdt-0.6b-v3",
+  "diarization": "hybrid",
+  "speakers": [
+    { "id": "Remote 1", "name": "Dana" },
+    { "id": "Remote 2", "name": "Remote 2" },
+    { "id": "You", "name": "Pete" }
+  ],
+  "audio_retained": true,
+  "files": [
+    { "name": "transcript.json", "kind": "transcript", "bytes": 48211 },
+    { "name": "transcript.md", "kind": "transcript_markdown", "bytes": 21980 },
+    { "name": "notes.md", "kind": "notes", "bytes": 412 },
+    { "name": "summary.md", "kind": "summary", "bytes": 1893 },
+    { "name": "mic.opus", "kind": "audio_mic", "bytes": 4981233 },
+    { "name": "loopback.opus", "kind": "audio_loopback", "bytes": 5310877 },
+    { "name": "mixed.opus", "kind": "audio_mixed", "bytes": 5402115 }
+  ],
+  "voxtype_version": "1.3.0"
+}
+```
+
+This is a stable contract:
+
+- Every field above is always present. A value that is unknown or does not
+  apply is `null` (`title`, `url`, `ended_at` and `duration_secs` while the
+  meeting records, `engine`, `model` and `diarization` for meetings recorded
+  before voxtype kept them, `diarization` when it was off).
+- New fields may be added. Ignore fields you do not know.
+- `manifest_version` changes only if an existing field changes meaning.
+- Keys are written in the order shown, pretty-printed, with a trailing
+  newline. The file is replaced atomically, so a reader never sees half of
+  it.
+
+The fields:
+
+- `status`: `active`, `paused`, `completed` or `cancelled`. A meeting left
+  `active` by a crash becomes `completed` the next time the daemon starts.
+- `started_at`, `ended_at`: RFC 3339, UTC. `duration_secs` is wall-clock
+  time from start to stop.
+- `engine`, `model`: the transcription engine and its model.
+  `voxtype_version` is the version that recorded the meeting.
+- `speakers`: each speaker in the transcript, sorted by `id`. `id` is the
+  speaker as the diarizer named it (the `speaker_id` in `transcript.json`, or
+  `You`/`Remote` without diarization); `name` is the name given with
+  `voxtype meeting label`, or `id` when there is none. Two speakers given the
+  same name keep separate entries.
+- `files`: the meeting's files that exist, in the order shown, with their
+  size in bytes when the manifest was written. `kind` is one of
+  `transcript`, `transcript_markdown`, `notes`, `summary`, `audio_mic`,
+  `audio_loopback` or `audio_mixed`. Names are relative to the folder.
+  Audio files end in `.opus` (Ogg Opus, 16 kHz mono) or, when ffmpeg was
+  missing, `.wav` (16-bit PCM, 16 kHz mono); match on `kind`, not on the
+  name.
+- `audio_retained`: whether the meeting kept its audio (`retain_audio`).
+
+The manifest is written when a meeting starts and rewritten when it stops,
+when its notes or summary change, and when a daemon restart completes a
+meeting a crash left open.
+
 ## What Voxtype will not do for you
 
 Voxtype does not edit your configuration, and asks that you not edit its own:

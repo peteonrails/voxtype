@@ -209,6 +209,7 @@ graphical frontend is installed, install a supported terminal or run
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
+- [Meeting Audio](#meeting-audio)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1608,6 +1609,42 @@ cat "$XDG_RUNTIME_DIR/voxtype/outcome.json"   # after a session ends
 
 No result is shown for cancelled recordings, accidental taps, or
 `record start --no-osd` sessions; that is expected.
+
+---
+
+## Meeting Audio
+
+### Meeting audio is saved as WAV instead of Opus
+
+With `[meeting] retain_audio = true`, voxtype encodes the audio with
+`ffmpeg`. When `ffmpeg` is not on the daemon's `PATH`, or was built without
+libopus, the daemon logs one of these and keeps `mic.wav`, `loopback.wav` and
+`mixed.wav` instead (about 115 MB per hour per file, against about 10 MB for
+Opus):
+
+```
+ffmpeg not found; keeping meeting audio as WAV ...
+/usr/bin/ffmpeg has no libopus encoder; keeping meeting audio as WAV ...
+```
+
+Install `ffmpeg` (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`,
+`sudo dnf install ffmpeg-free`) and check it has the encoder:
+
+```bash
+ffmpeg -hide_banner -encoders | grep libopus
+```
+
+Then restart the daemon (`systemctl --user restart voxtype`); the check runs
+once per daemon. Meetings already saved as WAV stay WAV. To convert one:
+
+```bash
+cd ~/.local/share/voxtype/meetings/<meeting>
+for t in mic loopback mixed; do
+  [ -f $t.wav ] && ffmpeg -i $t.wav -c:a libopus -b:a 24k $t.opus && rm $t.wav
+done
+```
+
+`meeting.json` lists whichever files are there the next time it is rewritten.
 
 ---
 
