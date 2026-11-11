@@ -1050,6 +1050,32 @@ mod tests {
         assert_eq!(back.speaker_key(), "Remote 1");
     }
 
+    /// A client offers "Restore original" from `original_speaker`; after a
+    /// reset the published segment must not carry it.
+    #[tokio::test]
+    async fn a_reset_mid_meeting_publishes_the_line_without_original_speaker() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.reassign_segment(&id, 1, "Casey", false).unwrap();
+        h.daemon.apply_speaker_overrides().await;
+        cli.reset_segment_speaker(&id, 1, false).unwrap();
+        h.daemon.apply_speaker_overrides().await;
+
+        let updates: Vec<TranscriptSegment> = std::iter::from_fn(|| h.events.try_recv().ok())
+            .filter_map(|e| match e {
+                MeetingEvent::SegmentUpdated { segment } => Some(segment),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].original_speaker.as_deref(), Some("Remote"));
+        let json = serde_json::to_value(&updates[1]).unwrap();
+        assert_eq!(json["speaker_id"], "Remote");
+        assert!(json.get("original_speaker").is_none(), "{json}");
+    }
+
     #[tokio::test]
     async fn a_line_moved_onto_a_speaker_follows_its_rename() {
         let mut h = harness().await;
