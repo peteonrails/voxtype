@@ -514,6 +514,82 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Edit {
+            meeting_id,
+            segment_id,
+            text,
+            reset,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let live = meeting_is_live(&id);
+
+            let segment = if reset {
+                storage.reset_segment_text(&id, segment_id, !live)
+            } else {
+                storage.edit_segment_text(
+                    &id,
+                    segment_id,
+                    text.as_deref().unwrap_or_default(),
+                    !live,
+                )
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to edit segment: {}", e))?;
+            if live {
+                poke_daemon("meeting_edit", &segment_id.to_string())?;
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&segment)?);
+            } else if reset {
+                println!(
+                    "Segment {} is back to its transcribed text in meeting {}",
+                    segment.id, meeting_id
+                );
+            } else {
+                println!("Edited segment {} in meeting {}", segment.id, meeting_id);
+            }
+        }
+
+        MeetingAction::DeleteLine {
+            meeting_id,
+            segment_id,
+            restore,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let live = meeting_is_live(&id);
+
+            let segment = if restore {
+                storage.restore_segment(&id, segment_id, !live)
+            } else {
+                storage.delete_segment(&id, segment_id, !live)
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to change segment: {}", e))?;
+            if live {
+                poke_daemon("meeting_edit", &segment_id.to_string())?;
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&segment)?);
+            } else if restore {
+                println!("Restored segment {} in meeting {}", segment.id, meeting_id);
+            } else {
+                println!(
+                    "Deleted segment {} from meeting {} (restore with --restore)",
+                    segment.id, meeting_id
+                );
+            }
+        }
+
         MeetingAction::Notes {
             meeting_id,
             append,
