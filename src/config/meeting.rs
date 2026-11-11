@@ -39,6 +39,10 @@ pub struct MeetingConfig {
     /// Summarization configuration
     #[serde(default)]
     pub summary: MeetingSummaryConfig,
+
+    /// Call detection and the Record prompt
+    #[serde(default)]
+    pub detect: super::MeetingDetectConfig,
 }
 
 /// Meeting audio configuration for dual capture
@@ -267,6 +271,7 @@ impl Default for MeetingConfig {
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
+            detect: super::MeetingDetectConfig::default(),
         }
     }
 }

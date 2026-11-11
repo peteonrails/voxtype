@@ -24,6 +24,7 @@
 
 pub mod chunk;
 pub mod data;
+pub mod detect;
 pub mod diarization;
 pub mod events;
 pub mod export;
