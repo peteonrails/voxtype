@@ -523,8 +523,9 @@ pub async fn body_markup() -> crate::text::diff::BodyMarkup {
 ///
 /// Two questions, because `body-markup` alone is not enough: the capability
 /// says markup is parsed, not which family. Qt rich text (quickshell, Plasma)
-/// honours `<font color>` and drops `<span>`; Pango (mako, dunst, swaync,
-/// GNOME Shell) does the reverse. Guessing wrong loses the colour silently.
+/// drops Pango's `<span>`, and some Qt panels print tags outside the spec's
+/// b/i/u/s subset as text; Pango (mako, dunst, swaync, GNOME Shell) has no
+/// `<font>`. Qt servers get only the safe subset; Pango servers get colour.
 #[cfg(target_os = "linux")]
 async fn detect_body_markup() -> crate::text::diff::BodyMarkup {
     use crate::text::diff::BodyMarkup;

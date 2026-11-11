@@ -2734,7 +2734,7 @@ If you see this notification while you were speaking, your microphone level is p
 **Default:** `true`
 **Required:** No
 
-When `[text]` cleanup or `[output.post_process]` changed the transcription, the transcription notification shows what changed: deletions struck through and replacements highlighted, with an "✎ N edits" title. Set it to `false` to get the plain text preview instead. An LLM `post_process` command that rewrites whole sentences produces a long diff, and this is the switch for that.
+When `[text]` cleanup or `[output.post_process]` changed the transcription, the transcription notification shows what changed, with an "✎ N edits" title. Deletions are struck through. Insertions are bold on Qt notification servers (Omarchy, KDE Plasma) and green on Pango servers (mako, dunst, swaync, GNOME), where deletions are also red. Qt servers get no colour because Omarchy's notification panel prints any markup outside the spec's bold, italic, underline and strikethrough as literal text. Set it to `false` to get the plain text preview instead. An LLM `post_process` command that rewrites whole sentences produces a long diff, and this is the switch for that.
 
 ```toml
 [output.notification]

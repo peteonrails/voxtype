@@ -26,13 +26,16 @@ pub struct Span {
 
 /// How a notification server expects inline markup.
 ///
-/// The two markup families are mutually unintelligible: Qt's rich text knows
-/// `<font color>` and ignores `<span>`, Pango is exactly the other way round.
-/// Verified against quickshell, which silently drops `<span>` in both the
-/// Pango and CSS spellings while honouring `<font color>`.
+/// The two markup families are mutually unintelligible: Qt's rich text
+/// ignores Pango's `<span>`, and Pango has no `<font>`. Qt servers also differ
+/// among themselves: Omarchy's notification panel renders only the spec's safe
+/// subset (`b`, `i`, `u`, `s`, links) and prints anything else, `<font color>`
+/// included, as literal text, while reporting the same server name as older
+/// shells that honoured it. So the Qt dialect sticks to that subset: deletions
+/// are struck through and insertions are bold, with no colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BodyMarkup {
-    /// Qt rich text: quickshell, Plasma.
+    /// Qt rich text: quickshell, Plasma. Limited to the spec's safe tags.
     Qt,
     /// Pango: mako, dunst, swaync, GNOME Shell.
     Pango,
@@ -143,18 +146,14 @@ pub fn render(spans: &[Span], markup: BodyMarkup) -> String {
             (SpanKind::Same, _) => body,
             (SpanKind::Deleted, BodyMarkup::Plain) => format!("[-{}-]", body),
             (SpanKind::Inserted, BodyMarkup::Plain) => format!("{{+{}+}}", body),
-            (SpanKind::Deleted, BodyMarkup::Qt) => {
-                format!("<font color=\"{}\"><s>{}</s></font>", DELETED_COLOUR, body)
-            }
+            (SpanKind::Deleted, BodyMarkup::Qt) => format!("<s>{}</s>", body),
             (SpanKind::Deleted, BodyMarkup::Pango) => {
                 format!(
                     "<span foreground=\"{}\"><s>{}</s></span>",
                     DELETED_COLOUR, body
                 )
             }
-            (SpanKind::Inserted, BodyMarkup::Qt) => {
-                format!("<font color=\"{}\">{}</font>", INSERTED_COLOUR, body)
-            }
+            (SpanKind::Inserted, BodyMarkup::Qt) => format!("<b>{}</b>", body),
             (SpanKind::Inserted, BodyMarkup::Pango) => {
                 format!("<span foreground=\"{}\">{}</span>", INSERTED_COLOUR, body)
             }
@@ -244,12 +243,14 @@ mod tests {
     }
 
     #[test]
-    fn qt_dialect_uses_font_color() {
+    fn qt_dialect_uses_only_spec_safe_tags() {
+        // Omarchy's notification panel prints any tag outside b/i/u/s as text.
         let spans = word_diff("old", "new");
         let out = render(&spans, BodyMarkup::Qt);
         assert!(out.contains("<s>old</s>"), "{out}");
-        assert!(out.contains(DELETED_COLOUR), "{out}");
-        assert!(out.contains("<font color=\"#22cc22\">new</font>"), "{out}");
+        assert!(out.contains("<b>new</b>"), "{out}");
+        assert!(!out.contains("<font"), "{out}");
+        assert!(!out.contains("<span"), "{out}");
     }
 
     #[test]
@@ -288,10 +289,7 @@ mod tests {
     fn everything_deleted_still_renders() {
         let spans = word_diff("um uh", "");
         assert_eq!(edit_count(&spans), 1);
-        assert_eq!(
-            render(&spans, BodyMarkup::Qt),
-            format!("<font color=\"{DELETED_COLOUR}\"><s>um uh</s></font>")
-        );
+        assert_eq!(render(&spans, BodyMarkup::Qt), "<s>um uh</s>");
     }
 
     #[test]
@@ -314,10 +312,7 @@ mod tests {
         let after = format!("{} tail", "word ".repeat(60));
         let spans = word_diff(&before, &after);
         let out = render_for_notification(&spans, BodyMarkup::Qt, 80);
-        assert_eq!(
-            out,
-            format!("<font color=\"{DELETED_COLOUR}\"><s>uhhhh</s></font>")
-        );
+        assert_eq!(out, "<s>uhhhh</s>");
         // Whatever we emit must be balanced markup, never a sliced tag.
         assert_eq!(out.matches("<s>").count(), out.matches("</s>").count());
     }
