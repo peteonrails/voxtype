@@ -438,6 +438,38 @@ pub(crate) async fn run_meeting_command(
         }
 
         MeetingAction::Reassign {
+        MeetingAction::View {
+            meeting_id,
+            ask_id,
+            tab,
+            ask,
+            no_open,
+        } => {
+            let path = config::Config::runtime_dir().join("meeting-view.request");
+            let request = ViewRequest {
+                meeting_id: meeting_id.as_deref(),
+                ask_id: ask_id.as_deref(),
+                // An answer is shown on the Ask tab.
+                tab: tab.as_deref().or(ask_id.as_ref().map(|_| "ask")),
+                ask: ask.as_deref(),
+                open: !no_open,
+            };
+            write_view_request(&path, &request)?;
+            if no_open && ask.is_none() {
+                println!("Nothing to do: --no-open without --ask.");
+            } else {
+                println!(
+                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin or voxtype's Quickshell shell, whichever is running.",
+                    if no_open { "ask" } else { "open" }
+                );
+            }
+        }
+
+        MeetingAction::Suggest { dry_run, watch } => {
+            run_meeting_suggest(config, None, dry_run, watch).await?;
+        }
+
+        MeetingAction::Summarize {
             meeting_id,
             segment_id,
             speaker,
@@ -639,6 +671,23 @@ pub(crate) async fn run_meeting_command(
     Ok(())
 }
 
+/// `voxtype meeting suggest`; `config_path` is passed on to the
+/// `meeting start` a live prompt runs.
+pub(crate) async fn run_meeting_suggest(
+    config: &config::Config,
+    config_path: Option<PathBuf>,
+    dry_run: bool,
+    watch: bool,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return meeting::detect::runner::suggest(config, config_path, dry_run, watch).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, config_path, dry_run, watch);
+        anyhow::bail!("Meeting detection is only available on Linux.")
+    }
+}
+
 /// Where a meeting is, as the CLI sees it: the daemon's `meeting_state` file
 /// plus any trigger the daemon has not acted on yet.
 ///
@@ -732,6 +781,40 @@ fn meeting_phase(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<String>
 ///
 /// The content is written to a private file and hard-linked into place, so
 /// the daemon can never read the trigger before its title is in it.
+/// What `voxtype meeting view` asks the running meeting view to do.
+struct ViewRequest<'a> {
+    meeting_id: Option<&'a str>,
+    ask_id: Option<&'a str>,
+    tab: Option<&'a str>,
+    ask: Option<&'a str>,
+    open: bool,
+}
+
+/// Write the request every meeting view host watches (see
+/// quickshell/voxtype-meetings/Meetings.qml). Written whole and renamed into
+/// place, so a host never reads half of it. `requested_at` lets a host that
+/// starts later ignore a request that was not meant for it.
+fn write_view_request(path: &std::path::Path, req: &ViewRequest) -> std::io::Result<()> {
+    let requested_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let request = serde_json::json!({
+        "meeting_id": req.meeting_id,
+        "ask_id": req.ask_id,
+        "tab": req.tab,
+        "ask": req.ask,
+        "open": req.open,
+        "requested_at": requested_at,
+    });
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staged = path.with_extension(format!("request.{}.tmp", std::process::id()));
+    std::fs::write(&staged, request.to_string())?;
+    std::fs::rename(&staged, path)
+}
+
 fn claim_start_trigger(start_file: &std::path::Path, title: &str) -> std::io::Result<bool> {
     static STAGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let staged = start_file.with_extension(format!(
@@ -778,6 +861,45 @@ mod tests {
 
     fn touch(dir: &std::path::Path, name: &str, content: &str) {
         std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn view_request_is_the_json_the_hosts_read() {
+        let dir = runtime();
+        let path = dir.path().join("voxtype").join("meeting-view.request");
+        let req = ViewRequest {
+            meeting_id: Some("abc"),
+            ask_id: Some("q1"),
+            tab: Some("ask"),
+            ask: Some("last-5m"),
+            open: false,
+        };
+        write_view_request(&path, &req).unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(req["meeting_id"], "abc");
+        assert_eq!(req["tab"], "ask");
+        assert_eq!(req["ask"], "last-5m");
+        assert_eq!(req["ask_id"], "q1");
+        assert_eq!(req["open"], false);
+        assert!(req["requested_at"].as_u64().unwrap() > 0);
+
+        // Defaults: no meeting, no tab, open; and nothing left behind.
+        let req = ViewRequest {
+            meeting_id: None,
+            ask_id: None,
+            tab: None,
+            ask: None,
+            open: true,
+        };
+        write_view_request(&path, &req).unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(req["meeting_id"].is_null() && req["tab"].is_null() && req["ask"].is_null());
+        assert!(req["ask_id"].is_null());
+        assert_eq!(req["open"], true);
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[test]

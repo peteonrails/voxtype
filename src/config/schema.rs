@@ -2199,6 +2199,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Minutes before a meeting stops on its own. 0 is unlimited.",
     ),
     spec(
+        "meeting.show_view_on_start",
+        "meeting",
+        "show_view_on_start",
+        KeyType::Bool,
+        "Meeting",
+        "Show meeting view on start",
+        "Open the live meeting view in the Omarchy shell when a meeting starts.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
@@ -2423,6 +2432,33 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Command the Open action of an ask notification runs. Unset opens the meeting view's Ask tab; empty turns Open off.",
     )
     .live(),
+    spec(
+        "meeting.detect.enabled",
+        "meeting.detect",
+        "enabled",
+        KeyType::Bool,
+        "Meeting",
+        "Offer to record calls",
+        "Notice a Zoom, Teams or Google Meet call starting and offer to record it. Unset is on for Omarchy, off elsewhere. Needs meeting mode on.",
+    ),
+    spec(
+        "meeting.detect.auto_record_apps",
+        "meeting.detect",
+        "auto_record_apps",
+        KeyType::String,
+        "Meeting",
+        "Record without asking",
+        "Comma-separated call apps (Zoom, Google Meet, Microsoft Teams) whose calls are recorded without a prompt.",
+    ),
+    spec(
+        "meeting.detect.debounce_secs",
+        "meeting.detect",
+        "debounce_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Call detection delay",
+        "Seconds a call app must hold the mic before the prompt, so a quick mic test does not count.",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -3045,6 +3081,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
+        "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
@@ -3072,6 +3109,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             json!(cfg.meeting.assistant.max_transcript_chars)
         }
         "meeting.assistant.open_command" => opt_str(cfg.meeting.assistant.open_command.as_ref()),
+        "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
+        "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {
+            [] => Json::Null,
+            apps => json!(apps.join(",")),
+        },
+        "meeting.detect.debounce_secs" => json!(cfg.meeting.detect.debounce_secs),
 
         _ => return None,
     };

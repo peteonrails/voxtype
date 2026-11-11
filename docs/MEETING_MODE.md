@@ -20,6 +20,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [AI Summarization](#ai-summarization)
   - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
   - [Deleting Meetings](#deleting-meetings)
+- [Live Meeting View](#live-meeting-view)
+- [Meeting Detection](#meeting-detection)
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
@@ -365,6 +367,116 @@ Permanently deletes the meeting record, transcript, and any associated audio fil
 
 ---
 
+## Live Meeting View
+
+The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
+
+The header shows the meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. Below it are four tabs:
+
+- **Transcript**: one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up; **Jump to latest** takes you back.
+  - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
+  - Click the speaker name on a line to move just that line: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign`; if it is refused, the line goes back and the error is shown.
+  - Hover a line for **Add note** (`voxtype meeting annotate`): a note, a **Highlight**, or both. Lines with either get a marker in the margin.
+- **Notes**: your notes for the meeting. They save as you type and go into the summary as guidance.
+- **Ask**: ask about what has been said, or use a quick question: "Last 5 minutes", "What did *the last remote speaker* just say?", "Action items so far". Answers stream in, say which agent gave them, and cite times like [1:58] that jump to that line.
+- **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing…" while it is written, and **Regenerate** after you fix speakers or lines.
+
+Ask and Summary show the agent in use ("Claude", or "Local (llama3.2)"); click it to pick another agent, switch to **Local model only**, or (in Omarchy) open the settings. The first time an agent is needed the view asks whether to send meeting transcripts to it, with **Use a local model instead** and **Not now**.
+
+Between updates the view says "Listening…": lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word.
+
+When the meeting ends its transcript stays on screen marked **Ended**, with its length and end time, so you can still fix lines, name speakers, take notes and ask questions after the call. It stays until a new meeting starts (**Start meeting** is offered there too), you go **‹ Meetings** back to the list, or you close the view.
+
+With no meeting in progress the view lists your recent meetings, newest first: title, date and time, length, how many speakers, and a **Summary** badge on those that have one, under **Start meeting** and an optional title. Pick one to open it the same way as an ended meeting, with its transcript, speakers and summary, and fix it the same way. A meeting with no summary yet has **Summarize** on its Summary tab. The list shows 50 meetings at first; **Show older meetings** loads more. A meeting that starts while you are reading an old one takes over the view, and once it ends it is at the top of the list.
+
+Open it yourself, in whichever shell is running:
+
+```bash
+voxtype meeting view                      # the current or last meeting
+voxtype meeting view latest --tab summary
+voxtype meeting view --ask last-5m --no-open   # answer arrives as a notification
+```
+
+In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
+
+An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
+
+```toml
+[meeting.assistant]
+open_command = "voxtype meeting view"
+```
+
+To stop it opening on its own:
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
+The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#live-transcript-and-status-meetingsock). It does not open over an open Voxtype Settings panel.
+
+---
+
+## Meeting Detection
+
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?" with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
+
+Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
+
+```toml
+[meeting]
+enabled = true
+
+[meeting.detect]
+enabled = true          # unset: on for Omarchy, off elsewhere
+auto_record_apps = []   # e.g. ["Zoom"] to record Zoom calls without asking
+debounce_secs = 5
+```
+
+The setting is read when the daemon starts, so restart it after changing it.
+
+### How calls are recognized
+
+- **The microphone.** A call app opening a PipeWire capture stream is the main signal. Native clients (Zoom, `teams-for-linux`) count on that alone.
+- **The window title.** A browser opens the microphone for many things, so a browser's stream only counts when a window title confirms a call: "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web. Titles come from Hyprland; on other compositors browser calls are not detected.
+- **Voxtype's own capture never counts**, nor do other dictation apps or the camera-effects virtual microphone.
+
+### When it prompts
+
+- Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt.
+- Not while a meeting is already recording.
+- Not while you are dictating: the prompt waits until dictation ends.
+- When the call app releases the microphone while a meeting is recording, a second notification offers **Stop meeting**. Voxtype never stops a meeting on its own.
+
+Detection never records by itself, except for apps you list in `auto_record_apps`.
+
+### Checking what it sees
+
+```bash
+# Read the current state once and print what would be prompted and why
+voxtype meeting suggest --dry-run
+
+# Keep watching and print each decision as calls start and end
+voxtype meeting suggest --dry-run --watch
+```
+
+Neither shows a notification or starts anything. Example output during a Meet call in Chromium:
+
+```text
+Meeting detection in the daemon: on (default on Omarchy)
+windows: 4 from Hyprland
+mic streams: 3
+  ignored mic stream 105 (PipeWire ALSA [hex]): another dictation app
+  ignored mic stream 129 (Camera Effects): camera-effects virtual mic
+evidence: Chromium has the mic (stream 211) and window "Meet - abc-defg-hij - Chromium" matches
+would prompt: Record "Meet - abc-defg-hij"? (Google Meet)
+```
+
+Without `--dry-run`, `voxtype meeting suggest` runs the detector in the foreground with real prompts. It refuses while the daemon is already prompting.
+
+To add another call service, see `apps` under [`[meeting.detect]`](CONFIGURATION.md#meetingdetect).
+
+---
+
 ## Configuration
 
 All meeting settings live under the `[meeting]` section in `~/.config/voxtype/config.toml`.
@@ -390,6 +502,10 @@ retain_audio = false
 
 # Maximum meeting duration in minutes (default: 180, 0 = unlimited)
 max_duration_mins = 180
+
+# Open the live meeting view in the Omarchy shell when a meeting starts
+# (default: true; no effect on other desktops)
+show_view_on_start = true
 ```
 
 ### Audio Settings

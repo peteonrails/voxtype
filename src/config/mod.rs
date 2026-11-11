@@ -13,6 +13,7 @@ mod hotkey;
 mod language;
 mod load;
 mod meeting;
+mod meeting_detect;
 mod notification;
 mod output;
 mod parse;
@@ -38,6 +39,7 @@ pub use load::{load_config, save_config};
 pub use meeting::{
     MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingSummaryConfig,
 };
+pub use meeting_detect::{default_apps as default_call_apps, CallAppPattern, MeetingDetectConfig};
 pub use notification::NotificationConfig;
 pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,

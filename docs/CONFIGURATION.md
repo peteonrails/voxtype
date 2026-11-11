@@ -3756,6 +3756,18 @@ Keep raw audio chunk files after transcription. Useful for debugging or re-trans
 
 Maximum meeting duration in minutes. Set to `0` for unlimited.
 
+### show_view_on_start
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view belongs to the Voxtype plugin for the Omarchy shell, so this does nothing on other desktops. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
 ---
 
 ## [meeting.audio]
@@ -3977,6 +3989,77 @@ local_only = false
 timeout_secs = 180
 max_transcript_chars = 100000
 ```
+
+---
+
+## [meeting.detect]
+
+Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browser) and offers to record it with a notification. Detection only suggests: nothing is recorded until you press Record, except for apps in `auto_record_apps`. It runs inside the daemon and only while `[meeting] enabled = true`. See [Meeting detection](MEETING_MODE.md#meeting-detection) for how calls are recognized.
+
+```toml
+[meeting.detect]
+enabled = true
+auto_record_apps = []
+debounce_secs = 5
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** unset (on for Omarchy, off elsewhere)
+**Required:** No
+
+Turn call detection on or off. When unset, detection is on when Omarchy is detected and off on every other desktop, so upgrading changes nothing outside Omarchy. Changing it needs a daemon restart.
+
+### auto_record_apps
+
+**Type:** Array of strings, or one comma-separated string
+**Default:** `[]`
+**Required:** No
+
+Call apps, by the `name` in `apps` (for example `"Zoom"` or `"Google Meet"`), whose calls are recorded without asking. Matching ignores case.
+
+```toml
+auto_record_apps = ["Zoom"]
+```
+
+### debounce_secs
+
+**Type:** Integer
+**Default:** `5`
+**Required:** No
+
+How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+
+### apps
+
+**Type:** Array of tables
+**Default:** Zoom, Microsoft Teams, Google Meet, Microsoft Teams (web), Zoom (web)
+**Required:** No
+
+The call apps to watch for. Setting `apps` replaces the built-in list, so copy the entries you want to keep. Each entry has:
+
+- `name` - shown in the prompt and used by `auto_record_apps`
+- `streams` - case-insensitive substrings of a PipeWire capture stream's `application.name`, `application.process.binary` or `node.name`
+- `titles` - case-insensitive substrings of a window title that confirm a call. Leave empty for a native client whose mic use always means a call. Browsers need titles, because they open the mic for many things.
+
+```toml
+[[meeting.detect.apps]]
+name = "Zoom"
+streams = ["zoom"]
+
+[[meeting.detect.apps]]
+name = "Google Meet"
+streams = ["chromium", "chrome", "firefox", "brave"]
+titles = ["Meet - ", "Google Meet"]
+
+[[meeting.detect.apps]]
+name = "Jitsi"
+streams = ["chromium", "firefox"]
+titles = ["Jitsi Meet"]
+```
+
+Window titles come from Hyprland. On other compositors only apps with empty `titles` are detected.
 
 ---
 

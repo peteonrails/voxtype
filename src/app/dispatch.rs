@@ -577,6 +577,13 @@ pub(crate) async fn dispatch(
             send_record_command(&config, action, top_level_model.as_deref())?;
         }
 
+        Commands::Meeting {
+            action: voxtype::MeetingAction::Suggest { dry_run, watch },
+        } => {
+            super::meeting::run_meeting_suggest(&config, cli.config.clone(), dry_run, watch)
+                .await?;
+        }
+
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
         }

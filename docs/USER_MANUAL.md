@@ -561,8 +561,10 @@ different user-owned directory. Writing outside of `$HOME` is refused
 unless `--force` is also passed.
 
 The command prints Hyprland, Sway, and River keybinding examples that
-toggle the Wave 2 engine-picker and meeting-controls panels via flag
-files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
+toggle the engine picker and the meeting view via flag files under
+`$XDG_RUNTIME_DIR/voxtype/`. The meeting view is the same one the Omarchy
+plugin shows (see [Live Meeting View](MEETING_MODE.md#live-meeting-view));
+it also opens when a meeting starts and on `voxtype meeting view`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
@@ -2777,6 +2779,7 @@ chunk_duration_secs = 30         # Audio chunk size for processing
 storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
 retain_audio = false             # Keep raw audio files after transcription
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
+show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)
