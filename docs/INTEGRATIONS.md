@@ -122,8 +122,20 @@ voxtype meeting status --json
 # {"active": true, "status": "recording", "meeting_id": "b6b2e5b2-..."}
 
 voxtype meeting show latest --json     # the full MeetingData (metadata + transcript)
-voxtype meeting list --json            # an array of MeetingMetadata
+voxtype meeting list --json            # an array of MeetingMetadata, plus two fields
 ```
+
+Each `meeting list --json` entry is the meeting's metadata with two more
+fields, read from the meeting index rather than each transcript, so a list
+of many meetings stays fast:
+
+- `has_summary` (bool): a summary is saved (`meeting summarize`, or the
+  summary at stop).
+- `speaker_count` (number): distinct speakers as the transcript displays
+  them, with labels and moved lines applied; speakers given the same name
+  count once, and a speaker whose only lines are empty does not count. It is
+  refreshed whenever the transcript is saved, so it follows labels and moves
+  made during or after the meeting. A meeting with no transcript yet has 0.
 
 `show`/`list` JSON is the same serde shape written to `metadata.json` and
 `transcript.json` on disk (snake_case), not the camelCase `meeting export -f
