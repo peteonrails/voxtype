@@ -37,6 +37,7 @@ pub mod session;
 pub mod streaming;
 pub mod wtype;
 pub mod xclip;
+pub mod xdotool;
 pub mod ydotool;
 
 pub use streaming::StreamingSession;
@@ -279,6 +280,7 @@ const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
     OutputDriver::Wtype,
     OutputDriver::Eitype,
     OutputDriver::Dotool,
+    OutputDriver::Xdotool,
     OutputDriver::Ydotool,
     OutputDriver::Clipboard,
     OutputDriver::Xclip,
@@ -317,6 +319,12 @@ fn create_driver_output(
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
             config.shift_enter_newlines,
+        )),
+        OutputDriver::Xdotool => Box::new(xdotool::XdotoolOutput::new(
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            config.auto_submit,
+            config.append_text.clone(),
         )),
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
@@ -500,7 +508,8 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+    matches!(name, "wtype" | "eitype" | "dotool" | "xdotool" | "ydotool")
+        || name.starts_with("paste")
 }
 
 /// True when any method in the chain synthesizes keystrokes, so the
