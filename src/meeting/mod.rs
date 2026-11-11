@@ -307,11 +307,36 @@ impl MeetingDaemon {
             .await
     }
 
+    /// Whether `samples` pass this meeting's energy gate (the same check
+    /// `process_chunk_with_source` applies). Used to gate a mic chunk on its
+    /// raw audio before speech enhancement lowers its level.
+    pub fn contains_speech(&self, samples: &[f32]) -> bool {
+        VoiceActivityDetector::new(
+            self.config.vad_threshold,
+            ChunkConfig::default().sample_rate,
+        )
+        .contains_speech(samples)
+    }
+
     /// Process a chunk of audio with a specific source label
     pub async fn process_chunk_with_source(
         &mut self,
         samples: Vec<f32>,
         source: AudioSource,
+    ) -> Result<Option<Vec<TranscriptSegment>>> {
+        self.process_chunk_with_source_checked(samples, source, false)
+            .await
+    }
+
+    /// Process a chunk of audio with a specific source label. With
+    /// `speech_checked`, the caller already found speech in the chunk's raw
+    /// audio (`contains_speech`) and the energy gate is not applied again to
+    /// these (enhanced) samples.
+    pub async fn process_chunk_with_source_checked(
+        &mut self,
+        samples: Vec<f32>,
+        source: AudioSource,
+        speech_checked: bool,
     ) -> Result<Option<Vec<TranscriptSegment>>> {
         if !self.state.is_active() {
             return Ok(None);
@@ -347,6 +372,9 @@ impl MeetingDaemon {
         let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone());
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
         buffer.add_samples(&samples);
+        if speech_checked {
+            buffer.mark_speech_checked();
+        }
 
         let mut result = processor
             .process_chunk(buffer)
