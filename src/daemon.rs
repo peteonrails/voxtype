@@ -640,7 +640,7 @@ fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
 
 /// Allowed diarization backend override values from the CLI handler. Kept in
 /// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
-const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
+const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml", "hybrid"];
 
 /// Validate a diarization backend override against the allowlist.
 ///
@@ -2882,6 +2882,15 @@ impl Daemon {
         }
     }
 
+    /// Rename a speaker in the HUD snapshot and tell meeting.sock subscribers.
+    fn publish_meeting_rename(&mut self, from: &str, to: &str) {
+        self.meeting_hud.rename_speaker(from, to);
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_speaker_renamed(from, to);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
@@ -2893,7 +2902,7 @@ impl Daemon {
             return Ok(());
         }
 
-        // CLI override (validated against ["simple", "ml"] by clap) wins over config.
+        // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
         let backend = diarization_override
             .clone()
             .unwrap_or_else(|| self.config.meeting.diarization.backend.clone());
@@ -3111,8 +3120,14 @@ impl Daemon {
                 None => Vec::new(),
             };
             for event in pending {
-                if let MeetingEvent::ChunkProcessed { chunk_id, segments } = event {
-                    self.publish_meeting_chunk(chunk_id, &segments);
+                match event {
+                    MeetingEvent::ChunkProcessed { chunk_id, segments } => {
+                        self.publish_meeting_chunk(chunk_id, &segments);
+                    }
+                    MeetingEvent::SpeakerRenamed { from, to } => {
+                        self.publish_meeting_rename(&from, &to);
+                    }
+                    _ => {}
                 }
             }
 
@@ -5543,6 +5558,9 @@ impl Daemon {
                                 chunk_id, segments.len());
                             self.publish_meeting_chunk(chunk_id, &segments);
                         }
+                        Some(MeetingEvent::SpeakerRenamed { from, to }) => {
+                            self.publish_meeting_rename(&from, &to);
+                        }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via
                             // `update_meeting_state("paused", ...)`.
@@ -6293,7 +6311,7 @@ while True:
         // Pin the allowlist contents so a future expansion of the CLI's
         // `value_parser` requires touching this test, keeping the daemon
         // and CLI surfaces in sync.
-        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml"]);
+        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml", "hybrid"]);
     }
 
     /// #636: the OSD suppression marker is created and removed, never

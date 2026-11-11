@@ -145,6 +145,7 @@ needed:
 ```json
 {"event": "hello", "status": "recording", "meeting_id": "...", "title": "Standup", "started_at": "2026-09-03T14:00:00Z", "chunk_count": 7, "diarization": {"enabled": true, "backend": "simple"}, "segments": [ /* TranscriptSegment[], same shape as transcript.json */ ]}
 {"event": "segments", "chunk_id": 8, "segments": [ /* TranscriptSegment[] for this chunk only */ ]}
+{"event": "speaker_renamed", "from": "Remote", "to": "Remote 1"}
 {"event": "status", "status": "paused"}
 {"event": "error", "message": "..."}
 ```
@@ -161,6 +162,13 @@ own (one segment per utterance, not per chunk), and `speaker_id` plus
 of one track, so the microphone and loopback events for the same stretch of
 time arrive one after the other: insert by `start_ms` rather than appending.
 Microphone echo of the remote side is removed before an event is sent.
+
+`speaker_renamed` means every segment already received with `speaker_id`
+equal to `from` now has `to`. Hybrid diarization sends it when a second
+remote voice is heard: the remote side, `Remote` until then, becomes
+`Remote 1`, and the new voice arrives as `Remote 2`. The event comes before
+the `segments` event that holds the new voice, a name given to the old ID
+moves to the new one, and the next `hello` already carries the new ID.
 
 Events fire roughly once per `chunk_duration_secs` (default 30s), not per
 word — meeting mode transcribes in chunks, it does not stream. A UI built on

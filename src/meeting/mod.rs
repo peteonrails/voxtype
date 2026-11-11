@@ -97,6 +97,10 @@ pub enum MeetingEvent {
         chunk_id: u32,
         segments: Vec<TranscriptSegment>,
     },
+    /// Segments already published under speaker `from` are now `to`, as
+    /// when hybrid diarization numbers the remote side on hearing a second
+    /// voice
+    SpeakerRenamed { from: String, to: String },
     /// Meeting paused
     Paused,
     /// Meeting resumed
@@ -429,6 +433,49 @@ impl MeetingDaemon {
         }
     }
 
+    /// Rename a speaker in the segments already transcribed, carry over any
+    /// name `meeting label` gave it, and tell the daemon so the HUD's
+    /// backlog follows.
+    async fn rename_speaker(&mut self, from: &str, to: &str) {
+        let Some(ref mut meeting) = self.current_meeting else {
+            return;
+        };
+        let mut renamed = 0;
+        for seg in &mut meeting.transcript.segments {
+            if seg.speaker_id.as_deref() == Some(from) {
+                seg.speaker_id = Some(to.to_string());
+                renamed += 1;
+            }
+        }
+        if renamed == 0 {
+            return;
+        }
+        tracing::info!(
+            "Renamed speaker {} to {} in {} segment(s)",
+            from,
+            to,
+            renamed
+        );
+        if let Err(e) = self
+            .storage
+            .rename_speaker_key(&meeting.metadata.id, from, to)
+        {
+            tracing::warn!(
+                "Failed to carry speaker label from {} to {}: {}",
+                from,
+                to,
+                e
+            );
+        }
+        let _ = self
+            .event_tx
+            .send(MeetingEvent::SpeakerRenamed {
+                from: from.to_string(),
+                to: to.to_string(),
+            })
+            .await;
+    }
+
     /// Persist after every chunk, not just on stop(): a crash mid-meeting
     /// would otherwise lose the whole transcript, and `meeting show --json`
     /// would report nothing while a meeting is in progress. One small JSON
@@ -526,6 +573,9 @@ impl MeetingDaemon {
                     seg.speaker_id = Some(diar.speaker.display_name());
                     seg.confidence = Some(diar.confidence);
                 }
+            }
+            for (from, to) in diarizer.take_speaker_renames() {
+                self.rename_speaker(&from, &to).await;
             }
         }
 
@@ -784,6 +834,104 @@ mod tests {
         live_said.sort();
         assert_eq!(live_said, expected);
         assert_eq!(said(&h.saved().transcript.segments), expected);
+    }
+
+    /// Clusters each loopback chunk as the next new voice: Auto(0), then
+    /// Auto(1), standing in for ECAPA hearing a second remote speaker.
+    struct NewVoicePerChunk(AtomicU32);
+
+    impl diarization::Diarizer for NewVoicePerChunk {
+        fn diarize(
+            &self,
+            _samples: &[f32],
+            _source: AudioSource,
+            _chunk_start_ms: u64,
+            segments: &[TranscriptSegment],
+        ) -> Vec<diarization::DiarizedSegment> {
+            let voice = self.0.fetch_add(1, Ordering::SeqCst);
+            segments
+                .iter()
+                .map(|seg| diarization::DiarizedSegment {
+                    speaker: diarization::SpeakerId::Auto(voice),
+                    start_ms: seg.start_ms,
+                    end_ms: seg.end_ms,
+                    text: seg.text.clone(),
+                    confidence: 0.8,
+                })
+                .collect()
+        }
+
+        fn name(&self) -> &'static str {
+            "new-voice-per-chunk"
+        }
+    }
+
+    /// Hybrid diarization calls the one remote voice "Remote". When a
+    /// second voice speaks, earlier segments become "Remote 1", on disk
+    /// and on the live feed, and a name given to "Remote" moves with them.
+    #[tokio::test]
+    async fn a_second_remote_voice_renames_the_first_everywhere() {
+        let mut h = harness().await;
+        h.daemon.diarizer = Some(Box::new(diarization::hybrid::HybridDiarizer::new(
+            Box::new(NewVoicePerChunk(AtomicU32::new(0))),
+        )));
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Dana").unwrap();
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = h.events.try_recv() {
+            match event {
+                MeetingEvent::SpeakerRenamed { from, to } => {
+                    events.push(format!("rename {from} -> {to}"))
+                }
+                MeetingEvent::ChunkProcessed { segments, .. } => {
+                    for s in segments {
+                        events.push(s.speaker_key());
+                    }
+                }
+                _ => {}
+            }
+        }
+        // The rename reaches the live feed before the chunk that caused it.
+        assert_eq!(
+            events,
+            vec![
+                "You",
+                "Remote",
+                "rename Remote -> Remote 1",
+                "You",
+                "Remote 2"
+            ]
+        );
+
+        cli.set_speaker_label(&id, "Remote 2", "Sam").unwrap();
+        h.daemon.stop().await.unwrap();
+        let speakers: Vec<(String, String)> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.speaker_display()))
+            .collect();
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            speakers,
+            pairs(&[
+                ("You", "You"),
+                ("Remote 1", "Dana"),
+                ("You", "You"),
+                ("Remote 2", "Sam"),
+            ])
+        );
     }
 
     #[tokio::test]

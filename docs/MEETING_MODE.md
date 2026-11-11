@@ -184,11 +184,12 @@ Every format lists the conversation in the order it was spoken: your lines and r
 
 ### Labeling Speakers
 
-Every transcript names its speakers. With simple diarization they are `You` (your microphone) and `Remote` (system audio); with ML diarization they are auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc. You can replace any of them with real names:
+Every transcript names its speakers. With simple diarization they are `You` (your microphone) and `Remote` (system audio); with ML diarization they are auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc.; with hybrid diarization they are `You` plus `Remote`, or `Remote 1`, `Remote 2` and so on once a second remote voice has spoken. You can replace any of them with real names:
 
 ```bash
 voxtype meeting label latest You "Pete"
 voxtype meeting label latest Remote "Dana"
+voxtype meeting label latest "Remote 2" "Sam"
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label latest 1 "Bob"
 ```
@@ -286,7 +287,7 @@ Speaker diarization identifies who said what in the transcript.
 # Enable speaker diarization (default: true)
 enabled = true
 
-# Backend: "simple", "ml", or "subprocess" (default: "simple")
+# Backend: "simple", "ml", "hybrid", or "subprocess" (default: "simple")
 backend = "simple"
 
 # Maximum speakers to detect (default: 10)
@@ -297,9 +298,18 @@ max_speakers = 10
 
 - **simple**: Uses audio source (mic vs loopback) to attribute speech as "You" or "Remote". No ML model needed.
 - **ml**: Uses ONNX-based speaker embeddings (ECAPA-TDNN) to identify individual remote speakers. The model is downloaded automatically on first use. **Experimental:** speaker clustering works best with longer speech segments; short segments may produce too many unique speaker IDs.
+- **hybrid**: Your microphone is always `You`, and speaker clustering runs only over the system audio to tell the remote participants apart. A call with one remote voice shows `Remote`, as with `simple`. When a second voice speaks, the first becomes `Remote 1` (in segments already saved and on the live meeting socket, and any name you gave `Remote` moves with it) and the new one `Remote 2`. Because the microphone is never clustered, your own voice cannot be split into several speakers and echo of the call on your microphone cannot turn into a speaker. Needs the same `ml-diarization` feature and ECAPA-TDNN model as `ml`; without them it falls back to `simple` and logs a warning.
 - **subprocess**: Same as `ml` but runs in a separate process for memory isolation.
 
-For most users, `simple` is sufficient. Use `ml` if you need to distinguish between multiple remote participants.
+For most users, `simple` is sufficient. Use `hybrid` if you need to distinguish between multiple remote participants on a call, and `ml` for a recording where everyone is in the same room on one microphone.
+
+`similarity_threshold`, `min_segment_ms` and the `vad_*` settings tune the clustering for both `ml` and `hybrid`; see the [configuration reference](CONFIGURATION.md#meetingdiarization). If one remote voice is split into `Remote 1` and `Remote 2`, lower `similarity_threshold`; if two remote voices share one name, raise it.
+
+To try hybrid for a single meeting without changing your config:
+
+```bash
+voxtype meeting start --diarization hybrid
+```
 
 ### Summarization Settings
 

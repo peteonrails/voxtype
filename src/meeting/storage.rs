@@ -497,6 +497,27 @@ impl MeetingStorage {
         Ok(keys)
     }
 
+    /// Move a speaker's label to a new speaker ID, for when the diarizer
+    /// renames a speaker mid-meeting. A label already on `to` wins.
+    pub fn rename_speaker_key(
+        &self,
+        meeting_id: &MeetingId,
+        from: &str,
+        to: &str,
+    ) -> Result<(), StorageError> {
+        let id = meeting_id.to_string();
+        self.conn.execute(
+            "UPDATE OR IGNORE speaker_name_labels SET speaker_key = ?3 \
+             WHERE meeting_id = ?1 AND speaker_key = ?2",
+            params![id, from, to],
+        )?;
+        self.conn.execute(
+            "DELETE FROM speaker_name_labels WHERE meeting_id = ?1 AND speaker_key = ?2",
+            params![id, from],
+        )?;
+        Ok(())
+    }
+
     /// All speaker labels for a meeting, keyed by speaker ID.
     pub fn get_speaker_labels(
         &self,
