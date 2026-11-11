@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell.Io
+import "MeetingText.js" as MT
 
 
 // The meeting view's subprocesses: `voxtype meeting …` and the one config read
@@ -118,7 +119,8 @@ Item {
       var action = actionProc.action
       var extra = actionProc.extra
       var ok = exitCode === 0
-      var message = ok ? "" : (actionProc.err || ("voxtype meeting " + action + " exited " + exitCode))
+      var what = action === "annotate" ? "notes on lines" : action === "reassign" ? "moving lines" : "voxtype meeting " + action
+      var message = ok ? "" : (MT.cliProblem(actionProc.err, what) || ("voxtype meeting " + action + " exited " + exitCode))
       actionProc.action = ""
       if (ok && action === "label" && extra) root.labelApplied(extra.key, extra.name)
       if (action === "reassign" || action === "annotate") {
@@ -137,7 +139,7 @@ Item {
     onFailedToStart: {
       var action = actionProc.action
       var extra = actionProc.extra
-      var message = "Could not run " + root.bin + ". Is voxtype installed?"
+      var message = MT.missingCli(root.bin)
       actionProc.action = ""
       if (action === "reassign") root.reassignFinished(extra, false, message, null)
       if (action === "annotate") root.annotateFinished(extra, false, message, null)

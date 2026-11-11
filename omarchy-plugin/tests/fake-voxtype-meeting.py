@@ -62,7 +62,10 @@ meeting rewrite its transcript.json; edits to the socket's meetings go through
 the socket, which announces live ones as segment_updated.
 
 state["fail"] maps an action ("pause", "label", …) to the stderr it should
-fail with (exit 1), changing nothing.
+fail with (exit 1), changing nothing. state["old"] makes the commands newer
+than 1.3.0 (assistant, ask, summarize, notes, annotate, reassign) fail the way
+an older voxtype does: "unrecognized subcommand", exit 2. `status --format
+json` exits 0 only with state["daemon_running"].
 """
 import json
 import os
@@ -259,8 +262,8 @@ def status(state):
                 "supported": c.get("supported", True), "tool_less": c["id"] == "claude",
                 "sandbox": "bwrap" if c["id"] == "codex" else None, "consent": c.get("consent", False),
                 "sources": ["path"]}
-        if c["id"] == "codex":
-            cand["note"] = CODEX_NOTE
+        if c.get("note") or c["id"] == "codex":
+            cand["note"] = c.get("note", CODEX_NOTE)
         cands.append(cand)
     usable = [c for c in cands if c["found"] and c["supported"]]
     agent = next((c for c in cands if c["id"] == a.get("agent")), None) if a.get("agent") else None
@@ -350,8 +353,11 @@ def ask(state, args):
     meeting = resolve(state, rest[0])
     st = status(state)
     if st["backend"] == "none":
-        emit({"event": "error", "code": st["blocked"],
-              "message": "Meeting transcripts can't go to %s until you allow it." % (st["agent_name"] or "an agent")})
+        if st["blocked"] == "consent_required":
+            message = "Meeting transcripts can't go to %s until you allow it." % (st["agent_name"] or "an agent")
+        else:
+            message = "No agent or local model is available (%s)." % st["blocked"]
+        emit({"event": "error", "code": st["blocked"], "message": message})
         return 1
     if state.get("fail", {}).get("ask"):
         emit({"event": "error", "code": "agent_failed", "message": state["fail"]["ask"]})
@@ -516,6 +522,18 @@ def main():
             return 2
         print("true" if state.get("show_view_on_start", True) else "false")
         return 0
+
+    if args[:3] == ["status", "--format", "json"]:
+        if state.get("daemon_running"):
+            print(json.dumps({"text": "", "alt": "idle", "class": "idle"}))
+            return 0
+        print("voxtype daemon is not running", file=sys.stderr)
+        return 1
+
+    if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
+            "assistant", "ask", "summarize", "notes", "annotate", "reassign"):
+        print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
+        return 2
 
     if args[:2] == ["config", "set"] and len(args) == 4:
         return config_set(state, args[2], args[3])

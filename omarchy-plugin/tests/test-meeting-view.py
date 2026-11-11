@@ -53,6 +53,12 @@ Scenarios:
               over; when it ends, Back shows it at the top of the list
   list-old    a voxtype whose list has no has_summary/speaker_count: the rows
               read their folders instead
+  cli-missing no voxtype to run: the list, Start and the assistant say so
+  daemon-old  the daemon answers but publishes no meeting.sock
+  agent-missing  no usable agent: the Ask tab says what to install; an
+              unsupported agent shows its note in the menu
+  old-voxtype a voxtype without the 1.3.0 commands: each feature says to update
+  copy        Copy on an answer and on the summary (wl-copy), and wl-copy missing
   ask-error   an ask that fails shows the error event's message
   summary-error  a summary that fails after the meeting shows its error
   autoopen    a meeting started elsewhere opens the closed view
@@ -85,9 +91,12 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-             "ask-error", "summary-error", "list-old")
+             "ask-error", "summary-error", "list-old", "cli-missing", "daemon-old", "agent-missing",
+             "old-voxtype", "copy")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
+DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
+                  "Nobody raised a blocker.")
 STANDALONE = h.PLUGIN.parent / "quickshell"
 HOSTS = ("omarchy", "standalone")
 # Scenarios about the Omarchy Settings panel itself.
@@ -168,6 +177,9 @@ INITIAL = {
     "scroll-tabs": lambda: [scroll_meeting()],
     "view-request": lambda: [running_meeting()],
     "ask-error": lambda: [running_meeting()],
+    "agent-missing": lambda: [running_meeting()],
+    "old-voxtype": lambda: [running_meeting()],
+    "copy": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
 }
 
@@ -188,6 +200,11 @@ STATE = {
                                      "candidates": [dict(CLAUDE, consent=False), dict(CODEX, consent=False)]}},
     "local-only": {"assistant": {"agent": "claude", "local_only": False, "candidates": [CLAUDE, CODEX]}},
     "ask-error": {"fail": {"ask": "Claude failed: the agent exited with status 1."}},
+    "daemon-old": {"daemon_running": True},
+    "agent-missing": {"assistant": {"agent": None, "local_only": False, "candidates": [
+        dict(CLAUDE, found=False),
+        dict(CODEX, supported=False, note="bwrap is not installed, so codex cannot run in its jail")]}},
+    "old-voxtype": {"old": True},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
 }
 
@@ -277,7 +294,16 @@ def run(scenario, host, shell, evidence):
         fake = r.root / "voxtype-meeting-fake"
         fake.write_text("#!/bin/sh\nexec " + sys.executable + " -I " + str(FAKE_CLI) + ' "$@"\n')
         fake.chmod(0o755)
+        if scenario == "cli-missing":
+            fake = r.root / "no-such-voxtype"
         r.dev_json(fake)
+        # wl-copy that keeps what it was given.
+        bindir = r.root / "bin"
+        bindir.mkdir()
+        clipboard = r.root / "clipboard.txt"
+        (bindir / "wl-copy").write_text("#!/bin/sh\ncat >> " + str(clipboard) + "\nprintf '\\n<<END>>\\n' >> "
+                                        + str(clipboard) + "\n")
+        (bindir / "wl-copy").chmod(0o755)
 
         runtime = r.root / "run"
         (runtime / "voxtype").mkdir(parents=True)
@@ -302,7 +328,7 @@ def run(scenario, host, shell, evidence):
                 if sock.exists():
                     break
                 time.sleep(0.02)
-            if scenario == "nodaemon":
+            if scenario in ("nodaemon", "daemon-old"):
                 with open(ctl, "a") as f:
                     f.write(json.dumps({"cmd": "down"}) + "\n")
                 for _ in range(100):
@@ -316,7 +342,8 @@ def run(scenario, host, shell, evidence):
                 "__PAST_DESIGN__": PAST["design"], "__PAST_ONE2ONE__": PAST["one2one"],
             }, env={"XDG_RUNTIME_DIR": str(runtime), "FAKE_MEETING_CTL": str(ctl),
                     "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot),
-                    "FAKE_MEETING_DATA": str(data)}, timeout=120)
+                    "FAKE_MEETING_DATA": str(data),
+                    "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", "")}, timeout=120)
         finally:
             with open(ctl, "a") as f:
                 f.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -333,11 +360,17 @@ def run(scenario, host, shell, evidence):
 
         notes_file = data / ("notes-%s.md" % MEETING_ID)
         saved_notes = notes_file.read_text() if notes_file.exists() else None
+        copied = clipboard.read_text() if clipboard.exists() else None
 
     problems = h.driver_problems(output, code, "MEETING_VIEW", scenario)
     problems += check_calls(scenario, calls, runtime_notes=str(runtime / "voxtype"))
     if scenario == "notes" and saved_notes != "Mine":
         problems.append("notes on disk: %r, expected 'Mine'" % saved_notes)
+    # The answer, then the summary's markdown.
+    if scenario == "copy":
+        parts = (copied or "").split("\n<<END>>\n")
+        if len(parts) < 2 or parts[0] != DEFAULT_ANSWER or not parts[1].startswith("## Overview"):
+            problems.append("clipboard: %r" % copied)
     return output, problems, calls
 
 
@@ -427,6 +460,12 @@ def check_calls(scenario, calls, runtime_notes=""):
                         ["config", "set", "meeting.assistant.agent", "codex"],
                         ["config", "set", "meeting.assistant.local_only", "false"]], "config writes")
         expect(meeting, [], "meeting commands")
+    elif scenario in ("cli-missing", "daemon-old", "old-voxtype"):
+        pass
+    elif scenario == "agent-missing":
+        expect(meeting, [ask_call("What did we decide?")], "meeting commands")
+    elif scenario == "copy":
+        expect(meeting, [ask_call("What did we decide?"), ["meeting", "stop"], summarize_call()], "meeting commands")
     elif scenario == "ask-error":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario in ("summary", "view-request", "summary-error"):

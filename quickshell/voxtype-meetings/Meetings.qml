@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "MeetingText.js" as MT
 
 // The meeting view, everything but the host: the live feed from meeting.sock,
 // the `voxtype meeting` commands, the assistant (notes, ask, summary), the
@@ -112,7 +113,7 @@ Item {
         return
       }
       if (code !== 0) {
-        root.listError = listProc.err || "voxtype meeting list exited " + code
+        root.listError = MT.cliProblem(listProc.err, "the meetings list") || "voxtype meeting list exited " + code
         return
       }
       var parsed = null
@@ -124,7 +125,62 @@ Item {
       root.listError = ""
       root.pastMeetings = parsed
     }
-    onFailedToStart: root.listError = "Could not run " + root.bin
+    onFailedToStart: root.listError = MT.missingCli(root.bin)
+  }
+
+  // ------------------------------------------------------------ daemon
+
+  // While meeting.sock cannot be reached: is the daemon down, or running
+  // without the socket (a voxtype from before it, or one that failed to bind
+  // it)? `voxtype status` exits 0 when a daemon answers. The view says which.
+  property bool daemonRunning: false
+  Timer {
+    interval: 4000
+    repeat: true
+    triggeredOnStart: true
+    running: root.shown && !feed.connected
+    onTriggered: if (!daemonProc.running && !daemonProc.startPending) daemonProc.launch([root.bin, "status", "--format", "json"])
+  }
+  MeetingProcess {
+    id: daemonProc
+    onExited: function(code) { root.daemonRunning = code === 0 }
+    onFailedToStart: root.daemonRunning = false
+  }
+
+  // ------------------------------------------------------------ copy
+
+  // The command a Copy runs, text on stdin. wl-clipboard's, which Omarchy and
+  // most Wayland desktops ship.
+  property string copyCommand: "wl-copy"
+  signal copied(string key)
+
+  function copyText(text, key) {
+    if (copyProc.running || copyProc.startPending) return
+    copyProc.text = String(text || "")
+    copyProc.key = key
+    copyProc.err = ""
+    copyProc.stdinEnabled = true
+    copyProc.launch([root.copyCommand])
+  }
+
+  MeetingProcess {
+    id: copyProc
+    property string text: ""
+    property string key: ""
+    property string err: ""
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: copyProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (code === 0) root.copied(copyProc.key)
+      else root.actionError = "Could not copy: " + (copyProc.err || root.copyCommand + " exited " + code)
+    }
+    onFailedToStart: root.actionError = "Copying needs " + root.copyCommand + " (the wl-clipboard package), which is not installed."
+  }
+  Connections {
+    target: copyProc
+    function onStarted() {
+      copyProc.write(copyProc.text)
+      copyProc.stdinEnabled = false
+    }
   }
 
   Connections {
@@ -172,6 +228,11 @@ Item {
     onShowOnStartRead: function(show) {
       if (show && !root.panelOpen) root.openRequested()
     }
+  }
+
+  Connections {
+    target: root
+    function onCopied(key) { if (root.window) root.window.view.noteCopied(key) }
   }
 
   Connections {
@@ -284,11 +345,12 @@ Item {
     }
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: storedProc.out = String(text || "") }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: storedProc.err = String(text || "").trim() }
+    onFailedToStart: root.actionError = MT.missingCli(root.bin)
     onExited: function(code) {
       var data = null
       try { data = JSON.parse(storedProc.out) } catch (e) {}
       if (code !== 0 || !data || !feed.loadStored(data)) {
-        root.actionError = storedProc.err || "Could not open that meeting."
+        root.actionError = MT.cliProblem(storedProc.err, "opening past meetings") || "Could not open that meeting."
         return
       }
       if (data.metadata && data.metadata.summary) assistant.setStoredSummary(feed.meetingId, data.metadata.summary)
@@ -324,6 +386,7 @@ Item {
       view.listLoading = Qt.binding(function() { return root.listLoading })
       view.listError = Qt.binding(function() { return root.listError })
       view.listHasMore = Qt.binding(function() { return root.listHasMore })
+      view.daemonRunning = Qt.binding(function() { return root.daemonRunning })
       if (root.pendingTab !== "") view.selectTab(root.pendingTab)
       root.pendingTab = ""
       w.visible = true
@@ -349,6 +412,7 @@ Item {
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }
+    function onCopyRequested(text, key) { root.copyText(text, key) }
     function onCloseRequested() { root.closeRequested() }
     function onErrorDismissed() { root.actionError = "" }
   }

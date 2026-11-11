@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "MeetingText.js" as MT
 
 // Notes, Ask and Summary for the meeting the feed holds. Non-visual and owned
 // by Meetings.qml, so an answer still streams in, and the notes still save,
@@ -72,6 +73,21 @@ Item {
   readonly property string blocker: {
     if (status === null || status.blocked !== "consent_required") return ""
     return status.choice_required === true ? "choose" : "consent"
+  }
+
+  // Why nothing can answer, for the Ask and Summary tabs; "" when something
+  // can, or when consent is all that is missing (the dialog handles that).
+  readonly property string problem: {
+    if (root.status === null) return root.statusError
+    var s = root.status
+    if (s.backend !== "none" || s.blocked === "consent_required") return ""
+    if (s.problem) return String(s.problem)
+    if (s.blocked === "no_backend")
+      return "No agent or local model was found. Questions and summaries need Claude Code or Codex, "
+        + "or Ollama for a local model. Install one, or name one in [meeting.assistant] agent."
+    if (s.blocked === "agent_unavailable")
+      return (s.agent_name || "The configured agent") + " was not found. Install it, or pick another agent."
+    return "The meeting assistant cannot answer right now (" + s.blocked + ")."
   }
 
   // The work waiting on the consent dialog: {kind: "ask"|"summary", ...}.
@@ -440,7 +456,8 @@ Item {
     property string out: ""
     property bool again: false
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: statusProc.out = String(text || "") }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.statusError = String(text || "").trim() }
+    property string err: ""
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: statusProc.err = String(text || "").trim() }
     onExited: function(code) {
       if (statusProc.again) {
         statusProc.again = false
@@ -455,13 +472,18 @@ Item {
             root.statusError = ""
           }
         } catch (e) {
-          root.statusError = "voxtype meeting assistant status did not return JSON"
+          root.statusError = "voxtype meeting assistant status did not return JSON."
         }
+      } else {
+        root.status = null
+        root.statusError = MT.cliProblem(statusProc.err, "the meeting assistant (Ask and summaries)")
+          || "voxtype meeting assistant status exited " + code + "."
       }
       root.runAfterStatus()
     }
     onFailedToStart: {
-      root.statusError = "Could not run " + root.bin
+      root.status = null
+      root.statusError = MT.missingCli(root.bin)
       root.runAfterStatus()
     }
   }
@@ -502,7 +524,7 @@ Item {
     onFailedToStart: {
       configProc.steps = []
       configProc.job = null
-      root.assistantError("Could not run " + root.bin)
+      root.assistantError(MT.missingCli(root.bin))
     }
   }
 
@@ -550,7 +572,7 @@ Item {
       if (r >= 0) {
         threadModel.setProperty(r, "pending", false)
         if (code !== 0 && threadModel.get(r).error === "")
-          threadModel.setProperty(r, "error", askProc.err || "voxtype meeting ask exited " + code)
+          threadModel.setProperty(r, "error", MT.cliProblem(askProc.err, "the meeting assistant (Ask)") || "voxtype meeting ask exited " + code)
       }
       askProc.answerRow = -1
       askProc.errorCode = ""
@@ -567,7 +589,7 @@ Item {
       var r = askProc.row()
       if (r >= 0) {
         threadModel.setProperty(r, "pending", false)
-        threadModel.setProperty(r, "error", "Could not run " + root.bin)
+        threadModel.setProperty(r, "error", MT.missingCli(root.bin))
       }
       askProc.answerRow = -1
       Qt.callLater(root.pumpAsk)
@@ -619,7 +641,7 @@ Item {
           return
         }
         root.summaryState = "error"
-        root.summaryError = summaryProc.err.replace(/^Error:\s*/, "") || "voxtype meeting summarize exited " + code
+        root.summaryError = MT.cliProblem(summaryProc.err, "summaries") || "voxtype meeting summarize exited " + code
         return
       }
       var parsed = null
@@ -635,7 +657,7 @@ Item {
     }
     onFailedToStart: {
       root.summaryState = "error"
-      root.summaryError = "Could not run " + root.bin
+      root.summaryError = MT.missingCli(root.bin)
     }
   }
 
@@ -661,15 +683,24 @@ Item {
     id: notesReadProc
     property string meeting: ""
     property string out: ""
+    property string err: ""
     property bool again: false
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: notesReadProc.out = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: notesReadProc.err = String(text || "").trim() }
+    onFailedToStart: root.notesError = MT.missingCli(root.bin)
     onExited: function(code) {
       if (notesReadProc.again) {
         notesReadProc.again = false
         Qt.callLater(root.loadNotes)
         return
       }
-      if (code !== 0 || notesReadProc.meeting !== root.notesMeeting || root.notesDirty) return
+      if (notesReadProc.meeting !== root.notesMeeting) return
+      if (code !== 0) {
+        root.notesError = MT.cliProblem(notesReadProc.err, "meeting notes") || "Could not read the notes."
+        return
+      }
+      if (root.notesError.indexOf("too old") !== -1 || root.notesError.indexOf("Could not") === 0) root.notesError = ""
+      if (root.notesDirty) return
       var parsed = null
       try { parsed = JSON.parse(notesReadProc.out) } catch (e) {}
       root.notes = parsed && parsed.notes !== undefined && parsed.notes !== null ? String(parsed.notes) : ""
@@ -683,7 +714,7 @@ Item {
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: notesSaveProc.err = String(text || "").trim() }
     onExited: function(code) {
       if (code !== 0) {
-        root.notesError = notesSaveProc.err || "voxtype meeting notes exited " + code
+        root.notesError = MT.cliProblem(notesSaveProc.err, "meeting notes") || "voxtype meeting notes exited " + code
         return
       }
       root.notesError = ""
@@ -691,6 +722,6 @@ Item {
       if (root.notes === notesSaveProc.saved) root.notesDirty = false
       else notesDebounce.restart()
     }
-    onFailedToStart: root.notesError = "Could not run " + root.bin
+    onFailedToStart: root.notesError = MT.missingCli(root.bin)
   }
 }

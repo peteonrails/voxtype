@@ -14,6 +14,8 @@ Item {
 
   signal agentMenuRequested(var anchor)
   signal citationActivated(real ms)
+  signal copyRequested(string text, string key)
+  property string copiedKey: ""
 
   // Show one answer (a notification's Open) and flash it.
   property int flashRow: -1
@@ -52,6 +54,18 @@ Item {
         assistant: root.assistant
         onMenuRequested: function(anchor) { root.agentMenuRequested(anchor) }
       }
+    }
+
+    // Why nothing can answer (no agent, an old voxtype, the CLI missing).
+    Text {
+      objectName: "assistantProblem"
+      Layout.fillWidth: true
+      visible: text !== ""
+      text: root.assistant ? root.assistant.problem : ""
+      color: root.theme.urgent
+      font.family: root.theme.fontFamily
+      font.pixelSize: root.theme.bodySmall
+      wrapMode: Text.WordWrap
     }
 
     ListView {
@@ -169,13 +183,38 @@ Item {
             wrapMode: Text.WordWrap
           }
 
-          Text {
-            objectName: "answerBy"
-            visible: !entry.pending && entry.error === "" && entry.agent !== ""
-            text: "Answered by " + entry.agent
-            color: root.theme.dim
-            font.family: root.theme.fontFamily
-            font.pixelSize: root.theme.caption
+          Row {
+            spacing: root.theme.lg
+            visible: !entry.pending && entry.error === ""
+
+            Text {
+              objectName: "answerBy"
+              visible: entry.agent !== ""
+              text: "Answered by " + entry.agent
+              color: root.theme.dim
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.caption
+            }
+
+            Text {
+              id: copyAnswer
+              objectName: "answerCopy"
+              visible: entry.text !== ""
+              readonly property string key: "answer:" + entry.index
+              text: root.copiedKey === copyAnswer.key ? "Copied" : "Copy"
+              color: copyMouse.containsMouse ? root.theme.fg : root.theme.dim
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.caption
+              font.underline: copyMouse.containsMouse
+              MouseArea {
+                id: copyMouse
+                anchors.fill: parent
+                anchors.margins: -root.theme.sm
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.copyRequested(entry.text, copyAnswer.key)
+              }
+            }
           }
         }
       }

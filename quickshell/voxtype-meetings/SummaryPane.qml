@@ -15,6 +15,8 @@ Item {
 
   signal agentMenuRequested(var anchor)
   signal citationActivated(real ms)
+  signal copyRequested(string text, string key)
+  property string copiedKey: ""
 
   readonly property string summaryState: root.assistant ? root.assistant.summaryState : ""
   readonly property alias flick: flick
@@ -40,6 +42,14 @@ Item {
         onMenuRequested: function(anchor) { root.agentMenuRequested(anchor) }
       }
       MeetingButton {
+        objectName: "summaryCopy"
+        theme: root.theme
+        visible: root.assistant && root.assistant.summaryMarkdown !== ""
+        text: root.copiedKey === "summary" ? "Copied" : "Copy"
+        bordered: true
+        onClicked: root.copyRequested(root.assistant.summaryMarkdown, "summary")
+      }
+      MeetingButton {
         objectName: "regenerateButton"
         theme: root.theme
         text: root.summaryState === "ready" || root.summaryState === "error" ? "Regenerate" : "Summarize"
@@ -47,6 +57,17 @@ Item {
         enabled: root.summaryState !== "summarizing" && root.feed && root.feed.meetingId !== ""
         onClicked: root.assistant.regenerate()
       }
+    }
+
+    Text {
+      objectName: "assistantProblem"
+      Layout.fillWidth: true
+      visible: text !== "" && root.summaryState !== "ready"
+      text: root.assistant ? root.assistant.problem : ""
+      color: root.theme.urgent
+      font.family: root.theme.fontFamily
+      font.pixelSize: root.theme.bodySmall
+      wrapMode: Text.WordWrap
     }
 
     Text {
