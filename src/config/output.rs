@@ -97,10 +97,18 @@ pub struct OutputConfig {
     #[serde(default)]
     pub post_process: Option<PostProcessConfig>,
 
-    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v")
-    /// Defaults to "ctrl+v" if not specified
+    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v"),
+    /// or "auto" to send ctrl+v to GUI apps and `paste_keys_terminal` to terminals.
+    /// Defaults to "auto" if not specified
     #[serde(default)]
     pub paste_keys: Option<String>,
+
+    /// Keystroke paste mode sends when the focused window is a terminal
+    /// (detected on Hyprland, Sway and niri). Defaults to "ctrl+shift+v".
+    /// Setting it alongside an explicit `paste_keys` makes that keystroke
+    /// terminal-aware too.
+    #[serde(default)]
+    pub paste_keys_terminal: Option<String>,
 
     /// Keyboard layout for dotool (e.g., "de" for German, "fr" for French)
     /// Required for non-US keyboard layouts when using dotool
@@ -206,6 +214,7 @@ impl Default for OutputConfig {
             post_output_command: None,
             post_process: None,
             paste_keys: None,
+            paste_keys_terminal: None,
             dotool_xkb_layout: None,
             dotool_xkb_variant: None,
             eitype_xkb_layout: None,
