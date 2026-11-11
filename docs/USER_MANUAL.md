@@ -2751,6 +2751,10 @@ voxtype meeting label <id> 0 "Bob"
 voxtype meeting reassign latest 28 "Remote 2"
 voxtype meeting reassign latest 28 --reset
 
+# Notes and per-line annotations
+voxtype meeting notes latest --append "Ask Dana about travel"
+voxtype meeting annotate latest 28 "Check this number" --highlight
+
 # AI summarization (requires Ollama or remote API)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json

@@ -726,10 +726,20 @@ fn check_meeting_resume() -> bool {
     }
 }
 
-/// Check for a `meeting reassign` (via file trigger). The CLI has already
-/// stored the move; the daemon applies it to the running meeting.
-fn check_meeting_reassign() -> bool {
-    let file = Config::runtime_dir().join("meeting_reassign");
+/// Check for a `meeting reassign` or `meeting annotate` (via file trigger).
+/// The CLI has already stored the change; the daemon applies it to the
+/// running meeting.
+fn check_meeting_edit() -> bool {
+    take_trigger("meeting_edit")
+}
+
+/// Check for a change to the running meeting's notes (via file trigger).
+fn check_meeting_notes() -> bool {
+    take_trigger("meeting_notes")
+}
+
+fn take_trigger(name: &str) -> bool {
+    let file = Config::runtime_dir().join(name);
     if file.exists() {
         let _ = std::fs::remove_file(&file);
         true
@@ -747,7 +757,8 @@ fn cleanup_meeting_files() {
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
-        "meeting_reassign",
+        "meeting_edit",
+        "meeting_notes",
     ] {
         let file = runtime_dir.join(name);
         if file.exists() {
@@ -3275,10 +3286,20 @@ impl Daemon {
             changed = true;
         }
 
-        if check_meeting_reassign() {
+        if check_meeting_edit() {
             if let Some(ref mut daemon) = self.meeting_daemon {
-                tracing::debug!("Meeting speaker reassignment requested via file trigger");
-                daemon.apply_speaker_overrides().await;
+                tracing::debug!("Meeting transcript edit requested via file trigger");
+                daemon.apply_segment_edits().await;
+            }
+        }
+
+        if check_meeting_notes() {
+            let notes = self.meeting_daemon.as_ref().and_then(|daemon| {
+                let id = daemon.current_meeting_id()?;
+                daemon.storage().load_notes(&id).ok()
+            });
+            if let (Some(notes), Some(ref hub)) = (notes, &self.meeting_event_hub) {
+                hub.publish_notes_updated(&notes);
             }
         }
 

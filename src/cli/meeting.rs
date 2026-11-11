@@ -177,6 +177,68 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read or write a meeting's notes
+    ///
+    /// Free-text notes kept in notes.md in the meeting's folder. With no
+    /// option, prints them. Safe while the meeting records: the daemon
+    /// never overwrites them. Exports and transcript.md show them at the
+    /// top under "Notes".
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting notes latest\n  \
+        voxtype meeting notes latest --append 'Follow up with Dana about the budget'\n  \
+        voxtype meeting notes latest --set-file notes.md\n  \
+        echo 'New notes' | voxtype meeting notes latest --set-file -\n  \
+        voxtype meeting notes latest --json")]
+    Notes {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// Add TEXT as a new line at the end of the notes
+        #[arg(long, value_name = "TEXT", conflicts_with = "set_file")]
+        append: Option<String>,
+
+        /// Replace the notes with the contents of PATH ("-" reads stdin)
+        #[arg(long, value_name = "PATH")]
+        set_file: Option<std::path::PathBuf>,
+
+        /// Print {meeting_id, notes, updated_at} as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach a note or highlight to one transcript line
+    ///
+    /// Replaces any annotation the line had. Segment IDs are the `id` of
+    /// each segment in `meeting show --json`. Works while the meeting is
+    /// still recording. Exports and transcript.md show the annotation as a
+    /// quote under its line.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting annotate latest 28 'Check this number'\n  \
+        voxtype meeting annotate latest 28 'Decision' --highlight\n  \
+        voxtype meeting annotate latest 28 --highlight\n  \
+        voxtype meeting annotate latest 28 --remove")]
+    Annotate {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// The segment to annotate (its `id` in `meeting show --json`)
+        segment_id: u32,
+
+        /// The note
+        #[arg(required_unless_present_any = ["highlight", "remove"], conflicts_with = "remove")]
+        text: Option<String>,
+
+        /// Highlight the line, with or without a note
+        #[arg(long, conflicts_with = "remove")]
+        highlight: bool,
+
+        /// Remove the line's annotation
+        #[arg(long)]
+        remove: bool,
+
+        /// Print the updated segment as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
     /// Uses Ollama or a remote API to generate a summary with

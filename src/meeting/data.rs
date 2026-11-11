@@ -67,6 +67,15 @@ impl std::fmt::Display for AudioSource {
     }
 }
 
+/// A note or highlight attached to one transcript line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentAnnotation {
+    /// The note; empty for a bare highlight
+    pub text: String,
+    /// Whether the line is highlighted
+    pub highlight: bool,
+}
+
 /// A single transcript segment with timing and speaker info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
@@ -90,7 +99,11 @@ pub struct TranscriptSegment {
     /// another speaker by hand (`meeting reassign`). `speaker_id` then holds
     /// the chosen speaker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reassigned_from: Option<String>,
+    pub original_speaker: Option<String>,
+    /// A note or highlight the user attached to this line
+    /// (`meeting annotate`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<SegmentAnnotation>,
     /// Confidence score (0.0 - 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -109,7 +122,8 @@ impl TranscriptSegment {
             source: AudioSource::Unknown,
             speaker_id: None,
             speaker_label: None,
-            reassigned_from: None,
+            original_speaker: None,
+            annotation: None,
             confidence: None,
             chunk_id,
         }
@@ -426,7 +440,7 @@ impl Transcript {
     pub fn apply_speaker_overrides(&mut self, overrides: &std::collections::HashMap<u32, String>) {
         for segment in &mut self.segments {
             let assigned = segment
-                .reassigned_from
+                .original_speaker
                 .take()
                 .unwrap_or_else(|| segment.speaker_key());
             let target = overrides.get(&segment.id).unwrap_or(&assigned);
@@ -435,8 +449,19 @@ impl Transcript {
                 segment.speaker_label = None;
             }
             if *target != assigned {
-                segment.reassigned_from = Some(assigned);
+                segment.original_speaker = Some(assigned);
             }
+        }
+    }
+
+    /// Attach the user's notes and highlights: `annotations` maps a segment
+    /// ID to its annotation, and a line missing from it has none.
+    pub fn apply_annotations(
+        &mut self,
+        annotations: &std::collections::HashMap<u32, SegmentAnnotation>,
+    ) {
+        for segment in &mut self.segments {
+            segment.annotation = annotations.get(&segment.id).cloned();
         }
     }
 
@@ -449,8 +474,8 @@ impl Transcript {
                 segment.speaker_id = Some(to.to_string());
                 renamed += 1;
             }
-            if segment.reassigned_from.as_deref() == Some(from) {
-                segment.reassigned_from = Some(to.to_string());
+            if segment.original_speaker.as_deref() == Some(from) {
+                segment.original_speaker = Some(to.to_string());
                 renamed += 1;
             }
         }
@@ -639,6 +664,9 @@ pub struct MeetingData {
     pub metadata: MeetingMetadata,
     /// Transcript
     pub transcript: Transcript,
+    /// The user's free-text notes (notes.md), when there are any
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 impl MeetingData {
@@ -647,6 +675,7 @@ impl MeetingData {
         Self {
             metadata: MeetingMetadata::new(title),
             transcript: Transcript::new(),
+            notes: None,
         }
     }
 
@@ -1169,7 +1198,7 @@ mod tests {
     fn keys(t: &Transcript) -> Vec<(String, Option<String>)> {
         t.segments
             .iter()
-            .map(|s| (s.speaker_key(), s.reassigned_from.clone()))
+            .map(|s| (s.speaker_key(), s.original_speaker.clone()))
             .collect()
     }
 
@@ -1192,7 +1221,7 @@ mod tests {
 
         // Applying again is a no-op; removing the override undoes it.
         t.apply_speaker_overrides(&overrides);
-        assert_eq!(t.segments[1].reassigned_from.as_deref(), Some("Remote 1"));
+        assert_eq!(t.segments[1].original_speaker.as_deref(), Some("Remote 1"));
         t.apply_speaker_overrides(&std::collections::HashMap::new());
         assert_eq!(
             keys(&t),
@@ -1245,6 +1274,27 @@ mod tests {
                 ("Remote 1".to_string(), Some("Remote 2".to_string())),
             ]
         );
+    }
+
+    #[test]
+    fn annotations_attach_by_segment_id_and_come_off_again() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        let mut annotations = std::collections::HashMap::new();
+        let note = SegmentAnnotation {
+            text: "check".to_string(),
+            highlight: false,
+        };
+        annotations.insert(1, note.clone());
+        t.apply_annotations(&annotations);
+        assert_eq!(t.segments[0].annotation, None);
+        assert_eq!(t.segments[1].annotation, Some(note));
+
+        t.apply_annotations(&std::collections::HashMap::new());
+        assert_eq!(t.segments[1].annotation, None);
+        let json = serde_json::to_value(&t.segments[1]).unwrap();
+        assert!(json.get("annotation").is_none());
     }
 
     #[test]

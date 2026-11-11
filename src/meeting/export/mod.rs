@@ -81,6 +81,16 @@ pub enum ExportError {
     UnsupportedFormat(String),
 }
 
+/// One line describing an annotation: "Note: text", "Highlight: text", or
+/// "Highlight" alone.
+pub fn annotation_line(annotation: &crate::meeting::data::SegmentAnnotation) -> String {
+    match (annotation.highlight, annotation.text.is_empty()) {
+        (true, true) => "Highlight".to_string(),
+        (true, false) => format!("Highlight: {}", annotation.text),
+        (false, _) => format!("Note: {}", annotation.text),
+    }
+}
+
 /// Export options
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
@@ -154,6 +164,58 @@ mod tests {
             meeting.transcript.add_segment(seg);
         }
         meeting
+    }
+
+    #[test]
+    fn exports_carry_notes_on_top_and_annotations_under_their_line() {
+        let mut meeting = conversation();
+        meeting.notes = Some("Budget review\n- travel is high\n".to_string());
+        meeting.transcript.segments[1].annotation = Some(crate::meeting::SegmentAnnotation {
+            text: "follow up".to_string(),
+            highlight: true,
+        });
+        meeting.transcript.segments[2].annotation = Some(crate::meeting::SegmentAnnotation {
+            text: "check".to_string(),
+            highlight: false,
+        });
+        let options = ExportOptions {
+            include_speakers: true,
+            ..Default::default()
+        };
+
+        let md = export_meeting(&meeting, ExportFormat::Markdown, &options).unwrap();
+        assert!(
+            md.contains("## Notes\n\nBudget review\n- travel is high\n\n"),
+            "{md}"
+        );
+        assert!(md.find("## Notes").unwrap() < md.find("## Transcript").unwrap());
+        assert!(
+            md.contains("Yes, loud and clear.\n\n> **Highlight: follow up**\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Great, let's start.\n\n> Note: check\n"),
+            "{md}"
+        );
+
+        let txt = export_meeting(&meeting, ExportFormat::Text, &options).unwrap();
+        assert!(txt.starts_with("Notes:\nBudget review"), "{txt}");
+        assert!(
+            txt.contains("Yes, loud and clear.\n  > Highlight: follow up\n"),
+            "{txt}"
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(&export_meeting(&meeting, ExportFormat::Json, &options).unwrap())
+                .unwrap();
+        assert_eq!(json["notes"], "Budget review\n- travel is high\n");
+        assert_eq!(
+            json["transcript"]["segments"][1]["annotation"]["highlight"],
+            true
+        );
+        assert!(json["transcript"]["segments"][0]
+            .get("annotation")
+            .is_none());
     }
 
     /// Bug: exports listed all of You, then all of Remote, per chunk.

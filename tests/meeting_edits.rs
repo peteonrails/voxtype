@@ -1,7 +1,7 @@
-//! `voxtype meeting reassign` from the command line, against a scratch
-//! XDG data and runtime directory: after a meeting has stopped it rewrites the
-//! transcript, while one is recording it leaves the file to the daemon and
-//! drops a trigger for it.
+//! `voxtype meeting reassign`, `notes` and `annotate` from the command line,
+//! against scratch XDG data and runtime directories. After a meeting has
+//! stopped they rewrite the transcript; while one is recording they leave the
+//! file to the daemon and drop a trigger for it.
 
 use std::process::{Command, Output};
 
@@ -104,7 +104,7 @@ fn reassign_after_stop_shows_in_the_export() {
     assert_eq!(segment["id"], 2);
     assert_eq!(segment["speaker_id"], "Person 1");
     assert_eq!(segment["speaker_label"], "Casey");
-    assert_eq!(segment["reassigned_from"], "Remote 1");
+    assert_eq!(segment["original_speaker"], "Remote 1");
     assert_eq!(segment["text"], "I disagree with that.");
 
     let export = stdout(&s.voxtype(&[
@@ -211,7 +211,7 @@ fn reassign_during_a_meeting_leaves_the_file_to_the_daemon() {
         before
     );
     assert_eq!(
-        std::fs::read_to_string(s.path("runtime/voxtype/meeting_reassign")).unwrap(),
+        std::fs::read_to_string(s.path("runtime/voxtype/meeting_edit")).unwrap(),
         "2"
     );
     // Readers see the move even before the daemon applies it.
@@ -220,4 +220,160 @@ fn reassign_during_a_meeting_leaves_the_file_to_the_daemon() {
     ))
     .unwrap();
     assert_eq!(show["transcript"]["segments"][2]["speaker_label"], "Casey");
+}
+
+#[test]
+fn notes_print_append_set_and_json() {
+    let s = Scratch::new();
+    let id = s.meeting();
+
+    assert_eq!(stdout(&s.voxtype(&["meeting", "notes", "latest"])), "");
+    let out = stdout(&s.voxtype(&["meeting", "notes", "latest", "--append", "Ask about budget"]));
+    assert!(out.contains("Notes saved"), "{out}");
+    stdout(&s.voxtype(&["meeting", "notes", &id[..8], "--append", "Follow up Friday"]));
+    assert_eq!(
+        stdout(&s.voxtype(&["meeting", "notes", "latest"])),
+        "Ask about budget\nFollow up Friday\n"
+    );
+
+    let file = s.path("new-notes.md");
+    std::fs::write(&file, "# Replaced\n").unwrap();
+    stdout(&s.voxtype(&[
+        "meeting",
+        "notes",
+        "latest",
+        "--set-file",
+        file.to_str().unwrap(),
+    ]));
+    let json: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "notes", "latest", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(json["meeting_id"], id);
+    assert_eq!(json["notes"], "# Replaced\n");
+    assert!(json["updated_at"].as_str().unwrap().contains('T'));
+
+    // stdin
+    let mut child = Command::new(env!("CARGO_BIN_EXE_voxtype"))
+        .env("XDG_CONFIG_HOME", s.path("config"))
+        .env("XDG_DATA_HOME", s.path("data"))
+        .env("XDG_RUNTIME_DIR", s.path("runtime"))
+        .args(["meeting", "notes", "latest", "--set-file", "-", "--json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"From stdin\n")
+        .unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&child.wait_with_output().unwrap())).unwrap();
+    assert_eq!(json["notes"], "From stdin\n");
+
+    // Exports put them on top.
+    let export = stdout(&s.voxtype(&["meeting", "export", "latest", "--format", "markdown"]));
+    assert!(export.contains("## Notes\n\nFrom stdin\n"), "{export}");
+    assert!(!s.path("runtime/voxtype/meeting_notes").exists());
+}
+
+#[test]
+fn notes_without_a_meeting_fail() {
+    let s = Scratch::new();
+    assert!(!s.voxtype(&["meeting", "notes", "latest"]).status.success());
+}
+
+#[test]
+fn annotate_shows_on_the_segment_and_in_the_export() {
+    let s = Scratch::new();
+    s.meeting();
+
+    let out = stdout(&s.voxtype(&[
+        "meeting",
+        "annotate",
+        "latest",
+        "2",
+        "Check this claim",
+        "--highlight",
+        "--json",
+    ]));
+    let segment: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(segment["id"], 2);
+    assert_eq!(
+        segment["annotation"],
+        serde_json::json!({"text": "Check this claim", "highlight": true})
+    );
+
+    let show: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "show", "latest", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        show["transcript"]["segments"][2]["annotation"]["text"],
+        "Check this claim"
+    );
+    assert!(show["transcript"]["segments"][1]
+        .get("annotation")
+        .is_none());
+
+    let export = stdout(&s.voxtype(&["meeting", "export", "latest", "--format", "markdown"]));
+    assert!(
+        export.contains("I disagree with that.\n\n> **Highlight: Check this claim**\n"),
+        "{export}"
+    );
+
+    let out = stdout(&s.voxtype(&["meeting", "annotate", "latest", "2", "--remove", "--json"]));
+    let segment: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(segment.get("annotation").is_none());
+
+    assert!(!s
+        .voxtype(&["meeting", "annotate", "latest", "2"])
+        .status
+        .success());
+    assert!(!s
+        .voxtype(&["meeting", "annotate", "latest", "2", "x", "--remove"])
+        .status
+        .success());
+    let output = s.voxtype(&["meeting", "annotate", "latest", "42", "x"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Valid segment ids: 0 to 3."));
+}
+
+/// During a meeting, notes and annotations are stored and the daemon is
+/// poked; transcript.json stays the daemon's to write.
+#[test]
+fn notes_and_annotations_during_a_meeting_poke_the_daemon() {
+    let s = Scratch::new();
+    let id = s.meeting();
+    std::fs::write(
+        s.path("runtime/voxtype/meeting_state"),
+        format!("recording\n{id}\n"),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(s.transcript_file(&id)).unwrap();
+
+    stdout(&s.voxtype(&["meeting", "notes", "latest", "--append", "live note"]));
+    assert!(s.path("runtime/voxtype/meeting_notes").exists());
+
+    stdout(&s.voxtype(&["meeting", "annotate", "latest", "1", "live annotation"]));
+    assert_eq!(
+        std::fs::read_to_string(s.path("runtime/voxtype/meeting_edit")).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.transcript_file(&id)).unwrap(),
+        before
+    );
+
+    let show: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "show", "latest", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(show["notes"], "live note\n");
+    assert_eq!(
+        show["transcript"]["segments"][1]["annotation"]["text"],
+        "live annotation"
+    );
 }

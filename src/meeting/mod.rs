@@ -28,6 +28,7 @@ pub mod detect;
 pub mod diarization;
 pub mod events;
 pub mod export;
+pub mod notes;
 pub mod state;
 pub mod storage;
 pub mod summary;
@@ -35,7 +36,7 @@ pub mod summary;
 pub use chunk::{ChunkBuffer, ChunkConfig, ChunkProcessor, ProcessedChunk, VoiceActivityDetector};
 pub use data::{
     ActionItem, AudioSource, MeetingData, MeetingId, MeetingMetadata, MeetingStatus,
-    MeetingSummary, Transcript, TranscriptSegment,
+    MeetingSummary, SegmentAnnotation, Transcript, TranscriptSegment,
 };
 pub use events::{DiarizationInfo, MeetingEventHub, MeetingHudState};
 pub use export::{export_meeting, export_meeting_to_file, ExportFormat, ExportOptions};
@@ -474,28 +475,30 @@ impl MeetingDaemon {
             .await;
     }
 
-    /// Re-read the speaker overrides `meeting reassign` stored, move the
-    /// affected lines in the running meeting, save, and publish each line
-    /// that changed. Returns how many did.
-    pub async fn apply_speaker_overrides(&mut self) -> usize {
+    /// Re-read what the user changed line by line (`meeting reassign`,
+    /// `meeting annotate`), apply it to the running meeting, save, and
+    /// publish each line that changed. Returns how many did.
+    pub async fn apply_segment_edits(&mut self) -> usize {
         let Some(ref mut meeting) = self.current_meeting else {
             return 0;
         };
         let id = meeting.metadata.id;
-        let (overrides, labels) = match (
+        let (overrides, labels, annotations) = match (
             self.storage.get_speaker_overrides(&id),
             self.storage.get_speaker_labels(&id),
+            self.storage.get_annotations(&id),
         ) {
-            (Ok(overrides), Ok(labels)) => (overrides, labels),
-            (Err(e), _) | (_, Err(e)) => {
-                tracing::warn!("Failed to read speaker overrides: {}", e);
+            (Ok(o), Ok(l), Ok(a)) => (o, l, a),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                tracing::warn!("Failed to read transcript edits: {}", e);
                 return 0;
             }
         };
 
         let before = meeting.transcript.segments.clone();
         meeting.transcript.apply_speaker_overrides(&overrides);
-        // Only the moved lines are published; names they now carry are
+        meeting.transcript.apply_annotations(&annotations);
+        // Only the changed lines are published; names they now carry are
         // applied to those copies alone.
         let changed: Vec<TranscriptSegment> = meeting
             .transcript
@@ -503,7 +506,9 @@ impl MeetingDaemon {
             .iter()
             .zip(&before)
             .filter(|(now, was)| {
-                now.speaker_id != was.speaker_id || now.reassigned_from != was.reassigned_from
+                now.speaker_id != was.speaker_id
+                    || now.original_speaker != was.original_speaker
+                    || now.annotation != was.annotation
             })
             .map(|(now, _)| {
                 let mut segment = now.clone();
@@ -517,11 +522,7 @@ impl MeetingDaemon {
         }
         self.persist_transcript();
         for segment in &changed {
-            tracing::info!(
-                "Segment {} now belongs to {}",
-                segment.id,
-                segment.speaker_display()
-            );
+            tracing::info!("Segment {} changed by hand", segment.id);
             let _ = self
                 .event_tx
                 .send(MeetingEvent::SegmentUpdated {
@@ -1029,7 +1030,7 @@ mod tests {
         let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
         let id = cli.resolve_meeting_id("latest").unwrap();
         cli.reassign_segment(&id, 1, "Casey", false).unwrap();
-        assert_eq!(h.daemon.apply_speaker_overrides().await, 1);
+        assert_eq!(h.daemon.apply_segment_edits().await, 1);
         assert_eq!(drain(&mut h.events), vec!["updated 1 Casey (Person 1)"]);
 
         // A second remote voice renames Remote; the moved line stays Casey.
@@ -1044,11 +1045,69 @@ mod tests {
         let line = &saved.transcript.segments[1];
         assert_eq!(line.id, 1);
         assert_eq!(line.speaker_display(), "Casey");
-        assert_eq!(line.reassigned_from.as_deref(), Some("Remote 1"));
+        assert_eq!(line.original_speaker.as_deref(), Some("Remote 1"));
 
         // --reset after stop gives it back to the renamed diarizer speaker.
         let back = cli.reset_segment_speaker(&id, 1, true).unwrap();
         assert_eq!(back.speaker_key(), "Remote 1");
+    }
+
+    /// A client offers "Restore original" from `original_speaker`; after a
+    /// reset the published segment must not carry it.
+    #[tokio::test]
+    async fn a_reset_mid_meeting_publishes_the_line_without_original_speaker() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.reassign_segment(&id, 1, "Casey", false).unwrap();
+        h.daemon.apply_segment_edits().await;
+        cli.reset_segment_speaker(&id, 1, false).unwrap();
+        h.daemon.apply_segment_edits().await;
+
+        let updates: Vec<TranscriptSegment> = std::iter::from_fn(|| h.events.try_recv().ok())
+            .filter_map(|e| match e {
+                MeetingEvent::SegmentUpdated { segment } => Some(segment),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].original_speaker.as_deref(), Some("Remote"));
+        let json = serde_json::to_value(&updates[1]).unwrap();
+        assert_eq!(json["speaker_id"], "Remote");
+        assert!(json.get("original_speaker").is_none(), "{json}");
+    }
+
+    #[tokio::test]
+    async fn an_annotation_mid_meeting_is_published_and_kept() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        drain(&mut h.events);
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.annotate_segment(&id, 1, "check this", true, false)
+            .unwrap();
+        assert_eq!(h.daemon.apply_segment_edits().await, 1);
+
+        let updated: Vec<TranscriptSegment> = std::iter::from_fn(|| h.events.try_recv().ok())
+            .filter_map(|e| match e {
+                MeetingEvent::SegmentUpdated { segment } => Some(segment),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].id, 1);
+        assert_eq!(
+            updated[0].annotation,
+            Some(SegmentAnnotation {
+                text: "check this".to_string(),
+                highlight: true
+            })
+        );
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+        assert!(h.saved().transcript.segments[1].annotation.is_some());
     }
 
     #[tokio::test]
@@ -1062,7 +1121,7 @@ mod tests {
         let id = cli.resolve_meeting_id("latest").unwrap();
         // The mic line was really the remote voice.
         cli.reassign_segment(&id, 0, "Remote", false).unwrap();
-        h.daemon.apply_speaker_overrides().await;
+        h.daemon.apply_segment_edits().await;
 
         h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
         h.daemon.stop().await.unwrap();
