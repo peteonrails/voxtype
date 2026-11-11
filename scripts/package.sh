@@ -642,13 +642,20 @@ if [[ "$PLUGIN_VERSION" != "$VERSION" ]]; then
     exit 1
 fi
 
-# The source RPM spec is what COPR and other from-source Fedora builds use.
-# Nothing exercised it, so it sat at 0.4.2 for a year without the OSD. RPM
-# versions cannot carry the -rcN suffix, so compare the release part.
+# The source RPM spec and Debian source package are what COPR and other
+# from-source builds use. Nothing exercised them, so both sat at 0.4.2 for a
+# year without the OSD. Their versions cannot carry the -rcN suffix, so
+# compare the release part.
 SPEC_VERSION=$(sed -n 's/^Version:[[:space:]]*//p' "$PROJECT_DIR/packaging/rpm/voxtype.spec")
 if [[ "$SPEC_VERSION" != "${VERSION%%-*}" ]]; then
     echo "Error: packaging/rpm/voxtype.spec Version is '$SPEC_VERSION', expected '${VERSION%%-*}'."
     echo "Bump it together with Cargo.toml, and add a %changelog entry."
+    exit 1
+fi
+DEB_SOURCE_VERSION=$(sed -n '1s/^voxtype (\([^-)]*\).*/\1/p' "$PROJECT_DIR/packaging/debian/changelog")
+if [[ "$DEB_SOURCE_VERSION" != "${VERSION%%-*}" ]]; then
+    echo "Error: packaging/debian/changelog is at '$DEB_SOURCE_VERSION', expected '${VERSION%%-*}'."
+    echo "Add a changelog entry for the release together with the Cargo.toml bump."
     exit 1
 fi
 

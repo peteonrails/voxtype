@@ -3,56 +3,119 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export CARGO_HOME = $(CURDIR)/debian/cargo_home
 
+# Same AVX-512/GFNI floor as the release builds, for every binary except the
+# AVX-512 variant. CMAKE_*_FLAGS replace the flags the cmake crate would pass
+# to whisper.cpp, -fPIC included, so it has to be put back: compilers that
+# don't default to PIE otherwise fail the link with "relocation R_X86_64_32S
+# against .bss".
+HASWELL_ENV = RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
+	GGML_NATIVE=OFF GGML_AVX512=OFF \
+	CMAKE_C_FLAGS="-fPIC -mno-avx512f -mno-gfni" CMAKE_CXX_FLAGS="-fPIC -mno-avx512f -mno-gfni"
+
+# GGUF engines (Parakeet and Cohere .gguf models) run in voxtype-gguf-worker,
+# which links transcribe.cpp; the daemon only carries the client.
+GGUF = gguf,cohere-gguf,parakeet-gguf
+
+PKG = debian/voxtype
+LIB = $(PKG)/usr/lib/voxtype
+SHARE = $(PKG)/usr/share/voxtype
+
 %:
 	dh $@
 
+# Each variant is copied to variants/ because the `cargo clean` before the
+# next variant wipes everything under target/.
 override_dh_auto_build:
-	# Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-	# Disable AVX-512 via compiler flags (WHISPER_NO_AVX512 doesn't work with whisper-rs-sys 0.14.1)
-	CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --locked
-	cp target/release/voxtype target/release/voxtype-avx2
-	# Build AVX-512 optimized binary (for Zen 4+, some Intel)
+	# AVX2 baseline (most CPUs from 2013+)
+	$(HASWELL_ENV) cargo build --release --locked --features $(GGUF)
+	install -D -m 755 target/release/voxtype variants/voxtype-avx2
+	# CPU GGUF worker, shared by the AVX2 and AVX-512 binaries
+	$(HASWELL_ENV) cargo build --release --locked -p voxtype-gguf-worker
+	install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker
+	# AVX-512 (Zen 4+, some Intel)
 	cargo clean
-	cargo build --release --locked
-	cp target/release/voxtype target/release/voxtype-avx512
+	cargo build --release --locked --features $(GGUF)
+	install -D -m 755 target/release/voxtype variants/voxtype-avx512
+	# Vulkan GPU build, and the Vulkan GGUF worker it looks for beside itself
+	cargo clean
+	$(HASWELL_ENV) cargo build --release --locked --features gpu-vulkan
+	install -D -m 755 target/release/voxtype variants/voxtype-vulkan
+	$(HASWELL_ENV) cargo build --release --locked -p voxtype-gguf-worker --features vulkan
+	install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker-vulkan
+	# OSD launcher, GTK4 and Quickshell frontends, and the audio bridge, in
+	# their own invocation so the daemon binaries stay free of GTK4
+	$(HASWELL_ENV) cargo build --release --locked --features osd-gtk4 \
+		--bin voxtype-osd --bin voxtype-osd-gtk4 \
+		--bin voxtype-osd-quickshell --bin voxtype-audio-bridge
+	# Man pages (compiles only clap and clap_mangen)
+	cargo xtask man target/man
 
 override_dh_auto_install:
-	# Install tiered binaries to /usr/lib/voxtype/
-	# The postinst script creates a symlink at /usr/bin/voxtype
-	install -D -m 755 target/release/voxtype-avx2 debian/voxtype/usr/lib/voxtype/voxtype-avx2
-	install -D -m 755 target/release/voxtype-avx512 debian/voxtype/usr/lib/voxtype/voxtype-avx512
-	# Install default configuration
-	install -D -m 644 config/default.toml debian/voxtype/etc/voxtype/config.toml
-	# Install documentation
-	install -D -m 644 README.md debian/voxtype/usr/share/doc/voxtype/README.md
-	install -D -m 644 docs/INSTALL.md debian/voxtype/usr/share/doc/voxtype/INSTALL.md
-	# Install shell completions
+	# Binaries live in /usr/lib/voxtype; postinst links /usr/bin/voxtype
+	for f in voxtype-avx2 voxtype-avx512 voxtype-vulkan voxtype-gguf-worker voxtype-gguf-worker-vulkan; do \
+		install -D -m 755 variants/$$f $(LIB)/$$f; \
+	done
+	# OSD. The launcher finds its frontends in its own directory, so only it
+	# gets a /usr/bin link. The Quickshell launcher execs the audio bridge by
+	# basename, so the bridge goes on PATH.
+	install -D -m 755 target/release/voxtype-osd $(LIB)/voxtype-osd
+	install -D -m 755 target/release/voxtype-osd-quickshell $(LIB)/voxtype-osd-quickshell
+	install -d $(PKG)/usr/bin
+	ln -s ../lib/voxtype/voxtype-osd $(PKG)/usr/bin/voxtype-osd
+	install -D -m 755 target/release/voxtype-audio-bridge $(PKG)/usr/bin/voxtype-audio-bridge
+	install -D -m 755 target/release/voxtype-osd-gtk4 \
+		debian/voxtype-osd-gtk4/usr/lib/voxtype/voxtype-osd-gtk4
+	# Quickshell QML tree, OSD style packages and recipes
+	for tree in quickshell:quickshell examples/osd-packages:osd examples/osd-recipes:osd-recipes; do \
+		src=$${tree%%:*}; dest=$(SHARE)/$${tree##*:}; \
+		install -d $$dest && cp -a $$src/. $$dest/ && \
+		find $$dest -mindepth 1 \( -name '.*' -o -name '*~' \) -prune -exec rm -rf {} + && \
+		find $$dest -type d -exec chmod 755 {} + && \
+		find $$dest -type f -exec chmod 644 {} + || exit 1; \
+	done
+	# Omarchy Settings plugin, staged by the same script as the RPM and AUR
+	bash scripts/stage-omarchy-plugin.sh omarchy-plugin $(SHARE)/omarchy-plugin
+	# Man pages
+	install -d $(PKG)/usr/share/man/man1
+	install -m 644 target/man/*.1 $(PKG)/usr/share/man/man1/
+	# systemd user unit (not enabled; see override_dh_installsystemd)
+	install -D -m 644 packaging/systemd/voxtype.service \
+		$(PKG)/usr/lib/systemd/user/voxtype.service
+	# Default configuration
+	install -D -m 644 config/default.toml $(PKG)/etc/voxtype/config.toml
+	# Documentation
+	install -D -m 644 README.md $(PKG)/usr/share/doc/voxtype/README.md
+	install -D -m 644 docs/INSTALL.md $(PKG)/usr/share/doc/voxtype/INSTALL.md
+	install -D -m 644 THIRD_PARTY.md $(PKG)/usr/share/doc/voxtype/THIRD_PARTY.md
+	# Shell completions
 	install -D -m 644 packaging/completions/voxtype.bash \
-		debian/voxtype/usr/share/bash-completion/completions/voxtype
+		$(PKG)/usr/share/bash-completion/completions/voxtype
 	install -D -m 644 packaging/completions/voxtype.zsh \
-		debian/voxtype/usr/share/zsh/vendor-completions/_voxtype
+		$(PKG)/usr/share/zsh/vendor-completions/_voxtype
 	install -D -m 644 packaging/completions/voxtype.fish \
-		debian/voxtype/usr/share/fish/vendor_completions.d/voxtype.fish
-	# Install configuration TUI launcher (.desktop entry + terminal-picker script)
+		$(PKG)/usr/share/fish/vendor_completions.d/voxtype.fish
+	# Configuration TUI launcher (.desktop entry + terminal-picker script)
 	install -D -m 644 packaging/voxtype-configure.desktop \
-		debian/voxtype/usr/share/applications/voxtype-configure.desktop
+		$(PKG)/usr/share/applications/voxtype-configure.desktop
 	install -D -m 755 packaging/scripts/voxtype-configure-launcher \
-		debian/voxtype/usr/bin/voxtype-configure-launcher
+		$(PKG)/usr/bin/voxtype-configure-launcher
 	install -D -m 644 assets/icon.svg \
-		debian/voxtype/usr/share/icons/hicolor/scalable/apps/voxtype.svg
+		$(PKG)/usr/share/icons/hicolor/scalable/apps/voxtype.svg
 	install -D -m 644 assets/icon.png \
-		debian/voxtype/usr/share/icons/hicolor/128x128/apps/voxtype.png
+		$(PKG)/usr/share/icons/hicolor/128x128/apps/voxtype.png
 
 override_dh_auto_test:
-	# Only test with AVX2 build to avoid SIGILL in build environments
-	CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo test --release --locked
+	# Only test with the AVX2 build to avoid SIGILL in build environments
+	$(HASWELL_ENV) cargo test --release --locked
 
+# voxtype runs as a systemd user service that each user enables themselves
+# (`systemctl --user enable --now voxtype`). dh_installsystemd only handles
+# system units and has no --user option, so it must not touch this one.
 override_dh_installsystemd:
-	dh_installsystemd --user --name=voxtype
 
 override_dh_auto_clean:
 	cargo clean || true
-	rm -rf debian/cargo_home
+	rm -rf debian/cargo_home variants
 
 override_dh_shlibdeps:
 	dh_shlibdeps --dpkg-shlibdeps-params=--ignore-missing-info
