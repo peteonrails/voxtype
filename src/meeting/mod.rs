@@ -28,6 +28,7 @@ pub mod diarization;
 pub mod events;
 pub mod export;
 pub mod notes;
+pub mod retained_audio;
 pub mod state;
 pub mod storage;
 pub mod summary;
