@@ -122,23 +122,21 @@ impl VoiceActivityDetector {
             return false;
         }
 
-        let mut speech_frames = 0;
+        let speech_frames = samples
+            .chunks(window_size)
+            .filter(|chunk| Self::calculate_rms(chunk) > self.threshold)
+            .count();
         let total_frames = samples.len() / window_size;
-
-        for chunk in samples.chunks(window_size) {
-            let rms = Self::calculate_rms(chunk);
-            if rms > self.threshold {
-                speech_frames += 1;
-            }
+        if total_frames == 0 {
+            return false;
         }
 
-        // Require at least 10% of frames to have speech
-        if total_frames > 0 {
-            let speech_ratio = speech_frames as f32 / total_frames as f32;
-            speech_ratio > 0.1
-        } else {
-            false
-        }
+        // Speech in over 10% of the frames, or 300 ms of it in all. The
+        // ratio alone dropped whole 30 s chunks holding one short sentence:
+        // the opening "let's get started" while people join, or a "sounds
+        // good" on the microphone track while the other side talks.
+        speech_frames as f32 / total_frames as f32 > 0.1
+            || speech_frames as u32 * self.window_ms >= MIN_SPEECH_MS
     }
 
     /// Calculate RMS energy of samples
@@ -194,6 +192,9 @@ impl VoiceActivityDetector {
         segments
     }
 }
+
+/// Speech a chunk needs before it is transcribed at all.
+const MIN_SPEECH_MS: u32 = 300;
 
 /// Silence at least this long separates two utterances.
 const UTTERANCE_GAP_SECS: f32 = 0.7;
@@ -528,6 +529,27 @@ mod tests {
             );
             assert_eq!(seg.chunk_id, 3);
         }
+    }
+
+    /// Bug: a chunk was transcribed only if over 10% of it was speech, so a
+    /// 30 s chunk holding one two-second sentence was dropped whole.
+    #[test]
+    fn one_short_sentence_in_a_long_chunk_is_transcribed() {
+        let mut processor =
+            ChunkProcessor::new(ChunkConfig::default(), Arc::new(UntimedTranscriber));
+        let mut buffer = processor.new_buffer(0, AudioSource::Microphone, 0);
+        buffer.add_samples(&speech_at(30.0, &[(1.0, 3.0)]));
+
+        let result = processor.process_chunk(buffer).unwrap();
+        assert_eq!(result.segments.len(), 1, "sentence dropped");
+        assert!(near(result.segments[0].start_ms, 800));
+    }
+
+    #[test]
+    fn a_click_in_a_long_chunk_is_not_speech() {
+        let vad = VoiceActivityDetector::new(0.01, 16000);
+        assert!(!vad.contains_speech(&speech_at(30.0, &[(4.0, 4.1)])));
+        assert!(vad.contains_speech(&speech_at(30.0, &[(4.0, 4.4)])));
     }
 
     #[test]
