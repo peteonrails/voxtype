@@ -6,32 +6,43 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 
 - [When to Use Meeting Mode](#when-to-use-meeting-mode)
 - [Quick Start](#quick-start)
-- [Commands](#commands)
+- [Recording a Meeting](#recording-a-meeting)
   - [Starting a Meeting](#starting-a-meeting)
   - [Stopping a Meeting](#stopping-a-meeting)
   - [Pausing and Resuming](#pausing-and-resuming)
   - [Checking Status](#checking-status)
+- [Live Meeting View](#live-meeting-view)
+- [Meeting Detection](#meeting-detection)
+  - [How calls are recognized](#how-calls-are-recognized)
+  - [When it prompts](#when-it-prompts)
+  - [Checking what it sees](#checking-what-it-sees)
+- [Working with Transcripts](#working-with-transcripts)
   - [Listing Past Meetings](#listing-past-meetings)
-  - [Viewing Meeting Details](#viewing-meeting-details)
-  - [Exporting Transcripts](#exporting-transcripts)
+  - [Viewing a Meeting](#viewing-a-meeting)
   - [Labeling Speakers](#labeling-speakers)
-  - [The Meeting Folder](#the-meeting-folder)
+  - [Moving a Line to Another Speaker](#moving-a-line-to-another-speaker)
+  - [Correcting and Deleting Lines](#correcting-and-deleting-lines)
+  - [Annotating a Line](#annotating-a-line)
+  - [Notes](#notes)
+  - [Exporting Transcripts](#exporting-transcripts)
+  - [Deleting Meetings](#deleting-meetings)
+- [Meeting Audio](#meeting-audio)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
-  - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
+- [The Meeting Assistant](#the-meeting-assistant)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
   - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
-  - [Deleting Meetings](#deleting-meetings)
-- [Live Meeting View](#live-meeting-view)
-- [Meeting Detection](#meeting-detection)
+  - [Privacy: Where Transcripts Go](#privacy-where-transcripts-go)
+- [Automation](#automation)
+  - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
+  - [Integrations](#integrations)
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
   - [Diarization Settings](#diarization-settings)
   - [Summarization Settings](#summarization-settings)
   - [Assistant Settings](#assistant-settings)
-- [Privacy: Where Transcripts Go](#privacy-where-transcripts-go)
 - [Storage](#storage)
 - [Tips for Best Results](#tips-for-best-results)
 
@@ -71,6 +82,8 @@ voxtype
 voxtype meeting start --title "Weekly Standup"
 ```
 
+   The [meeting view](#live-meeting-view) opens at the right edge of the screen in the Omarchy shell or in voxtype's Quickshell shell, and shows the transcript as it arrives.
+
 4. When the meeting ends:
 
 ```bash
@@ -85,7 +98,7 @@ voxtype meeting export latest --format markdown --output standup.md
 
 ---
 
-## Commands
+## Recording a Meeting
 
 ### Starting a Meeting
 
@@ -158,297 +171,6 @@ Shows whether a meeting is recording, paused, finalizing, or idle, along with th
 
 The daemon acts on meeting commands between audio chunks, so while it is transcribing a chunk a request can take a few seconds to land. Until it does, status reports the request itself: `starting`, `pausing`, `resuming` or `stopping`. A second `voxtype meeting start` is refused as soon as the first one is issued, not only once that meeting is recording.
 
-### Listing Past Meetings
-
-```bash
-voxtype meeting list
-voxtype meeting list --limit 5
-voxtype meeting list --json
-```
-
-Lists recent meetings with their ID, title, date, duration, status, and chunk count. Defaults to showing the 10 most recent. Meetings are sorted by start time, newest first.
-
-### Viewing Meeting Details
-
-```bash
-voxtype meeting show latest
-voxtype meeting show <meeting-id>
-voxtype meeting show latest --json
-```
-
-Shows detailed information about a meeting: title, start/end times, duration, word count, number of chunks, speakers detected, and the transcription engine used.
-
-You can use `latest` as a shorthand for the most recent meeting's ID. This works with all commands that take a meeting ID.
-
-`--json` on `status`, `list`, and `show` (and `meeting_active`/`meeting_status` in `voxtype status --format json --extended`) are documented as an integration contract in [`INTEGRATIONS.md`](./INTEGRATIONS.md#meeting-mode), along with the `meeting.sock` NDJSON socket that streams the live transcript and status for building a HUD or bar widget.
-
-### Exporting Transcripts
-
-```bash
-# Markdown to stdout
-voxtype meeting export latest
-
-# Plain text to a file
-voxtype meeting export latest --format text --output meeting.txt
-
-# JSON with timestamps and speaker labels
-voxtype meeting export latest --format json --timestamps --speakers
-
-# Subtitle formats
-voxtype meeting export latest --format srt --output meeting.srt
-voxtype meeting export latest --format vtt --output meeting.vtt
-```
-
-**Supported formats:**
-
-| Format | Flag | Description |
-|--------|------|-------------|
-| Markdown | `markdown` or `md` | Default. Readable with headers and speaker labels. |
-| Plain text | `text` or `txt` | Just the words, no formatting. |
-| JSON | `json` | Structured data with all segment metadata. |
-| SRT | `srt` | SubRip subtitle format. |
-| VTT | `vtt` | WebVTT subtitle format. |
-
-**Export options:**
-
-| Flag | Description |
-|------|-------------|
-| `--format`, `-f` | Output format (default: markdown) |
-| `--output`, `-o` | Write to file instead of stdout |
-| `--timestamps` | Include timestamps in output |
-| `--speakers` | Include speaker labels |
-| `--metadata` | Include a metadata header (title, date, duration) |
-
-Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did.
-
-### Labeling Speakers
-
-Every transcript names its speakers. With simple diarization they are `You` (your microphone) and `Remote` (system audio); with ML diarization they are auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc.; with hybrid diarization they are `You` plus `Remote`, or `Remote 1`, `Remote 2` and so on once a second remote voice has spoken. You can replace any of them with real names:
-
-```bash
-voxtype meeting label latest You "Pete"
-voxtype meeting label latest Remote "Dana"
-voxtype meeting label latest "Remote 2" "Sam"
-voxtype meeting label latest SPEAKER_00 "Alice"
-voxtype meeting label latest 1 "Bob"
-```
-
-The speaker can be the ID as the transcript shows it (matched without regard to case), just the number for an ML speaker (`0` for `SPEAKER_00`), or a name you already assigned, which renames every speaker carrying it. A speaker the meeting does not contain is an error that lists the speakers it does contain, so a typo never reports success.
-
-Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
-
-### Moving a Line to Another Speaker
-
-When the diarizer gives a single line to the wrong person, move that line on its own:
-
-```bash
-voxtype meeting show latest --json          # find the line's "id"
-voxtype meeting reassign latest 28 "Remote 2"
-voxtype meeting reassign latest 28 Dana      # a name you gave with `meeting label`
-voxtype meeting reassign latest 28 "Casey"   # nobody yet: creates the speaker Casey
-voxtype meeting reassign latest 28 --reset   # back to what the diarizer chose
-```
-
-The meeting can be its full ID, the start of it (`f82f0c11`), or `latest`. The line is the segment's `id` from `meeting show --json`; an ID the meeting does not have is an error that names the valid range. The speaker is matched the way `meeting label` matches it: an ID from the transcript (`You`, `Remote 1`, `SPEAKER_00` or just `0`) or a name already given, ignoring case. Text that matches no one creates a new speaker with that name, under an internal ID of the form `Person 1` that no diarizer produces. Add `--json` to print the updated segment.
-
-The move is stored per segment and applied whenever the transcript is saved or read, so exports, `meeting show` and the meeting socket all show it, and neither later chunks nor diarization can move the line back. If the diarizer renames the speaker you moved the line to (hybrid's `Remote` becoming `Remote 1`), the line follows. The segment keeps the diarizer's own choice in `original_speaker`, which is what `--reset` restores.
-
-This works during a meeting too. The command stores the move and the daemon applies it before the next chunk, sending the changed line to the meeting socket.
-
-### Correcting and Deleting Lines
-
-Fix a line the engine misheard, or hide one that should not be there, by the segment's `id` from `meeting show --json`:
-
-```bash
-voxtype meeting edit latest 28 "We ship on Friday."
-voxtype meeting edit latest 28 --reset           # back to the transcribed text
-voxtype meeting delete-line latest 31
-voxtype meeting delete-line latest 31 --restore
-```
-
-An edited line keeps what was transcribed as `original_text`. A deleted line is not destroyed: it stays in `transcript.json` marked `"deleted": true`, so `--restore` can bring it back, but exports, `transcript.md`, `meeting show` and the meeting assistant leave it out. Both are stored beside speaker moves and annotations and applied whenever the transcript is saved or read, so later chunks cannot undo them, and both work during a meeting. Add `--json` to print the segment.
-
-### Notes
-
-Each meeting has free-text notes, kept as `notes.md` in the meeting's folder. You can write them during the meeting or after it; the daemon never overwrites them.
-
-```bash
-voxtype meeting notes latest                         # print them
-voxtype meeting notes latest --append "Ask Dana about travel"
-voxtype meeting notes latest --set-file agenda.md    # replace them ("-" reads stdin)
-voxtype meeting notes latest --json                  # {meeting_id, notes, updated_at}
-```
-
-Exports and `transcript.md` show the notes at the top, under "Notes".
-
-### Annotating a Line
-
-Attach a note or a highlight to one transcript line, by the segment's `id` from `meeting show --json`:
-
-```bash
-voxtype meeting annotate latest 28 "Check this number"
-voxtype meeting annotate latest 28 "Decision" --highlight
-voxtype meeting annotate latest 28 --highlight       # highlight without a note
-voxtype meeting annotate latest 28 --remove
-```
-
-A line has at most one annotation; annotating it again replaces it. Annotations are stored beside speaker moves and applied whenever the transcript is saved or read, so later chunks cannot remove them. Exports show each one as a quote under its line (`> Note: ...`, or `> **Highlight: ...**`), and `meeting show --json` and the meeting socket carry it on the segment as `"annotation": {"text": "...", "highlight": true}`. Both commands work during a meeting.
-
-### The Meeting Folder
-
-Each meeting folder holds:
-
-| File | What it is |
-|------|------------|
-| `meeting.json` | The manifest: title, times, engine and model, speakers and their names, and every file below with its size. A stable format for scripts; see [INTEGRATIONS.md](INTEGRATIONS.md#the-meeting-folder-and-meetingjson) |
-| `transcript.json` | The segments, with speaker names, moves, annotations and text corrections applied. Deleted lines stay here, marked `"deleted": true`, and appear nowhere else |
-| `transcript.md` | The same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change |
-| `notes.md` | Your notes, once you write any |
-| `summary.md` | The meeting summary, once there is one |
-| `mic.opus`, `loopback.opus`, `mixed.opus` | The meeting's audio, with `retain_audio = true` (below) |
-| `metadata.json` | Voxtype's own record of the meeting; read `meeting.json` instead |
-
-`meeting.json` is written when the meeting starts and rewritten when it stops, when its notes or summary change, and when a daemon restart finishes a meeting a crash left open.
-
-### Keeping the Audio
-
-With `retain_audio = true` the meeting folder also keeps the meeting's audio, as three Ogg Opus files at 16 kHz mono and 24 kbps:
-
-- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (`echo_cancel = "auto"` with the GTCRN model present), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
-- `loopback.opus`: the other side, from the loopback device. A meeting recorded without loopback has no loopback file.
-- `mixed.opus`: the two summed, for listening back.
-
-The three files are the same length and start when the meeting starts, so a transcript timestamp is the same moment in each. Time spent paused is left out of both the audio and the transcript.
-
-Audio goes to disk chunk by chunk as the meeting records (every `chunk_duration_secs`, 30 seconds by default), not at the end. If voxtype crashes mid-meeting, the files keep everything up to the last chunk handed over before the crash and play as they are; the next daemon start marks the meeting completed in `meeting.json`.
-
-Opus takes about 10 MB per hour per file for speech, so a one-hour meeting with all three files uses about 30 MB (less where a side is silent).
-
-Encoding needs `ffmpeg` with libopus, which most distributions' `ffmpeg` package includes. Without it voxtype logs a warning and keeps the audio as `mic.wav`, `loopback.wav` and `mixed.wav` instead, at about 115 MB per hour per file. See [Troubleshooting](TROUBLESHOOTING.md#meeting-audio-is-saved-as-wav-instead-of-opus).
-
-### Playing a Meeting Back
-
-`voxtype meeting play` plays a meeting's kept audio from the start, from a transcript line, or from a time, and returns straight away while it plays in the background:
-
-```bash
-voxtype meeting play latest                       # from the start
-voxtype meeting play latest --segment 28          # from line 28 (its id in meeting show --json)
-voxtype meeting play latest --at 12:40            # 12 minutes 40 seconds in (also 760 or 1:12:40)
-voxtype meeting play latest --track loopback      # only the other side (mixed, mic or loopback)
-voxtype meeting play --status                     # what is playing
-voxtype meeting play --stop
-```
-
-Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
-
-Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
-
-### Running a Command After a Meeting
-
-`post_meeting_command` runs a shell command once a meeting has stopped and its folder is final: after the transcript, audio and `meeting.json` are written, and after the automatic summary when one runs. Use it to copy the folder somewhere, file it in your notes, or start your own processing.
-
-```toml
-[meeting]
-post_meeting_command = 'rsync -a "$VOXTYPE_MEETING_DIR" nas:meetings/'
-post_meeting_timeout_secs = 300   # default
-```
-
-The command runs through `sh -c` in the meeting folder, with these variables set:
-
-| Variable | Value |
-|----------|-------|
-| `VOXTYPE_MEETING_ID` | The meeting's ID |
-| `VOXTYPE_MEETING_DIR` | The meeting folder |
-| `VOXTYPE_MEETING_MANIFEST` | The path of its `meeting.json` |
-
-It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
-
-### Asking About a Meeting
-
-Ask a question about a meeting while it is recording or after it ends. The answer streams to the terminal and cites the `[mm:ss]` of the lines it relies on:
-
-```bash
-voxtype meeting ask latest "What did Steve just say?" --last 2m
-voxtype meeting ask latest "Summarize the last few minutes" --last 5m
-voxtype meeting ask latest "What are the action items so far?"
-```
-
-The assistant gets the transcript as `meeting show` displays it (speaker names you gave, lines moved with `meeting reassign`, and your annotations next to their lines), your meeting notes, and the question. `--last` limits it to the end of the transcript: `5m`, `90s`, `1h`, `2m30s`, or a bare number of minutes. It is a time window, so "the last few minutes" means minutes, not a number of words.
-
-A meeting longer than `max_transcript_chars` is sent as a running summary of its earlier part plus as many recent lines as fit. The running summary is kept in the meeting folder (`assistant-context.json`), so asking again during a meeting only summarizes what was said since.
-
-Every question and answer is saved to `asks.jsonl` in the meeting folder, and `voxtype meeting show <id> --json` includes them as `asks`.
-
-Other options:
-
-| Option | Effect |
-|--------|--------|
-| `--json` | One JSON event per line: `start`, `delta` while the answer streams, then `answer` (the saved record) or `error` |
-| `--notify` | Also show the answer as a desktop notification. Its Open action raises the meeting view on the Ask tab (`[meeting.assistant] open_command` replaces that; `""` removes it) |
-| `--agent claude` | Use this agent for this question |
-| `--local` | Answer with the local model (Ollama) |
-
-`ask` does not need the daemon: it reads the same saved transcript `meeting show` does.
-
-### AI Summarization
-
-Generate a summary with an overview, key points, decisions, action items with owners, and chapters with timestamps:
-
-```bash
-# Markdown summary to stdout
-voxtype meeting summarize latest
-
-# JSON format
-voxtype meeting summarize latest --format json
-
-# Save to file
-voxtype meeting summarize latest --output summary.md
-
-# Write a new one after naming speakers or moving lines
-voxtype meeting summarize latest --regenerate
-```
-
-The summary is saved with the meeting: `summary.md` in the meeting folder, `metadata.json`, and the meeting index, so it survives a restart. Running `summarize` again prints the saved summary; `--regenerate` writes a new one. Your notes go in as guidance, so the summary expands on what you wrote.
-
-The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent) unless `[meeting.summary] backend` is `"local"` or `"remote"`, which keep the older Ollama and API summarizers.
-
-**Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
-
-### The Meeting Assistant and Consent
-
-`ask` and summaries go through your own coding agent, run headless with every tool switched off: it gets the transcript as text and returns text. It never gets a shell, file access or network tools in this path. Which agent:
-
-1. `[meeting.assistant] agent` in config.
-2. Otherwise the Omarchy default agent (`omarchy-default-agent`), when that command exists. Voxtype works the same without Omarchy.
-3. Otherwise a supported agent CLI found on PATH: Claude Code or Pi. With both found and neither allowed yet, the consent prompt asks which to use.
-
-| Agent | Support |
-|-------|---------|
-| Claude Code (`claude`) | Supported, no tools: `claude -p --tools "" --strict-mcp-config ...` |
-| Codex (`codex`) | Supported when named in config or as the Omarchy default, and only with bubblewrap (`bwrap`) installed: `codex exec` with its shell and app tools disabled and a read-only sandbox, run inside a bwrap jail. Its command tool cannot be switched off, so the jail is what keeps it away from your files: it sees `/usr`, the codex install, a few `/etc` files for DNS and TLS, and `~/.codex/auth.json` read-only, and nothing else from your home. It is never picked from PATH on its own |
-| Pi (`pi`) | Supported, no tools: `pi --print --no-tools --no-mcp --no-extensions --no-skills --no-context-files --no-session ...`, with the prompt attached as a file. Its answer arrives whole rather than streaming |
-| OpenCode (`opencode`) | Not supported: `opencode run` has no flag that turns its tools off, and its agents allow shell commands and web fetches, so even a filesystem jail could not keep a transcript from leaving the machine |
-| Hermes (`hermes`) | Not supported: its one-shot mode loads tools and auto-approves them, with no documented way to turn them all off |
-
-The first time transcripts would go to an agent, voxtype asks once ("Send to Claude / Use a local model / Not now") and remembers the answer per agent. Without a terminal to ask on, `ask` and `summarize` refuse with a message naming the command that allows it:
-
-```bash
-voxtype meeting assistant status          # which agent, what was found, consent
-voxtype meeting assistant allow claude    # allow transcripts to go to Claude
-voxtype meeting assistant revoke claude   # stop
-voxtype meeting assistant status --json   # for the meeting view and Settings panel
-```
-
-With no agent found, or with `local_only = true` or `--local`, answers and summaries come from the local Ollama model in `[meeting.summary]`.
-
-### Deleting Meetings
-
-```bash
-voxtype meeting delete <meeting-id> --force
-```
-
-Permanently deletes the meeting record, transcript, and any associated audio files. The `--force` flag is required to confirm deletion.
-
 ---
 
 ## Live Meeting View
@@ -465,7 +187,7 @@ The header shows the meeting title, how long it has been running, and whether it
 - **Ask**: ask about what has been said, or use a quick question: "Last 5 minutes", "What did *the last remote speaker* just say?", "Action items so far". Answers stream in, say which agent gave them, and cite times like [1:58] that jump to that line.
 - **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing…" while it is written, and **Regenerate** after you fix speakers or lines.
 
-**More** in the header exports the meeting as Markdown, plain text, JSON, SRT or WebVTT (`voxtype meeting export`) into `~/Documents/Voxtype/` (or `$XDG_DOCUMENTS_DIR/Voxtype/`), named by date and title, with **Open folder** once it is written. **Open meeting folder** shows the meeting's own files. All of this works during a meeting, after it, and on past meetings.
+**⋯** in the header exports the meeting as Markdown, plain text, JSON, SRT or WebVTT (`voxtype meeting export`) into `~/Documents/Voxtype/` (or `$XDG_DOCUMENTS_DIR/Voxtype/`), named by date and title, with **Open folder** once it is written. **Open meeting folder** shows the meeting's own files. All of this works during a meeting, after it, and on past meetings.
 
 Ask and Summary show the agent in use ("Claude", or "Local (llama3.2)"); click it to pick another agent, switch to **Local model only**, or (in Omarchy) open the settings. The first time an agent is needed the view asks whether to send meeting transcripts to it, with **Use a local model instead** and **Not now**.
 
@@ -500,7 +222,7 @@ To stop it opening on its own:
 voxtype config set meeting.show_view_on_start false
 ```
 
-The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#live-transcript-and-status-meetingsock). It does not open over an open Voxtype Settings panel.
+The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#the-live-feed-meetingsock). It does not open over an open Voxtype Settings panel.
 
 ---
 
@@ -565,6 +287,312 @@ To add another call service, see `apps` under [`[meeting.detect]`](CONFIGURATION
 
 ---
 
+## Working with Transcripts
+
+### Listing Past Meetings
+
+```bash
+voxtype meeting list
+voxtype meeting list --limit 5
+voxtype meeting list --json
+```
+
+Lists recent meetings, newest first, with their title, ID, date, duration and status. It shows the 10 most recent unless you pass `--limit`.
+
+### Viewing a Meeting
+
+```bash
+voxtype meeting show latest
+voxtype meeting show <meeting-id>
+voxtype meeting show latest --json
+```
+
+Shows a meeting's title, ID, start and end times, duration, status, number of chunks, the call's link if it has one, and its transcript's segment count, word count and speakers. It reads the saved transcript, which grows with every chunk, so it is current during a meeting too.
+
+Every command that takes a meeting accepts its full ID, the start of it (`a32baa9b`), or `latest` for the most recent.
+
+### Labeling Speakers
+
+Every transcript names its speakers. With simple diarization they are `You` (your microphone) and `Remote` (system audio); with ML diarization they are auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc.; with hybrid diarization they are `You` plus `Remote`, or `Remote 1`, `Remote 2` and so on once a second remote voice has spoken. You can replace any of them with real names:
+
+```bash
+voxtype meeting label latest You "Pete"
+voxtype meeting label latest Remote "Dana"
+voxtype meeting label latest "Remote 2" "Sam"
+voxtype meeting label latest SPEAKER_00 "Alice"
+voxtype meeting label latest 1 "Bob"
+```
+
+The speaker can be the ID as the transcript shows it (matched without regard to case), just the number for an ML speaker (`0` for `SPEAKER_00`), or a name you already assigned, which renames every speaker carrying it. A speaker the meeting does not contain is an error that lists the speakers it does contain, so a typo never reports success.
+
+Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
+
+### Moving a Line to Another Speaker
+
+When the diarizer gives a single line to the wrong person, move that line on its own:
+
+```bash
+voxtype meeting show latest --json          # find the line's "id"
+voxtype meeting reassign latest 28 "Remote 2"
+voxtype meeting reassign latest 28 Dana      # a name you gave with `meeting label`
+voxtype meeting reassign latest 28 "Casey"   # nobody yet: creates the speaker Casey
+voxtype meeting reassign latest 28 --reset   # back to what the diarizer chose
+```
+
+The meeting can be its full ID, the start of it (`f82f0c11`), or `latest`. The line is the segment's `id` from `meeting show --json`; an ID the meeting does not have is an error that names the valid range. The speaker is matched the way `meeting label` matches it: an ID from the transcript (`You`, `Remote 1`, `SPEAKER_00` or just `0`) or a name already given, ignoring case. Text that matches no one creates a new speaker with that name, under an internal ID of the form `Person 1` that no diarizer produces. Add `--json` to print the updated segment.
+
+The move is stored per segment and applied whenever the transcript is saved or read, so exports, `meeting show` and the meeting socket all show it, and neither later chunks nor diarization can move the line back. If the diarizer renames the speaker you moved the line to (hybrid's `Remote` becoming `Remote 1`), the line follows. The segment keeps the diarizer's own choice in `original_speaker`, which is what `--reset` restores.
+
+This works during a meeting too. The command stores the move and the daemon applies it before the next chunk, sending the changed line to the meeting socket.
+
+### Correcting and Deleting Lines
+
+Fix a line the engine misheard, or hide one that should not be there, by the segment's `id` from `meeting show --json`:
+
+```bash
+voxtype meeting edit latest 28 "We ship on Friday."
+voxtype meeting edit latest 28 --reset           # back to the transcribed text
+voxtype meeting delete-line latest 31
+voxtype meeting delete-line latest 31 --restore
+```
+
+An edited line keeps what was transcribed as `original_text`. A deleted line is not destroyed: it stays in `transcript.json` marked `"deleted": true`, so `--restore` can bring it back, but exports, `transcript.md`, `meeting show` and the meeting assistant leave it out. Both are stored beside speaker moves and annotations and applied whenever the transcript is saved or read, so later chunks cannot undo them, and both work during a meeting. Add `--json` to print the segment.
+
+### Annotating a Line
+
+Attach a note or a highlight to one transcript line, by the segment's `id` from `meeting show --json`:
+
+```bash
+voxtype meeting annotate latest 28 "Check this number"
+voxtype meeting annotate latest 28 "Decision" --highlight
+voxtype meeting annotate latest 28 --highlight       # highlight without a note
+voxtype meeting annotate latest 28 --remove
+```
+
+A line has at most one annotation; annotating it again replaces it. Annotations are stored beside speaker moves and applied whenever the transcript is saved or read, so later chunks cannot remove them. Exports show each one as a quote under its line (`> Note: ...`, or `> **Highlight: ...**`), and `meeting show --json` and the meeting socket carry it on the segment as `"annotation": {"text": "...", "highlight": true}`. Both commands work during a meeting.
+
+### Notes
+
+Each meeting has free-text notes, kept as `notes.md` in the meeting's folder. You can write them during the meeting or after it; the daemon never overwrites them.
+
+```bash
+voxtype meeting notes latest                         # print them
+voxtype meeting notes latest --append "Ask Dana about travel"
+voxtype meeting notes latest --set-file agenda.md    # replace them ("-" reads stdin)
+voxtype meeting notes latest --json                  # {meeting_id, notes, updated_at}
+```
+
+Exports and `transcript.md` show the notes at the top, under "Notes".
+
+### Exporting Transcripts
+
+```bash
+# Markdown to stdout
+voxtype meeting export latest
+
+# Plain text to a file
+voxtype meeting export latest --format text --output meeting.txt
+
+# JSON with timestamps and speaker labels
+voxtype meeting export latest --format json --timestamps --speakers
+
+# Subtitle formats
+voxtype meeting export latest --format srt --output meeting.srt
+voxtype meeting export latest --format vtt --output meeting.vtt
+```
+
+**Supported formats:**
+
+| Format | Flag | Description |
+|--------|------|-------------|
+| Markdown | `markdown` or `md` | Default. Readable with headers and speaker labels. |
+| Plain text | `text` or `txt` | Just the words, no formatting. |
+| JSON | `json` | Structured data with all segment metadata. |
+| SRT | `srt` | SubRip subtitle format. |
+| VTT | `vtt` | WebVTT subtitle format. |
+
+**Export options:**
+
+| Flag | Description |
+|------|-------------|
+| `--format`, `-f` | Output format (default: markdown) |
+| `--output`, `-o` | Write to file instead of stdout |
+| `--timestamps` | Include timestamps in output |
+| `--speakers` | Include speaker labels |
+| `--metadata` | Include a metadata header (title, date, duration) |
+
+Markdown and JSON exports start with your notes and the summary when the meeting has them, and plain text with the notes. Annotations appear under their lines, and deleted lines are left out.
+
+Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did.
+
+### Deleting Meetings
+
+```bash
+voxtype meeting delete <meeting-id> --force
+```
+
+Permanently deletes the meeting: its record, its folder and everything in it, audio included. Without `--force` it refuses and deletes nothing.
+
+---
+
+## Meeting Audio
+
+### Keeping the Audio
+
+With `retain_audio = true` the meeting folder also keeps the meeting's audio, as three Ogg Opus files at 16 kHz mono and 24 kbps:
+
+- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (`echo_cancel = "auto"` with the GTCRN model present), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
+- `loopback.opus`: the other side, from the loopback device. A meeting recorded without loopback has no loopback file.
+- `mixed.opus`: the two summed, for listening back.
+
+The three files are the same length and start when the meeting starts, so a transcript timestamp is the same moment in each. Time spent paused is left out of both the audio and the transcript.
+
+Audio goes to disk chunk by chunk as the meeting records (every `chunk_duration_secs`, 30 seconds by default), not at the end. If voxtype crashes mid-meeting, the files keep everything up to the last chunk handed over before the crash and play as they are; the next daemon start marks the meeting completed in `meeting.json`.
+
+Opus takes about 10 MB per hour per file for speech, so a one-hour meeting with all three files uses about 30 MB (less where a side is silent).
+
+Encoding needs `ffmpeg` with libopus, which most distributions' `ffmpeg` package includes. Without it voxtype logs a warning and keeps the audio as `mic.wav`, `loopback.wav` and `mixed.wav` instead, at about 115 MB per hour per file. See [Troubleshooting](TROUBLESHOOTING.md#meeting-audio-is-saved-as-wav-instead-of-opus).
+
+### Playing a Meeting Back
+
+`voxtype meeting play` plays a meeting's kept audio from the start, from a transcript line, or from a time, and returns straight away while it plays in the background:
+
+```bash
+voxtype meeting play latest                       # from the start
+voxtype meeting play latest --segment 28          # from line 28 (its id in meeting show --json)
+voxtype meeting play latest --at 12:40            # 12 minutes 40 seconds in (also 760 or 1:12:40)
+voxtype meeting play latest --track loopback      # only the other side (mixed, mic or loopback)
+voxtype meeting play --status                     # what is playing
+voxtype meeting play --stop
+```
+
+Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
+
+Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
+
+---
+
+## The Meeting Assistant
+
+### Asking About a Meeting
+
+Ask a question about a meeting while it is recording or after it ends. The answer streams to the terminal and cites the `[mm:ss]` of the lines it relies on:
+
+```bash
+voxtype meeting ask latest "What did Steve just say?" --last 2m
+voxtype meeting ask latest "Summarize the last few minutes" --last 5m
+voxtype meeting ask latest "What are the action items so far?"
+```
+
+The assistant gets the transcript as `meeting show` displays it (speaker names you gave, lines moved with `meeting reassign`, and your annotations next to their lines), your meeting notes, and the question. `--last` limits it to the end of the transcript: `5m`, `90s`, `1h`, `2m30s`, or a bare number of minutes. It is a time window, so "the last few minutes" means minutes, not a number of words.
+
+A meeting longer than `max_transcript_chars` is sent as a running summary of its earlier part plus as many recent lines as fit. The running summary is kept in the meeting folder (`assistant-context.json`), so asking again during a meeting only summarizes what was said since.
+
+Every question and answer is saved to `asks.jsonl` in the meeting folder, and `voxtype meeting show <id> --json` includes them as `asks`.
+
+Other options:
+
+| Option | Effect |
+|--------|--------|
+| `--json` | One JSON event per line: `start`, `delta` while the answer streams, then `answer` (the saved record) or `error` |
+| `--notify` | Also show the answer as a desktop notification. Its Open action raises the meeting view on the Ask tab (`[meeting.assistant] open_command` replaces that; `""` removes it) |
+| `--agent claude` | Use this agent for this question |
+| `--local` | Answer with the local model (Ollama) |
+
+`ask` does not need the daemon: it reads the same saved transcript `meeting show` does.
+
+### AI Summarization
+
+Generate a summary with an overview, key points, decisions, action items with owners, and chapters with timestamps:
+
+```bash
+# Markdown summary to stdout
+voxtype meeting summarize latest
+
+# JSON format
+voxtype meeting summarize latest --format json
+
+# Save to file
+voxtype meeting summarize latest --output summary.md
+
+# Write a new one after naming speakers or moving lines
+voxtype meeting summarize latest --regenerate
+```
+
+The summary is saved with the meeting: `summary.md` in the meeting folder, `metadata.json`, and the meeting index, so it survives a restart. Running `summarize` again prints the saved summary; `--regenerate` writes a new one. Your notes go in as guidance, so the summary expands on what you wrote.
+
+The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent) unless `[meeting.summary] backend` is `"local"` or `"remote"`, which keep the older Ollama and API summarizers.
+
+**Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md#status)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
+
+### The Meeting Assistant and Consent
+
+`ask` and summaries go through your own coding agent, run headless with every tool switched off: it gets the transcript as text and returns text. It never gets a shell, file access or network tools in this path. Which agent:
+
+1. `[meeting.assistant] agent` in config.
+2. Otherwise the Omarchy default agent (`omarchy-default-agent`), when that command exists. Voxtype works the same without Omarchy.
+3. Otherwise a supported agent CLI found on PATH: Claude Code or Pi. With both found and neither allowed yet, the consent prompt asks which to use.
+
+| Agent | Support |
+|-------|---------|
+| Claude Code (`claude`) | Supported, no tools: `claude -p --tools "" --strict-mcp-config ...` |
+| Codex (`codex`) | Supported when named in config or as the Omarchy default, and only with bubblewrap (`bwrap`) installed: `codex exec` with its shell and app tools disabled and a read-only sandbox, run inside a bwrap jail. Its command tool cannot be switched off, so the jail is what keeps it away from your files: it sees `/usr`, the codex install, a few `/etc` files for DNS and TLS, and `~/.codex/auth.json` read-only, and nothing else from your home. It is never picked from PATH on its own |
+| Pi (`pi`) | Supported, no tools: `pi --print --no-tools --no-mcp --no-extensions --no-skills --no-context-files --no-session ...`, with the prompt attached as a file. Its answer arrives whole rather than streaming |
+| OpenCode (`opencode`) | Not supported: `opencode run` has no flag that turns its tools off, and its agents allow shell commands and web fetches, so even a filesystem jail could not keep a transcript from leaving the machine |
+| Hermes (`hermes`) | Not supported: its one-shot mode loads tools and auto-approves them, with no documented way to turn them all off |
+
+The first time transcripts would go to an agent, voxtype asks once ("Send to Claude / Use a local model / Not now") and remembers the answer per agent. Without a terminal to ask on, `ask` and `summarize` refuse with a message naming the command that allows it:
+
+```bash
+voxtype meeting assistant status          # which agent, what was found, consent
+voxtype meeting assistant allow claude    # allow transcripts to go to Claude
+voxtype meeting assistant revoke claude   # stop
+voxtype meeting assistant status --json   # for the meeting view and Settings panel
+```
+
+With no agent found, or with `local_only = true` or `--local`, answers and summaries come from the local Ollama model in `[meeting.summary]`.
+
+### Privacy: Where Transcripts Go
+
+Recording and transcription stay on your machine. The assistant is the one part of meeting mode that can send a transcript elsewhere:
+
+- **An agent** (`claude`, `codex`, `pi`) sends the prompt to whichever account that CLI is signed in to, usually the vendor's cloud service, under that account's terms. That prompt holds the meeting title, date, speaker names, the transcript (or the part of it that fits, plus a summary of the rest), your notes and annotations, and your question. Nothing goes to an agent until you allow it for that agent, and `voxtype meeting assistant revoke <agent>` stops it.
+- **The local model** (Ollama at `ollama_url`, `localhost` by default) keeps everything on your machine. `local_only = true` makes it the only option.
+- The agent runs in an empty temporary directory with its tools off, so it does not read your files or project instructions, and its session is not saved (`--no-session-persistence` for Claude, `--ephemeral` for Codex, `--no-session` for Pi). The prompt reaches it through a file in a private temporary directory that is removed when the agent exits.
+- Codex keeps a command tool that cannot be turned off, and a transcript is untrusted text: anyone on the call can say something meant for the model. So codex runs in a bubblewrap jail where your home holds nothing but its `auth.json` (read-only), and without `bwrap` voxtype does not use codex at all.
+- Consent is stored in `$XDG_STATE_HOME/voxtype/assistant-consent.json` (default `~/.local/state/voxtype/`).
+- Answers are stored in the meeting folder (`asks.jsonl`, `summary.md`), next to the transcript, and deleted with it.
+
+---
+
+## Automation
+
+### Running a Command After a Meeting
+
+`post_meeting_command` runs a shell command once a meeting has stopped and its folder is final: after the transcript, audio and `meeting.json` are written, and after the automatic summary when one runs. Use it to copy the folder somewhere, file it in your notes, or start your own processing.
+
+```toml
+[meeting]
+post_meeting_command = 'rsync -a "$VOXTYPE_MEETING_DIR" nas:meetings/'
+post_meeting_timeout_secs = 300   # default
+```
+
+The command runs through `sh -c` in the meeting folder, with these variables set:
+
+| Variable | Value |
+|----------|-------|
+| `VOXTYPE_MEETING_ID` | The meeting's ID |
+| `VOXTYPE_MEETING_DIR` | The meeting folder |
+| `VOXTYPE_MEETING_MANIFEST` | The path of its `meeting.json` |
+
+It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
+
+### Integrations
+
+Everything a program can read or drive is documented as a stable contract in [INTEGRATIONS.md](INTEGRATIONS.md#meeting-mode): `--json` on `status`, `list`, `show`, `ask`, `assistant status`, `play` and the transcript-editing commands, the `meeting.sock` socket that streams the live transcript and status, the `meeting.json` manifest, and the files the meeting view reads and writes. Build a bar widget, a view of your own, or an agent workflow on those rather than on voxtype's internal files.
+
+---
+
 ## Configuration
 
 All meeting settings live under the `[meeting]` section in `~/.config/voxtype/config.toml`.
@@ -599,9 +627,21 @@ post_meeting_timeout_secs = 300
 # Maximum meeting duration in minutes (default: 180, 0 = unlimited)
 max_duration_mins = 180
 
-# Open the live meeting view in the Omarchy shell when a meeting starts
-# (default: true; no effect on other desktops)
+# Open the live meeting view when a meeting starts, in the Omarchy shell or
+# voxtype's Quickshell shell (default: true)
 show_view_on_start = true
+
+# How opaque the meeting view's background is while the pointer is elsewhere,
+# 0.3 to 1.0 (default: 0.8)
+view_opacity = 0.8
+
+# Meeting Started/Paused/Resumed/Ended notifications: "auto" skips them while
+# the meeting view is on screen, "always", or "never" (default: "auto")
+status_notifications = "auto"
+
+# While meeting mode is off, offer to turn it on from the tray and a
+# notification at most once a day (default: true)
+offer_enable = true
 ```
 
 ### Audio Settings
@@ -720,45 +760,48 @@ max_transcript_chars = 100000
 
 ---
 
-## Privacy: Where Transcripts Go
-
-Recording and transcription stay on your machine. The assistant is the one part of meeting mode that can send a transcript elsewhere:
-
-- **An agent** (`claude`, `codex`) sends the prompt to whichever account that CLI is signed in to, usually the vendor's cloud service, under that account's terms. That prompt holds the meeting title, date, speaker names, the transcript (or the part of it that fits, plus a summary of the rest), your notes and annotations, and your question. Nothing goes to an agent until you allow it for that agent, and `voxtype meeting assistant revoke <agent>` stops it.
-- **The local model** (Ollama at `ollama_url`, `localhost` by default) keeps everything on your machine. `local_only = true` makes it the only option.
-- The agent runs in an empty temporary directory with its tools off, so it does not read your files or project instructions, and its session is not saved (`--no-session-persistence` for Claude, `--ephemeral` for Codex). The prompt reaches it through a file in a private temporary directory that is removed when the agent exits.
-- Codex keeps a command tool that cannot be turned off, and a transcript is untrusted text: anyone on the call can say something meant for the model. So codex runs in a bubblewrap jail where your home holds nothing but its `auth.json` (read-only), and without `bwrap` voxtype does not use codex at all.
-- Consent is stored in `$XDG_STATE_HOME/voxtype/assistant-consent.json` (default `~/.local/state/voxtype/`).
-- Answers are stored in the meeting folder (`asks.jsonl`, `summary.md`), next to the transcript, and deleted with it.
-
----
-
 ## Storage
 
-Meeting data is stored at `~/.local/share/voxtype/meetings/` by default (or the path you set in `storage_path`).
-
-Each meeting gets its own directory named by date and title:
+Meetings are kept under `~/.local/share/voxtype/meetings/` by default, or the `storage_path` you set. Each meeting gets a folder named by its date and title, and `index.db`, a SQLite database, indexes them all for fast listing:
 
 ```
 ~/.local/share/voxtype/meetings/
-  index.db                          # SQLite database with meeting metadata
-  2026-02-16-weekly-standup/
-    meeting.json                    # Manifest: what the meeting is and what is here
-    transcript.json                 # Full transcript with segments
-    transcript.md                   # The same, readable
-    notes.md                        # Your notes, if any
-    mic.opus                        # Audio, with retain_audio = true
+  index.db
+  2026-11-11-release-sync/
+    meeting.json
+    transcript.json
+    transcript.md
+    notes.md
+    summary.md
+    asks.jsonl
+    mic.opus
     loopback.opus
     mixed.opus
-    metadata.json                   # Voxtype's own record
-  2026-02-14-project-kickoff/
+    metadata.json
+  2026-11-10-weekly-standup/
     meeting.json
     transcript.json
     transcript.md
     metadata.json
 ```
 
-The `index.db` SQLite database stores meeting metadata for fast listing and lookup. Transcripts are stored as JSON files alongside the metadata for easy access and portability.
+A folder holds:
+
+| File | What it is |
+|------|------------|
+| `meeting.json` | The manifest: title, times, engine and model, speakers and their names, and every file below with its size. A stable format for scripts; see [INTEGRATIONS.md](INTEGRATIONS.md#the-meeting-folder-and-meetingjson) |
+| `transcript.json` | The segments, with speaker names, moves, annotations and text corrections applied. Deleted lines stay here, marked `"deleted": true`, and appear nowhere else |
+| `transcript.md` | The same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change |
+| `notes.md` | Your notes, once you write any |
+| `summary.md` | The meeting summary, once there is one |
+| `asks.jsonl` | Every question asked with `meeting ask` or the Ask tab, and its answer, one per line |
+| `assistant-context.json` | During a long meeting, the assistant's running summary of the earlier part, so asking again only summarizes what is new |
+| `mic.opus`, `loopback.opus`, `mixed.opus` | The meeting's audio, with `retain_audio = true` (below) |
+| `metadata.json` | Voxtype's own record of the meeting; read `meeting.json` instead |
+
+`meeting.json` is written when the meeting starts and rewritten when it stops, when its notes or summary change, and when a daemon restart finishes a meeting a crash left open.
+
+`voxtype meeting delete` removes the folder along with the meeting's record. Copying a folder elsewhere keeps everything a reader needs, starting with `meeting.json`; [post_meeting_command](#running-a-command-after-a-meeting) does that automatically.
 
 ---
 
