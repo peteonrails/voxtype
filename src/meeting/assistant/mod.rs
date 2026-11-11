@@ -134,6 +134,8 @@ pub struct AssistantSettings {
     pub local_only: bool,
     pub timeout: Duration,
     pub max_transcript_chars: usize,
+    /// As configured: `None` means the default (open the meeting view),
+    /// an empty string means no Open action. See [`open_action_command`].
     pub open_command: Option<String>,
     pub summary_auto: Option<bool>,
     /// `[meeting.summary] backend`: `local` and `remote` keep the older
@@ -152,7 +154,7 @@ impl AssistantSettings {
             local_only: a.local_only,
             timeout: Duration::from_secs(a.timeout_secs.max(1)),
             max_transcript_chars: (a.max_transcript_chars as usize).max(2_000),
-            open_command: a.open_command.clone().filter(|s| !s.trim().is_empty()),
+            open_command: a.open_command.clone(),
             summary_auto: s.auto,
             summary_backend: s.backend.clone(),
             summary: crate::meeting::summary::SummaryConfig {
@@ -192,6 +194,50 @@ impl AssistantSettings {
                         .is_some_and(|a| self.consent().is_allowed(&a.id))
             }
         }
+    }
+}
+
+/// The command the Open action of an `ask --notify` notification runs.
+///
+/// An explicit `open_command` wins, and an empty one turns Open off. Unset,
+/// Open raises the meeting view on its Ask tab through `voxtype` itself:
+/// `exe` (the running binary, not whatever `voxtype` PATH finds), when
+/// `has_view` says that binary has a `meeting view` command.
+pub fn open_action_command(
+    configured: Option<&str>,
+    exe: Option<&Path>,
+    has_view: impl FnOnce(&Path) -> bool,
+) -> Option<String> {
+    match configured {
+        Some(cmd) if cmd.trim().is_empty() => None,
+        Some(cmd) => Some(cmd.to_string()),
+        None => {
+            let exe = exe?;
+            has_view(exe).then(|| {
+                format!(
+                    "{} meeting view \"$VOXTYPE_MEETING_ID\" --tab ask",
+                    shell_quote(&exe.display().to_string())
+                )
+            })
+        }
+    }
+}
+
+/// Does `exe` have the `meeting view` command? Older and parallel builds
+/// do not; asking its own help is the one reliable test.
+pub fn binary_has_meeting_view(exe: &Path) -> bool {
+    agent::run_quick(exe, &["meeting", "view", "--help"]).is_some()
+}
+
+/// Quote `s` for `sh -c`.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -922,6 +968,27 @@ mod tests {
         assert_eq!(v["backend_name"], "Claude");
         assert_eq!(v["auto_summary"], true);
         assert_eq!(v["candidates"][0]["consent"], true);
+    }
+
+    #[test]
+    fn open_defaults_to_the_meeting_view_of_this_binary() {
+        let exe = Path::new("/opt/vox type/voxtype");
+        assert_eq!(
+            open_action_command(None, Some(exe), |p| p == exe).as_deref(),
+            Some("'/opt/vox type/voxtype' meeting view \"$VOXTYPE_MEETING_ID\" --tab ask")
+        );
+        // A binary without `meeting view` gets no Open action.
+        assert_eq!(open_action_command(None, Some(exe), |_| false), None);
+        assert_eq!(open_action_command(None, None, |_| true), None);
+        // Explicit settings win; empty disables.
+        assert_eq!(
+            open_action_command(Some("my-view --ask"), Some(exe), |_| true).as_deref(),
+            Some("my-view --ask")
+        );
+        assert_eq!(open_action_command(Some(""), Some(exe), |_| true), None);
+        assert_eq!(open_action_command(Some("  "), Some(exe), |_| true), None);
+        assert_eq!(shell_quote("/usr/bin/voxtype"), "/usr/bin/voxtype");
+        assert_eq!(shell_quote("/a'b"), "'/a'\\''b'");
     }
 
     #[test]

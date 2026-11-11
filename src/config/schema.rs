@@ -2420,7 +2420,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::String,
         "Meeting",
         "Answer Open command",
-        "Command the Open action of an ask notification runs. Unset shows no Open action.",
+        "Command the Open action of an ask notification runs. Unset opens the meeting view's Ask tab; empty turns Open off.",
     )
     .live(),
 ];

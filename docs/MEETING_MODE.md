@@ -271,7 +271,7 @@ Other options:
 | Option | Effect |
 |--------|--------|
 | `--json` | One JSON event per line: `start`, `delta` while the answer streams, then `answer` (the saved record) or `error` |
-| `--notify` | Also show the answer as a desktop notification. Its Open action runs `[meeting.assistant] open_command` |
+| `--notify` | Also show the answer as a desktop notification. Its Open action raises the meeting view on the Ask tab (`[meeting.assistant] open_command` replaces that; `""` removes it) |
 | `--agent claude` | Use this agent for this question |
 | `--local` | Answer with the local model (Ollama) |
 
@@ -472,7 +472,8 @@ timeout_secs = 180
 max_transcript_chars = 100000
 
 # Command the Open action of an `ask --notify` notification runs, through
-# sh -c, with VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID set. Unset: no Open action.
+# sh -c, with VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID set.
+# Unset: open the meeting view on its Ask tab. "": no Open action.
 # open_command = "..."
 ```
 

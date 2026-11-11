@@ -3966,7 +3966,9 @@ Transcript characters sent verbatim. A longer meeting is sent as a running summa
 **Default:** unset
 **Required:** No
 
-Command run, through `sh -c`, when the Open action of a `meeting ask --notify` notification is clicked. `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` are set to the meeting and the answer's `id` in `asks.jsonl`. Unset shows the notification without an Open action.
+Command run, through `sh -c`, when the Open action of a `meeting ask --notify` notification is clicked. `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` are set to the meeting and the answer's `id` in `asks.jsonl`.
+
+Unset, Open raises the meeting view on its Ask tab: `voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask`, run with the same voxtype binary that answered rather than whichever `voxtype` is first on PATH. A binary without the `meeting view` command shows no Open action. An empty string (`open_command = ""`, set in the config file) turns the Open action off.
 
 ```toml
 [meeting.assistant]

@@ -479,3 +479,65 @@ async fn notify_shows_the_answer_and_open_runs_the_command() {
     );
     assert!(env.contains(&format!("VOXTYPE_MEETING_ID={id}")), "{env}");
 }
+
+/// Unset `open_command` opens the meeting view through this binary when it
+/// has `meeting view`, and an empty one turns Open off.
+#[tokio::test(flavor = "multi_thread")]
+async fn notify_open_defaults_to_the_view_and_empty_turns_it_off() {
+    let Some(bus) = PrivateBus::start() else {
+        eprintln!("skipping: dbus-daemon is not available");
+        return;
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.Notifications")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/Notifications",
+            FakeServer {
+                answer: "open".into(),
+                log: log.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let w = World::new();
+    w.meeting();
+    w.run(&["meeting", "assistant", "allow", "claude"]);
+    let has_view = w.run(&["meeting", "view", "--help"]).status.success();
+    let config = std::fs::read_to_string(w.p("config.toml")).unwrap();
+    let without: String = config
+        .lines()
+        .filter(|l| !l.starts_with("open_command"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+
+    for (body, expect_open) in [
+        (without.clone(), has_view),
+        (format!("{without}open_command = \"\"\n"), false),
+    ] {
+        std::fs::write(w.p("config.toml"), body).unwrap();
+        log.lock().unwrap().clear();
+        let mut cmd = w.command(&["meeting", "ask", "latest", "q", "--notify"]);
+        cmd.env("DBUS_SESSION_BUS_ADDRESS", &bus.address);
+        let o = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || cmd.output().unwrap()),
+        )
+        .await
+        .expect("ask --notify returns")
+        .unwrap();
+        assert!(o.status.success(), "{}", text(&o.stderr));
+        let seen = log.lock().unwrap().clone();
+        let actions = seen[0].rsplit(" | ").next().unwrap().to_string();
+        if expect_open {
+            assert_eq!(actions, "default,Open,open,Open", "{seen:?}");
+        } else {
+            assert_eq!(actions, "", "{seen:?}");
+        }
+    }
+}

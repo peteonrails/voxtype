@@ -237,9 +237,12 @@ exit status 1 (`code` as above). `last_secs` is present only with `--last`.
 The `answer` object, without `event` and `meeting_id`, is the line saved to
 the meeting's `asks.jsonl` and listed under `asks` in `meeting show --json`.
 `--notify` additionally shows the answer as a notification whose Open action
-runs `[meeting.assistant] open_command` with `VOXTYPE_MEETING_ID` and
-`VOXTYPE_ASK_ID` set; the command waits for the notification to be answered,
-up to 15 minutes.
+runs `voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask` through the same
+binary that answered (or `[meeting.assistant] open_command`, with
+`VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` set; an empty `open_command` drops
+the action). The command waits for the notification to be answered, up to 15
+minutes. A view host that wants to scroll to the answer reads
+`VOXTYPE_ASK_ID` through a custom `open_command`.
 
 ### Assistant state: `meeting assistant status --json`
 

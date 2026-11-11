@@ -262,7 +262,9 @@ pub struct MeetingAssistantConfig {
 
     /// Command the "Open" action of an `ask --notify` notification runs,
     /// through `sh -c`. VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID are set.
-    /// Unset shows no Open action.
+    /// Unset opens the meeting view on its Ask tab
+    /// (`voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask`); an empty
+    /// string shows no Open action.
     #[serde(default)]
     pub open_command: Option<String>,
 }
