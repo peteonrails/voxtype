@@ -15,6 +15,12 @@ pub struct MeetingConfig {
     #[serde(default = "default_true")]
     pub offer_enable: bool,
 
+    /// Meeting started/paused/resumed/ended notifications: "auto" skips them
+    /// while a meeting view is on screen, "always", or "never". Errors always
+    /// notify.
+    #[serde(default = "default_status_notifications")]
+    pub status_notifications: String,
+
     /// Duration of each audio chunk in seconds
     #[serde(default = "default_chunk_duration")]
     pub chunk_duration_secs: u32,
@@ -175,6 +181,10 @@ fn default_vad_rms_floor() -> f32 {
     0.005
 }
 
+fn default_status_notifications() -> String {
+    "auto".to_string()
+}
+
 fn default_chunk_duration() -> u32 {
     30
 }
@@ -265,6 +275,7 @@ impl Default for MeetingConfig {
         Self {
             enabled: false,
             offer_enable: true,
+            status_notifications: default_status_notifications(),
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,

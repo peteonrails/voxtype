@@ -1367,6 +1367,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "While meeting mode is off, the tray offers to turn it on. Set false to stop the offer.",
     ),
     spec(
+        "meeting.status_notifications",
+        "meeting",
+        "status_notifications",
+        closed(crate::meeting::status_notice::STATUS_MODES),
+        "Meeting",
+        "Meeting status notifications",
+        "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -2883,6 +2892,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "meeting.enabled" => json!(cfg.meeting.enabled),
         "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
+        "meeting.status_notifications" => json!(cfg.meeting.status_notifications),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),

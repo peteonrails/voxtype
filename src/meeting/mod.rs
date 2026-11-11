@@ -28,8 +28,10 @@ pub mod diarization;
 pub mod events;
 pub mod export;
 pub mod state;
+pub mod status_notice;
 pub mod storage;
 pub mod summary;
+pub mod view_presence;
 
 pub use chunk::{ChunkBuffer, ChunkConfig, ChunkProcessor, ProcessedChunk, VoiceActivityDetector};
 pub use data::{
