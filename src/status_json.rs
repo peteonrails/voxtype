@@ -11,9 +11,10 @@
 //! ## Contract
 //!
 //! - Key order: `text, alt, class, tooltip` (then `model, device, backend,
-//!   model_upgrade` when extended). `model_upgrade` is the
-//!   `voxtype::model_upgrade::UpgradeStatus` object, or `null` when there is
-//!   nothing to offer, no ONNX removal notice and nothing to clean up.
+//!   model_upgrade, osd_frontend_active` when extended). `model_upgrade` is
+//!   the `voxtype::model_upgrade::UpgradeStatus` object, or `null` when there
+//!   is nothing to offer, no ONNX removal notice and nothing to clean up.
+//!   `osd_frontend_active` is `quickshell`, `gtk4`, `native` or `none`.
 //! - Whitespace: a single space after each `:` between key and value.
 //! - The tooltip is a JSON string with `\n` (the two-byte escape) between
 //!   lines, not a real `0x0a` newline — Waybar renders these client-side.
@@ -46,6 +47,8 @@ pub struct ExtendedStatusInfo {
     pub backend: String,
     /// `None` serializes as `null`: nothing to offer, notice or clean up.
     pub model_upgrade: Option<UpgradeStatus>,
+    /// The OSD frontend in use: `quickshell`, `gtk4`, `native` or `none`.
+    pub osd_frontend_active: String,
 }
 
 impl ExtendedStatusInfo {
@@ -86,6 +89,7 @@ impl ExtendedStatusInfo {
             device: config.audio.device.clone(),
             backend,
             model_upgrade: model_upgrade_for(config),
+            osd_frontend_active: osd_frontend_active(config, inv.daemon_pid.is_some()),
         }
     }
 
@@ -93,7 +97,28 @@ impl ExtendedStatusInfo {
     /// was accepted, declined or cleaned up.
     pub fn refresh_model_upgrade(&mut self, config: &config::Config) {
         self.model_upgrade = model_upgrade_for(config);
+        self.osd_frontend_active =
+            osd_frontend_active(config, crate::daemon_status::is_daemon_running());
     }
+}
+
+/// The frontend the running daemon published at startup. With no daemon
+/// (or one that predates publishing), what the current config resolves to
+/// on this system, the same answer the next daemon would log.
+fn osd_frontend_active(config: &config::Config, daemon_alive: bool) -> String {
+    use crate::osd::frontend;
+    if daemon_alive {
+        if let Some(name) = frontend::read_published(&config::Config::runtime_dir()) {
+            return name;
+        }
+    }
+    if !config.osd.enabled {
+        return "none".to_string();
+    }
+    let configured = frontend::effective_configured(config.osd.frontend);
+    frontend::resolve(configured, &frontend::SystemProbe)
+        .active_name()
+        .to_string()
 }
 
 fn model_upgrade_for(config: &config::Config) -> Option<UpgradeStatus> {
@@ -292,7 +317,7 @@ pub fn format_state_json(
                 .and_then(|status| serde_json::to_string(status).ok())
                 .unwrap_or_else(|| "null".to_string());
             format!(
-                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}, "model_upgrade": {}}}"#,
+                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}, "model_upgrade": {}, "osd_frontend_active": {}}}"#,
                 json_str(text),
                 json_str(alt),
                 json_str(class),
@@ -301,6 +326,7 @@ pub fn format_state_json(
                 json_str(&info.device),
                 json_str(&info.backend),
                 upgrade,
+                json_str(&info.osd_frontend_active),
             )
         }
         None => format!(
@@ -453,14 +479,15 @@ mod tests {
             device: "default".to_string(),
             backend: "CPU (AVX2)".to_string(),
             model_upgrade: None,
+            osd_frontend_active: "gtk4".to_string(),
         };
         assert_eq!(
             format_state_json("recording", &icons, Some(&ext)),
-            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null}"#,
+            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null, "osd_frontend_active": "gtk4"}"#,
         );
         assert_eq!(
             format_state_json("idle", &icons, Some(&ext)),
-            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null}"#,
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null, "osd_frontend_active": "gtk4"}"#,
         );
     }
 
@@ -482,6 +509,7 @@ mod tests {
             device: r#"PulseAudio "Main" \ Loopback"#.to_string(),
             backend: r#"GPU \\ CUDA"#.to_string(),
             model_upgrade: None,
+            osd_frontend_active: "gtk4".to_string(),
         };
 
         let json = format_state_json("recording", &icons, Some(&ext));
@@ -549,6 +577,7 @@ mod tests {
             device: "default".to_string(),
             backend: "ONNX CPU (AVX2)".to_string(),
             model_upgrade: Some(upgrade(false)),
+            osd_frontend_active: "quickshell".to_string(),
         };
         let json = format_state_json("idle", &icons, Some(&ext));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();

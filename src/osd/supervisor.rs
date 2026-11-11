@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
+use super::config::OsdFrontend;
+
 const OSD_BINARY: &str = "voxtype-osd";
 const RESTART_MIN: Duration = Duration::from_secs(1);
 const RESTART_MAX: Duration = Duration::from_secs(30);
@@ -55,11 +57,16 @@ fn resolve_osd_binary() -> PathBuf {
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
 /// drop kills the child via `kill_on_drop`. Holding the handle keeps the
 /// supervisor alive for the daemon's lifetime.
-pub fn spawn() -> JoinHandle<()> {
-    tokio::spawn(supervise())
+///
+/// `frontend` is passed to the launcher as `--frontend`: the daemon sets it
+/// when it resolved `auto` itself, so the launcher runs the same frontend
+/// the daemon logged and published. `None` leaves the choice to the
+/// launcher, which is how explicit frontends have always been handled.
+pub fn spawn(frontend: Option<OsdFrontend>) -> JoinHandle<()> {
+    tokio::spawn(supervise(frontend))
 }
 
-async fn supervise() {
+async fn supervise(frontend: Option<OsdFrontend>) {
     let mut backoff = RESTART_MIN;
     let mut rapid_fails: u32 = 0;
     let mut rapid_window_start = Instant::now();
@@ -69,6 +76,9 @@ async fn supervise() {
         let osd_binary = resolve_osd_binary();
         let mut cmd = Command::new(&osd_binary);
         cmd.kill_on_drop(true);
+        if let Some(f) = frontend {
+            cmd.args(["--frontend", f.as_str()]);
+        }
         // Tell the dispatcher this child is supervised. The dispatcher
         // uses this to suppress qs's daemonize fork when handing off to
         // the Quickshell launcher (otherwise kill_on_drop has nothing
@@ -113,7 +123,7 @@ async fn supervise() {
             if rapid_fails >= RAPID_FAIL_THRESHOLD {
                 tracing::error!(
                     "OSD child exited {} times within {:?}. Giving up — check that \
-                     voxtype-osd-gtk4 (or voxtype-osd-native) is installed and that \
+                     the OSD frontend runs (`voxtype setup osd --status`) and that \
                      the [osd] config is valid. The daemon will keep running.",
                     rapid_fails,
                     RAPID_FAIL_WINDOW

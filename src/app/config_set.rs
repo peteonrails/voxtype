@@ -154,3 +154,66 @@ pub(crate) fn run_setup_osd(
     }
     Ok(())
 }
+
+/// `voxtype setup osd --status [--json]`: the configured frontend, the one
+/// that resolves on this system, and whether to offer the Quickshell OSD.
+pub(crate) fn run_setup_osd_status(config: &config::Config, json: bool) -> anyhow::Result<()> {
+    use voxtype::osd::frontend::{self, OsdStatus, SystemProbe};
+
+    let configured = frontend::effective_configured(config.osd.frontend);
+    let dismissed = frontend::offer_dismissed(&config::Config::state_dir());
+    let status = OsdStatus::build(configured, &SystemProbe, dismissed);
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
+    println!("Configured: {}", status.configured);
+    println!("Active:     {}", status.active);
+    println!("Reason:     {}", status.reason);
+    println!(
+        "Quickshell: {}",
+        if status.quickshell_available {
+            "available"
+        } else {
+            "not available"
+        }
+    );
+    if !config.osd.enabled {
+        println!("\nThe OSD is disabled ([osd] enabled = false).");
+    }
+    if status.offer {
+        println!(
+            "\nThe Quickshell OSD can run here. Switch with:\n  \
+             voxtype setup osd --use-auto && systemctl --user restart voxtype\n\
+             or keep {} with: voxtype setup osd --dismiss-offer",
+            status.configured
+        );
+    }
+    Ok(())
+}
+
+/// `voxtype setup osd --use-auto`: write osd.frontend = "auto" through the
+/// validated config-set path and clear a dismissed offer.
+pub(crate) fn run_setup_osd_use_auto(cli_override: Option<PathBuf>) -> anyhow::Result<()> {
+    let path = resolve_config_path_for_write(cli_override)?;
+    let out = match config_set::set_key(path, "osd.frontend", "auto") {
+        Ok(out) => out,
+        Err(e) => fail(e),
+    };
+    voxtype::osd::frontend::set_offer_dismissed(&config::Config::state_dir(), false)?;
+    println!("Set osd.frontend = \"auto\" in {}", out.path.display());
+    restart_hint(out.restart_required);
+    Ok(())
+}
+
+/// `voxtype setup osd --dismiss-offer`: keep the current frontend and stop
+/// offering the Quickshell OSD.
+pub(crate) fn run_setup_osd_dismiss_offer() -> anyhow::Result<()> {
+    let state_dir = config::Config::state_dir();
+    voxtype::osd::frontend::set_offer_dismissed(&state_dir, true)?;
+    println!(
+        "Dismissed the Quickshell OSD offer ({}).",
+        voxtype::osd::frontend::offer_state_path(&state_dir).display()
+    );
+    Ok(())
+}

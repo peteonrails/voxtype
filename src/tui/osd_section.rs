@@ -100,7 +100,7 @@ impl Field {
 
 const TABLE: &str = "osd";
 
-const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
 const LAYOUT_CHOICES: &[&str] = &[
     "compact", "wide", "minimal", "pill", "shell", "tile", "orb", "custom",
@@ -135,7 +135,7 @@ impl OsdState {
             enabled: ed.get_bool(TABLE, "enabled").unwrap_or(true),
             frontend: ed
                 .get_string(TABLE, "frontend")
-                .unwrap_or_else(|| "gtk4".to_string()),
+                .unwrap_or_else(|| "auto".to_string()),
             style: ed
                 .get_string(TABLE, "style")
                 .unwrap_or_else(|| "default".to_string()),
@@ -545,7 +545,10 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
                  difference is the underlying toolkit.",
             ),
             Line::from(""),
-            Line::from("  gtk4    GTK4 + layer-shell. Default. Already pulled in by most"),
+            Line::from("  auto    Default. Quickshell when qs and a Wayland session are"),
+            Line::from("          available, else gtk4, else native."),
+            Line::from(""),
+            Line::from("  gtk4    GTK4 + layer-shell. Already pulled in by most"),
             Line::from("          Hyprland setups (walker, swayosd) so no extra runtime cost."),
             Line::from(""),
             Line::from("  native  SCTK + wgpu + egui. Skips GTK4 entirely if you want to"),

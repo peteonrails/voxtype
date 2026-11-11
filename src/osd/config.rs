@@ -23,17 +23,16 @@ pub enum OsdPosition {
 
 /// Selects which OSD frontend the `voxtype-osd` wrapper launches.
 ///
-/// The wrapper treats this as a *preference*: if the chosen frontend's
-/// binary isn't on PATH (e.g. the user built voxtype with only one of
-/// `osd-gtk4`/`osd-native`/`osd-quickshell`), the wrapper falls back to
-/// whichever it can find and logs a warning. Default is `Gtk4` because
-/// GTK4 ships with most Hyprland setups already (Omarchy pulls it in via
-/// swayosd, walker, etc.) so there's no extra runtime cost for the
-/// typical user.
+/// `Auto` (the default for new configs and configs without the key) picks
+/// Quickshell where it can run, else GTK4, else native; see
+/// [`crate::osd::frontend`]. An explicit value is a *preference*: if the
+/// chosen frontend's binary isn't installed, the wrapper falls back to
+/// whichever it can find and logs a warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OsdFrontend {
     #[default]
+    Auto,
     Gtk4,
     Native,
     Quickshell,
@@ -42,16 +41,31 @@ pub enum OsdFrontend {
 impl OsdFrontend {
     /// Name of the binary that implements this frontend, suitable for a
     /// PATH lookup or `Command::new`.
+    ///
+    /// `Auto` has no binary of its own; it names the `voxtype-osd`
+    /// launcher, which resolves it.
     pub fn binary_name(self) -> &'static str {
         match self {
+            OsdFrontend::Auto => "voxtype-osd",
             OsdFrontend::Gtk4 => "voxtype-osd-gtk4",
             OsdFrontend::Native => "voxtype-osd-native",
             OsdFrontend::Quickshell => "voxtype-osd-quickshell",
         }
     }
 
+    /// Config spelling: `auto`, `gtk4`, `native` or `quickshell`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OsdFrontend::Auto => "auto",
+            OsdFrontend::Gtk4 => "gtk4",
+            OsdFrontend::Native => "native",
+            OsdFrontend::Quickshell => "quickshell",
+        }
+    }
+
     pub fn parse_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(OsdFrontend::Auto),
             "gtk4" | "gtk" => Some(OsdFrontend::Gtk4),
             "native" | "wgpu" | "egui" => Some(OsdFrontend::Native),
             "quickshell" | "qml" | "qs" => Some(OsdFrontend::Quickshell),
@@ -341,7 +355,7 @@ pub struct OsdConfig {
     /// the default; reduce for hot mics, increase for quiet sources.
     pub waveform_gain: f32,
     /// Which OSD frontend the `voxtype-osd` wrapper launches. Defaults to
-    /// `Gtk4` since GTK4 ships with most Hyprland setups already.
+    /// `Auto`, which picks the best frontend the system can run.
     pub frontend: OsdFrontend,
     /// Quickshell style name, package name, or package path.
     pub style: String,
@@ -420,9 +434,23 @@ mod tests {
     }
 
     #[test]
-    fn frontend_default_is_gtk4() {
-        assert_eq!(OsdFrontend::default(), OsdFrontend::Gtk4);
-        assert_eq!(OsdConfig::default().frontend, OsdFrontend::Gtk4);
+    fn frontend_default_is_auto() {
+        assert_eq!(OsdFrontend::default(), OsdFrontend::Auto);
+        assert_eq!(OsdConfig::default().frontend, OsdFrontend::Auto);
+        // A config without the key means auto; explicit values are kept.
+        let c: OsdConfig = toml::from_str("enabled = true").unwrap();
+        assert_eq!(c.frontend, OsdFrontend::Auto);
+        for (raw, want) in [
+            ("auto", OsdFrontend::Auto),
+            ("gtk4", OsdFrontend::Gtk4),
+            ("native", OsdFrontend::Native),
+            ("quickshell", OsdFrontend::Quickshell),
+        ] {
+            let c: OsdConfig = toml::from_str(&format!("frontend = \"{raw}\"")).unwrap();
+            assert_eq!(c.frontend, want);
+            assert_eq!(want.as_str(), raw);
+            assert_eq!(OsdFrontend::parse_str(raw), Some(want));
+        }
     }
 
     #[test]

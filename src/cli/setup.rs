@@ -369,9 +369,9 @@ pub enum SetupAction {
         status: bool,
     },
 
-    /// Apply or list OSD recipe presets
+    /// Apply or list OSD recipe presets, or show which OSD frontend runs
     #[command(long_about = "\
-        Apply or list OSD recipe presets\n\n\
+        Apply or list OSD recipe presets, or show which OSD frontend runs\n\n\
         A recipe is a complete [osd] preset: layout, frame, and \
         [[osd.visual.layers]]. Applying one writes its keys into config.toml \
         through the same editor as `voxtype config set`: keys the recipe sets \
@@ -383,11 +383,31 @@ pub enum SetupAction {
         ~/.local/share/voxtype/osd-recipes, then \
         /usr/share/voxtype/osd-recipes; a user copy shadows a shipped one. \
         With no --recipe name, lists the available recipes.\n\n\
+        Frontend: [osd] frontend = \"auto\" (the default) runs the Quickshell \
+        OSD when voxtype-osd-quickshell is installed, qs (or quickshell) is \
+        on PATH and a Wayland session is present; otherwise gtk4 when \
+        voxtype-osd-gtk4 is installed, its libraries (gtk4-layer-shell, GTK \
+        4) load and a display is present; otherwise native. An explicit gtk4, native or quickshell is always kept.\n\n\
+        --status shows the configured frontend, the one that runs and why. \
+        --status --json prints {configured, active, reason, \
+        quickshell_available, offer, offer_dismissed}, where configured is \
+        auto, gtk4, native or quickshell, active is quickshell, gtk4, native \
+        or none, and offer is true when an explicit gtk4 or native could \
+        switch to the Quickshell OSD and the offer was not dismissed.\n\n\
+        --use-auto sets osd.frontend = \"auto\" (validated, like `voxtype \
+        config set`) and clears a dismissed offer. --dismiss-offer answers \
+        \"Keep\" to the offer; it is stored in \
+        ~/.local/state/voxtype/osd-offer.json, never in config.toml. Neither \
+        restarts the daemon: restart voxtype to apply a frontend change.\n\n\
         Examples:\n  \
         voxtype setup osd --list\n  \
         voxtype setup osd --recipe showcase-bars --dry-run\n  \
         voxtype setup osd --recipe showcase-bars\n  \
-        voxtype setup osd --recipe ./my-recipe.toml")]
+        voxtype setup osd --recipe ./my-recipe.toml\n  \
+        voxtype setup osd --status\n  \
+        voxtype setup osd --status --json\n  \
+        voxtype setup osd --use-auto && systemctl --user restart voxtype\n  \
+        voxtype setup osd --dismiss-offer")]
     Osd {
         /// Recipe name from --list, or a path to a recipe .toml file
         #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
@@ -400,6 +420,22 @@ pub enum SetupAction {
         /// Show what would change without writing config.toml
         #[arg(long)]
         dry_run: bool,
+
+        /// Show the configured OSD frontend, the one that runs, and why
+        #[arg(long, conflicts_with_all = ["recipe", "list", "dry_run", "use_auto", "dismiss_offer"])]
+        status: bool,
+
+        /// With --status, print the state as JSON
+        #[arg(long, requires = "status")]
+        json: bool,
+
+        /// Set osd.frontend = "auto" and clear a dismissed Quickshell offer
+        #[arg(long, conflicts_with_all = ["recipe", "list", "dry_run", "dismiss_offer"])]
+        use_auto: bool,
+
+        /// Dismiss the offer to switch to the Quickshell OSD
+        #[arg(long, conflicts_with_all = ["recipe", "list", "dry_run"])]
+        dismiss_offer: bool,
     },
 
     /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher

@@ -9,7 +9,10 @@ use voxtype::{config, daemon, setup, transcribe, Cli, Commands, ConfigAction, Se
 
 use super::config_get::run_config_get;
 use super::config_schema::run_config_schema;
-use super::config_set::{run_config_set, run_config_unset, run_setup_osd};
+use super::config_set::{
+    run_config_set, run_config_unset, run_setup_osd, run_setup_osd_dismiss_offer,
+    run_setup_osd_status, run_setup_osd_use_auto,
+};
 use super::config_show::show_config;
 use super::info::run_info_command;
 use super::meeting::run_meeting_command;
@@ -439,9 +442,21 @@ pub(crate) async fn dispatch(
                     recipe,
                     list,
                     dry_run,
+                    status,
+                    json,
+                    use_auto,
+                    dismiss_offer,
                 }) => {
                     warn_if_root("osd");
-                    run_setup_osd(cli.config.clone(), recipe, list, dry_run)?;
+                    if status {
+                        run_setup_osd_status(&config, json)?;
+                    } else if use_auto {
+                        run_setup_osd_use_auto(cli.config.clone())?;
+                    } else if dismiss_offer {
+                        run_setup_osd_dismiss_offer()?;
+                    } else {
+                        run_setup_osd(cli.config.clone(), recipe, list, dry_run)?;
+                    }
                 }
                 Some(SetupAction::Quickshell {
                     target,

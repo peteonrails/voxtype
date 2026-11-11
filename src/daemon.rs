@@ -1488,6 +1488,28 @@ impl Daemon {
         }
     }
 
+    /// Resolve `[osd] frontend` (logging the choice and why, once) and
+    /// start the OSD supervisor. Returns the active frontend's name for
+    /// `voxtype status`, or "none" when nothing can run.
+    fn spawn_osd(&mut self) -> &'static str {
+        use osd::config::OsdFrontend;
+        let configured = osd::frontend::effective_configured(self.config.osd.frontend);
+        let resolution = osd::frontend::resolve(configured, &osd::frontend::SystemProbe);
+        let Some(active) = resolution.active else {
+            tracing::warn!(
+                "OSD frontend: none ({}). Run `voxtype setup osd --status` for details, \
+                 or set [osd] enabled = false.",
+                resolution.reason
+            );
+            return "none";
+        };
+        tracing::info!("OSD frontend: {} ({})", active.as_str(), resolution.reason);
+        // Explicit values keep the launcher's own resolution, unchanged.
+        let forced = (configured == OsdFrontend::Auto).then_some(active);
+        self.osd_supervisor_task = Some(osd::supervisor::spawn(forced));
+        active.as_str()
+    }
+
     /// Publish `recording.json` for the session `state` just started, so OSD
     /// frontends can show elapsed time, the remaining time before
     /// `max_duration_secs`, and which engine and model this recording uses.
@@ -4246,9 +4268,12 @@ impl Daemon {
         // Spawn the OSD child if enabled and the level socket bound. Without
         // the socket the frontend has nothing to render, so skip the spawn
         // rather than burning a slot in the launcher's restart logic.
-        if self.config.osd.enabled && self.level_hub.is_some() {
-            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
-        }
+        let osd_active = if self.config.osd.enabled && self.level_hub.is_some() {
+            self.spawn_osd()
+        } else {
+            "none"
+        };
+        osd::frontend::publish_active(&Config::runtime_dir(), osd_active);
 
         // The single-instance lock is already held. Never register a duplicate tray.
         #[cfg(target_os = "linux")]
