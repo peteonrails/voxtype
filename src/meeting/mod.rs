@@ -101,6 +101,9 @@ pub enum MeetingEvent {
     /// when hybrid diarization numbers the remote side on hearing a second
     /// voice
     SpeakerRenamed { from: String, to: String },
+    /// A segment already published changed speaker, as when the user moves
+    /// a line to someone else with `meeting reassign`
+    SegmentUpdated { segment: TranscriptSegment },
     /// Meeting paused
     Paused,
     /// Meeting resumed
@@ -440,13 +443,7 @@ impl MeetingDaemon {
         let Some(ref mut meeting) = self.current_meeting else {
             return;
         };
-        let mut renamed = 0;
-        for seg in &mut meeting.transcript.segments {
-            if seg.speaker_id.as_deref() == Some(from) {
-                seg.speaker_id = Some(to.to_string());
-                renamed += 1;
-            }
-        }
+        let renamed = meeting.transcript.rename_speaker(from, to);
         if renamed == 0 {
             return;
         }
@@ -474,6 +471,64 @@ impl MeetingDaemon {
                 to: to.to_string(),
             })
             .await;
+    }
+
+    /// Re-read the speaker overrides `meeting reassign` stored, move the
+    /// affected lines in the running meeting, save, and publish each line
+    /// that changed. Returns how many did.
+    pub async fn apply_speaker_overrides(&mut self) -> usize {
+        let Some(ref mut meeting) = self.current_meeting else {
+            return 0;
+        };
+        let id = meeting.metadata.id;
+        let (overrides, labels) = match (
+            self.storage.get_speaker_overrides(&id),
+            self.storage.get_speaker_labels(&id),
+        ) {
+            (Ok(overrides), Ok(labels)) => (overrides, labels),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!("Failed to read speaker overrides: {}", e);
+                return 0;
+            }
+        };
+
+        let before = meeting.transcript.segments.clone();
+        meeting.transcript.apply_speaker_overrides(&overrides);
+        // Only the moved lines are published; names they now carry are
+        // applied to those copies alone.
+        let changed: Vec<TranscriptSegment> = meeting
+            .transcript
+            .segments
+            .iter()
+            .zip(&before)
+            .filter(|(now, was)| {
+                now.speaker_id != was.speaker_id || now.reassigned_from != was.reassigned_from
+            })
+            .map(|(now, _)| {
+                let mut segment = now.clone();
+                segment.speaker_label = labels.get(&segment.speaker_key()).cloned();
+                segment
+            })
+            .collect();
+
+        if changed.is_empty() {
+            return 0;
+        }
+        self.persist_transcript();
+        for segment in &changed {
+            tracing::info!(
+                "Segment {} now belongs to {}",
+                segment.id,
+                segment.speaker_display()
+            );
+            let _ = self
+                .event_tx
+                .send(MeetingEvent::SegmentUpdated {
+                    segment: segment.clone(),
+                })
+                .await;
+        }
+        changed.len()
     }
 
     /// Persist after every chunk, not just on stop(): a crash mid-meeting
@@ -932,6 +987,93 @@ mod tests {
                 ("Remote 2", "Sam"),
             ])
         );
+    }
+
+    fn drain(events: &mut mpsc::Receiver<MeetingEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                MeetingEvent::SpeakerRenamed { from, to } => {
+                    out.push(format!("rename {from} -> {to}"))
+                }
+                MeetingEvent::SegmentUpdated { segment } => out.push(format!(
+                    "updated {} {} ({})",
+                    segment.id,
+                    segment.speaker_display(),
+                    segment.speaker_key()
+                )),
+                MeetingEvent::ChunkProcessed { segments, .. } => out.extend(
+                    segments
+                        .iter()
+                        .map(|s| format!("{} {}", s.id, s.speaker_key())),
+                ),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// `meeting reassign` mid-meeting: the daemon moves the line, publishes
+    /// it, and neither the next chunk nor hybrid's rename moves it back.
+    #[tokio::test]
+    async fn a_line_reassigned_mid_meeting_stays_put() {
+        let mut h = harness().await;
+        h.daemon.diarizer = Some(Box::new(diarization::hybrid::HybridDiarizer::new(
+            Box::new(NewVoicePerChunk(AtomicU32::new(0))),
+        )));
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        drain(&mut h.events);
+
+        // What the CLI does while the meeting records: store, don't rewrite.
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.reassign_segment(&id, 1, "Casey", false).unwrap();
+        assert_eq!(h.daemon.apply_speaker_overrides().await, 1);
+        assert_eq!(drain(&mut h.events), vec!["updated 1 Casey (Person 1)"]);
+
+        // A second remote voice renames Remote; the moved line stays Casey.
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(
+            drain(&mut h.events),
+            vec!["rename Remote -> Remote 1", "2 You", "3 Remote 2"]
+        );
+        h.daemon.stop().await.unwrap();
+
+        let saved = h.saved();
+        let line = &saved.transcript.segments[1];
+        assert_eq!(line.id, 1);
+        assert_eq!(line.speaker_display(), "Casey");
+        assert_eq!(line.reassigned_from.as_deref(), Some("Remote 1"));
+
+        // --reset after stop gives it back to the renamed diarizer speaker.
+        let back = cli.reset_segment_speaker(&id, 1, true).unwrap();
+        assert_eq!(back.speaker_key(), "Remote 1");
+    }
+
+    #[tokio::test]
+    async fn a_line_moved_onto_a_speaker_follows_its_rename() {
+        let mut h = harness().await;
+        h.daemon.diarizer = Some(Box::new(diarization::hybrid::HybridDiarizer::new(
+            Box::new(NewVoicePerChunk(AtomicU32::new(0))),
+        )));
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        // The mic line was really the remote voice.
+        cli.reassign_segment(&id, 0, "Remote", false).unwrap();
+        h.daemon.apply_speaker_overrides().await;
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+
+        let keys: Vec<String> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_key())
+            .collect();
+        assert_eq!(keys, vec!["Remote 1", "Remote 1", "You", "Remote 2"]);
     }
 
     #[tokio::test]

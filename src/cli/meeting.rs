@@ -119,6 +119,39 @@ pub enum MeetingAction {
         /// Human-readable label to assign
         label: String,
     },
+    /// Move one transcript line to another speaker
+    ///
+    /// For a line the diarizer gave to the wrong person. SPEAKER matches an
+    /// existing speaker the way `meeting label` does: an ID from the
+    /// transcript (You, Remote 1, SPEAKER_00 or just 0) or a name already
+    /// assigned, ignoring case. Text that matches no one creates a new
+    /// speaker with that name. The move sticks: later chunks and speaker
+    /// renames do not undo it. Works while the meeting is still recording.
+    /// Segment IDs are the `id` of each segment in `meeting show --json`.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting reassign latest 28 'Remote 2'\n  \
+        voxtype meeting reassign latest 28 Dana\n  \
+        voxtype meeting reassign f82f0c11 28 'Someone New' --json\n  \
+        voxtype meeting reassign latest 28 --reset")]
+    Reassign {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// The segment to move (its `id` in `meeting show --json`)
+        segment_id: u32,
+
+        /// Speaker to move it to: an ID, a name, or a new name
+        #[arg(required_unless_present = "reset", conflicts_with = "reset")]
+        speaker: Option<String>,
+
+        /// Give the segment back to the speaker the diarizer assigned
+        #[arg(long)]
+        reset: bool,
+
+        /// Print the updated segment as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
     /// Uses Ollama or a remote API to generate a summary with

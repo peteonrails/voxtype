@@ -115,6 +115,16 @@ impl MeetingHudState {
             if segment.speaker_id.as_deref() == Some(from) {
                 segment.speaker_id = Some(to.to_string());
             }
+            if segment.reassigned_from.as_deref() == Some(from) {
+                segment.reassigned_from = Some(to.to_string());
+            }
+        }
+    }
+
+    /// Replace the backlog's copy of a segment that changed after it was sent.
+    pub fn update_segment(&mut self, segment: &TranscriptSegment) {
+        if let Some(existing) = self.segments.iter_mut().find(|s| s.id == segment.id) {
+            *existing = segment.clone();
         }
     }
 }
@@ -143,6 +153,9 @@ enum WireEvent {
     SpeakerRenamed {
         from: String,
         to: String,
+    },
+    SegmentUpdated {
+        segment: TranscriptSegment,
     },
     Status {
         status: String,
@@ -274,6 +287,14 @@ impl MeetingEventHub {
         self.publish(WireEvent::SpeakerRenamed {
             from: from.to_string(),
             to: to.to_string(),
+        });
+    }
+
+    /// Broadcast a `segment_updated` event: one segment already sent now
+    /// reads differently, as after `meeting reassign`.
+    pub fn publish_segment_updated(&self, segment: &TranscriptSegment) {
+        self.publish(WireEvent::SegmentUpdated {
+            segment: segment.clone(),
         });
     }
 

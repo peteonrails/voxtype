@@ -198,6 +198,24 @@ The speaker can be the ID as the transcript shows it (matched without regard to 
 
 Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
 
+### Moving a Line to Another Speaker
+
+When the diarizer gives a single line to the wrong person, move that line on its own:
+
+```bash
+voxtype meeting show latest --json          # find the line's "id"
+voxtype meeting reassign latest 28 "Remote 2"
+voxtype meeting reassign latest 28 Dana      # a name you gave with `meeting label`
+voxtype meeting reassign latest 28 "Casey"   # nobody yet: creates the speaker Casey
+voxtype meeting reassign latest 28 --reset   # back to what the diarizer chose
+```
+
+The meeting can be its full ID, the start of it (`f82f0c11`), or `latest`. The line is the segment's `id` from `meeting show --json`; an ID the meeting does not have is an error that names the valid range. The speaker is matched the way `meeting label` matches it: an ID from the transcript (`You`, `Remote 1`, `SPEAKER_00` or just `0`) or a name already given, ignoring case. Text that matches no one creates a new speaker with that name, under an internal ID of the form `Person 1` that no diarizer produces. Add `--json` to print the updated segment.
+
+The move is stored per segment and applied whenever the transcript is saved or read, so exports, `meeting show` and the meeting socket all show it, and neither later chunks nor diarization can move the line back. If the diarizer renames the speaker you moved the line to (hybrid's `Remote` becoming `Remote 1`), the line follows. The segment keeps the diarizer's own choice in `reassigned_from`, which is what `--reset` restores.
+
+This works during a meeting too. The command stores the move and the daemon applies it before the next chunk, sending the changed line to the meeting socket.
+
 ### AI Summarization
 
 Generate a summary with key points, action items, and decisions:

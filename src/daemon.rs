@@ -726,6 +726,18 @@ fn check_meeting_resume() -> bool {
     }
 }
 
+/// Check for a `meeting reassign` (via file trigger). The CLI has already
+/// stored the move; the daemon applies it to the running meeting.
+fn check_meeting_reassign() -> bool {
+    let file = Config::runtime_dir().join("meeting_reassign");
+    if file.exists() {
+        let _ = std::fs::remove_file(&file);
+        true
+    } else {
+        false
+    }
+}
+
 /// Clean up any stale meeting command files on startup
 fn cleanup_meeting_files() {
     let runtime_dir = Config::runtime_dir();
@@ -735,6 +747,7 @@ fn cleanup_meeting_files() {
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
+        "meeting_reassign",
     ] {
         let file = runtime_dir.join(name);
         if file.exists() {
@@ -2891,6 +2904,15 @@ impl Daemon {
         }
     }
 
+    /// Replace a segment in the HUD snapshot and tell meeting.sock subscribers.
+    fn publish_segment_updated(&mut self, segment: &meeting::TranscriptSegment) {
+        self.meeting_hud.update_segment(segment);
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_segment_updated(segment);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
@@ -3127,6 +3149,9 @@ impl Daemon {
                     MeetingEvent::SpeakerRenamed { from, to } => {
                         self.publish_meeting_rename(&from, &to);
                     }
+                    MeetingEvent::SegmentUpdated { segment } => {
+                        self.publish_segment_updated(&segment);
+                    }
                     _ => {}
                 }
             }
@@ -3244,6 +3269,13 @@ impl Daemon {
                 tracing::error!("Failed to pause meeting: {}", e);
             }
             changed = true;
+        }
+
+        if check_meeting_reassign() {
+            if let Some(ref mut daemon) = self.meeting_daemon {
+                tracing::debug!("Meeting speaker reassignment requested via file trigger");
+                daemon.apply_speaker_overrides().await;
+            }
         }
 
         if check_meeting_resume()
@@ -5560,6 +5592,9 @@ impl Daemon {
                         }
                         Some(MeetingEvent::SpeakerRenamed { from, to }) => {
                             self.publish_meeting_rename(&from, &to);
+                        }
+                        Some(MeetingEvent::SegmentUpdated { segment }) => {
+                            self.publish_segment_updated(&segment);
                         }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via

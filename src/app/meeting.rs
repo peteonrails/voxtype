@@ -435,6 +435,57 @@ pub(crate) async fn run_meeting_command(
             );
         }
 
+        MeetingAction::Reassign {
+            meeting_id,
+            segment_id,
+            speaker,
+            reset,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+
+            // While the meeting records, the daemon owns transcript.json and
+            // rewrites it after every chunk: store the move and let the
+            // daemon apply it, rather than racing it for the file.
+            let runtime_dir = config::Config::runtime_dir();
+            let live = live_meeting_id(&runtime_dir).as_deref() == Some(&id.to_string());
+
+            let segment = if reset {
+                storage.reset_segment_speaker(&id, segment_id, !live)
+            } else {
+                let speaker = speaker.as_deref().unwrap_or_default();
+                storage.reassign_segment(&id, segment_id, speaker, !live)
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to reassign segment: {}", e))?;
+
+            if live {
+                std::fs::create_dir_all(&runtime_dir)?;
+                std::fs::write(runtime_dir.join("meeting_reassign"), segment_id.to_string())?;
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&segment)?);
+            } else if reset {
+                println!(
+                    "Segment {} is back with {} in meeting {}",
+                    segment.id,
+                    segment.speaker_display(),
+                    meeting_id
+                );
+            } else {
+                println!(
+                    "Moved segment {} to {} in meeting {}",
+                    segment.id,
+                    segment.speaker_display(),
+                    meeting_id
+                );
+            }
+        }
+
         MeetingAction::Summarize {
             meeting_id,
             format,
@@ -585,6 +636,14 @@ fn base_meeting_state(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<St
         .filter(|id| !id.is_empty())
         .map(str::to_string);
     (phase, id)
+}
+
+/// The ID of the meeting the daemon is recording, paused or finishing.
+fn live_meeting_id(runtime_dir: &std::path::Path) -> Option<String> {
+    match base_meeting_state(runtime_dir) {
+        (MeetingPhase::Idle, _) => None,
+        (_, id) => id,
+    }
 }
 
 fn meeting_phase(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<String>) {

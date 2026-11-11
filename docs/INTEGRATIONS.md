@@ -146,6 +146,7 @@ needed:
 {"event": "hello", "status": "recording", "meeting_id": "...", "title": "Standup", "started_at": "2026-09-03T14:00:00Z", "chunk_count": 7, "diarization": {"enabled": true, "backend": "simple"}, "segments": [ /* TranscriptSegment[], same shape as transcript.json */ ]}
 {"event": "segments", "chunk_id": 8, "segments": [ /* TranscriptSegment[] for this chunk only */ ]}
 {"event": "speaker_renamed", "from": "Remote", "to": "Remote 1"}
+{"event": "segment_updated", "segment": { /* one TranscriptSegment, same shape as in segments */ }}
 {"event": "status", "status": "paused"}
 {"event": "error", "message": "..."}
 ```
@@ -169,6 +170,15 @@ remote voice is heard: the remote side, `Remote` until then, becomes
 `Remote 1`, and the new voice arrives as `Remote 2`. The event comes before
 the `segments` event that holds the new voice, a name given to the old ID
 moves to the new one, and the next `hello` already carries the new ID.
+
+`segment_updated` replaces one segment already received, matched by `id`,
+with the copy it carries. It follows `voxtype meeting reassign` (or
+`--reset`): the segment's `speaker_id` and `speaker_label` are the speaker
+the user chose, and `reassigned_from` holds the speaker the diarizer had
+given it (absent after a reset). A moved line is never moved back by a later
+chunk, and a `speaker_renamed` applies to it like any other: rename by
+`speaker_id`, and rename `reassigned_from` too if you keep it. The next
+`hello` already carries the change.
 
 Events fire roughly once per `chunk_duration_secs` (default 30s), not per
 word — meeting mode transcribes in chunks, it does not stream. A UI built on
