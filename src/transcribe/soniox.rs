@@ -155,9 +155,10 @@ impl SonioxTranscriber {
             })?;
 
         // User left the default realtime model with async_api enabled —
-        // swap to the async-default model.
-        if config.async_api && config.model == "stt-rt-v4" {
-            config.model = "stt-async-v4".to_string();
+        // swap to the async-default model. `stt-rt-v4` was the documented
+        // default before v6, so configs that pinned it keep the swap.
+        if config.async_api && matches!(config.model.as_str(), "stt-rt-v6" | "stt-rt-v4") {
+            config.model = "stt-async-v6".to_string();
         }
 
         let context_terms = load_context_terms(&config)?;
@@ -1195,7 +1196,7 @@ mod tests {
     fn cfg_with_key(key: Option<&str>) -> SonioxConfig {
         SonioxConfig {
             api_key: key.map(|s| s.to_string()),
-            model: "stt-rt-v4".into(),
+            model: "stt-rt-v6".into(),
             language_hints: vec!["hu".into(), "en".into()],
             language_hints_strict: true,
             streaming: true,
@@ -1214,7 +1215,16 @@ mod tests {
         cfg.async_api = true;
         let t = SonioxTranscriber::new(cfg).unwrap();
         assert!(t.as_streaming().is_none());
-        assert_eq!(t.config.model, "stt-async-v4");
+        assert_eq!(t.config.model, "stt-async-v6");
+    }
+
+    #[test]
+    fn async_api_swaps_legacy_v4_default() {
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.async_api = true;
+        cfg.model = "stt-rt-v4".into();
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        assert_eq!(t.config.model, "stt-async-v6");
     }
 
     #[test]
@@ -1259,7 +1269,7 @@ mod tests {
         let t = SonioxTranscriber::new(cfg_with_key(Some("my-key"))).unwrap();
         let frame: serde_json::Value = serde_json::from_str(&t.init_frame()).unwrap();
         assert_eq!(frame["api_key"], "my-key");
-        assert_eq!(frame["model"], "stt-rt-v4");
+        assert_eq!(frame["model"], "stt-rt-v6");
         assert_eq!(frame["audio_format"], "pcm_s16le");
         assert_eq!(frame["sample_rate"], 16000);
         assert_eq!(frame["num_channels"], 1);
