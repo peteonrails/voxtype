@@ -112,6 +112,22 @@ two chips renamed alike merge), and the transcript in start-time order with a
 timestamp per line. It scrolls with new lines unless you have scrolled up. With
 no meeting it offers Start meeting with an optional title.
 
+Clicking the speaker on a line opens a small chooser (a plain item, not a
+Popup) to move just that line: the meeting's speakers as chips, a "New
+speaker…" field, and Restore original for a line already moved. A pick runs
+`voxtype meeting reassign <meeting id> <segment id> <speaker> --json` (or
+`--reset`); the line moves at once, takes the segment the CLI prints, and goes
+back with the CLI's stderr in the error banner if it is refused.
+`segment_updated` events (tagged `event`, or `type` as its contract was first
+written) apply live, so a change made elsewhere shows up too. A line is marked
+"moved from …" when the segment carries `original_speaker_id` or
+`reassigned: true`, or it was moved from this view.
+
+A meeting that ends is kept on screen as **Ended** (title, length, end time)
+with renames and reassignment still working, until a new meeting starts or the
+view is closed. A daemon that goes away mid-meeting leaves it Ended the same
+way.
+
 ```bash
 omarchy-shell io.voxtype.settings meetings
 omarchy-shell shell toggle io.voxtype.settings '{"view":"meetings"}'
@@ -446,7 +462,9 @@ speaks the daemon's NDJSON contract (a `hello` per connection, `segments`,
 `voxtype config get meeting.show_view_on_start`, and tells the fake socket what
 the daemon would do. The plugin's `shell` is a stand-in that records summons.
 Scenarios cover the hello backlog, insertion by start time, speaker renames,
-chip rename and merge, pause/resume/stop through finalizing, opening on a start
+chip rename and merge, moving one line (to a speaker, to a new one, a refusal
+rolled back, Restore original, `segment_updated` from elsewhere), editing after
+the meeting ends, pause/resume/stop through finalizing, opening on a start
 (on, off, an older CLI, an open Settings panel), reconnecting after a drop, a
 socket that goes away and a daemon restart, the idle state and a refused start,
 no daemon at all, and auto-scroll. `--evidence` also saves a screenshot of the

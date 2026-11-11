@@ -14,6 +14,11 @@ import Quickshell.Io
 // A `status` event carries no title, id or start time. When one says a meeting
 // is running and this feed has no meeting yet, it reconnects, and the new
 // connection's `hello` supplies them.
+//
+// A meeting that ends is kept, marked `ended`, so its lines can still be
+// fixed after the call: the daemon resets to an empty idle snapshot, but the
+// feed holds on to the transcript until a new meeting starts or the view is
+// closed (clearEnded).
 Item {
   id: root
 
@@ -48,6 +53,11 @@ Item {
   property var speakerOrder: []
 
   readonly property bool active: status === "recording" || status === "paused" || status === "finalizing"
+  // The last meeting is over but still on screen for editing.
+  property bool ended: false
+  // Wall-clock ms the meeting was seen to end.
+  property real endedAt: 0
+  readonly property bool hasMeeting: active || ended
 
   // One row per utterance, kept in start_ms order.
   readonly property alias segments: model
@@ -134,12 +144,14 @@ Item {
       text: String(segment.text || "").trim(),
       speaker: key,
       source: String(segment.source || ""),
-      chunkId: Number(segment.chunk_id) || 0
+      chunkId: Number(segment.chunk_id) || 0,
+      originalSpeaker: root.originalOf(segment)
     }
     if (row.text === "") return
     for (var d = model.count - 1; d >= 0; d--) {
       if (model.get(d).segId === row.segId) {
         model.set(d, row)
+        root.noteLabel(key, segment)
         return
       }
     }
@@ -149,12 +161,117 @@ Item {
     while (at > 0 && model.get(at - 1).startMs > row.startMs) at--
     model.insert(at, row)
     root.noteSpeaker(key)
-    if (segment.speaker_label !== undefined && segment.speaker_label !== null && segment.speaker_label !== ""
-        && root.labels[key] !== String(segment.speaker_label)) {
-      var next = root.copyLabels()
-      next[key] = String(segment.speaker_label)
-      root.labels = next
+    root.noteLabel(key, segment)
+  }
+
+  function noteLabel(key, segment) {
+    if (segment.speaker_label === undefined || segment.speaker_label === null || segment.speaker_label === "") return
+    if (root.labels[key] === String(segment.speaker_label)) return
+    var next = root.copyLabels()
+    next[key] = String(segment.speaker_label)
+    root.labels = next
+  }
+
+  // The pipeline's own speaker key for a line someone moved. The daemon puts
+  // `original_speaker` on every segment with an override (hello, segments,
+  // segment_updated, `show --json`) and leaves it off otherwise, so it alone
+  // says whether a line is moved, and the mark survives a reconnect.
+  function originalOf(segment) {
+    var o = segment.original_speaker
+    return o !== undefined && o !== null && o !== "" ? String(o) : ""
+  }
+
+  function rowIndex(segId) {
+    for (var i = model.count - 1; i >= 0; i--) if (model.get(i).segId === segId) return i
+    return -1
+  }
+
+  // Everything about a line that a reassignment changes, to put back if the
+  // CLI refuses it.
+  function snapshot(segId) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return null
+    var r = model.get(i)
+    return { segId: segId, speaker: r.speaker, originalSpeaker: r.originalSpeaker,
+             speakerOrder: root.speakerOrder.slice() }
+  }
+
+  function restoreSnapshot(snap) {
+    if (!snap) return
+    var i = root.rowIndex(snap.segId)
+    if (i === -1) return
+    model.setProperty(i, "speaker", snap.speaker)
+    model.setProperty(i, "originalSpeaker", snap.originalSpeaker)
+    root.speakerOrder = snap.speakerOrder
+  }
+
+  // A line moved to `key`, before the CLI has confirmed it.
+  function applyReassign(segId, key) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return
+    var r = model.get(i)
+    var original = r.originalSpeaker !== "" ? r.originalSpeaker : r.speaker
+    model.setProperty(i, "speaker", key)
+    model.setProperty(i, "originalSpeaker", key === original ? "" : original)
+    root.noteSpeaker(key)
+    root.pruneSpeakers()
+  }
+
+  // A line put back on its original speaker, before the CLI has confirmed it.
+  // Without a known original there is nothing to show until it answers.
+  function applyRestore(segId) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return
+    var r = model.get(i)
+    if (r.originalSpeaker === "") return
+    model.setProperty(i, "speaker", r.originalSpeaker)
+    model.setProperty(i, "originalSpeaker", "")
+    root.noteSpeaker(r.speaker)
+    root.pruneSpeakers()
+  }
+
+  // A changed segment, from `segment_updated` or the CLI's --json answer.
+  // It is the daemon's word on the line, override and all.
+  function updateSegment(segment) {
+    if (!segment || segment.id === undefined) return
+    var i = root.rowIndex(Number(segment.id))
+    if (i === -1) {
+      root.insertSegment(segment)
+      return
     }
+    var r = model.get(i)
+    var key = root.speakerKey(segment)
+    var original = root.originalOf(segment)
+    model.setProperty(i, "speaker", key)
+    if (segment.text !== undefined && String(segment.text).trim() !== "") model.setProperty(i, "text", String(segment.text).trim())
+    model.setProperty(i, "originalSpeaker", original)
+    root.noteSpeaker(key)
+    root.noteLabel(key, segment)
+    root.pruneSpeakers()
+  }
+
+  // Chips are the speakers the transcript has lines for; one emptied by a
+  // reassignment goes away.
+  function pruneSpeakers() {
+    var present = ({})
+    for (var i = 0; i < model.count; i++) present[model.get(i).speaker] = true
+    var next = []
+    for (var j = 0; j < root.speakerOrder.length; j++)
+      if (present[root.speakerOrder[j]]) next.push(root.speakerOrder[j])
+    if (next.length !== root.speakerOrder.length) root.speakerOrder = next
+  }
+
+  // The view closed: an ended meeting has nothing left to show.
+  function clearEnded() {
+    if (!root.ended) return
+    root.reset()
+  }
+
+  // The meeting on screen is over; keep it for editing.
+  function endMeeting() {
+    root.ended = model.count > 0 || root.meetingId !== ""
+    root.endedAt = Date.now()
+    if (!root.ended) root.reset()
   }
 
   function setStatus(next) {
@@ -174,13 +291,24 @@ Item {
     root.chunkCount = 0
     root.diarization = false
     root.lastSegmentsAt = 0
+    root.ended = false
+    root.endedAt = 0
   }
 
   function handleHello(ev) {
     var before = root.status
     var beforeId = root.meetingId
     var known = root.everConnected
+    var wasActive = root.active
     root.everConnected = true
+    var next = String(ev.status || "idle")
+    // An idle hello never carries a transcript. If the feed holds a meeting
+    // (ended, or running until the daemon went away), keep it for editing.
+    if (next === "idle" && (root.ended || wasActive)) {
+      if (!root.ended) root.endMeeting()
+      root.setStatus("idle")
+      return
+    }
     root.reset()
     root.meetingId = ev.meeting_id ? String(ev.meeting_id) : ""
     root.title = ev.title ? String(ev.title) : ""
@@ -189,7 +317,6 @@ Item {
     root.diarization = !!(ev.diarization && ev.diarization.enabled)
     var list = ev.segments && ev.segments.length !== undefined ? ev.segments : []
     for (var i = 0; i < list.length; i++) if (list[i]) root.insertSegment(list[i])
-    var next = String(ev.status || "idle")
     root.setStatus(next)
     // A status event already announced this meeting and asked for this hello;
     // or the daemon restarted into a new one. Either way it is a start only if
@@ -200,7 +327,9 @@ Item {
   }
 
   function handleEvent(ev) {
-    var kind = String(ev.event || "")
+    // Every event is tagged `event`. `type` is accepted too: an early draft
+    // of the segment_updated contract used it.
+    var kind = String(ev.event || ev.type || "")
     if (kind === "hello") {
       root.handleHello(ev)
     } else if (kind === "segments") {
@@ -208,20 +337,27 @@ Item {
       for (var i = 0; i < list.length; i++) if (list[i]) root.insertSegment(list[i])
       if (ev.chunk_id !== undefined) root.chunkCount = Math.max(root.chunkCount, Number(ev.chunk_id) + 1)
       root.lastSegmentsAt = Date.now()
+    } else if (kind === "segment_updated") {
+      root.updateSegment(ev.segment)
     } else if (kind === "speaker_renamed") {
       root.renameSpeaker(String(ev.from || ""), String(ev.to || ""))
     } else if (kind === "status") {
       var next = String(ev.status || "")
       if (next === "") return
       if (next === "idle") {
+        // The meeting is over (the daemon's next hello is empty), but its
+        // lines stay on screen to be fixed.
+        if (root.active) root.endMeeting()
+        else if (!root.ended) root.reset()
         root.setStatus("idle")
-        // The meeting is over; the daemon's next hello is empty too.
-        root.reset()
         return
       }
+      // A start: fetch the title, id and start time this event lacks. An
+      // ended meeting gives way to the new one now.
+      var starting = root.ended || root.meetingId === ""
+      if (root.ended) root.reset()
       root.setStatus(next)
-      // A start: fetch the title, id and start time this event lacks.
-      if (root.meetingId === "") root.reconnect()
+      if (starting) root.reconnect()
     } else if (kind === "error") {
       root.lastError = String(ev.message || "")
     }
@@ -229,8 +365,10 @@ Item {
 
   function renameSpeaker(from, to) {
     if (from === "" || to === "" || from === to) return
-    for (var i = 0; i < model.count; i++)
+    for (var i = 0; i < model.count; i++) {
       if (model.get(i).speaker === from) model.setProperty(i, "speaker", to)
+      if (model.get(i).originalSpeaker === from) model.setProperty(i, "originalSpeaker", to)
+    }
     var order = root.speakerOrder.slice()
     var at = order.indexOf(from)
     if (at !== -1) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake voxtype meeting.sock for the meeting view tests. Never touches a daemon.
 
-    fake-meeting-sock.py SOCKET CONTROL LOG
+    fake-meeting-sock.py SOCKET CONTROL LOG SNAPSHOT
 
 Binds SOCKET and speaks the meeting.sock contract (docs/INTEGRATIONS.md, "Live
 transcript and status"): every new connection gets a `hello` snapshot of the
@@ -21,12 +21,22 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
   {"cmd": "stop"}                  status finalizing, then idle 1 s later
   {"cmd": "error", "message": M}
   {"cmd": "label", "key": K, "name": N}  later segments with K carry N
+  {"cmd": "update", "segment": S, "key": "event"|"type", "meeting_id": M}
+                                   replace segment S (by id). In the live meeting
+                                   it is broadcast as segment_updated, tagged
+                                   with `key` (default `event`, the daemon's);
+                                   in the stored one (after the meeting ended)
+                                   nothing is sent, as the daemon only announces
+                                   live changes
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
   {"cmd": "quit"}
 
-Each handled command is appended to LOG, so a driver can wait for it.
+Each handled command is appended to LOG, so a driver can wait for it. After
+each one, SNAPSHOT holds {"live": ..., "stored": ...}: the running meeting and
+the last one that ended, each {meeting_id, segments}, which is what
+fake-voxtype-meeting.py edits for `meeting reassign`.
 """
 import json
 import os
@@ -44,10 +54,12 @@ def now_iso():
 
 
 class Server:
-    def __init__(self, path, control, log):
+    def __init__(self, path, control, log, snapshot):
         self.path = path
         self.control = control
         self.log = log
+        self.snapshot = snapshot
+        self.stored = None
         self.offset = 0
         self.sel = selectors.DefaultSelector()
         self.listener = None
@@ -58,6 +70,8 @@ class Server:
         self.up()
 
     def idle(self):
+        if getattr(self, "state", None) and self.state.get("meeting_id"):
+            self.stored = {"meeting_id": self.state["meeting_id"], "segments": self.state["segments"]}
         self.state = {"status": "idle", "meeting_id": None, "title": None, "started_at": None,
                       "chunk_count": 0, "diarization": {"enabled": False}, "segments": []}
         self.labels = {}
@@ -162,6 +176,17 @@ class Server:
             self.broadcast({"event": "error", "message": cmd["message"]})
         elif kind == "label":
             self.labels[cmd["key"]] = cmd["name"]
+        elif kind == "update":
+            seg = cmd["segment"]
+            target = None
+            if not cmd.get("meeting_id") or cmd.get("meeting_id") == self.state.get("meeting_id"):
+                target = self.state
+            elif self.stored and cmd.get("meeting_id") == self.stored["meeting_id"]:
+                target = self.stored
+            if target is not None:
+                target["segments"] = [seg if s["id"] == seg["id"] else s for s in target["segments"]]
+                if target is self.state:
+                    self.broadcast({cmd.get("key", "event"): "segment_updated", "segment": seg})
         elif kind == "drop":
             self.drop()
         elif kind == "down":
@@ -172,6 +197,11 @@ class Server:
             return False
         with open(self.log, "a") as f:
             f.write(json.dumps(cmd) + "\n")
+        live = {"meeting_id": self.state.get("meeting_id"), "segments": self.state["segments"]}
+        tmp = self.snapshot + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"live": live, "stored": self.stored}, f)
+        os.replace(tmp, self.snapshot)
         return True
 
     def poll_control(self):
@@ -207,4 +237,4 @@ class Server:
 
 
 if __name__ == "__main__":
-    Server(sys.argv[1], sys.argv[2], sys.argv[3]).run()
+    Server(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]).run()

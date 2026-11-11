@@ -292,9 +292,10 @@ It shows:
 - The meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop** buttons
 - The transcript, one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up to read something; **Jump to latest** takes you back
 - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip
+- Click the speaker name on a line to move just that line to someone else: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign` for you; if it is refused, the line goes back and the error is shown. Escape closes the chooser
 - "Listening…" between updates. Lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word
 
-With no meeting running it offers a **Start meeting** button and an optional title.
+When the meeting ends, its transcript stays on screen marked **Ended**, with its length and end time, so you can still fix lines and name speakers after the call. It stays until a new meeting starts (**Start meeting** is offered there too) or you close the view. With no meeting at all it offers **Start meeting** and an optional title.
 
 Open it yourself with:
 

@@ -37,6 +37,16 @@ Item {
     onActionFinished: function(action, ok, message) {
       if (!ok) root.actionError = message
     }
+    // The line was moved on screen before the CLI ran: keep it if it took
+    // (with the daemon's version of the segment when --json gave one), put it
+    // back if not.
+    onReassignFinished: function(extra, ok, message, segment) {
+      if (!ok) {
+        feed.restoreSnapshot(extra ? extra.snapshot : null)
+        return
+      }
+      if (segment) feed.updateSegment(segment)
+    }
     // `[meeting] show_view_on_start`, read at the moment it is needed so a
     // change made with `voxtype config set` applies to the next meeting.
     onShowOnStartRead: function(show) {
@@ -51,8 +61,30 @@ Item {
     }
   }
 
+  // Move one transcript line to a speaker: `speaker` is what the CLI is given
+  // (a display name, or a new name), `key` the speaker key to show meanwhile.
+  function reassign(segId, speaker, key) {
+    var snap = feed.snapshot(segId)
+    if (!snap) return
+    root.actionError = ""
+    feed.applyReassign(segId, key)
+    meetingCli.reassign(feed.meetingId, segId, speaker, { snapshot: snap })
+  }
+
+  function restoreSpeaker(segId) {
+    var snap = feed.snapshot(segId)
+    if (!snap) return
+    root.actionError = ""
+    feed.applyRestore(segId)
+    meetingCli.restoreSpeaker(feed.meetingId, segId, { snapshot: snap })
+  }
+
   onShownChanged: {
-    if (!root.shown) return
+    // A finished meeting stays on screen until the view is closed.
+    if (!root.shown) {
+      feed.clearEnded()
+      return
+    }
     root.actionError = ""
     feed.connectNow()
   }
@@ -85,6 +117,8 @@ Item {
       for (var i = 0; i < keys.length; i++) list.push(String(keys[i]))
       meetingCli.label(feed.meetingId, list, name)
     }
+    function onReassignRequested(segId, speaker, key) { root.reassign(segId, speaker, key) }
+    function onRestoreRequested(segId) { root.restoreSpeaker(segId) }
     function onCloseRequested() { root.closeRequested() }
     function onErrorDismissed() { root.actionError = "" }
   }
