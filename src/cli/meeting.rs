@@ -89,8 +89,14 @@ pub enum MeetingAction {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,
 
-        /// Output format: text, markdown, json
-        #[arg(long, short, default_value = "markdown")]
+        /// Output format; md and txt also work for markdown and text
+        #[arg(
+            long,
+            short,
+            default_value = "markdown",
+            ignore_case = true,
+            value_parser = super::export_format_parser()
+        )]
         format: String,
 
         /// Output file path (default: stdout)
@@ -748,5 +754,62 @@ mod tests {
         assert!(play(&["latest", "--stop"]).is_err());
         assert!(play(&["--stop", "--status"]).is_err());
         assert!(play(&["latest", "--track", "speakers"]).is_err());
+    }
+
+    fn export_format(format: &str) -> Result<String, clap::Error> {
+        let argv = ["voxtype", "meeting", "export", "latest", "--format", format];
+        match Cli::try_parse_from(argv)?.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Export { format, .. },
+            }) => Ok(format),
+            _ => panic!("Expected Meeting Export"),
+        }
+    }
+
+    #[test]
+    fn meeting_export_takes_every_format_and_its_alias() {
+        // Accepted as given; `ExportFormat::parse` resolves aliases and case
+        // (pinned against this list in src/meeting/export/mod.rs).
+        for given in [
+            "markdown", "md", "text", "txt", "json", "srt", "vtt", "SRT", "Md",
+        ] {
+            let format = export_format(given).unwrap_or_else(|e| panic!("--format {given}: {e}"));
+            assert!(
+                format.eq_ignore_ascii_case(given),
+                "--format {given} gave {format}"
+            );
+        }
+        let cli = Cli::try_parse_from(["voxtype", "meeting", "export", "latest"]).unwrap();
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Export { format, .. },
+            }) => assert_eq!(format, "markdown"),
+            _ => panic!("Expected Meeting Export"),
+        }
+    }
+
+    #[test]
+    fn meeting_export_refuses_an_unknown_format_with_the_list() {
+        let err = export_format("bogus").unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+        let text = err.to_string();
+        for name in ["markdown", "text", "json", "srt", "vtt"] {
+            assert!(text.contains(name), "{name} missing from: {text}");
+        }
+    }
+
+    #[test]
+    fn meeting_export_help_lists_every_format() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let export = cmd
+            .find_subcommand_mut("meeting")
+            .and_then(|m| m.find_subcommand_mut("export"))
+            .expect("meeting export");
+        let help = export.render_long_help().to_string();
+        assert!(
+            help.contains("[possible values: markdown, text, json, srt, vtt]"),
+            "{help}"
+        );
     }
 }
