@@ -272,7 +272,7 @@ pub struct MeetingSummaryConfig {
 /// and writes summaries, run headless with no tools.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingAssistantConfig {
-    /// Agent to use: "claude" or "codex". Unset uses `omarchy-default-agent`
+    /// Agent to use: "claude", "codex" or "pi". Unset uses `omarchy-default-agent`
     /// when that command exists, then a supported agent CLI found on PATH.
     #[serde(default)]
     pub agent: Option<String>,

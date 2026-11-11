@@ -3945,11 +3945,11 @@ The meeting assistant answers `voxtype meeting ask` and writes summaries, throug
 
 ### agent
 
-**Type:** String (`"claude"`, `"codex"`)
+**Type:** String (`"claude"`, `"codex"`, `"pi"`)
 **Default:** unset
 **Required:** No
 
-The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` found on PATH. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
+The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` or `pi` found on PATH. OpenCode and Hermes are not supported: neither can be run with its tools off. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
 
 **CLI override:** `--agent` on `meeting ask` and `meeting summarize`
 **Environment variable:** `VOXTYPE_MEETING_AGENT`
