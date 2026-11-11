@@ -3,12 +3,53 @@ import QtTest
 import Quickshell
 import Quickshell.Io
 import "plugin" as Plugin
+import "standalone" as Standalone
 
-// Driven by test-meeting-view.py. The plugin runs against a fake meeting.sock
+// Driven by test-meeting-view.py. The meeting view runs under one of its two
+// hosts (__HOST__: "omarchy", the Settings plugin's Panel.qml, or
+// "standalone", quickshell/MeetingControls.qml) against a fake meeting.sock
 // (fake-meeting-sock.py) and a fake CLI (fake-voxtype-meeting.py); this file
 // feeds the socket through its control file and checks what the view shows.
 Item {
   id: host
+
+  readonly property bool omarchy: __HOST__ === "omarchy"
+  readonly property var hostItem: hostLoader.item
+  // Times the view went from closed to open, whichever host.
+  property int opens: 0
+  property bool wasOpen: false
+
+  Loader {
+    id: hostLoader
+    sourceComponent: host.omarchy ? omarchyHost : standaloneHost
+  }
+
+  Component {
+    id: omarchyHost
+    Plugin.Panel { manifest: ({__sourceDir: __PLUGIN__}); shell: fakeShell }
+  }
+
+  Component {
+    id: standaloneHost
+    Standalone.MeetingControls { voxtypeBinary: __FAKE_BIN__ }
+  }
+
+  Timer {
+    interval: 20
+    running: true
+    repeat: true
+    onTriggered: {
+      var open = host.viewOpen()
+      if (open && !host.wasOpen) host.opens++
+      host.wasOpen = open
+    }
+  }
+
+  function ctrl() { return host.omarchy ? host.hostItem.meetingsTest : host.hostItem.meetings }
+  function viewOpen() {
+    if (!host.hostItem) return false
+    return host.omarchy ? host.hostItem.opened && host.hostItem.view === "meetings" : host.hostItem.open
+  }
 
   // Stands in for the Omarchy shell: records summons and opens the panel the
   // way the shell's summon() does.
@@ -17,14 +58,12 @@ Item {
     property var summons: []
     function summon(id, payload) {
       fakeShell.summons = fakeShell.summons.concat([String(payload)])
-      panel.open(payload)
+      host.hostItem.open(payload)
       return true
     }
-    function hide(id) { panel.close(); return true }
-    function toggle(id, payload) { if (panel.opened) fakeShell.hide(id); else fakeShell.summon(id, payload) }
+    function hide(id) { host.hostItem.close(); return true }
+    function toggle(id, payload) { if (host.hostItem.opened) fakeShell.hide(id); else fakeShell.summon(id, payload) }
   }
-
-  Plugin.Panel { id: panel; manifest: ({__sourceDir: __PLUGIN__}); shell: fakeShell }
 
   Process {
     id: helper
@@ -63,6 +102,26 @@ Item {
           else if (s === "restore") tc.driveRestore()
           else if (s === "external-update") tc.driveExternalUpdate()
           else if (s === "ended-edit") tc.driveEndedEdit()
+          else if (s === "notes") tc.driveNotes()
+          else if (s === "annotate") tc.driveAnnotate()
+          else if (s === "ask") tc.driveAsk()
+          else if (s === "ask-chips") tc.driveAskChips()
+          else if (s === "ask-notify") tc.driveAskNotify()
+          else if (s === "consent") tc.driveConsent()
+          else if (s === "consent-choose") tc.driveConsentChoose()
+          else if (s === "local-only") tc.driveLocalOnly()
+          else if (s === "summary") tc.driveSummary()
+          else if (s === "regenerate") tc.driveRegenerate()
+          else if (s === "scroll-tabs") tc.driveScrollTabs()
+          else if (s === "view-request") tc.driveViewRequest()
+          else if (s === "list") tc.driveList()
+          else if (s === "past-view") tc.drivePastView()
+          else if (s === "past-summary") tc.drivePastSummary()
+          else if (s === "past-summarize") tc.drivePastSummarize()
+          else if (s === "past-reassign") tc.drivePastReassign()
+          else if (s === "start-while-browsing") tc.driveStartWhileBrowsing()
+          else if (s === "ask-error") tc.driveAskError()
+          else if (s === "summary-error") tc.driveSummaryError()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -137,8 +196,18 @@ Item {
       return s
     }
 
-    function feed() { return panel.meetingsTest.feed }
-    function view() { var w = panel.meetingsTest.window; return w ? w.view : null }
+    function feed() { return host.ctrl().feed }
+    function view() { var w = host.ctrl().window; return w ? w.view : null }
+
+    // Open the view the way a user would on this host: the IPC verb in
+    // Omarchy, the keybinding's flag file in the standalone shell.
+    function openHost() {
+      if (host.omarchy) {
+        check(host.hostItem.ipcTest.meetings() === "ok", "meetings verb")
+        return
+      }
+      sh(["sh", "-c", 'mkdir -p "$1" && touch "$1/meeting-controls.flag"', "_", __RUNTIME__])
+    }
     function txt(name) { var it = find(view(), name); return it ? String(it.text) : "<missing " + name + ">" }
 
     function chips() {
@@ -162,6 +231,12 @@ Item {
     // [time, speaker, text] per line, from the delegates on screen.
     function lines() {
       var lv = find(view(), "transcriptList")
+      // Every row instantiated, so a row scrolled out of view is still read
+      // (the tabs leave the transcript less room than the old layout had).
+      if (lv.cacheBuffer < 100000) {
+        lv.cacheBuffer = 100000
+        wait(60)
+      }
       var out = []
       for (var i = 0; i < lv.count; i++) {
         var item = lv.itemAtIndex(i)
@@ -178,8 +253,8 @@ Item {
     }
 
     function openView() {
-      check(panel.ipcTest.meetings() === "ok", "meetings verb")
-      waitFor(function() { return view() !== null && panel.view === "meetings" }, "view opened")
+      openHost()
+      waitFor(function() { return view() !== null && host.viewOpen() }, "view opened")
       // Key events go to the TestCase's window: the meeting window's.
       tc.parent = view()
     }
@@ -241,6 +316,7 @@ Item {
       ctl({ cmd: "segments", chunk_id: 3, segments: [seg(7, 61, "Nothing from QA, ship it.", "loopback", "Remote 2", 3)] })
       waitFor(function() { return JSON.stringify(renderedChips()) === '["You","Remote 1","Remote 2"]' },
               "renamed and new speaker: " + renderedChips())
+      waitFor(function() { return lines().length === 7 }, "the new voice's line rendered")
       check(lines()[1][1] === "Remote 1" && lines()[4][1] === "Remote 1", "old lines follow the rename: " + JSON.stringify(lines()))
       check(lines()[6][1] === "Remote 2", "new voice")
       shot("three-speakers")
@@ -281,25 +357,25 @@ Item {
       waitFor(function() { return txt("meetingState") === "Ended" }, "Ended after stop: " + txt("meetingState"))
       check(!shown(find(view(), "idleState")), "the ended meeting stays on screen")
       check(lines().length === 8 && txt("meetingTitle") === "Standup", "transcript and title kept")
-      check(panel.opened && panel.view === "meetings", "view stays open after the meeting")
+      check(host.viewOpen(), "view stays open after the meeting")
       shot("ended")
     }
 
     function driveAutoOpen(expectOpen) {
       waitFor(function() { return feed().connected && feed().status === "idle" }, "feed connected while closed")
-      check(!panel.opened, "closed to begin with")
+      check(!host.viewOpen(), "closed to begin with")
       // As `voxtype meeting start`, the detection prompt's Record button or
       // the tray would: the daemon starts a meeting and says so.
       ctl({ cmd: "start", title: "Design review" })
       waitFor(function() { return feed().meetingId !== "" && feed().title === "Design review" }, "hello for the new meeting")
       if (!expectOpen) {
         wait(1500)
-        check(!panel.opened, "show_view_on_start = false keeps the view closed")
-        check(fakeShell.summons.length === 0, "no summon: " + JSON.stringify(fakeShell.summons))
+        check(!host.viewOpen() && host.opens === 0, "show_view_on_start = false keeps the view closed")
         return
       }
-      waitFor(function() { return panel.opened && panel.view === "meetings" && view() !== null }, "view opened itself")
-      check(JSON.stringify(fakeShell.summons) === JSON.stringify(['{"view":"meetings"}']), "summoned through the shell: " + JSON.stringify(fakeShell.summons))
+      waitFor(function() { return host.viewOpen() && view() !== null }, "view opened itself")
+      if (host.omarchy)
+        check(JSON.stringify(fakeShell.summons) === JSON.stringify(['{"view":"meetings"}']), "summoned through the shell: " + JSON.stringify(fakeShell.summons))
       tc.parent = view()
       waitFor(function() { return txt("meetingTitle") === "Design review" }, "title: " + txt("meetingTitle"))
       check(txt("meetingState") === "Recording", "state: " + txt("meetingState"))
@@ -308,12 +384,12 @@ Item {
 
     function driveAutoOpenSettings() {
       waitFor(function() { return feed().connected && feed().status === "idle" }, "feed connected")
-      panel.open("{}")
-      check(panel.opened && panel.view === "settings", "Settings open")
+      host.hostItem.open("{}")
+      check(host.hostItem.opened && host.hostItem.view === "settings", "Settings open")
       ctl({ cmd: "start", title: "Design review" })
       waitFor(function() { return feed().meetingId !== "" }, "meeting seen")
       wait(1200)
-      check(panel.view === "settings", "Settings not taken over")
+      check(host.hostItem.view === "settings", "Settings not taken over")
       check(fakeShell.summons.length === 0, "no summon: " + JSON.stringify(fakeShell.summons))
     }
 
@@ -371,7 +447,7 @@ Item {
       click(find(view(), "startButton"), "Start again")
       waitFor(function() { return feed().status === "recording" && txt("meetingTitle") === "Retro" }, "recording Retro: " + txt("meetingTitle"))
       check(!shown(find(view(), "actionError")), "error cleared")
-      check(fakeShell.summons.length === 1, "only the meetings verb summoned: " + JSON.stringify(fakeShell.summons))
+      check(host.opens === 1, "opened once, by the user")
       shot("started")
     }
 
@@ -426,7 +502,7 @@ Item {
       return m && m.visible ? String(m.text) : ""
     }
 
-    function idleCli() { return panel.meetingsTest.cli.busy === "" && panel.meetingsTest.cli.queue.length === 0 }
+    function idleCli() { return host.ctrl().cli.busy === "" && host.ctrl().cli.queue.length === 0 }
 
     function typeNewSpeaker(name) {
       var field = find(popup(), "newSpeakerField")
@@ -447,7 +523,7 @@ Item {
       // Escape closes the chooser, not the view.
       keyClick(Qt.Key_Escape)
       waitFor(function() { return !popup().visible }, "Escape closed the chooser")
-      check(panel.opened && view() !== null, "view still open")
+      check(host.viewOpen() && view() !== null, "view still open")
 
       openChooser(1)
       pick("You")
@@ -596,10 +672,515 @@ Item {
       var close = find(view(), "closeButton")
       tc.parent = host
       click(close, "Close")
-      waitFor(function() { return !panel.opened && view() === null }, "view closed")
+      waitFor(function() { return !host.viewOpen() && view() === null }, "view closed")
       check(!feed().ended && feed().segments.count === 0, "ended meeting dropped on close")
       openView()
       waitFor(function() { return shown(find(view(), "idleState")) }, "idle after reopening")
+    }
+
+    // ------------------------------------------------------------ assistant
+
+    function tab(name) {
+      click(find(view(), "tab_" + name), "tab " + name)
+      waitFor(function() { return view().currentTab === name }, "on the " + name + " tab")
+    }
+
+    function assistant() { return host.ctrl().assistant }
+    function thread() { return assistant().thread }
+    function answered(n) {
+      return thread().count >= n * 2 && !thread().get(n * 2 - 1).pending
+    }
+    function chipLabel() {
+      var pane = find(view(), view().currentTab === "summary" ? "summaryPane" : "askPane")
+      return String(find(pane, "agentChip").text)
+    }
+
+    // A request as `voxtype meeting view` (or a notification's Open) writes it.
+    function request(req) {
+      if (req.requested_at === undefined) req.requested_at = Date.now()
+      sh(["sh", "-c", 'mkdir -p "$1" && printf "%s" "$2" > "$1/meeting-view.request.tmp" && mv "$1/meeting-view.request.tmp" "$1/meeting-view.request"',
+          "_", __RUNTIME__, JSON.stringify(req)])
+    }
+
+    function typeAsk(q) {
+      var field = find(find(view(), "askPane"), "askField")
+      click(field, "Ask field")
+      field.text = q
+      keyClick(Qt.Key_Return)
+    }
+
+    function driveNotes() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("notes")
+      var area = find(view(), "notesArea")
+      click(area, "notes pad")
+      area.text = "Ask about the release date"
+      check(txt("notesStatus") === "Edited", "edited: " + txt("notesStatus"))
+      waitFor(function() { return txt("notesStatus") === "Saved" }, "autosaved: " + txt("notesStatus"))
+      shot("notes")
+
+      // Changed elsewhere: notes_updated reloads the pad.
+      sh(["sh", "-c", 'printf "From the CLI" > "$1/notes-$2.md"', "_", __DATA__, __MEETING_ID__])
+      ctl({ cmd: "notes_updated", meeting_id: __MEETING_ID__ })
+      waitFor(function() { return area.text === "From the CLI" }, "reloaded: " + area.text)
+
+      // Unsaved typing is never overwritten by an update from elsewhere.
+      area.text = "Mine"
+      ctl({ cmd: "notes_updated", meeting_id: __MEETING_ID__, notes: "Theirs" })
+      wait(300)
+      check(area.text === "Mine", "kept the typing: " + area.text)
+      waitFor(function() { return txt("notesStatus") === "Saved" }, "saved Mine")
+    }
+
+    function driveAnnotate() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var item = lineItem(2)
+      mouseMove(item, 30, 4)
+      var note = find(item, "lineNoteButton")
+      waitFor(function() { return note.visible }, "Add note on hover")
+      check(String(note.text) === "Add note", "Add note: " + note.text)
+      mouseClick(note, note.width / 2, note.height / 2)
+      var editor = find(view(), "noteEditor")
+      waitFor(function() { return editor.visible }, "note editor open")
+      var field = find(editor, "noteField")
+      waitFor(function() { return field.activeFocus }, "note field focused")
+      field.text = "check this number"
+      keyClick(Qt.Key_Return)
+      check(!editor.visible, "editor closes on save")
+      check(find(lineItem(2), "lineMarker").visible, "margin marker at once")
+      check(String(find(lineItem(2), "lineAnnotation").text) === "Note: check this number", "note shown")
+      waitFor(idleCli, "annotate finished")
+      wait(300)
+      check(find(lineItem(2), "lineMarker").visible, "marker after the daemon's segment_updated")
+      shot("annotated")
+
+      // A highlight from elsewhere marks the margin without a note.
+      var s2 = seg(2, 9, "Yes, loud and clear.", "loopback", "Remote", 0)
+      s2.annotation = { text: "", highlight: true }
+      ctl({ cmd: "update", key: "event", segment: s2 })
+      waitFor(function() { return find(lineItem(1), "lineMarker").visible }, "highlight marker")
+      check(!find(lineItem(1), "lineAnnotation").visible, "no note text for a highlight")
+
+      // A bare highlight from the editor: --highlight with no text.
+      mouseMove(lineItem(0), 30, 4)
+      note = find(lineItem(0), "lineNoteButton")
+      waitFor(function() { return note.visible }, "Add note on line 0")
+      mouseClick(note, note.width / 2, note.height / 2)
+      waitFor(function() { return editor.visible }, "editor for a highlight")
+      click(find(editor, "noteHighlightButton"), "Highlight")
+      click(find(editor, "noteSaveButton"), "Save")
+      check(find(lineItem(0), "lineMarker").visible && !find(lineItem(0), "lineAnnotation").visible, "highlighted, no note")
+      waitFor(idleCli, "highlight finished")
+      wait(300)
+      check(find(lineItem(0), "lineMarker").visible, "highlight kept after the daemon")
+      check(String(find(lineItem(0), "lineNoteButton").text) === "Edit note", "a highlighted line offers Edit")
+
+      mouseMove(lineItem(2), 30, 4)
+      note = find(lineItem(2), "lineNoteButton")
+      waitFor(function() { return note.visible && String(note.text) === "Edit note" }, "Edit note")
+      mouseClick(note, note.width / 2, note.height / 2)
+      waitFor(function() { return editor.visible }, "editor again")
+      check(find(editor, "noteField").text === "check this number", "editor holds the note")
+      click(find(editor, "noteRemoveButton"), "Remove")
+      check(!find(lineItem(2), "lineMarker").visible, "marker gone at once")
+      waitFor(idleCli, "remove finished")
+      wait(300)
+      check(!find(lineItem(2), "lineMarker").visible, "marker gone after the daemon")
+    }
+
+    function driveAsk() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      waitFor(function() { return chipLabel() === "Claude  ▾" }, "agent chip: " + chipLabel())
+      typeAsk("What did we decide?")
+      waitFor(function() { return thread().count === 2 }, "question and answer rows")
+      check(thread().get(0).text === "What did we decide?", "question shown")
+      // It streams: text arrives while the answer is still pending.
+      waitFor(function() { return thread().get(1).pending && thread().get(1).text !== "" }, "a partial answer", 3000)
+      var partial = thread().get(1).text
+      waitFor(function() { return answered(1) }, "answer finished", 8000)
+      var full = thread().get(1).text
+      check(partial.length < full.length, "streamed in pieces: " + partial.length + " < " + full.length)
+      check(full.indexOf("[00:35] The build went green") === 0, "answer: " + full)
+      var row = find(view(), "askThread").itemAtIndex(1)
+      check(String(find(row, "answerBy").text) === "Answered by Claude", "attribution: " + find(row, "answerBy").text)
+      shot("ask")
+
+      // The answer opens with its [0:35] citation: clicking it shows that line.
+      var answerText = find(row, "answerText")
+      check(String(answerText.text).indexOf('<a href="#t=35000"') === 0, "the answer's citation linked: " + answerText.text)
+      check(String(answerText.text).indexOf('<a href="#t=50000"') !== -1, "both citations: " + answerText.text)
+      mouseClick(answerText, 6, 8)
+      waitFor(function() { return view().currentTab === "transcript" }, "citation opened the transcript")
+      waitFor(function() { return find(view(), "transcriptPane").flashSegId === 4 }, "the cited line flashes: " + find(view(), "transcriptPane").flashSegId)
+      shot("citation")
+    }
+
+    function driveAskChips() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      var pane = find(view(), "askPane")
+      check(String(find(pane, "askChip_lastSpeaker").text) === "What did Remote just say?", "last speaker chip: " + find(pane, "askChip_lastSpeaker").text)
+      click(find(pane, "askChip_last5"), "Last 5 minutes")
+      waitFor(function() { return answered(1) }, "first chip answered", 8000)
+      click(find(pane, "askChip_lastSpeaker"), "last speaker")
+      waitFor(function() { return answered(2) }, "second chip answered", 8000)
+      click(find(pane, "askChip_actions"), "action items")
+      waitFor(function() { return answered(3) }, "third chip answered", 8000)
+      check(thread().get(2).text === "What did Remote just say?", "question text: " + thread().get(2).text)
+      shot("ask-chips")
+    }
+
+    function driveAskNotify() {
+      waitFor(function() { return feed().connected && feed().meetingId !== "" }, "feed has the meeting")
+      check(!host.viewOpen(), "closed")
+      // A quick question with the view closed: answered as a notification.
+      request({ ask: "last-5m", open: false })
+      waitFor(function() { return thread().count === 2 && answered(1) }, "answered while closed", 8000)
+      check(!host.viewOpen(), "still closed")
+      var askId = thread().get(1).askId
+      check(askId === "ask-1", "the answer's id from the stream: " + askId)
+      // The notification's Open action: open_command `voxtype meeting view`
+      // with VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID set writes this.
+      request({ meeting_id: __MEETING_ID__, ask_id: askId, tab: "ask", open: true })
+      waitFor(function() { return host.viewOpen() && view() !== null }, "Open raised the view")
+      tc.parent = view()
+      waitFor(function() { return view().currentTab === "ask" }, "on the Ask tab: " + view().currentTab)
+      check(find(view(), "askThread").count === 2, "the answer is in the thread")
+      waitFor(function() { return find(view(), "askPane").flashRow === 1 }, "that answer is shown")
+      shot("opened-from-notification")
+    }
+
+    function driveConsent() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      waitFor(function() { return assistant().status !== null }, "assistant status read")
+      typeAsk("What did we decide?")
+      var dialog = find(view(), "consentDialog")
+      waitFor(function() { return dialog.visible }, "consent asked")
+      check(txt("consentTitle") === "Send meeting transcripts to Claude?", "title: " + txt("consentTitle"))
+      check(thread().count === 0, "nothing asked yet")
+      shot("consent")
+      click(find(dialog, "consentNotNow"), "Not now")
+      check(!dialog.visible && thread().count === 0, "Not now asks nothing")
+
+      typeAsk("What did we decide?")
+      waitFor(function() { return dialog.visible }, "asked again")
+      click(find(dialog, "consentAllow_claude"), "Send to Claude")
+      waitFor(function() { return answered(1) }, "answered after consent", 8000)
+      waitFor(function() { return assistant().blocker === "" }, "consent recorded")
+      typeAsk("And the date?")
+      waitFor(function() { return answered(2) }, "second question needs no dialog", 8000)
+      check(!dialog.visible, "no dialog the second time")
+    }
+
+    function driveConsentChoose() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      waitFor(function() { return assistant().status !== null }, "assistant status read")
+      typeAsk("What did we decide?")
+      var dialog = find(view(), "consentDialog")
+      waitFor(function() { return dialog.visible }, "consent asked")
+      check(txt("consentTitle") === "Send meeting transcripts to Claude or Codex?", "title: " + txt("consentTitle"))
+      check(find(dialog, "consentAllow_claude") !== null && find(dialog, "consentAllow_codex") !== null, "one button per agent")
+      shot("consent-choose")
+      click(find(dialog, "consentLocal"), "Use a local model instead")
+      waitFor(function() { return answered(1) }, "answered locally", 8000)
+      waitFor(function() { return chipLabel() === "Local (llama3.2)  ▾" }, "chip says local: " + chipLabel())
+      var row = find(view(), "askThread").itemAtIndex(1)
+      check(String(find(row, "answerBy").text) === "Answered by Local (llama3.2)", "attribution: " + find(row, "answerBy").text)
+    }
+
+    function driveLocalOnly() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      waitFor(function() { return chipLabel() === "Claude  ▾" }, "agent chip: " + chipLabel())
+      var menu = find(view(), "agentMenu")
+      click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+      waitFor(function() { return menu.visible }, "menu open")
+      check(find(menu, "agentOption_claude") !== null && find(menu, "agentOption_codex") !== null, "agents listed")
+      check(shown(find(menu, "openSettings")) === host.omarchy, "Change in Settings only where the host can open them")
+      check(String(find(menu, "agentNote_codex").text).indexOf("bwrap jail") !== -1, "codex's jail explained: " + find(menu, "agentNote_codex").text)
+      shot("agent-menu")
+      click(find(menu, "localOnlyToggle"), "Local model only")
+      check(!menu.visible, "menu closes")
+      waitFor(function() { return chipLabel() === "Local (llama3.2)  ▾" }, "local: " + chipLabel())
+      click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+      waitFor(function() { return menu.visible }, "menu again")
+      check(String(find(menu, "localOnlyToggle").text) === "✓ Local model only (llama3.2)", "checked: " + find(menu, "localOnlyToggle").text)
+      keyClick(Qt.Key_Escape)
+      check(!menu.visible && host.viewOpen(), "Escape closes the menu, not the view")
+      click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+      waitFor(function() { return menu.visible }, "menu a third time")
+      click(find(menu, "localOnlyToggle"), "Local model only off")
+      waitFor(function() { return chipLabel() === "Claude  ▾" }, "back to Claude: " + chipLabel())
+      click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+      waitFor(function() { return menu.visible }, "menu for Codex")
+      click(find(menu, "agentOption_codex"), "Codex")
+      waitFor(function() { return chipLabel() === "Codex  ▾" }, "Codex: " + chipLabel())
+      if (host.omarchy) {
+        click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+        waitFor(function() { return menu.visible }, "menu for Settings")
+        var settings = find(menu, "openSettings")
+        tc.parent = host
+        click(settings, "Change in Settings")
+        waitFor(function() { return host.hostItem.opened && host.hostItem.view === "settings" }, "Settings opened")
+      }
+    }
+
+    function driveSummary() {
+      ctl({ cmd: "autosummary", summary: {
+        summary: "A short standup about the release.", decisions: ["Ship today."],
+        action_items: [{ description: "Cut the tag", assignee: "Pete", completed: false }], key_points: [],
+        chapters: [{ start_ms: 4000, title: "Greetings" }, { start_ms: 35000, title: "Release status" }] } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(find(view(), "tab_summary") === null || !find(view(), "tab_summary").visible, "no Summary tab while recording")
+      click(find(view(), "stopButton"), "Stop")
+      // The daemon is idle before it summarizes: the meeting shows Ended
+      // first, then the summarizing event (naming it) takes over the tab.
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      waitFor(function() { return view().currentTab === "summary" && shown(find(view(), "summarizing")) }, "summarizing", 5000)
+      check(txt("meetingState") === "Summarizing", "state: " + txt("meetingState"))
+      check(chipLabel() === "Claude  ▾", "agent chip in the Summary header: " + chipLabel())
+      shot("summarizing")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary ready: " + txt("summaryText"), 8000)
+      var md = txt("summaryText")
+      check(md.indexOf("**Pete**: Cut the tag") !== -1, "action item with owner: " + md)
+      check(/<a href="#t=35000"[^>]*>0:35<\/a> Release status/.test(md), "chapter linked: " + md)
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended after summary_ready")
+      shot("summary")
+      // A chapter jumps into the transcript.
+      find(view(), "summaryText").linkActivated("#t=35000")
+      waitFor(function() { return view().currentTab === "transcript" }, "chapter opened the transcript")
+      waitFor(function() { return find(view(), "transcriptPane").flashSegId === 4 }, "the chapter's line flashes")
+    }
+
+    function driveRegenerate() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      tab("summary")
+      check(shown(find(view(), "summaryEmpty")), "no summary yet")
+      var button = find(view(), "regenerateButton")
+      check(String(button.text) === "Summarize", "button: " + button.text)
+      click(button, "Summarize")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing")
+      check(!button.enabled, "no second run while one is going")
+      waitFor(function() { return txt("summaryText").indexOf("Release status") !== -1 }, "summary", 8000)
+      check(String(button.text) === "Regenerate", "Regenerate now: " + button.text)
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__,
+          JSON.stringify({ summary_json: { summary: "Regenerated after fixing speakers [0:21].", key_points: [],
+                                           decisions: [], action_items: [], generated_at: "2026-11-11T17:00:00Z" } })])
+      click(button, "Regenerate")
+      waitFor(function() { return txt("summaryText").indexOf("Regenerated after fixing speakers") !== -1 }, "regenerated", 8000)
+      shot("regenerated")
+    }
+
+    function driveScrollTabs() {
+      openView()
+      var lv = null
+      waitFor(function() { lv = find(view(), "transcriptList"); return lv && lv.count === 40 }, "40 lines")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      tab("summary")
+      click(find(view(), "regenerateButton"), "Summarize")
+      var flick = find(view(), "summaryFlick")
+      waitFor(function() { return txt("summaryText").indexOf("Section 30") !== -1 && flick.contentHeight > flick.height * 2 }, "a long summary", 8000)
+      flick.contentY = 300
+      tab("transcript")
+      lv.positionViewAtIndex(12, ListView.Beginning)
+      lv.follow = false
+      wait(100)
+      var y1 = lv.contentY
+      check(y1 > 0 && !lv.atYEnd, "transcript scrolled to the middle: " + y1)
+      tab("summary")
+      check(Math.abs(flick.contentY - 300) < 1, "summary kept its place: " + flick.contentY)
+      tab("transcript")
+      check(Math.abs(lv.contentY - y1) < 1, "transcript kept its place: " + lv.contentY + " vs " + y1)
+      tab("summary")
+      check(Math.abs(flick.contentY - 300) < 1, "summary still in place: " + flick.contentY)
+      shot("summary-scrolled")
+    }
+
+    function driveViewRequest() {
+      waitFor(function() { return feed().connected && feed().meetingId !== "" }, "feed has the meeting")
+      // `voxtype meeting view <id> --tab notes`
+      request({ meeting_id: __MEETING_ID__, tab: "notes", open: true })
+      waitFor(function() { return host.viewOpen() && view() !== null }, "opened by request")
+      tc.parent = view()
+      waitFor(function() { return view().currentTab === "notes" }, "on Notes: " + view().currentTab)
+      if (host.omarchy) {
+        // The plugin's own payload form picks the tab too.
+        fakeShell.summon("io.voxtype.settings", JSON.stringify({ view: "meetings", tab: "ask" }))
+        waitFor(function() { return view().currentTab === "ask" }, "payload tab: " + view().currentTab)
+      }
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      var close = find(view(), "closeButton")
+      tc.parent = host
+      click(close, "Close")
+      waitFor(function() { return !host.viewOpen() && feed().meetingId === "" }, "closed, ended meeting dropped")
+
+      // A request that is too old (a host that started later) is ignored.
+      request({ meeting_id: __MEETING_ID__, open: true, requested_at: Date.now() - 120000 })
+      wait(800)
+      check(!host.viewOpen(), "stale request ignored")
+
+      // A meeting that is not on screen opens from its saved transcript.
+      request({ meeting_id: __MEETING_ID__, tab: "transcript", open: true })
+      waitFor(function() { return host.viewOpen() && view() !== null }, "opened on a saved meeting")
+      tc.parent = view()
+      waitFor(function() { return feed().ended && lines().length === 4 }, "saved transcript loaded: " + (view() ? lines().length : -1))
+      check(txt("meetingState") === "Ended" && txt("meetingTitle") === "Standup", "shown as Ended: " + txt("meetingState"))
+      shot("saved-meeting")
+    }
+
+    // ------------------------------------------------------------ past meetings
+
+    function pastList() { return find(view(), "meetingList") }
+    function row(i) { return pastList().itemAtIndex(i) }
+    function rowText(i, name) { var r = row(i); return r ? String(find(r, name).text) : "<no row " + i + ">" }
+
+    function openList() {
+      openView()
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList() && pastList().count > 0 }, "the list")
+    }
+
+    function openPast(i, title) {
+      click(row(i), "row " + i)
+      waitFor(function() { return feed().ended && txt("meetingTitle") === title }, "opened " + title + ": " + txt("meetingTitle"))
+    }
+
+    function driveList() {
+      openList()
+      check(shown(find(view(), "startButton")) && shown(find(view(), "startTitleField")), "Start meeting stays at the top")
+      check(txt("idleTitle") === "No meeting in progress", "idle title: " + txt("idleTitle"))
+      check(pastList().count === 50, "first page of 50: " + pastList().count)
+      check(rowText(0, "meetingRowTitle") === "Design review" && rowText(1, "meetingRowTitle") === "1:1 with Sam", "newest first")
+      waitFor(function() { return rowText(0, "meetingRowDetails").indexOf("3 speakers") !== -1 }, "speakers read from the folder: " + rowText(0, "meetingRowDetails"))
+      var d = rowText(0, "meetingRowDetails")
+      check(d.indexOf("2026, ") !== -1 && d.indexOf("45 min") !== -1, "date and length: " + d)
+      check(rowText(1, "meetingRowDetails").indexOf("25 min · 2 speakers") !== -1, "second row: " + rowText(1, "meetingRowDetails"))
+      check(find(row(0), "meetingRowSummary").visible, "Summary badge on the summarized meeting")
+      check(!find(row(1), "meetingRowSummary").visible, "no badge without a summary")
+      check(rowText(2, "meetingRowTitle") === "Untitled meeting", "untitled: " + rowText(2, "meetingRowTitle"))
+      shot("list")
+      pastList().positionViewAtEnd()
+      wait(200)
+      var more = find(view(), "meetingListMore")
+      waitFor(function() { return more && shown(more) }, "Show older meetings")
+      click(more, "Show older meetings")
+      waitFor(function() { return pastList().count === 60 }, "all 60 after the second page: " + pastList().count)
+      waitFor(function() { return !shown(find(view(), "meetingListMore")) }, "no more to show")
+    }
+
+    function drivePastView() {
+      openList()
+      openPast(0, "Design review")
+      check(txt("meetingState") === "Ended" && txt("meetingElapsed") === "45:00", "Ended, 45 min: " + txt("meetingState") + " " + txt("meetingElapsed"))
+      check(txt("meetingEndedAt").indexOf("Tue 10 Nov 2026, ") === 0, "its date: " + txt("meetingEndedAt"))
+      waitFor(function() { return lines().length === 4 }, "transcript loaded")
+      check(JSON.stringify(renderedChips()) === '["You","Remote 1","Remote 2"]', "chips: " + renderedChips())
+      check(shown(find(view(), "backButton")), "Back offered")
+      check(!shown(find(view(), "pauseButton")), "no Pause on a past meeting")
+      shot("past-meeting")
+      click(find(view(), "backButton"), "Back")
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList().count === 2 }, "back to the list")
+      check(!feed().ended && feed().meetingId === "", "nothing held after Back")
+      openPast(1, "1:1 with Sam")
+      waitFor(function() { return lines().length === 3 }, "the other meeting's transcript")
+    }
+
+    function drivePastSummary() {
+      openList()
+      openPast(0, "Design review")
+      check(view().currentTab === "transcript", "opens on the transcript")
+      check(shown(find(view(), "tab_summary")), "Summary tab for a past meeting")
+      tab("summary")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary from show --json: " + txt("summaryText"))
+      check(txt("summaryText").indexOf("**Dana**: Draft the empty state") !== -1, "action item: " + txt("summaryText"))
+      check(String(find(view(), "regenerateButton").text) === "Regenerate", "Regenerate offered")
+      shot("past-summary")
+      find(view(), "summaryText").linkActivated("#t=61000")
+      waitFor(function() { return view().currentTab === "transcript" && find(view(), "transcriptPane").flashSegId === 2 }, "chapter jumps to its line")
+      tab("summary")
+      check(txt("summaryText").indexOf("## Overview") === 0, "summary still there")
+    }
+
+    function drivePastSummarize() {
+      openList()
+      openPast(1, "1:1 with Sam")
+      tab("summary")
+      check(shown(find(view(), "summaryEmpty")), "no summary yet")
+      var button = find(view(), "regenerateButton")
+      check(String(button.text) === "Summarize", "Summarize: " + button.text)
+      click(button, "Summarize")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing")
+      waitFor(function() { return txt("summaryText").indexOf("Release status") !== -1 }, "rendered the output", 8000)
+      shot("past-summarized")
+    }
+
+    function drivePastReassign() {
+      openList()
+      openPast(1, "1:1 with Sam")
+      waitFor(function() { return lines().length === 3 }, "transcript loaded")
+      openChooser(1)
+      pick("You")
+      check(lines()[1][1] === "You", "moved at once")
+      waitFor(idleCli, "reassign finished")
+      check(lines()[1][1] === "You" && moved(1) === "moved from Remote", "kept with the CLI's segment: " + JSON.stringify(lines()[1]) + " " + moved(1))
+      // It is stored: Back, then open it again.
+      click(find(view(), "backButton"), "Back")
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList().count > 0 }, "list")
+      openPast(1, "1:1 with Sam")
+      waitFor(function() { return lines().length === 3 && lines()[1][1] === "You" && moved(1) === "moved from Remote" }, "still moved after reopening")
+    }
+
+    function driveStartWhileBrowsing() {
+      openList()
+      openPast(0, "Design review")
+      ctl({ cmd: "start", title: "Live one" })
+      waitFor(function() { return feed().status === "recording" && txt("meetingTitle") === "Live one" }, "the live meeting took over: " + txt("meetingTitle"))
+      check(!feed().ended && lines().length === 0, "the past meeting is gone")
+      check(!shown(find(view(), "backButton")) && shown(find(view(), "pauseButton")), "live controls, no Back")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      click(find(view(), "backButton"), "Back")
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList().count === 3 && rowText(0, "meetingRowTitle") === "Live one" }, "the ended meeting tops the list: " + (pastList() ? rowText(0, "meetingRowTitle") : ""))
+      shot("list-after-meeting")
+    }
+
+    function driveAskError() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      typeAsk("What did we decide?")
+      waitFor(function() { return answered(1) }, "the ask ended", 8000)
+      check(thread().get(1).error === "Claude failed: the agent exited with status 1.", "error message: " + thread().get(1).error)
+      var row = find(view(), "askThread").itemAtIndex(1)
+      check(shown(find(row, "answerError")) && !shown(find(row, "answerBy")), "error shown, no attribution")
+      shot("ask-error")
+    }
+
+    function driveSummaryError() {
+      ctl({ cmd: "autosummary", error: { code: "agent_failed", message: "Summary failed: Claude exited with status 1." } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing", 6000)
+      waitFor(function() { return shown(find(view(), "summaryError")) }, "the failure", 6000)
+      check(txt("summaryError") === "Summary failed: Claude exited with status 1.", "message: " + txt("summaryError"))
+      check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+      shot("summary-error")
     }
 
     function driveScroll() {

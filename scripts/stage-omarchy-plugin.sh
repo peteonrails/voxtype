@@ -1,11 +1,13 @@
 #!/bin/bash
 # Stage the Omarchy Settings plugin into its packaged, versioned layout.
 #
-# Usage: stage-omarchy-plugin.sh <source-dir> <dest-root>
+# Usage: stage-omarchy-plugin.sh <source-dir> <dest-root> [<meetings-dir>]
 #
-#   <source-dir>  the repo's omarchy-plugin/ directory
-#   <dest-root>   where io.voxtype.settings/ is created, normally
-#                 $pkgroot/usr/share/voxtype/omarchy-plugin
+#   <source-dir>    the repo's omarchy-plugin/ directory
+#   <dest-root>     where io.voxtype.settings/ is created, normally
+#                   $pkgroot/usr/share/voxtype/omarchy-plugin
+#   <meetings-dir>  the meeting view shared with the standalone Quickshell
+#                   shell; default <source-dir>/../quickshell/voxtype-meetings
 #
 # Produces:
 #
@@ -15,6 +17,12 @@
 #     <version>/Panel.qml
 #     <version>/components/*.qml
 #     <version>/components/<view>/*.qml   one level of view directories
+#     <version>/components/meetings/*.qml,*.js   from <meetings-dir>
+#
+# In the repo, omarchy-plugin/components/meetings is a symlink to
+# quickshell/voxtype-meetings, so the flat tree and its tests load the one
+# implementation. Staging copies the real directory instead of following that
+# link, so an archive that drops symlinks still stages a working plugin.
 #
 # <version> is the manifest's version string, including any -rcN suffix.
 # The QML lives under a versioned directory so every upgrade gives Omarchy a
@@ -37,14 +45,17 @@ die() {
     exit 1
 }
 
-[[ $# -eq 2 ]] || die "usage: $0 <source-dir> <dest-root>"
+[[ $# -eq 2 || $# -eq 3 ]] || die "usage: $0 <source-dir> <dest-root> [<meetings-dir>]"
 SRC="${1%/}"
 DEST_ROOT="${2%/}"
+MEETINGS="${3:-$SRC/../quickshell/voxtype-meetings}"
+MEETINGS="${MEETINGS%/}"
 
 [[ -f "$SRC/manifest.json" ]] || die "$SRC/manifest.json not found"
 [[ -f "$SRC/Panel.qml" ]] || die "$SRC/Panel.qml not found"
 [[ -d "$SRC/components" ]] || die "$SRC/components/ not found"
 [[ -f "$SRC/LICENSE" ]] || die "$SRC/LICENSE not found"
+[[ -f "$MEETINGS/Meetings.qml" ]] || die "$MEETINGS/Meetings.qml not found (the shared meeting view)"
 
 # The version doubles as a directory name inside an entry point, which
 # Omarchy rejects if it contains "..", so accept only a plain release or
@@ -78,6 +89,7 @@ install -m 644 "${COMPONENTS[@]}" "$PLUGIN_DIR/$VERSION/components/"
 
 # A view with several files keeps them in its own directory (components/meetings/).
 for VIEW_DIR in "$SRC"/components/*/; do
+    [[ -L "${VIEW_DIR%/}" ]] && continue
     VIEW=$(basename "$VIEW_DIR")
     shopt -s nullglob
     VIEW_FILES=("$VIEW_DIR"*.qml)
@@ -86,6 +98,12 @@ for VIEW_DIR in "$SRC"/components/*/; do
     install -d -m 755 "$PLUGIN_DIR/$VERSION/components/$VIEW"
     install -m 644 "${VIEW_FILES[@]}" "$PLUGIN_DIR/$VERSION/components/$VIEW/"
 done
+
+shopt -s nullglob
+MEETING_FILES=("$MEETINGS"/*.qml "$MEETINGS"/*.js)
+shopt -u nullglob
+install -d -m 755 "$PLUGIN_DIR/$VERSION/components/meetings"
+install -m 644 "${MEETING_FILES[@]}" "$PLUGIN_DIR/$VERSION/components/meetings/"
 
 sed "s|$ENTRY_PATTERN|\"panel\": \"$VERSION/Panel.qml\"|" "$SRC/manifest.json" > "$PLUGIN_DIR/manifest.json"
 chmod 644 "$PLUGIN_DIR/manifest.json"

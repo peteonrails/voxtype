@@ -7,7 +7,6 @@ import qs.Commons
 import qs.Commons as ShellTheme
 import qs.Ui
 import "components"
-import "components/meetings"
 
 // Voxtype settings, as an Omarchy panel plugin.
 //
@@ -20,9 +19,10 @@ import "components/meetings"
 //   omarchy-shell io.voxtype.settings toggle
 //   omarchy-shell io.voxtype.settings section Hotkey
 //
-// The live meeting view is the same plugin with {"view":"meetings"}, or the
-// `meetings` verb; it also opens by itself when a meeting starts (see
-// components/meetings/Meetings.qml).
+// The live meeting view is the same plugin with {"view":"meetings"} (plus an
+// optional "tab" and "meeting_id"), or the `meetings` verb; it also opens by
+// itself when a meeting starts (components/OmarchyMeetingsHost.qml, around the
+// view shared with the standalone shell in quickshell/voxtype-meetings).
 //
 // The panel owns no settings model of its own: `voxtype config schema --json`
 // is the whole source of truth, re-read on every summon and after every write,
@@ -265,7 +265,10 @@ Item {
 
     root.view = payload.view === "meetings" ? "meetings" : "settings"
     root.opened = true
-    if (root.view === "meetings") return
+    if (root.view === "meetings") {
+      meetings.select(payload)
+      return
+    }
     if (cli.downloading) root.browsingEngine = cli.downloadEngine
     // Re-read on every summon: the config file may have been edited by the
     // TUI, another shell, or an upgrade since the last time we looked.
@@ -981,13 +984,15 @@ Item {
 
   // ---------------------------------------------------------------- window
 
-  Meetings {
+  OmarchyMeetingsHost {
     id: meetings
     bin: cli.bin
     shown: root.opened && root.view === "meetings"
     panelOpen: root.opened
     onOpenRequested: root.requestOpen(JSON.stringify({ view: "meetings" }))
     onCloseRequested: root.dismiss()
+    // "Change in Settings" on the agent chip: the Meeting section.
+    onSettingsRequested: root.requestOpen(JSON.stringify({ section: "Meeting" }))
   }
 
   PanelWindow {

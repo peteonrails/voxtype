@@ -19,11 +19,12 @@
 //     `$XDG_RUNTIME_DIR/voxtype/engine-picker.flag` file. Self-sources
 //     its state from config.toml; doesn't need the daemon state or
 //     audio bridge.
-//   - MeetingControls: meeting status + start/stop/pause/resume,
-//     toggled via the `$XDG_RUNTIME_DIR/voxtype/meeting-controls.flag`
-//     file. Self-sources state from
-//     `$XDG_RUNTIME_DIR/voxtype/meeting_state` and `voxtype meeting
-//     show`; doesn't need the daemon state or audio bridge either.
+//   - MeetingControls: the meeting view (voxtype-meetings/, the same
+//     one the Omarchy plugin shows): live transcript, notes, ask and
+//     summary. Opens when a meeting starts, on `voxtype meeting view`,
+//     and still toggles via the `$XDG_RUNTIME_DIR/voxtype/meeting-controls.flag`
+//     file. Reads meeting.sock itself; doesn't need the daemon state or
+//     audio bridge.
 //
 // State is sourced from the daemon's state file at
 // $XDG_RUNTIME_DIR/voxtype/state. Audio frames are sourced from the

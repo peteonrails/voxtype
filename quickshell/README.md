@@ -12,7 +12,8 @@ OSD frontends. Intended for users running a Quickshell-based desktop shell
 | `shell.qml` | Composition root. Wires the shared state and audio bridges into each widget. |
 | `OsdSurface.qml` | Recipe-driven recording HUD: state icon + tint, scrolling waveform, peak meter, elapsed time and limit countdown, a brief engine and model chip, a result card when the session ends, and optional trusted custom QML style package. Visible whenever the daemon is not idle (plus a moment afterwards for the result), on the focused output under Hyprland and Sway/i3, and on every output elsewhere. |
 | `EnginePicker.qml` | Floating panel listing every transcription engine, with the active one marked. Switches engines via `voxtype config set engine <name>`. Engines not compiled into the running binary are shown dimmed. |
-| `MeetingControls.qml` | Meeting status panel (title, elapsed time, chunk count) with Start / Stop / Pause / Resume buttons that shell out to `voxtype meeting <action>`. |
+| `MeetingControls.qml` | Hosts the meeting view (below) in this shell: its theme, and opening it on a meeting start, on `voxtype meeting view`, or on the `meeting-controls.flag` keybinding. |
+| `voxtype-meetings/` | The meeting view, shared with the Omarchy plugin (which stages the same files as `components/meetings/`): live transcript with speaker chips and per-line reassignment, Notes, Ask and Summary tabs. One implementation for both; a host only supplies a `MeetingTheme` and how a window opens. |
 | `voxtype-shared/` | Shared QML module: `Theme` (palette/sizing singleton), `StateReader` (daemon state file watcher), `AudioBridge` (wrapper around the `voxtype-audio-bridge` sidecar), `StyleLoader`, `RecipeRenderer`, and `StateIcon` (vector state and result icons). See [voxtype-shared/README.md](voxtype-shared/README.md). |
 
 ## Install

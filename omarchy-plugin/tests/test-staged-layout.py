@@ -156,7 +156,8 @@ def check_tree(plugin_dir, version):
     problems = []
     want = {"LICENSE", "manifest.json", version + "/Panel.qml"}
     want |= {version + "/components/" + p.name for p in (PLUGIN / "components").glob("*.qml")}
-    want |= {version + "/components/" + p.parent.name + "/" + p.name for p in (PLUGIN / "components").glob("*/*.qml")}
+    want |= {version + "/components/" + p.parent.name + "/" + p.name
+             for pattern in ("*/*.qml", "*/*.js") for p in (PLUGIN / "components").glob(pattern)}
     have = {str(p.relative_to(plugin_dir)) for p in plugin_dir.rglob("*") if not p.is_dir()}
     if have != want:
         problems.append("tree differs: missing " + json.dumps(sorted(want - have))

@@ -42,10 +42,12 @@ omarchy plugin add https://github.com/peteonrails/omarchy-voxtype-settings.git -
 ```
 
 Or by hand, from a checkout of this directory (the one holding
-`manifest.json`):
+`manifest.json`). `-L` matters: `components/meetings` is a link to the meeting
+view in `../quickshell/voxtype-meetings`, shared with the standalone
+Quickshell shell, and has to be copied as files:
 
 ```bash
-cp -r . ~/.config/omarchy/plugins/io.voxtype.settings
+cp -rL . ~/.config/omarchy/plugins/io.voxtype.settings
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.voxtype.settings
 ```
@@ -105,7 +107,36 @@ target exists from the start. Adding or removing that flag needs a full
 
 ## Meetings
 
-The plugin's second view follows a meeting live: title, elapsed time, state
+The meeting view's QML lives in `quickshell/voxtype-meetings/`, shared with
+voxtype's standalone Quickshell shell; `components/meetings` here is a link to
+it, `scripts/stage-omarchy-plugin.sh` copies it into packages, and
+`components/OmarchyMeetingsHost.qml` adapts it to this plugin (the shell's
+theme, `shell.summon`, and "Change in Settings" opening the Meeting section).
+The view uses only QtQuick and Quickshell, never `qs.Commons` or `qs.Ui`, so it
+runs under both hosts.
+
+Tabs: **Transcript**, **Notes** (an autosaving pad over `voxtype meeting notes
+--set-file`, re-read with `notes --json` on `notes_updated`), **Ask** (the
+meeting's saved asks from `show --json`, then new questions streamed from
+`voxtype meeting ask --json`, with quick chips; the answer's `citations` become
+links that jump into the transcript) and, once the meeting stops, **Summary**
+(the MeetingSummary from `show --json`, `summary_ready` or `voxtype meeting
+summarize --format json [--regenerate]`, rendered with chapter links; a
+Summarizing state from the `summarizing` event that names the meeting). Each
+tab keeps its scroll position. Ask and Summary carry an agent chip
+(`backend_name` from `voxtype meeting assistant status --json`) with a menu of
+the agents found, their notes (codex's bwrap jail), Local model only, and
+Change in Settings. `blocked: "consent_required"` opens the consent dialog
+(one button per usable agent when `choice_required`). Transcript lines get
+"Add note" on hover (`voxtype meeting annotate`, note and/or `--highlight`),
+and annotated or highlighted lines a margin marker. A question asked while the
+view is closed (`voxtype meeting view --ask last-5m --no-open`) runs with
+`--notify`; with `[meeting.assistant] open_command = "voxtype meeting view"`,
+the notification's Open writes `$XDG_RUNTIME_DIR/voxtype/meeting-view.request`
+(meeting and answer from `VOXTYPE_MEETING_ID`/`VOXTYPE_ASK_ID`), which every
+host reads, and the view opens on that answer.
+
+The view follows a meeting live: title, elapsed time, state
 (recording, paused, finalizing), Pause/Resume and Stop, a chip per speaker
 (click to rename, which runs `voxtype meeting label <meeting id> <key> <name>`;
 two chips renamed alike merge), and the transcript in start-time order with a
@@ -124,9 +155,17 @@ written) apply live, so a change made elsewhere shows up too. A line is marked
 `reassigned: true`, or it was moved from this view.
 
 A meeting that ends is kept on screen as **Ended** (title, length, end time)
-with renames and reassignment still working, until a new meeting starts or the
-view is closed. A daemon that goes away mid-meeting leaves it Ended the same
-way.
+with renames and reassignment still working, until a new meeting starts, Back
+returns to the list, or the view is closed. A daemon that goes away
+mid-meeting leaves it Ended the same way.
+
+With no meeting on screen the view lists past meetings from `voxtype meeting
+list --json` (50, then more on request), newest first. That list carries
+metadata only, so each row reads its own folder (`storage_path`) for the
+speaker count (transcript.json) and the Summary badge (metadata.json's
+`summary`, or summary.md), and only for rows actually built. Opening one runs
+`voxtype meeting show <id> --json` and shows it as Ended; edits go to the
+stored meeting.
 
 ```bash
 omarchy-shell io.voxtype.settings meetings

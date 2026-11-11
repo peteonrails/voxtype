@@ -101,10 +101,11 @@ fn stage_script_produces_the_packaged_layout() {
         if name.ends_with(".qml") {
             want.push(format!("{version}/components/{name}"));
         } else if component.path().is_dir() {
-            // One level of view directories (components/meetings/) ships too.
+            // One level of view directories ships too: components/meetings/
+            // is the shared meeting view (a symlink in the repo), .js included.
             for file in std::fs::read_dir(component.path()).unwrap().flatten() {
                 let file = file.file_name().to_string_lossy().into_owned();
-                if file.ends_with(".qml") {
+                if file.ends_with(".qml") || file.ends_with(".js") {
                     want.push(format!("{version}/components/{name}/{file}"));
                 }
             }

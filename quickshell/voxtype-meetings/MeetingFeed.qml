@@ -65,6 +65,19 @@ Item {
 
   // `from` is the status before this one: "" when the feed had none.
   signal transitioned(string from, string to)
+  // Notes changed outside this view (`notes_updated`). `notes` is the new text
+  // when the event carries it, otherwise null and the reader fetches it.
+  signal notesUpdated(string meetingId, var notes)
+  // The summary is written (`summary_ready`). The daemon's event carries the
+  // MeetingSummary as `summary` (and summary.md's `path`); `markdown` is ""
+  // unless an event carries text.
+  signal summaryReady(string meetingId, string markdown, var summary)
+  // After a meeting stops, `{"event":"status","status":"summarizing",
+  // "meeting_id"}`. Not a change of the daemon's state, which is already
+  // idle by then (and may be a new meeting's): it names the meeting.
+  signal summarizing(string meetingId)
+  // An `error` event naming a meeting, such as a failed summary.
+  signal meetingError(string meetingId, string code, string message)
   // A meeting began while this feed was watching: an idle (or ended) meeting
   // gave way to a recording one. Never fired for a meeting already running
   // when the feed first connected.
@@ -145,7 +158,9 @@ Item {
       speaker: key,
       source: String(segment.source || ""),
       chunkId: Number(segment.chunk_id) || 0,
-      originalSpeaker: root.originalOf(segment)
+      originalSpeaker: root.originalOf(segment),
+      annotation: root.annotationOf(segment).text,
+      highlight: root.annotationOf(segment).highlight
     }
     if (row.text === "") return
     for (var d = model.count - 1; d >= 0; d--) {
@@ -179,6 +194,66 @@ Item {
   function originalOf(segment) {
     var o = segment.original_speaker
     return o !== undefined && o !== null && o !== "" ? String(o) : ""
+  }
+
+  // A line's note or highlight: `annotation` is either the note text or
+  // {text, highlight}. Absent means none, like original_speaker.
+  function annotationOf(segment) {
+    var a = segment.annotation
+    if (a === undefined || a === null) return { text: "", highlight: false }
+    if (typeof a === "string") return { text: a, highlight: false }
+    return { text: a.text ? String(a.text) : "", highlight: a.highlight === true }
+  }
+
+  function setAnnotation(segId, text, highlight) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return
+    model.setProperty(i, "annotation", String(text || ""))
+    model.setProperty(i, "highlight", highlight === true)
+  }
+
+  function annotationSnapshot(segId) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return null
+    var r = model.get(i)
+    return { segId: segId, annotation: r.annotation, highlight: r.highlight }
+  }
+
+  // The first line at or before `ms`, for citations and chapter links.
+  function rowAt(ms) {
+    var best = -1
+    for (var i = 0; i < model.count; i++) {
+      if (model.get(i).startMs <= ms) best = i
+      else break
+    }
+    return best === -1 && model.count > 0 ? 0 : best
+  }
+
+  // The last remote speaker's display name, for the "what did … just say" chip.
+  function lastRemoteSpeaker() {
+    for (var i = model.count - 1; i >= 0; i--) {
+      var r = model.get(i)
+      if (r.source === "loopback" || (r.source !== "microphone" && r.speaker !== "You")) return root.displayName(r.speaker)
+    }
+    return ""
+  }
+
+  // A meeting that is not the current one, from `voxtype meeting show --json`,
+  // shown the way an ended meeting is.
+  function loadStored(data) {
+    if (root.active || !data || !data.metadata) return false
+    root.reset()
+    var m = data.metadata
+    root.meetingId = String(m.id || "")
+    root.title = m.title ? String(m.title) : ""
+    root.startedAt = m.started_at ? String(m.started_at) : ""
+    root.chunkCount = Number(m.chunk_count) || 0
+    var list = data.transcript && data.transcript.segments ? data.transcript.segments : []
+    for (var i = 0; i < list.length; i++) if (list[i]) root.insertSegment(list[i])
+    root.ended = true
+    var end = m.ended_at ? Date.parse(String(m.ended_at).replace(/(\.\d{3})\d+/, "$1")) : NaN
+    root.endedAt = isNaN(end) ? Date.now() : end
+    return true
   }
 
   function rowIndex(segId) {
@@ -245,6 +320,9 @@ Item {
     model.setProperty(i, "speaker", key)
     if (segment.text !== undefined && String(segment.text).trim() !== "") model.setProperty(i, "text", String(segment.text).trim())
     model.setProperty(i, "originalSpeaker", original)
+    var note = root.annotationOf(segment)
+    model.setProperty(i, "annotation", note.text)
+    model.setProperty(i, "highlight", note.highlight)
     root.noteSpeaker(key)
     root.noteLabel(key, segment)
     root.pruneSpeakers()
@@ -337,6 +415,11 @@ Item {
       for (var i = 0; i < list.length; i++) if (list[i]) root.insertSegment(list[i])
       if (ev.chunk_id !== undefined) root.chunkCount = Math.max(root.chunkCount, Number(ev.chunk_id) + 1)
       root.lastSegmentsAt = Date.now()
+    } else if (kind === "notes_updated") {
+      root.notesUpdated(String(ev.meeting_id || root.meetingId), ev.notes !== undefined ? ev.notes : null)
+    } else if (kind === "summary_ready") {
+      root.summaryReady(String(ev.meeting_id || root.meetingId), ev.markdown ? String(ev.markdown) : "",
+                        ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
     } else if (kind === "speaker_renamed") {
@@ -344,6 +427,10 @@ Item {
     } else if (kind === "status") {
       var next = String(ev.status || "")
       if (next === "") return
+      if (next === "summarizing") {
+        root.summarizing(String(ev.meeting_id || root.meetingId))
+        return
+      }
       if (next === "idle") {
         // The meeting is over (the daemon's next hello is empty), but its
         // lines stay on screen to be fixed.
@@ -359,6 +446,10 @@ Item {
       root.setStatus(next)
       if (starting) root.reconnect()
     } else if (kind === "error") {
+      if (ev.meeting_id) {
+        root.meetingError(String(ev.meeting_id), String(ev.code || ""), String(ev.message || ""))
+        return
+      }
       root.lastError = String(ev.message || "")
     }
   }
