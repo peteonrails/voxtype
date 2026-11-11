@@ -83,6 +83,7 @@ pub mod hotkey;
 pub mod hotkey_macos;
 pub mod language_selection;
 pub mod meeting;
+pub mod meeting_offer;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 pub mod model_catalog;
