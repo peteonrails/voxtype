@@ -39,6 +39,10 @@ pub struct MeetingConfig {
     /// Summarization configuration
     #[serde(default)]
     pub summary: MeetingSummaryConfig,
+
+    /// Meeting assistant: `meeting ask` and agent summaries
+    #[serde(default)]
+    pub assistant: MeetingAssistantConfig,
 }
 
 /// Meeting audio configuration for dual capture
@@ -225,6 +229,62 @@ pub struct MeetingSummaryConfig {
     /// Request timeout in seconds
     #[serde(default = "default_summary_timeout")]
     pub timeout_secs: u64,
+
+    /// Summarize each meeting when it stops. Unset means on once an agent
+    /// has been allowed (`voxtype meeting assistant allow <agent>`), off
+    /// otherwise.
+    #[serde(default)]
+    pub auto: Option<bool>,
+}
+
+/// Meeting assistant configuration: which coding agent answers `meeting ask`
+/// and writes summaries, run headless with no tools.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingAssistantConfig {
+    /// Agent to use: "claude" or "codex". Unset uses `omarchy-default-agent`
+    /// when that command exists, then a supported agent CLI found on PATH.
+    #[serde(default)]
+    pub agent: Option<String>,
+
+    /// Never send transcripts to an agent; answer and summarize with the
+    /// local model from `[meeting.summary]` (Ollama) instead.
+    #[serde(default)]
+    pub local_only: bool,
+
+    /// Seconds to wait for an answer or a summary.
+    #[serde(default = "default_assistant_timeout")]
+    pub timeout_secs: u64,
+
+    /// Transcript characters sent verbatim. A longer meeting sends a summary
+    /// of its earlier part plus as many recent lines as fit.
+    #[serde(default = "default_assistant_max_transcript_chars")]
+    pub max_transcript_chars: u64,
+
+    /// Command the "Open" action of an `ask --notify` notification runs,
+    /// through `sh -c`. VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID are set.
+    /// Unset shows no Open action.
+    #[serde(default)]
+    pub open_command: Option<String>,
+}
+
+fn default_assistant_timeout() -> u64 {
+    180
+}
+
+fn default_assistant_max_transcript_chars() -> u64 {
+    100_000
+}
+
+impl Default for MeetingAssistantConfig {
+    fn default() -> Self {
+        Self {
+            agent: None,
+            local_only: false,
+            timeout_secs: default_assistant_timeout(),
+            max_transcript_chars: default_assistant_max_transcript_chars(),
+            open_command: None,
+        }
+    }
 }
 
 fn default_summary_backend() -> String {
@@ -252,6 +312,7 @@ impl Default for MeetingSummaryConfig {
             remote_endpoint: None,
             remote_api_key: None,
             timeout_secs: default_summary_timeout(),
+            auto: None,
         }
     }
 }
@@ -267,6 +328,7 @@ impl Default for MeetingConfig {
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
+            assistant: MeetingAssistantConfig::default(),
         }
     }
 }
@@ -430,5 +492,35 @@ mod tests {
         assert_eq!(config.meeting.storage_path, "auto");
         assert_eq!(config.meeting.diarization.backend, "simple");
         assert_eq!(config.meeting.summary.backend, "disabled");
+        assert_eq!(config.meeting.summary.auto, None);
+        assert_eq!(config.meeting.assistant.agent, None);
+        assert!(!config.meeting.assistant.local_only);
+        assert_eq!(config.meeting.assistant.timeout_secs, 180);
+        assert_eq!(config.meeting.assistant.max_transcript_chars, 100_000);
+    }
+
+    #[test]
+    fn test_parse_meeting_assistant_config() {
+        let config: Config = toml::from_str(
+            r#"
+            [meeting.summary]
+            auto = false
+
+            [meeting.assistant]
+            agent = "codex"
+            local_only = true
+            timeout_secs = 30
+            max_transcript_chars = 5000
+            open_command = "true"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.meeting.summary.auto, Some(false));
+        let a = &config.meeting.assistant;
+        assert_eq!(a.agent.as_deref(), Some("codex"));
+        assert!(a.local_only);
+        assert_eq!(a.timeout_secs, 30);
+        assert_eq!(a.max_transcript_chars, 5000);
+        assert_eq!(a.open_command.as_deref(), Some("true"));
     }
 }

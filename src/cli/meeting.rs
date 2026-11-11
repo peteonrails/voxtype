@@ -216,8 +216,20 @@ pub enum MeetingAction {
     },
     /// Generate an AI summary of a meeting
     ///
-    /// Uses Ollama or a remote API to generate a summary with
-    /// key points, action items, and decisions.
+    /// Writes an overview, key points, decisions, action items with owners
+    /// and chapters with timestamps, saves it with the meeting (summary.md,
+    /// metadata.json and the index) and prints it. A meeting that already
+    /// has a summary prints the saved one; --regenerate writes a new one,
+    /// for example after naming speakers or moving lines.
+    ///
+    /// The summary comes from the meeting assistant (your coding agent, run
+    /// with no tools, or the local Ollama model), unless
+    /// [meeting.summary] backend is "local" or "remote", which keep the
+    /// older Ollama and API summarizers.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting summarize latest\n  \
+        voxtype meeting summarize latest --regenerate\n  \
+        voxtype meeting summarize latest --local --format json")]
     Summarize {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,
@@ -229,6 +241,106 @@ pub enum MeetingAction {
         /// Output file path (default: stdout)
         #[arg(long, short)]
         output: Option<std::path::PathBuf>,
+
+        /// Write a new summary even if the meeting already has one
+        #[arg(long)]
+        regenerate: bool,
+
+        /// Agent to use for this summary (claude or codex)
+        #[arg(long, value_name = "AGENT", env = "VOXTYPE_MEETING_AGENT")]
+        agent: Option<String>,
+
+        /// Use the local model (Ollama) instead of an agent
+        #[arg(long, conflicts_with = "agent")]
+        local: bool,
+    },
+    /// Ask a question about a meeting, during or after it
+    ///
+    /// Sends the transcript, with speaker names as you labelled them, your
+    /// notes and the question to the meeting assistant and streams the
+    /// answer. Answers cite the [mm:ss] of the lines they rely on. Each
+    /// question and answer is saved to the meeting's asks.jsonl.
+    ///
+    /// The assistant is your coding agent run headless with no tools:
+    /// [meeting.assistant] agent, else the Omarchy default agent, else
+    /// claude found on PATH. Its first use asks once whether transcripts
+    /// may go to that agent (see `voxtype meeting assistant`). --local, or
+    /// [meeting.assistant] local_only = true, answers with the local Ollama
+    /// model instead.
+    ///
+    /// --json prints one JSON object per line: {"event":"start",...},
+    /// {"event":"delta","text":...} as the answer streams, then
+    /// {"event":"answer",...} with the saved record, or {"event":"error",...}.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting ask latest \"What did Steve just say?\" --last 2m\n  \
+        voxtype meeting ask latest \"Summarize the last few minutes\" --last 5m\n  \
+        voxtype meeting ask latest \"What are the action items so far?\"\n  \
+        voxtype meeting ask latest \"Who owns the release?\" --notify\n  \
+        voxtype meeting ask latest \"What did we decide?\" --local --json")]
+    Ask {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// The question
+        question: String,
+
+        /// Only consider the end of the transcript: 5m, 90s, 1h, 2m30s,
+        /// or a number of minutes
+        #[arg(long, value_name = "DURATION")]
+        last: Option<String>,
+
+        /// Print JSON events (one per line) instead of plain text
+        #[arg(long)]
+        json: bool,
+
+        /// Also show the answer as a desktop notification, with an Open
+        /// action that runs [meeting.assistant] open_command
+        #[arg(long)]
+        notify: bool,
+
+        /// Agent to use for this question (claude or codex)
+        #[arg(long, value_name = "AGENT", env = "VOXTYPE_MEETING_AGENT")]
+        agent: Option<String>,
+
+        /// Use the local model (Ollama) instead of an agent
+        #[arg(long, conflicts_with = "agent")]
+        local: bool,
+    },
+    /// Choose and allow the agent that answers questions and writes summaries
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting assistant status\n  \
+        voxtype meeting assistant status --json\n  \
+        voxtype meeting assistant allow claude\n  \
+        voxtype meeting assistant revoke claude")]
+    Assistant {
+        #[command(subcommand)]
+        action: AssistantAction,
+    },
+}
+
+/// `voxtype meeting assistant` actions
+#[derive(Subcommand)]
+pub enum AssistantAction {
+    /// Allow meeting transcripts to go to an agent
+    ///
+    /// The agent sends what it is given to the account it is signed in to,
+    /// usually a cloud service. voxtype asks once per agent; this records
+    /// the answer. It also turns on summaries at stop unless
+    /// [meeting.summary] auto = false.
+    Allow {
+        /// Agent: claude or codex
+        agent: String,
+    },
+    /// Stop sending meeting transcripts to an agent
+    Revoke {
+        /// Agent: claude or codex
+        agent: String,
+    },
+    /// Show which agent answers, what was found, and consent per agent
+    Status {
+        /// Output as JSON (for the meeting view and Settings panel)
+        #[arg(long)]
+        json: bool,
     },
 }
 

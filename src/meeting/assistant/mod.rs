@@ -1,0 +1,890 @@
+//! Meeting assistant: ask a meeting a question, and summarize it, through
+//! the user's own coding agent run headless with no tools.
+//!
+//! - [`agent`] resolves which agent answers: `[meeting.assistant] agent`,
+//!   then `omarchy-default-agent`, then supported CLIs on PATH.
+//! - [`consent`] keeps the per-agent "send transcripts to X" answer.
+//! - [`runner`] runs the agent's print mode with tools off.
+//! - [`local`] is the fallback: the Ollama model from `[meeting.summary]`.
+//! - [`prompt`] builds the prompt shared by ask and summary.
+//! - [`asks`] stores each question and answer in `asks.jsonl`.
+//! - [`summarize`] writes the meeting summary, by hand or at stop.
+
+pub mod agent;
+pub mod asks;
+pub mod consent;
+pub mod local;
+#[cfg(target_os = "linux")]
+pub mod notify;
+pub mod prompt;
+pub mod runner;
+pub mod summarize;
+#[cfg(test)]
+pub(crate) mod testing;
+
+use crate::meeting::data::MeetingData;
+use agent::{Resolution, ResolvedAgent};
+use chrono::Utc;
+use consent::ConsentStore;
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use thiserror::Error;
+
+/// Agent ids the assistant can run headless.
+pub const SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
+
+/// Free-text notes the user keeps for a meeting, read into every prompt.
+pub const NOTES_FILE: &str = "notes.md";
+
+/// Running summary of a long meeting's earlier part, so repeated asks
+/// during a meeting only summarize what is new.
+pub const CONTEXT_CACHE_FILE: &str = "assistant-context.json";
+
+#[derive(Error, Debug)]
+pub enum AssistantError {
+    #[error(
+        "Meeting transcripts have not been allowed to go to {name}.\n  \
+         Allow it once with: voxtype meeting assistant allow {agent}\n  \
+         Or answer with the local model: add --local, or set [meeting.assistant] local_only = true"
+    )]
+    ConsentRequired { agent: String, name: String },
+
+    #[error("{0}\n  Supported agents: claude, codex. See: voxtype meeting assistant status")]
+    AgentUnavailable(String),
+
+    #[error("Agent '{0}' cannot be run without tools, so voxtype does not use it")]
+    UnsupportedAgent(String),
+
+    #[error("{name} failed: {message}")]
+    Agent { name: String, message: String },
+
+    #[error(
+        "{name} did not answer within {secs}s. Raise [meeting.assistant] timeout_secs for long meetings."
+    )]
+    Timeout { name: String, secs: u64 },
+
+    #[error("Local model: {0}")]
+    Local(String),
+
+    #[error(
+        "Answers and summaries need an agent or a local model.\n  \
+         No supported agent CLI (claude, codex) was found, and the local model failed: {message}\n  \
+         Install Claude Code or Codex, or run Ollama with: ollama pull {model}"
+    )]
+    NoBackend { message: String, model: String },
+
+    #[error("The meeting has no transcript yet")]
+    EmptyTranscript,
+
+    #[error("{0}")]
+    Storage(String),
+
+    #[error("Could not read the summary the model wrote: {0}")]
+    Parse(String),
+}
+
+impl AssistantError {
+    /// Stable code for `--json` error events and the UI.
+    pub fn code(&self) -> &'static str {
+        match self {
+            AssistantError::ConsentRequired { .. } => "consent_required",
+            AssistantError::AgentUnavailable(_) | AssistantError::UnsupportedAgent(_) => {
+                "agent_unavailable"
+            }
+            AssistantError::Agent { .. } => "agent_failed",
+            AssistantError::Timeout { .. } => "timeout",
+            AssistantError::Local(_) => "local_failed",
+            AssistantError::NoBackend { .. } => "no_backend",
+            AssistantError::EmptyTranscript => "empty_transcript",
+            AssistantError::Storage(_) => "storage",
+            AssistantError::Parse(_) => "parse",
+        }
+    }
+}
+
+/// Where the assistant looks for things. Replaced in tests.
+#[derive(Debug, Clone)]
+pub struct AssistantEnv {
+    /// Directories searched for agent CLIs and `omarchy-default-agent`.
+    pub path: Option<OsString>,
+    pub consent_file: PathBuf,
+    pub omarchy_command: String,
+}
+
+impl AssistantEnv {
+    pub fn from_process() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            consent_file: crate::config::Config::state_dir().join(consent::CONSENT_FILE),
+            omarchy_command: "omarchy-default-agent".to_string(),
+        }
+    }
+}
+
+/// The assistant's settings, from `[meeting.assistant]` and `[meeting.summary]`.
+#[derive(Debug, Clone)]
+pub struct AssistantSettings {
+    pub agent: Option<String>,
+    pub local_only: bool,
+    pub timeout: Duration,
+    pub max_transcript_chars: usize,
+    pub open_command: Option<String>,
+    pub summary_auto: Option<bool>,
+    /// `[meeting.summary] backend`: `local` and `remote` keep the older
+    /// summarizers for `meeting summarize` and auto-summary.
+    pub summary_backend: String,
+    pub summary: crate::meeting::summary::SummaryConfig,
+    pub env: AssistantEnv,
+}
+
+impl AssistantSettings {
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        let a = &cfg.meeting.assistant;
+        let s = &cfg.meeting.summary;
+        Self {
+            agent: a.agent.clone().filter(|s| !s.trim().is_empty()),
+            local_only: a.local_only,
+            timeout: Duration::from_secs(a.timeout_secs.max(1)),
+            max_transcript_chars: (a.max_transcript_chars as usize).max(2_000),
+            open_command: a.open_command.clone().filter(|s| !s.trim().is_empty()),
+            summary_auto: s.auto,
+            summary_backend: s.backend.clone(),
+            summary: crate::meeting::summary::SummaryConfig {
+                backend: s.backend.clone(),
+                ollama_url: s.ollama_url.clone(),
+                ollama_model: s.ollama_model.clone(),
+                remote_endpoint: s.remote_endpoint.clone(),
+                remote_api_key: s.remote_api_key.clone(),
+                timeout_secs: s.timeout_secs,
+            },
+            env: AssistantEnv::from_process(),
+        }
+    }
+
+    pub fn consent(&self) -> ConsentStore {
+        ConsentStore::load(&self.env.consent_file)
+    }
+
+    pub fn resolve(&self, agent_override: Option<&str>) -> Resolution {
+        agent::resolve(
+            agent_override.or(self.agent.as_deref()),
+            &self.env,
+            &self.consent(),
+        )
+    }
+
+    /// Is auto-summary on? Unset means on once the resolved agent has
+    /// consent, and never when only the local model may be used.
+    pub fn auto_summary(&self) -> bool {
+        match self.summary_auto {
+            Some(on) => on,
+            None => {
+                !self.local_only
+                    && self
+                        .resolve(None)
+                        .agent
+                        .is_some_and(|a| self.consent().is_allowed(&a.id))
+            }
+        }
+    }
+}
+
+/// What answers: an agent CLI or the local model.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Backend {
+    Agent(ResolvedAgent),
+    Local {
+        url: String,
+        model: String,
+        /// Chosen because no agent was found, not by request.
+        fallback: bool,
+    },
+}
+
+impl Backend {
+    /// `claude`, `codex`, `local:<model>`.
+    pub fn id(&self) -> String {
+        match self {
+            Backend::Agent(a) => a.id.clone(),
+            Backend::Local { model, .. } => format!("local:{model}"),
+        }
+    }
+
+    /// "Claude", "Local (llama3.2)".
+    pub fn display_name(&self) -> String {
+        match self {
+            Backend::Agent(a) => a.name.clone(),
+            Backend::Local { model, .. } => format!("Local ({model})"),
+        }
+    }
+
+    /// Run `prompt`, streaming the answer to `on_text`.
+    pub fn complete(
+        &self,
+        prompt: &str,
+        json: bool,
+        timeout: Duration,
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<String, AssistantError> {
+        match self {
+            Backend::Agent(a) => runner::run_agent(a, prompt, timeout, on_text),
+            Backend::Local {
+                url,
+                model,
+                fallback,
+            } => local::generate(url, model, prompt, json, timeout, on_text).map_err(|e| {
+                match (fallback, e) {
+                    (true, AssistantError::Local(message)) => AssistantError::NoBackend {
+                        message,
+                        model: model.clone(),
+                    },
+                    (_, e) => e,
+                }
+            }),
+        }
+    }
+}
+
+/// Per-call overrides from the command line.
+#[derive(Debug, Clone, Default)]
+pub struct Overrides {
+    /// `--local`: use the local model.
+    pub local: bool,
+    /// `--agent <id>`: use this agent instead of the configured one.
+    pub agent: Option<String>,
+}
+
+/// Pick the backend for one ask or summary. Never asks the user; a TTY
+/// prompt for consent is the caller's business.
+pub fn choose_backend(
+    settings: &AssistantSettings,
+    overrides: &Overrides,
+) -> Result<Backend, AssistantError> {
+    let local = |fallback| Backend::Local {
+        url: settings.summary.ollama_url.clone(),
+        model: settings.summary.ollama_model.clone(),
+        fallback,
+    };
+    if settings.local_only || overrides.local {
+        return Ok(local(false));
+    }
+    let res = settings.resolve(overrides.agent.as_deref());
+    if let Some(agent) = res.agent {
+        if settings.consent().is_allowed(&agent.id) {
+            return Ok(Backend::Agent(agent));
+        }
+        return Err(AssistantError::ConsentRequired {
+            agent: agent.id,
+            name: agent.name,
+        });
+    }
+    if let Some(problem) = res.problem {
+        return Err(AssistantError::AgentUnavailable(problem));
+    }
+    Ok(local(true))
+}
+
+/// The meeting's folder, when it has one.
+pub fn meeting_folder(meeting: &MeetingData) -> Option<&Path> {
+    meeting.metadata.storage_path.as_deref()
+}
+
+/// The user's notes for the meeting (`notes.md`), if any.
+pub fn read_notes(meeting: &MeetingData) -> Option<String> {
+    let text = std::fs::read_to_string(meeting_folder(meeting)?.join(NOTES_FILE)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// Annotations on transcript lines. The annotation store is not built yet;
+/// this is the hook it fills, and the prompt already carries them.
+pub fn read_annotations(_meeting: &MeetingData) -> Vec<prompt::Annotation> {
+    Vec::new()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextCache {
+    backend: String,
+    through_ms: u64,
+    summary: String,
+}
+
+/// Build the prompt context for `meeting`. `last` limits it to the final
+/// stretch of the transcript. A meeting too long for the budget gets a
+/// running summary of its earlier part, made with `backend` and cached in
+/// the meeting folder.
+pub fn build_context(
+    settings: &AssistantSettings,
+    meeting: &MeetingData,
+    last: Option<Duration>,
+    backend: &Backend,
+) -> Result<prompt::Context, AssistantError> {
+    let header = prompt::header(meeting, Utc::now());
+    let all = prompt::lines(&meeting.transcript.segments);
+    let mut ctx = prompt::Context {
+        header,
+        notes: read_notes(meeting),
+        annotations: read_annotations(meeting),
+        ..Default::default()
+    };
+    let budget = settings.max_transcript_chars;
+
+    if let Some(window) = last {
+        let end = prompt::transcript_end_ms(meeting);
+        let lines = prompt::last_window(&all, window, end);
+        let from = lines.first().map(|l| l.start_ms).unwrap_or(end);
+        ctx.excerpt = Some(format!(
+            "Excerpt: only the last {} of the transcript, from [{}] to [{}].",
+            human_duration(window),
+            prompt::ts(from),
+            prompt::ts(end)
+        ));
+        ctx.lines = match prompt::fit(lines, budget) {
+            prompt::Fit::Whole(l) => l,
+            prompt::Fit::Split { recent, .. } => recent,
+        };
+        return Ok(ctx);
+    }
+
+    match prompt::fit(all, budget) {
+        prompt::Fit::Whole(lines) => ctx.lines = lines,
+        prompt::Fit::Split { earlier, recent } => {
+            let through = recent.first().map(|l| l.start_ms).unwrap_or(0);
+            let summary =
+                earlier_summary(settings, meeting, &ctx.header, &earlier, through, backend)?;
+            ctx.earlier_summary = Some((summary, through));
+            ctx.lines = recent;
+        }
+    }
+    Ok(ctx)
+}
+
+/// Summarize `earlier` (everything before `through`), reusing and extending
+/// a cached running summary when one exists for the same backend.
+fn earlier_summary(
+    settings: &AssistantSettings,
+    meeting: &MeetingData,
+    header: &str,
+    earlier: &[prompt::Line],
+    through: u64,
+    backend: &Backend,
+) -> Result<String, AssistantError> {
+    let cache_path = meeting_folder(meeting).map(|f| f.join(CONTEXT_CACHE_FILE));
+    let cached: Option<ContextCache> = cache_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(|c: &ContextCache| c.backend == backend.id() && c.through_ms <= through);
+
+    let (mut summary, new_lines): (Option<String>, Vec<prompt::Line>) = match &cached {
+        Some(c) => (
+            Some(c.summary.clone()),
+            earlier
+                .iter()
+                .filter(|l| l.start_ms >= c.through_ms)
+                .cloned()
+                .collect(),
+        ),
+        None => (None, earlier.to_vec()),
+    };
+    if new_lines.is_empty() {
+        if let Some(s) = summary {
+            return Ok(s);
+        }
+    }
+    let piece_budget = settings
+        .max_transcript_chars
+        .saturating_sub(4_000)
+        .max(1_000);
+    for piece in prompt::pieces(&new_lines, piece_budget) {
+        let p = prompt::rolling_summary_prompt(header, summary.as_deref(), &piece);
+        summary = Some(backend.complete(&p, false, settings.timeout, &mut |_| {})?);
+    }
+    let summary = summary.unwrap_or_default();
+    if let Some(path) = cache_path {
+        let cache = ContextCache {
+            backend: backend.id(),
+            through_ms: through,
+            summary: summary.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&cache) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+    Ok(summary)
+}
+
+/// "5 minutes", "90 seconds", "1h 30m".
+pub fn human_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs.is_multiple_of(3600) && secs >= 3600 {
+        let h = secs / 3600;
+        format!("{h} hour{}", if h == 1 { "" } else { "s" })
+    } else if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs.is_multiple_of(60) && secs > 0 {
+        let m = secs / 60;
+        format!("{m} minute{}", if m == 1 { "" } else { "s" })
+    } else {
+        format!("{secs} seconds")
+    }
+}
+
+/// Parse `--last`: `5m`, `90s`, `1h`, `2m30s`, or a bare number of minutes.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return Err("empty duration".into());
+    }
+    if let Ok(mins) = s.parse::<u64>() {
+        return Ok(Duration::from_secs(mins * 60));
+    }
+    let mut total = 0u64;
+    let mut num = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+            continue;
+        }
+        let n: u64 = num
+            .parse()
+            .map_err(|_| format!("'{s}' is not a duration like 5m, 90s or 1h"))?;
+        num.clear();
+        total += match c {
+            'h' => n * 3600,
+            'm' => n * 60,
+            's' => n,
+            _ => return Err(format!("'{s}' is not a duration like 5m, 90s or 1h")),
+        };
+    }
+    if !num.is_empty() || total == 0 {
+        return Err(format!("'{s}' is not a duration like 5m, 90s or 1h"));
+    }
+    Ok(Duration::from_secs(total))
+}
+
+/// One question about a meeting.
+#[derive(Debug, Clone)]
+pub struct AskRequest {
+    pub question: String,
+    pub last: Option<Duration>,
+}
+
+/// Ask `meeting` a question with `backend`, streaming the answer to
+/// `on_text`, and record it in the meeting's `asks.jsonl`.
+pub fn ask(
+    settings: &AssistantSettings,
+    meeting: &MeetingData,
+    request: &AskRequest,
+    backend: &Backend,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<asks::AskRecord, AssistantError> {
+    let ctx = build_context(settings, meeting, request.last, backend)?;
+    let prompt = ctx.ask(&request.question);
+    let answer = backend.complete(&prompt, false, settings.timeout, on_text)?;
+    let record = asks::AskRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        time: Utc::now(),
+        question: request.question.trim().to_string(),
+        citations: prompt::citations(&answer),
+        answer,
+        agent: backend.id(),
+        agent_name: backend.display_name(),
+        last_secs: request.last.map(|d| d.as_secs()),
+    };
+    if let Some(folder) = meeting_folder(meeting) {
+        if let Err(e) = asks::append(folder, &record) {
+            tracing::warn!("Could not save the answer to {}: {}", asks::ASKS_FILE, e);
+        }
+    }
+    Ok(record)
+}
+
+/// `voxtype meeting assistant status --json`.
+pub fn status_json(settings: &AssistantSettings) -> serde_json::Value {
+    let consent = settings.consent();
+    let res = settings.resolve(None);
+    let backend = choose_backend(settings, &Overrides::default());
+    let (backend_kind, blocked) = match &backend {
+        Ok(Backend::Agent(_)) => ("agent", None),
+        Ok(Backend::Local { .. }) => ("local", None),
+        Err(e) => ("none", Some(e.code())),
+    };
+    let agent = res.agent.as_ref();
+    serde_json::json!({
+        "agent": agent.map(|a| a.id.clone()),
+        "agent_name": agent.map(|a| a.name.clone()),
+        "agent_path": agent.map(|a| a.path.clone()),
+        "source": res.source(),
+        "consent": agent.is_some_and(|a| consent.is_allowed(&a.id)),
+        "choice_required": res.choice_required,
+        "problem": res.problem,
+        "omarchy_default": res.omarchy_default,
+        "local_only": settings.local_only,
+        "local": {
+            "model": settings.summary.ollama_model,
+            "url": settings.summary.ollama_url,
+            "name": format!("Local ({})", settings.summary.ollama_model),
+        },
+        "backend": backend_kind,
+        "backend_name": backend.as_ref().ok().map(Backend::display_name),
+        "blocked": blocked,
+        "auto_summary": settings.auto_summary(),
+        "auto_summary_configured": settings.summary_auto,
+        "consent_file": consent.path(),
+        "candidates": res.candidates,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::Sandbox;
+    use super::*;
+
+    fn steve_meeting(sb: &Sandbox) -> MeetingData {
+        // "Remote 2" on the third line stands in for a line moved there with
+        // `meeting reassign`: storage hands the prompt builder segments with
+        // overrides and labels already applied, as here.
+        let m = sb.meeting(
+            "Release sync",
+            &[
+                (41, "Remote 1", "We ship on Friday."),
+                (52, "You", "Agreed."),
+                (60, "Remote 2", "The budget is 40k."),
+            ],
+        );
+        sb.label(&m, "You", "Pete");
+        sb.label(&m, "Remote 1", "Steve");
+        sb.label(&m, "Remote 2", "Dana");
+        sb.reload(&m)
+    }
+
+    fn collect(
+        settings: &AssistantSettings,
+        meeting: &MeetingData,
+        question: &str,
+        last: Option<Duration>,
+    ) -> (Result<asks::AskRecord, AssistantError>, String) {
+        let backend = choose_backend(settings, &Overrides::default()).unwrap();
+        let mut streamed = String::new();
+        let r = ask(
+            settings,
+            meeting,
+            &AskRequest {
+                question: question.into(),
+                last,
+            },
+            &backend,
+            &mut |t| streamed.push_str(t),
+        );
+        (r, streamed)
+    }
+
+    #[test]
+    fn without_consent_ask_refuses_and_names_the_command() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        let err = choose_backend(&sb.settings(), &Overrides::default()).unwrap_err();
+        assert_eq!(err.code(), "consent_required");
+        assert!(err
+            .to_string()
+            .contains("voxtype meeting assistant allow claude"));
+
+        sb.allow("claude");
+        match choose_backend(&sb.settings(), &Overrides::default()).unwrap() {
+            Backend::Agent(a) => assert_eq!(a.id, "claude"),
+            other => panic!("{other:?}"),
+        }
+        // Consent for one agent is not consent for another.
+        sb.fake_codex();
+        let err = choose_backend(
+            &sb.settings(),
+            &Overrides {
+                agent: Some("codex".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AssistantError::ConsentRequired { ref agent, .. } if agent == "codex")
+        );
+    }
+
+    #[test]
+    fn local_only_and_no_agent_use_the_local_model() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        let mut s = sb.settings();
+        s.local_only = true;
+        assert!(matches!(
+            choose_backend(&s, &Overrides::default()).unwrap(),
+            Backend::Local {
+                fallback: false,
+                ..
+            }
+        ));
+
+        let empty = Sandbox::new();
+        let b = choose_backend(&empty.settings(), &Overrides::default()).unwrap();
+        assert!(matches!(b, Backend::Local { fallback: true, .. }));
+        // Ollama is not running either: one message covering both.
+        let err = b
+            .complete("q", false, Duration::from_secs(2), &mut |_| {})
+            .unwrap_err();
+        assert_eq!(err.code(), "no_backend");
+        assert!(err.to_string().contains("ollama pull llama3.2"), "{err}");
+    }
+
+    #[test]
+    fn ask_sends_named_lines_and_records_the_answer() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(
+            &["Steve said ", "we ship on Friday [00:41]."],
+            "Steve said we ship on Friday [00:41].",
+        );
+        let m = steve_meeting(&sb);
+        std::fs::write(
+            sb.folder(&m).join(NOTES_FILE),
+            "Ask about the budget
+",
+        )
+        .unwrap();
+
+        let (record, streamed) = collect(&sb.settings(), &m, "What did Steve just say?", None);
+        let record = record.unwrap();
+        assert_eq!(streamed, "Steve said we ship on Friday [00:41].");
+        assert_eq!(record.answer, "Steve said we ship on Friday [00:41].");
+        assert_eq!(record.agent, "claude");
+        assert_eq!(record.agent_name, "Claude");
+        assert_eq!(
+            record.citations,
+            vec![prompt::Citation {
+                ts: "00:41".into(),
+                ms: 41_000
+            }]
+        );
+
+        let p = sb.claude_stdin(0);
+        assert!(p.starts_with("Meeting: Release sync, "), "{p}");
+        assert!(
+            p.contains("Speakers: Steve (Remote 1), Pete (You), Dana (Remote 2)."),
+            "{p}"
+        );
+        assert!(p.contains(
+            "[00:41] Steve: We ship on Friday.
+[00:52] Pete: Agreed.
+[01:00] Dana: The budget is 40k.
+"
+        ));
+        assert!(p.contains(
+            "User notes:
+Ask about the budget
+"
+        ));
+        assert!(p.ends_with(
+            "Question: What did Steve just say?
+Answer briefly. Cite the [mm:ss] of the lines you rely on.
+"
+        ));
+
+        let argv = sb.claude_argv(0);
+        assert_eq!(argv[0], "-p");
+        let tools = argv.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(argv[tools + 1], "");
+
+        let saved = asks::load(sb.folder(&m));
+        assert_eq!(saved, vec![record]);
+    }
+
+    #[test]
+    fn last_limits_the_prompt_to_a_time_window() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], "Late lines only [09:50].");
+        let m = sb.meeting(
+            "Long",
+            &[
+                (0, "You", "opening remarks"),
+                (100, "Remote", "early topic"),
+                (400, "Remote", "recent topic"),
+                (590, "You", "closing"),
+            ],
+        );
+        let (record, streamed) = collect(
+            &sb.settings(),
+            &m,
+            "Summarize",
+            Some(Duration::from_secs(300)),
+        );
+        let record = record.unwrap();
+        // Nothing streamed as partials, so the result is shown whole.
+        assert_eq!(streamed, "Late lines only [09:50].");
+        assert_eq!(record.last_secs, Some(300));
+        let p = sb.claude_stdin(0);
+        assert!(
+            p.contains(
+                "Excerpt: only the last 5 minutes of the transcript, from [06:40] to [09:53]."
+            ),
+            "{p}"
+        );
+        assert!(p.contains("recent topic") && p.contains("closing"));
+        assert!(!p.contains("opening remarks") && !p.contains("early topic"));
+    }
+
+    #[test]
+    fn a_long_meeting_sends_a_running_summary_plus_recent_lines() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], "They covered topics one to thirty.");
+        let lines: Vec<(u64, String)> = (0..60)
+            .map(|i| (i * 10, format!("topic number {i} discussed at some length")))
+            .collect();
+        let refs: Vec<(u64, &str, &str)> = lines
+            .iter()
+            .map(|(s, t)| (*s, if s % 20 == 0 { "You" } else { "Remote" }, t.as_str()))
+            .collect();
+        let m = sb.meeting("Marathon", &refs);
+        let mut s = sb.settings();
+        s.max_transcript_chars = 1_200;
+
+        let (r, _) = collect(&s, &m, "What was decided?", None);
+        r.unwrap();
+        let calls = sb.claude_calls();
+        assert!(calls >= 2, "earlier part summarized first ({calls} calls)");
+        let p = sb.claude_stdin(calls - 1);
+        assert!(p.contains("Summary of the meeting up to ["), "{p}");
+        assert!(p.contains("They covered topics one to thirty."));
+        assert!(!p.contains("topic number 0 "));
+        assert!(p.contains("topic number 59 "));
+        assert!(
+            p.len() < 1_200 + 800,
+            "prompt stays near the budget: {}",
+            p.len()
+        );
+        assert!(sb.folder(&m).join(CONTEXT_CACHE_FILE).exists());
+
+        // The next question reuses the cached summary: one more call only.
+        let (r, _) = collect(&s, &m, "And then?", None);
+        r.unwrap();
+        assert_eq!(sb.claude_calls(), calls + 1);
+    }
+
+    #[test]
+    fn codex_answers_from_its_last_message_file() {
+        let sb = Sandbox::new();
+        sb.fake_codex();
+        sb.allow("codex");
+        std::fs::write(
+            sb.out().join("codex.reply"),
+            "Codex says Friday [00:41]
+",
+        )
+        .unwrap();
+        let m = steve_meeting(&sb);
+        let mut s = sb.settings();
+        s.agent = Some("codex".into());
+        let (record, streamed) = collect(&s, &m, "When do we ship?", None);
+        let record = record.unwrap();
+        assert_eq!(record.answer, "Codex says Friday [00:41]");
+        assert_eq!(streamed, "Codex says Friday [00:41]");
+        let argv = std::fs::read_to_string(sb.out().join("codex.argv")).unwrap();
+        assert!(
+            argv.starts_with(
+                "exec
+--sandbox
+read-only
+"
+            ),
+            "{argv}"
+        );
+        assert!(argv.ends_with(
+            "
+-
+"
+        ));
+        let stdin = std::fs::read_to_string(sb.out().join("codex.stdin")).unwrap();
+        assert!(stdin.contains("Question: When do we ship?"));
+    }
+
+    #[test]
+    fn agent_failures_and_timeouts_are_reported() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], "unused");
+        let m = steve_meeting(&sb);
+        std::fs::write(sb.out().join("claude.fail"), "").unwrap();
+        let (r, _) = collect(&sb.settings(), &m, "q", None);
+        let err = r.unwrap_err();
+        assert_eq!(err.code(), "agent_failed");
+        assert!(err.to_string().contains("Not logged in"), "{err}");
+        assert!(
+            asks::load(sb.folder(&m)).is_empty(),
+            "failed asks are not saved"
+        );
+
+        std::fs::remove_file(sb.out().join("claude.fail")).unwrap();
+        std::fs::write(sb.out().join("claude.slow"), "").unwrap();
+        let mut s = sb.settings();
+        s.timeout = Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let (r, _) = collect(&s, &m, "q", None);
+        assert_eq!(r.unwrap_err().code(), "timeout");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn status_reports_agent_candidates_and_consent() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.fake_codex();
+        sb.fake_omarchy("claude");
+        let v = status_json(&sb.settings());
+        assert_eq!(v["agent"], "claude");
+        assert_eq!(v["agent_name"], "Claude");
+        assert_eq!(v["source"], "omarchy");
+        assert_eq!(v["omarchy_default"], "claude");
+        assert_eq!(v["consent"], false);
+        assert_eq!(v["backend"], "none");
+        assert_eq!(v["blocked"], "consent_required");
+        assert_eq!(v["auto_summary"], false);
+        assert_eq!(v["local_only"], false);
+        assert_eq!(v["local"]["name"], "Local (llama3.2)");
+        let c = v["candidates"].as_array().unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0]["id"], "claude");
+        assert_eq!(c[0]["tool_less"], true);
+        assert_eq!(c[1]["id"], "codex");
+        assert_eq!(c[1]["tool_less"], false);
+
+        sb.allow("claude");
+        let v = status_json(&sb.settings());
+        assert_eq!(v["consent"], true);
+        assert_eq!(v["backend"], "agent");
+        assert_eq!(v["backend_name"], "Claude");
+        assert_eq!(v["auto_summary"], true);
+        assert_eq!(v["candidates"][0]["consent"], true);
+    }
+
+    #[test]
+    fn durations_parse() {
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("90s").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
+        assert_eq!(parse_duration("2m30s").unwrap(), Duration::from_secs(150));
+        assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(600));
+        assert!(parse_duration("5x").is_err());
+        assert!(parse_duration("m").is_err());
+        assert!(parse_duration("5m3").is_err());
+        assert_eq!(human_duration(Duration::from_secs(300)), "5 minutes");
+        assert_eq!(human_duration(Duration::from_secs(60)), "1 minute");
+        assert_eq!(human_duration(Duration::from_secs(90)), "90 seconds");
+        assert_eq!(human_duration(Duration::from_secs(5400)), "1h 30m");
+    }
+}

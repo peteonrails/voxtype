@@ -225,6 +225,14 @@ impl MeetingStorage {
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (meeting_id, segment_id)
             );
+
+            -- The meeting's summary (MeetingSummary as JSON) and what wrote it.
+            CREATE TABLE IF NOT EXISTS meeting_summaries (
+                meeting_id TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL,
+                generated_by TEXT,
+                generated_at INTEGER NOT NULL
+            );
             "#,
         )?;
         Ok(())
@@ -292,7 +300,16 @@ impl MeetingStorage {
         // Update metadata file if storage path exists
         if let Some(ref path) = metadata.storage_path {
             let metadata_path = path.join("metadata.json");
-            let json = serde_json::to_string_pretty(metadata)?;
+            // A caller holding metadata from before the summary was written
+            // must not drop it from the file.
+            let json = match metadata.summary {
+                None => {
+                    let mut with_summary = metadata.clone();
+                    with_summary.summary = self.get_summary(&metadata.id)?;
+                    serde_json::to_string_pretty(&with_summary)?
+                }
+                Some(_) => serde_json::to_string_pretty(metadata)?,
+            };
             std::fs::write(metadata_path, json)?;
         }
 
@@ -346,7 +363,53 @@ impl MeetingStorage {
             )
             .optional()?;
 
+        let mut result = result;
+        if let Some(ref mut metadata) = result {
+            metadata.summary = self.get_summary(id)?;
+        }
         Ok(result)
+    }
+
+    /// Store a meeting's summary in the index and in metadata.json.
+    pub fn save_summary(
+        &self,
+        meeting_id: &MeetingId,
+        summary: &crate::meeting::data::MeetingSummary,
+    ) -> Result<(), StorageError> {
+        let mut metadata = self
+            .get_meeting(meeting_id)?
+            .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO meeting_summaries
+                (meeting_id, summary_json, generated_by, generated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                meeting_id.to_string(),
+                serde_json::to_string(summary)?,
+                summary.model,
+                summary.generated_at.timestamp(),
+            ],
+        )?;
+        metadata.summary = Some(summary.clone());
+        self.update_meeting(&metadata)
+    }
+
+    /// The meeting's stored summary, if it has one.
+    pub fn get_summary(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<Option<crate::meeting::data::MeetingSummary>, StorageError> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT summary_json FROM meeting_summaries WHERE meeting_id = ?1",
+                params![meeting_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
     }
 
     /// List meetings with optional limit
@@ -510,6 +573,10 @@ impl MeetingStorage {
         )?;
         self.conn.execute(
             "DELETE FROM segment_annotations WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM meeting_summaries WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
 

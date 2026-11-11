@@ -22,6 +22,7 @@
 //! - **Phase 4 (v0.6.0):** Remote server sync for corporate deployments
 //! - **Phase 5 (v0.6.1):** AI summarization with action items
 
+pub mod assistant;
 pub mod chunk;
 pub mod data;
 pub mod diarization;
@@ -137,6 +138,8 @@ pub struct MeetingDaemon {
     /// ID for the meeting's next transcript segment, unique across chunks
     /// and tracks so consumers (the HUD, edits) can address a segment.
     next_segment_id: u32,
+    /// Assistant settings for the summary written when a meeting stops
+    assistant: Option<assistant::AssistantSettings>,
 }
 
 impl MeetingDaemon {
@@ -187,6 +190,7 @@ impl MeetingDaemon {
             last_chunk_text: HashMap::new(),
             source_offsets: HashMap::new(),
             next_segment_id: 0,
+            assistant: Some(assistant::AssistantSettings::from_config(app_config)),
         })
     }
 
@@ -212,6 +216,7 @@ impl MeetingDaemon {
             last_chunk_text: HashMap::new(),
             source_offsets: HashMap::new(),
             next_segment_id: 0,
+            assistant: None,
         }
     }
 
@@ -327,6 +332,22 @@ impl MeetingDaemon {
         self.current_meeting = None;
 
         Ok(meeting_id)
+    }
+
+    /// The summary to run for a meeting that just stopped, unless
+    /// `[meeting.summary] auto = false`. Whether it runs when auto is unset
+    /// (consent given or not) is decided by the job itself, off the event
+    /// loop, since that means asking `omarchy-default-agent`.
+    pub fn auto_summary(&self, meeting_id: MeetingId) -> Option<assistant::summarize::AutoSummary> {
+        let settings = self.assistant.clone()?;
+        if settings.summary_auto == Some(false) {
+            return None;
+        }
+        Some(assistant::summarize::AutoSummary {
+            settings,
+            storage: self.config.storage.clone(),
+            meeting_id,
+        })
     }
 
     /// Get current meeting state
@@ -1164,6 +1185,121 @@ mod tests {
         assert_eq!(speakers, vec!["You", "Dana", "You", "Dana"]);
         // Segments streamed after the label carry it too.
         assert_eq!(live.last().unwrap().speaker_display(), "Dana");
+    }
+
+    use assistant::summarize::SummaryEvent;
+
+    /// Stop the harness meeting and run its auto-summary, returning the
+    /// events it emitted.
+    async fn stop_and_summarize(h: &mut Harness) -> (bool, Vec<SummaryEvent>) {
+        let id = h.daemon.stop().await.unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let ran = match h.daemon.auto_summary(id) {
+            Some(job) => job.run(move |e| sink.lock().unwrap().push(e)).await,
+            None => false,
+        };
+        let events = events.lock().unwrap().clone();
+        (ran, events)
+    }
+
+    const SUMMARY_REPLY: &str = r#"{"overview": "A short test meeting.", "decisions": [],
+        "action_items": [{"description": "Follow up", "owner": "Dana"}],
+        "chapters": [{"start": "00:01", "title": "Start"}]}"#;
+
+    #[tokio::test]
+    async fn auto_summary_reports_summarizing_then_ready() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], SUMMARY_REPLY);
+        let mut h = harness().await;
+        h.daemon.assistant = Some(sb.settings());
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Dana").unwrap();
+
+        let (ran, events) = stop_and_summarize(&mut h).await;
+        assert!(ran);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(
+            matches!(&events[0], SummaryEvent::Summarizing { meeting_id } if *meeting_id == id.to_string())
+        );
+        let SummaryEvent::Ready(outcome) = &events[1] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(outcome.agent, "claude");
+        assert_eq!(
+            outcome.summary.action_items[0].assignee.as_deref(),
+            Some("Dana")
+        );
+        let md = std::fs::read_to_string(outcome.path.as_ref().unwrap()).unwrap();
+        assert!(md.contains("A short test meeting."));
+        assert!(
+            sb.claude_stdin(0).contains("Dana: u1"),
+            "{}",
+            sb.claude_stdin(0)
+        );
+
+        let saved = h.saved();
+        assert_eq!(saved.metadata.status, MeetingStatus::Completed);
+        assert_eq!(saved.metadata.summary.unwrap().chapters[0].title, "Start");
+    }
+
+    #[tokio::test]
+    async fn a_failing_agent_still_stops_cleanly() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        std::fs::write(sb.out().join("claude.fail"), "").unwrap();
+        let mut h = harness().await;
+        h.daemon.assistant = Some(sb.settings());
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+
+        let (ran, events) = stop_and_summarize(&mut h).await;
+        assert!(ran);
+        assert!(matches!(events[0], SummaryEvent::Summarizing { .. }));
+        match &events[1] {
+            SummaryEvent::Failed { code, message, .. } => {
+                assert_eq!(*code, "agent_failed");
+                assert!(message.contains("Not logged in"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(h.daemon.state().is_idle());
+        let saved = h.saved();
+        assert_eq!(saved.transcript.segments.len(), 2);
+        assert_eq!(saved.metadata.status, MeetingStatus::Completed);
+        assert!(saved.metadata.summary.is_none());
+        assert!(!saved
+            .metadata
+            .storage_path
+            .unwrap()
+            .join(assistant::summarize::SUMMARY_FILE)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn auto_summary_waits_for_consent_and_honors_auto_false() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.claude_replies(&[], SUMMARY_REPLY);
+        let mut h = harness().await;
+        h.daemon.assistant = Some(sb.settings());
+        h.pair(&[(1.0, 3.0)], &[]).await;
+        let (ran, events) = stop_and_summarize(&mut h).await;
+        assert!(!ran, "no consent, auto unset: off");
+        assert!(events.is_empty());
+        assert_eq!(sb.claude_calls(), 0);
+
+        let mut h = harness().await;
+        sb.allow("claude");
+        let mut settings = sb.settings();
+        settings.summary_auto = Some(false);
+        h.daemon.assistant = Some(settings);
+        let id = h.daemon.stop().await.unwrap();
+        assert!(h.daemon.auto_summary(id).is_none());
     }
 
     #[test]

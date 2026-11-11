@@ -3173,6 +3173,18 @@ impl Daemon {
                     self.update_meeting_state("idle", None);
                     tracing::info!("Meeting stopped: {}", meeting_id);
 
+                    // Summarize in the background: the meeting is already
+                    // saved, and a slow or failing agent must not hold up
+                    // the daemon or the next meeting.
+                    if let Some(job) = daemon.auto_summary(meeting_id) {
+                        let hub = self.meeting_event_hub.clone();
+                        tokio::spawn(job.run(move |event| {
+                            if let Some(ref hub) = hub {
+                                hub.publish_summary_event(event);
+                            }
+                        }));
+                    }
+
                     self.play_feedback(SoundEvent::RecordingStop);
 
                     if self.config.output.notification.on_recording_stop {
