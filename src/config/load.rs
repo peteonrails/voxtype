@@ -89,12 +89,10 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
                      Rebuild with `--features itn` to use it."
                 );
             }
-            if config.text.punctuation_casing && !cfg!(feature = "punctuation-casing") {
-                tracing::warn!(
-                    "[text] punctuation_casing is set, but this build does not include the \
-                     punctuation-casing feature. Engine output will be left unchanged."
-                );
-            }
+            // No punctuation_casing capability check here: helper binaries
+            // such as voxtype-osd-quickshell load this config without the
+            // engine features, so their build says nothing about the
+            // engine's. TextProcessor warns from the transcribing binary.
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
@@ -415,6 +413,56 @@ mod tests {
         assert_eq!(config.hotkey.key, "F12");
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
+    }
+
+    /// Helper binaries load the same config with none of the engine
+    /// features: the release voxtype-osd-quickshell is built with only
+    /// `osd-gtk4` and logs into the daemon's journal, because the daemon
+    /// spawns it. A capability check here therefore reported the
+    /// launcher's build, not the engine's, and told an ONNX user that
+    /// punctuation casing was missing while it ran. The engine-aware check
+    /// lives in `TextProcessor`, which only the transcribing binary builds.
+    #[test]
+    fn load_config_does_not_judge_punctuation_casing_by_the_loading_binary() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "engine = \"paraformer\"\n\n[text]\npunctuation_casing = true\n",
+        )
+        .unwrap();
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let config = tracing::subscriber::with_default(subscriber, || {
+            load_config(Some(&config_path)).unwrap()
+        });
+        assert!(config.text.punctuation_casing);
+
+        let logged = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !logged.contains("punctuation"),
+            "config loading must not report punctuation-casing capability: {logged}"
+        );
     }
 
     /// #646's user-facing contract: a config file with one broken section
