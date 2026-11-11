@@ -61,6 +61,14 @@ struct ParsedKeystroke {
     key: String,
 }
 
+/// wtype names the Super key `logo`; it rejects `super`, `meta` and `win`.
+fn wtype_modifier(m: &str) -> String {
+    match m.to_lowercase().as_str() {
+        "super" | "meta" | "win" | "leftmeta" => "logo".to_string(),
+        other => other.to_string(),
+    }
+}
+
 impl ParsedKeystroke {
     /// Parse a keystroke string like "ctrl+v" or "shift+insert"
     fn parse(s: &str) -> Result<Self, String> {
@@ -96,7 +104,7 @@ impl ParsedKeystroke {
         // Press modifiers
         for modifier in &self.modifiers {
             args.push("-M".to_string());
-            args.push(modifier.clone());
+            args.push(wtype_modifier(modifier));
         }
 
         // Tap the key
@@ -106,7 +114,7 @@ impl ParsedKeystroke {
         // Release modifiers (reverse order)
         for modifier in self.modifiers.iter().rev() {
             args.push("-m".to_string());
-            args.push(modifier.clone());
+            args.push(wtype_modifier(modifier));
         }
 
         args
@@ -1099,5 +1107,17 @@ mod tests {
         assert!(debug_str.contains("[5 bytes]"));
         assert!(debug_str.contains("text/plain"));
         assert!(!debug_str.contains("[1, 2, 3"));
+    }
+
+    #[test]
+    fn wtype_args_name_super_logo() {
+        // wtype exits with "Invalid modifier name 'super'" otherwise.
+        let k = ParsedKeystroke::parse("super+v").unwrap();
+        assert_eq!(k.to_wtype_args(), ["-M", "logo", "-k", "v", "-m", "logo"]);
+        let k = ParsedKeystroke::parse("ctrl+shift+v").unwrap();
+        assert_eq!(
+            k.to_wtype_args(),
+            ["-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
+        );
     }
 }
