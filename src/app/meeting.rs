@@ -321,8 +321,9 @@ pub(crate) async fn run_meeting_command(
         } => {
             let export_format = ExportFormat::parse(&format).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Unknown export format '{}'. Valid formats: text, markdown, json",
-                    format
+                    "Unknown export format '{}'. Valid formats: {}",
+                    format,
+                    ExportFormat::all_names().join(", ")
                 )
             })?;
 

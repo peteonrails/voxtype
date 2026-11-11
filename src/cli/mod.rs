@@ -61,6 +61,31 @@ pub const ENGINE_NAMES_CSV: &str =
 /// this list against those arms.
 pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml", "hybrid"];
 
+/// Formats `voxtype meeting export --format` accepts, each with its short
+/// alias. Kept here rather than derived from
+/// `crate::meeting::export::ExportFormat` because `build.rs` includes this
+/// module standalone for man pages; a test in `src/meeting/export/mod.rs`
+/// pins every name and alias against `ExportFormat::parse`.
+pub(crate) const EXPORT_FORMATS: &[(&str, Option<&str>)] = &[
+    ("markdown", Some("md")),
+    ("text", Some("txt")),
+    ("json", None),
+    ("srt", None),
+    ("vtt", None),
+];
+
+/// `value_parser` for `meeting export --format`: an unknown format is
+/// refused at parse time with the list of valid ones.
+pub(crate) fn export_format_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(EXPORT_FORMATS.iter().map(|&(name, alias)| {
+        let value = clap::builder::PossibleValue::new(name);
+        match alias {
+            Some(alias) => value.alias(alias),
+            None => value,
+        }
+    }))
+}
+
 /// Values `voxtype setup --progress-format` accepts. `human` is curl's
 /// progress bar and the usual status lines; `json` emits one NDJSON event per
 /// update on stdout for a GUI to render.

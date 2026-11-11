@@ -282,6 +282,29 @@ mod tests {
         assert_eq!(ExportFormat::parse("invalid"), None);
     }
 
+    /// The CLI's `--format` list (kept apart for man-page generation) and
+    /// this parser must agree on every name and alias.
+    #[test]
+    fn cli_export_formats_all_parse() {
+        for &(name, alias) in crate::cli::EXPORT_FORMATS {
+            let format = ExportFormat::parse(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(format.to_string(), name);
+            if let Some(alias) = alias {
+                assert_eq!(ExportFormat::parse(alias), Some(format), "{alias}");
+            }
+        }
+        let names: Vec<_> = crate::cli::EXPORT_FORMATS.iter().map(|f| f.0).collect();
+        for format in [
+            ExportFormat::Text,
+            ExportFormat::Markdown,
+            ExportFormat::Json,
+            ExportFormat::Srt,
+            ExportFormat::Vtt,
+        ] {
+            assert!(names.contains(&format.to_string().as_str()), "{format}");
+        }
+    }
+
     #[test]
     fn test_format_extension() {
         assert_eq!(ExportFormat::Text.extension(), "txt");
