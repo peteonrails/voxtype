@@ -2803,6 +2803,8 @@ show_view_on_start = true        # Omarchy: open the live meeting view when a me
 mic_device = "default"           # Microphone (uses audio.device if not set)
 loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
 echo_cancel = "auto"             # GTCRN neural enhancement + transcript dedup
+echo_fuzzy = true                # Drop misheard short echoes ("Omarky problem.")
+echo_fuzzy_max_words = 4         # Longest line the fuzzy echo check looks at
 vad_threshold = 0.01             # Lower to 0.001 for quiet mics; 0.0 disables meeting VAD
 
 [meeting.diarization]
@@ -2845,6 +2847,8 @@ Once an agent is allowed, each meeting is also summarized when it stops (`summar
 When `loopback_device` is enabled, meeting mode captures both your microphone and system audio (remote participants) on separate channels. Without echo cancellation, the remote participants' audio bleeds into your microphone recording and gets transcribed as your speech.
 
 Voxtype uses GTCRN, a lightweight neural speech enhancement model, to clean the mic signal before transcription. The model removes background noise and speaker bleed-through while preserving your voice. A second pass at the transcript level strips any residual echoed phrases.
+
+That pass also drops short microphone lines that are a misheard copy of what the remote side said at the same moment, such as "Omarky problem." while the loopback said "the Omarchy package ... without any problems". It compares the audio levels of both tracks first, so a short reply of your own ("yes", "only one?") said over the other side is kept. Turn it off with `echo_fuzzy = false`; see [CONFIGURATION.md](CONFIGURATION.md#echo_fuzzy).
 
 The GTCRN model (~523 KB) is downloaded automatically the first time you run `voxtype meeting start`. To disable echo cancellation (e.g., if you have PipeWire's `echo-cancel` module configured):
 

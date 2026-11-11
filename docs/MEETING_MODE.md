@@ -524,11 +524,18 @@ loopback_device = "auto"
 # RMS threshold for meeting voice activity detection (default: 0.01)
 # Lower to 0.001 for quiet mics; set 0.0 to disable this pre-transcription gate
 vad_threshold = 0.01
+
+# Drop short microphone lines that are a misheard echo of the remote side
+# (default: true), up to this many words (default: 4)
+echo_fuzzy = true
+echo_fuzzy_max_words = 4
 ```
 
 Setting `loopback_device = "auto"` lets voxtype capture system audio (the other side of a call). When loopback is active, speaker attribution can distinguish between "You" (from the mic) and "Remote" (from system audio).
 
 Set `loopback_device = "disabled"` if you only want to capture your own microphone, or if loopback detection is causing problems.
+
+On speakers rather than headphones, your microphone also hears the call. Voxtype removes that echo from the "You" lines in three ways: long phrases that repeat the remote's words, short lines with exactly the remote's words, and (with `echo_fuzzy`) short lines that are a misheard version of them, such as "after the daemon restarts." while the remote said "after the demon restarts". The short-line checks look at both tracks' audio levels first: a reply of yours is louder on the microphone than the echo can explain, so "yes" said over the other side's "yes" stays.
 
 ### Diarization Settings
 
