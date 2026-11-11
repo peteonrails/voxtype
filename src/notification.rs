@@ -106,11 +106,73 @@ static REPLACE_UNSUPPORTED: std::sync::atomic::AtomicBool =
 #[cfg(target_os = "linux")]
 static PERSISTENT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The hicolor theme name of voxtype's own icon, installed system-wide by the
+/// packages and per user by `voxtype setup icons`.
+#[cfg(target_os = "linux")]
+const ICON_NAME: &str = "voxtype";
+
+/// The hicolor theme directories a notification server searches: the user's
+/// data dir first, then every system data dir, as the XDG base directory and
+/// icon theme specifications lay them out.
+#[cfg(target_os = "linux")]
+fn hicolor_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut bases = Vec::new();
+    match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        Some(home) => bases.push(PathBuf::from(home)),
+        None => bases.extend(dirs::home_dir().map(|h| h.join(".local/share"))),
+    }
+    let system = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+    bases.extend(
+        system
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from),
+    );
+    // Packages install here whatever the session's XDG_DATA_DIRS says.
+    bases.push(PathBuf::from("/usr/share"));
+    bases
+        .into_iter()
+        .map(|base| base.join("icons/hicolor"))
+        .collect()
+}
+
+/// Is a `voxtype` icon installed in any of these hicolor directories, at the
+/// sizes voxtype installs it?
+#[cfg(target_os = "linux")]
+fn icon_installed_in(hicolor_dirs: &[std::path::PathBuf]) -> bool {
+    hicolor_dirs.iter().any(|dir| {
+        dir.join("scalable/apps/voxtype.svg").is_file()
+            || dir.join("128x128/apps/voxtype.png").is_file()
+    })
+}
+
+/// Checked once per process. Without an installed icon, `--icon=voxtype`
+/// would make some servers draw a broken-image placeholder, which is worse
+/// than letting them fall back to the desktop entry's icon as before.
+#[cfg(target_os = "linux")]
+fn icon_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| icon_installed_in(&hicolor_dirs()))
+}
+
 /// Arguments shared by both Linux paths: identity, lifetime, urgency, and the
 /// GNOME hints, which stay because they are still what suppresses stacking
 /// there.
 #[cfg(target_os = "linux")]
 fn linux_common_args(lifetime: Lifetime, urgency: Option<&str>) -> Vec<String> {
+    linux_common_args_with_icon(lifetime, urgency, icon_available())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_common_args_with_icon(
+    lifetime: Lifetime,
+    urgency: Option<&str>,
+    icon: bool,
+) -> Vec<String> {
     let mut args = vec![
         "--app-name=Voxtype".to_string(),
         format!("--expire-time={}", lifetime.expire_ms()),
@@ -119,6 +181,9 @@ fn linux_common_args(lifetime: Lifetime, urgency: Option<&str>) -> Vec<String> {
         "-h".to_string(),
         "int:transient:1".to_string(),
     ];
+    if icon {
+        args.push(format!("--icon={ICON_NAME}"));
+    }
     if let Some(urgency) = urgency {
         args.push(format!(
             "--urgency={}",
@@ -490,6 +555,50 @@ mod linux_tests {
 
         let args = linux_common_args(Lifetime::Millis(2000), Some("nonsense"));
         assert!(args.contains(&"--urgency=normal".to_string()));
+    }
+
+    #[test]
+    fn icon_is_passed_only_when_installed() {
+        let args = linux_common_args_with_icon(Lifetime::Millis(2000), None, true);
+        assert!(args.contains(&"--icon=voxtype".to_string()));
+        assert!(args.contains(&"--app-name=Voxtype".to_string()));
+
+        let args = linux_common_args_with_icon(Lifetime::Millis(2000), None, false);
+        assert!(!args.iter().any(|a| a.starts_with("--icon")));
+        assert!(args.contains(&"--app-name=Voxtype".to_string()));
+    }
+
+    #[test]
+    fn icon_is_found_at_either_installed_size() {
+        let empty = tempfile::tempdir().unwrap();
+        let svg = tempfile::tempdir().unwrap();
+        let png = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let place = |dir: &std::path::Path, rel: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"icon").unwrap();
+        };
+        place(svg.path(), "scalable/apps/voxtype.svg");
+        place(png.path(), "128x128/apps/voxtype.png");
+        // Another app's icon, and ours as a directory rather than a file.
+        place(other.path(), "scalable/apps/audio-input-microphone.svg");
+        std::fs::create_dir_all(other.path().join("128x128/apps/voxtype.png")).unwrap();
+
+        let dirs = |d: &[&tempfile::TempDir]| -> Vec<std::path::PathBuf> {
+            d.iter().map(|t| t.path().to_path_buf()).collect()
+        };
+        assert!(!icon_installed_in(&[]));
+        assert!(!icon_installed_in(&dirs(&[&empty, &other])));
+        assert!(icon_installed_in(&dirs(&[&empty, &svg])));
+        assert!(icon_installed_in(&dirs(&[&png])));
+    }
+
+    #[test]
+    fn hicolor_dirs_cover_the_user_and_system_themes() {
+        let dirs = hicolor_dirs();
+        assert!(dirs.contains(&std::path::PathBuf::from("/usr/share/icons/hicolor")));
+        assert!(dirs.len() >= 2, "{dirs:?}");
     }
 
     #[test]

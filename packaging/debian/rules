@@ -38,6 +38,10 @@ override_dh_auto_install:
 		debian/voxtype/usr/share/applications/voxtype-configure.desktop
 	install -D -m 755 packaging/scripts/voxtype-configure-launcher \
 		debian/voxtype/usr/bin/voxtype-configure-launcher
+	install -D -m 644 assets/icon.svg \
+		debian/voxtype/usr/share/icons/hicolor/scalable/apps/voxtype.svg
+	install -D -m 644 assets/icon.png \
+		debian/voxtype/usr/share/icons/hicolor/128x128/apps/voxtype.png
 
 override_dh_auto_test:
 	# Only test with AVX2 build to avoid SIGILL in build environments
