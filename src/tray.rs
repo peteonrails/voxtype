@@ -233,11 +233,11 @@ impl VoxtypeTray {
     fn tooltip_title(&self) -> String {
         if self.upgrade.has_offers() {
             format!(
-                "VoxType: {} (model update available)",
+                "Voxtype: {} (model update available)",
                 self.state.tooltip_body()
             )
         } else {
-            format!("VoxType: {}", self.state.tooltip_body())
+            format!("Voxtype: {}", self.state.tooltip_body())
         }
     }
 }
@@ -248,7 +248,7 @@ impl Tray for VoxtypeTray {
         "voxtype".into()
     }
     fn title(&self) -> String {
-        "VoxType".into()
+        "Voxtype".into()
     }
     // Quickshell prefers a nonempty theme name even when it cannot resolve it.
     // Always publish embedded pixels, independent of optional icon installation.
@@ -293,7 +293,7 @@ impl Tray for VoxtypeTray {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         let mut menu: Vec<ksni::MenuItem<Self>> = vec![
             StandardItem {
-                label: format!("VoxType: {}", self.state.tooltip_body()),
+                label: format!("Voxtype: {}", self.state.tooltip_body()),
                 enabled: false,
                 ..Default::default()
             }

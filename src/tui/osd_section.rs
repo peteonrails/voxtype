@@ -604,7 +604,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from("  auto      let the selected style package choose, else Omarchy"),
             Line::from("  omarchy   inherit semantic colors from the active Omarchy theme"),
-            Line::from("  fallback  use VoxType's built-in dark palette"),
+            Line::from("  fallback  use Voxtype's built-in dark palette"),
             Line::from("  package   use package colors when a style package provides them"),
             Line::from("  custom    use literal recipe colors"),
             Line::from(""),

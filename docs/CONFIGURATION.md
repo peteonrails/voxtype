@@ -4443,7 +4443,7 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 
 ### Quickshell OSD customization
 
-The Quickshell frontend can customize the whole OSD without editing VoxType's
+The Quickshell frontend can customize the whole OSD without editing Voxtype's
 packaged QML. Normal users configure declarative recipes; advanced users can
 explicitly opt into trusted custom QML packages. The styling system was
 contributed by [OldJobobo](https://github.com/OldJobobo)
@@ -4494,7 +4494,7 @@ mirror = true
 ```
 
 When `palette` is omitted, a selected package manifest may choose the palette;
-otherwise VoxType falls back to Omarchy colors. With `palette = "omarchy"`,
+otherwise Voxtype falls back to Omarchy colors. With `palette = "omarchy"`,
 recipe colors such as `accent`, `background`,
 `foreground`, `success`, `warning`, and `error` resolve from the active
 Omarchy theme at `~/.config/omarchy/current/theme/colors.toml`. Literal colors
@@ -4677,7 +4677,7 @@ Quickshell launcher exits with an error explaining what to fix instead of
 silently falling back to the default style. `style` and `plugin_path` paths
 may start with `~`.
 
-VoxType ships working examples to copy from. Packaged installs place style
+Voxtype ships working examples to copy from. Packaged installs place style
 packages under `/usr/share/voxtype/osd/` and recipe presets under
 `/usr/share/voxtype/osd-recipes/`; in the source tree they live in
 [`examples/osd-packages/`](../examples/osd-packages/) (full packages,

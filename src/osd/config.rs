@@ -81,7 +81,7 @@ pub enum OsdPaletteSource {
     /// Resolve semantic colors from the active Omarchy theme.
     #[default]
     Omarchy,
-    /// Use VoxType's built-in fallback palette.
+    /// Use Voxtype's built-in fallback palette.
     Fallback,
     /// Use colors provided by the selected OSD package.
     Package,

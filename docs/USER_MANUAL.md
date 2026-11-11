@@ -2268,7 +2268,7 @@ Learned punctuation/casing is separate from deterministic cleanup and is disable
 in the TUI if this client lacks the `punctuation-casing` build feature.
 
 
-In the graphical VoxType app, the **Text Cleanup** section separates **Clean up text**
+In the graphical Voxtype app, the **Text Cleanup** section separates **Clean up text**
 from **LARD disfluency cleanup**. Clean up text contains independent deterministic
 stage switches. There is no master switch that resets your individual choices.
 The LARD switch only changes `text.lard_disfluency`; it does not change those

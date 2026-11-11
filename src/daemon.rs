@@ -4516,7 +4516,7 @@ impl Daemon {
                                 menu.explanation = format!("Language change failed: {error}");
                                 tray.update_language(menu);
                             }
-                            send_notification("VoxType: Language change failed", &error,
+                            send_notification("Voxtype: Language change failed", &error,
                                 self.config.output.notification.show_engine_icon, self.config.engine,
                                 &self.config.output.notification.urgency).await;
                         }

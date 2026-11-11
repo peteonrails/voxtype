@@ -1,4 +1,4 @@
-// Declarative voice-meter renderer for VoxType Quickshell OSD recipes.
+// Declarative voice-meter renderer for Voxtype Quickshell OSD recipes.
 //
 // Each recipe layer becomes its own scene-graph item (Rectangles, Text,
 // and QtQuick.Shapes paths) instead of strokes on a software Canvas, so

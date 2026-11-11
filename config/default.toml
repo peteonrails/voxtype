@@ -272,7 +272,7 @@ style = "default"
 # Palette source for Quickshell recipes. Leave unset to let a selected
 # package manifest choose its palette, falling back to Omarchy.
 # - omarchy: inherit colors from ~/.config/omarchy/current/theme/colors.toml
-# - fallback: use VoxType's built-in palette
+# - fallback: use Voxtype's built-in palette
 # - package: use package colors when a style package provides them
 # - custom: use literal recipe colors
 # palette = "omarchy"

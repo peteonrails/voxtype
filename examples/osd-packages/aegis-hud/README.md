@@ -1,6 +1,6 @@
 # Aegis HUD
 
-`aegis-hud` is a full Quickshell OSD style package showcase for VoxType. It
+`aegis-hud` is a full Quickshell OSD style package showcase for Voxtype. It
 uses a package manifest plus a trusted custom QML entry to replace the built-in
 recipe card with a cinematic circular voice HUD.
 
@@ -23,7 +23,7 @@ cargo run --bin voxtype-osd-quickshell -- \
 ```
 
 The manual state file makes the OSD visible. For live movement, start a real
-VoxType recording so `voxtype-audio-bridge` receives frames from the daemon.
+Voxtype recording so `voxtype-audio-bridge` receives frames from the daemon.
 
 Hide the OSD:
 

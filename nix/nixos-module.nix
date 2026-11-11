@@ -1,6 +1,6 @@
-# NixOS module for VoxType
+# NixOS module for Voxtype
 #
-# This module installs the VoxType package system-wide.
+# This module installs the Voxtype package system-wide.
 # For the systemd user service and full configuration, use the Home Manager module.
 #
 # Usage in your configuration.nix or flake:
@@ -34,12 +34,12 @@ let
   cfg = config.programs.voxtype;
 in {
   options.programs.voxtype = {
-    enable = lib.mkEnableOption "VoxType voice-to-text";
+    enable = lib.mkEnableOption "Voxtype voice-to-text";
 
     package = lib.mkOption {
       type = lib.types.package;
       description = ''
-        The VoxType package to install. Use the flake's wrapped packages:
+        The Voxtype package to install. Use the flake's wrapped packages:
 
         Whisper packages:
         - packages.default: CPU-only Whisper
@@ -59,7 +59,7 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    # Install VoxType (runtime deps are already in the wrapped package's PATH)
+    # Install Voxtype (runtime deps are already in the wrapped package's PATH)
     environment.systemPackages = [ cfg.package ];
   };
 }

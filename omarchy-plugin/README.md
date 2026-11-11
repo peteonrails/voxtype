@@ -1,4 +1,4 @@
-# VoxType: an Omarchy shell panel
+# Voxtype: an Omarchy shell panel
 
 A graphical settings panel for [voxtype](https://voxtype.io), running as a
 panel plugin inside `omarchy-shell`. It renders whatever `voxtype config schema

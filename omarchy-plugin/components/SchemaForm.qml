@@ -502,7 +502,7 @@ Item {
               objectName: "lardModelLicense"
               width: parent.width
               visible: root.cleanupHeading(entry.index) === "LARD disfluency cleanup"
-              text: "Optional local English-only model, off by default. Requires an explicit English language setting and separate model setup with voxtype setup lard --source /path/to/model.vxdf. Enabling the switch does not download a model. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; VoxType source remains MIT."
+              text: "Optional local English-only model, off by default. Requires an explicit English language setting and separate model setup with voxtype setup lard --source /path/to/model.vxdf. Enabling the switch does not download a model. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; Voxtype source remains MIT."
               textFormat: Text.RichText
               onLinkActivated: function(link) { Qt.openUrlExternally(link) }
               color: Qt.darker(ShellTheme.Color.foreground, 1.5)
