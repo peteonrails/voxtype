@@ -154,6 +154,14 @@ rather than allowed to back-pressure the daemon, the same trade-off the audio
 level socket (`audio.sock`) makes. Reconnect and read a fresh `hello` if that
 happens.
 
+Each segment carries an `id` unique within the meeting, a `start_ms` of its
+own (one segment per utterance, not per chunk), and `speaker_id` plus
+`speaker_label` once a name has been given with `voxtype meeting label`. The
+`hello` backlog is in order of `start_ms`. A `segments` event covers one chunk
+of one track, so the microphone and loopback events for the same stretch of
+time arrive one after the other: insert by `start_ms` rather than appending.
+Microphone echo of the remote side is removed before an event is sent.
+
 Events fire roughly once per `chunk_duration_secs` (default 30s), not per
 word — meeting mode transcribes in chunks, it does not stream. A UI built on
 this socket should show a "listening…" affordance between updates, not
