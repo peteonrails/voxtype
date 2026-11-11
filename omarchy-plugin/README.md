@@ -116,19 +116,25 @@ The view uses only QtQuick and Quickshell, never `qs.Commons` or `qs.Ui`, so it
 runs under both hosts.
 
 Tabs: **Transcript**, **Notes** (an autosaving pad over `voxtype meeting notes
---set-file`, reloaded on `notes_updated`), **Ask** (questions streamed from
-`voxtype meeting ask`, with quick chips and `[m:ss]` citations that jump into
-the transcript) and, once the meeting stops, **Summary** (summary.md, a
-Summarizing state driven by `status: summarizing` and `summary_ready`, and
-Regenerate). Each tab keeps its scroll position. Ask and Summary carry an agent
-chip ("Claude", "Local (llama3.2)") from `voxtype meeting assistant status
---json`, with a menu to pick an agent, turn on Local model only, or open
-Settings; the first use of an agent asks for consent. Transcript lines get
-"Add note" on hover (`voxtype meeting annotate`), and annotated or highlighted
-lines a margin marker. A question asked while the view is closed (`voxtype
-meeting view --ask last-5m --no-open`) runs with `--notify`; the
-notification's Open runs `voxtype meeting view <id> --tab ask`, which every
-host reads from `$XDG_RUNTIME_DIR/voxtype/meeting-view.request`.
+--set-file`, re-read with `notes --json` on `notes_updated`), **Ask** (the
+meeting's saved asks from `show --json`, then new questions streamed from
+`voxtype meeting ask --json`, with quick chips; the answer's `citations` become
+links that jump into the transcript) and, once the meeting stops, **Summary**
+(the MeetingSummary from `show --json`, `summary_ready` or `voxtype meeting
+summarize --format json [--regenerate]`, rendered with chapter links; a
+Summarizing state from the `summarizing` event that names the meeting). Each
+tab keeps its scroll position. Ask and Summary carry an agent chip
+(`backend_name` from `voxtype meeting assistant status --json`) with a menu of
+the agents found, their notes (codex's bwrap jail), Local model only, and
+Change in Settings. `blocked: "consent_required"` opens the consent dialog
+(one button per usable agent when `choice_required`). Transcript lines get
+"Add note" on hover (`voxtype meeting annotate`, note and/or `--highlight`),
+and annotated or highlighted lines a margin marker. A question asked while the
+view is closed (`voxtype meeting view --ask last-5m --no-open`) runs with
+`--notify`; with `[meeting.assistant] open_command = "voxtype meeting view"`,
+the notification's Open writes `$XDG_RUNTIME_DIR/voxtype/meeting-view.request`
+(meeting and answer from `VOXTYPE_MEETING_ID`/`VOXTYPE_ASK_ID`), which every
+host reads, and the view opens on that answer.
 
 The view follows a meeting live: title, elapsed time, state
 (recording, paused, finalizing), Pause/Resume and Stop, a chip per speaker

@@ -15,6 +15,15 @@ Item {
   signal agentMenuRequested(var anchor)
   signal citationActivated(real ms)
 
+  // Show one answer (a notification's Open) and flash it.
+  property int flashRow: -1
+  function focusRow(row) {
+    thread.positionViewAtIndex(row, ListView.Center)
+    root.flashRow = row
+    flashTimer.restart()
+  }
+  Timer { id: flashTimer; interval: 1600; onTriggered: root.flashRow = -1 }
+
   function submit() {
     var q = askField.text.trim()
     if (q === "" || !root.assistant) return
@@ -76,9 +85,19 @@ Item {
         required property string agent
         required property bool pending
         required property string error
+        required property string citations
+        required property string askId
         objectName: entry.role === "q" ? "askQuestion" : "askAnswer"
         width: ListView.view.width
         implicitHeight: entry.role === "q" ? bubble.height : answer.implicitHeight
+
+        Rectangle {
+          anchors.fill: parent
+          anchors.margins: -root.theme.xs
+          radius: 4
+          color: root.theme.alpha(root.theme.accent, 0.18)
+          visible: root.flashRow === entry.index
+        }
 
         Rectangle {
           id: bubble
@@ -112,7 +131,7 @@ Item {
             objectName: "answerText"
             width: parent.width
             visible: entry.text !== ""
-            text: MT.linkify(entry.text, root.theme.accent)
+            text: MT.linkCitations(entry.text, entry.citations, root.theme.accent)
             textFormat: Text.MarkdownText
             color: root.theme.fg
             linkColor: root.theme.accent

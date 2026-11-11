@@ -18,10 +18,13 @@ import Quickshell.Io
 //
 // `voxtype meeting view` (and a notification's Open action, which runs it)
 // writes $XDG_RUNTIME_DIR/voxtype/meeting-view.request:
-//   {"meeting_id": "<id>"|null, "tab": "transcript"|"notes"|"ask"|"summary"|null,
+//   {"meeting_id": "<id>"|null, "ask_id": "<id>"|null,
+//    "tab": "transcript"|"notes"|"ask"|"summary"|null,
 //    "ask": "last-5m"|"last-speaker"|"actions"|null, "open": bool,
 //    "requested_at": <unix ms>}
-// Every running host reads it, so the CLI needs to know none of them.
+// Every running host reads it, so the CLI needs to know none of them. As
+// `[meeting.assistant] open_command`, plain `voxtype meeting view` picks the
+// meeting and answer up from VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID.
 Item {
   id: root
 
@@ -49,6 +52,8 @@ Item {
   property string actionError: ""
   // The tab to show when the view next opens, from a request.
   property string pendingTab: ""
+  // An answer to show once its meeting is loaded (a notification's Open).
+  property string pendingAskId: ""
 
   readonly property string runtimeDir: {
     var dir = Quickshell.env("XDG_RUNTIME_DIR")
@@ -194,13 +199,12 @@ Item {
     meetingCli.restoreSpeaker(feed.meetingId, segId, { snapshot: snap })
   }
 
-  function annotate(segId, text) {
+  function annotate(segId, text, highlight) {
     var snap = feed.annotationSnapshot(segId)
     if (!snap) return
     root.actionError = ""
-    var keepHighlight = snap.highlight && String(text).trim() !== ""
-    feed.setAnnotation(segId, text, keepHighlight)
-    meetingCli.annotate(feed.meetingId, segId, text, keepHighlight, { snapshot: snap })
+    feed.setAnnotation(segId, text, highlight)
+    meetingCli.annotate(feed.meetingId, segId, text, highlight, { snapshot: snap })
   }
 
   // A host's own open request with a payload ({"tab", "meeting_id"}), such as
@@ -220,7 +224,14 @@ Item {
   function handleRequest(req) {
     var age = Date.now() - (Number(req.requested_at) || 0)
     if (!(age >= -5000 && age < 30000)) return
+    var loading = !!(req.meeting_id && req.meeting_id !== "latest" && req.meeting_id !== feed.meetingId && !feed.active)
     root.select(req)
+    if (req.ask_id) {
+      root.showTab("ask")
+      // A meeting still loading shows the answer once it is in.
+      if (loading) root.pendingAskId = String(req.ask_id)
+      else assistant.showAsk(String(req.ask_id))
+    }
     if (req.ask) {
       root.showTab("ask")
       assistant.askChip(String(req.ask))
@@ -281,6 +292,11 @@ Item {
         return
       }
       if (data.metadata && data.metadata.summary) assistant.setStoredSummary(feed.meetingId, data.metadata.summary)
+      if (root.pendingAskId !== "") {
+        assistant.showAsk(root.pendingAskId)
+        root.pendingAskId = ""
+        return
+      }
       root.showTab("transcript")
     }
   }
@@ -328,7 +344,7 @@ Item {
     }
     function onReassignRequested(segId, speaker, key) { root.reassign(segId, speaker, key) }
     function onRestoreRequested(segId) { root.restoreSpeaker(segId) }
-    function onAnnotateRequested(segId, text) { root.annotate(segId, text) }
+    function onAnnotateRequested(segId, text, highlight) { root.annotate(segId, text, highlight) }
     function onSettingsRequested() { root.settingsRequested() }
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }

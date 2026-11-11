@@ -242,7 +242,7 @@ The header shows the meeting title, how long it has been running, and whether it
 - **Transcript**: one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up; **Jump to latest** takes you back.
   - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
   - Click the speaker name on a line to move just that line: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign`; if it is refused, the line goes back and the error is shown.
-  - Hover a line for **Add note** (`voxtype meeting annotate`). Lines with a note or a highlight get a marker in the margin.
+  - Hover a line for **Add note** (`voxtype meeting annotate`): a note, a **Highlight**, or both. Lines with either get a marker in the margin.
 - **Notes**: your notes for the meeting. They save as you type and go into the summary as guidance.
 - **Ask**: ask about what has been said, or use a quick question: "Last 5 minutes", "What did *the last remote speaker* just say?", "Action items so far". Answers stream in, say which agent gave them, and cite times like [1:58] that jump to that line.
 - **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing…" while it is written, and **Regenerate** after you fix speakers or lines.
@@ -264,6 +264,13 @@ voxtype meeting view --ask last-5m --no-open   # answer arrives as a notificatio
 ```
 
 In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
+
+An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
+
+```toml
+[meeting.assistant]
+open_command = "voxtype meeting view"
+```
 
 To stop it opening on its own:
 

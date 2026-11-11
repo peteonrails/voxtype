@@ -4,11 +4,10 @@ import Quickshell.Io
 
 // Past meetings, newest first, for when no meeting is on screen: title, date
 // and time, length, speakers and a Summary badge. Clicking one opens it like
-// an ended meeting. `voxtype meeting list --json` gives the list (metadata
-// only); each row reads its own folder for what the list leaves out, the
-// speaker count from transcript.json and whether a summary exists, and only
-// for the rows actually built, so a long history costs nothing until it is
-// scrolled to.
+// an ended meeting. `voxtype meeting list --json` gives the list, with
+// `has_summary` and `speaker_count` on each entry. A voxtype from before those
+// fields leaves them out; then each row reads its own folder for them
+// (transcript.json, metadata.json, summary.md), only for rows actually built.
 Item {
   id: root
 
@@ -120,9 +119,13 @@ Item {
         objectName: "meetingRow_" + index
         readonly property string meetingId: String(modelData.id)
         readonly property string title: modelData.title ? String(modelData.title) : "Untitled meeting"
-        property int speakers: -1
-        property bool summary: modelData.summary !== undefined && modelData.summary !== null
-        readonly property string folder: modelData.storage_path ? String(modelData.storage_path) : ""
+        // From the list when it says; -1 / null until the folder is read.
+        readonly property bool listed: modelData.speaker_count !== undefined && modelData.has_summary !== undefined
+        property int speakers: modelData.speaker_count !== undefined ? Number(modelData.speaker_count) : -1
+        property bool summary: modelData.has_summary !== undefined ? modelData.has_summary === true
+          : (modelData.summary !== undefined && modelData.summary !== null)
+        // Only an older voxtype's list needs the folder read.
+        readonly property string folder: !row.listed && modelData.storage_path ? String(modelData.storage_path) : ""
         readonly property string details: {
           var parts = [root.when(modelData.started_at)]
           var d = root.duration(modelData)

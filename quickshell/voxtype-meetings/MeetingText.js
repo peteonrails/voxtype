@@ -11,6 +11,23 @@ function linkify(markdown, color) {
   })
 }
 
+// An answer's citations, as `meeting ask --json` reports them ([{ts, ms}]),
+// become links wherever "[ts]" appears in its text. Nothing else is guessed
+// at: a bracketed time the agent did not cite stays plain text.
+function linkCitations(text, citationsJson, color) {
+  var out = String(text || "")
+  var list = []
+  try { list = JSON.parse(citationsJson || "[]") } catch (e) {}
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i]
+    if (!c || c.ts === undefined) continue
+    var stamp = "[" + c.ts + "]"
+    var link = '<a href="#t=' + Number(c.ms) + '" style="color:' + color + '">' + c.ts + '</a>'
+    out = out.split(stamp).join(link)
+  }
+  return out
+}
+
 function stampToMs(stamp) {
   var parts = String(stamp).split(":")
   var secs = 0

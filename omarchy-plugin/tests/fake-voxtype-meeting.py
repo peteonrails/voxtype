@@ -27,17 +27,26 @@ fake meeting.sock's control file (FAKE_MEETING_CTL; see fake-meeting-sock.py):
 
 The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
 
-  meeting assistant status --json   state["assistant"], defaulting to Claude,
-                                    allowed, with a local llama3.2
-  meeting assistant allow AGENT     marks AGENT allowed (and current if none is)
+  meeting assistant status --json   the real shape, derived from
+                                    state["assistant"] (default: Claude found
+                                    and allowed, a local llama3.2)
+  meeting assistant allow AGENT     marks AGENT allowed
   config set meeting.assistant.local_only true|false
   config set meeting.assistant.agent ID
-  meeting ask M "Q" [--last 5m] [--notify]
-                                    streams state["answer"] (or a default with
-                                    [m:ss] citations) in chunks
-  meeting summarize M               prints state["summary_md"] (or a default)
+  meeting ask M "Q" [--last 5m] [--notify] --json
+                                    the NDJSON stream: start, deltas of
+                                    state["answer"], answer with citations, or
+                                    error (consent_required while blocked,
+                                    agent_failed with state["fail"]["ask"]);
+                                    each answer is saved for `show --json`
+  meeting summarize M [--regenerate] --format json
+                                    the saved MeetingSummary, or a new one
+                                    (state["summary_json"] or a default); refused
+                                    on stderr while consent is missing
   meeting list --json [--limit N]   the socket's last meeting, then
-                                    state["meetings"], newest first
+                                    state["meetings"] (with or without
+                                    has_summary/speaker_count, as the test
+                                    wrote them), newest first
   meeting show M --json             MeetingData for M: a past meeting's folder,
                                     or the fake socket's snapshot with its summary
   meeting notes M [--set-file F] [--json]
@@ -57,6 +66,7 @@ fail with (exit 1), changing nothing.
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -207,27 +217,27 @@ def reassign(state, args):
     return 0
 
 
+# The assistant as configured: which agent is set (or none: the first found
+# and supported one answers), local_only, and per candidate whether it is
+# found, supported and allowed. `assistant status --json` derives the rest the
+# way the real command does (docs/INTEGRATIONS.md).
 DEFAULT_ASSISTANT = {
-    "local_only": False, "local_model": "llama3.2", "agent": "claude", "agent_label": "Claude",
-    "consented": True, "candidates": [{"id": "claude", "label": "Claude", "consented": True}],
+    "agent": None, "local_only": False,
+    "candidates": [{"id": "claude", "name": "Claude", "found": True, "supported": True, "consent": True}],
 }
 
-DEFAULT_ANSWER = ("[0:35] The build went green overnight, and Pete will cut the tag after lunch [0:50]. "
+CODEX_NOTE = ("its command tool cannot be turned off, so it runs in a bwrap jail that sees no files "
+              "from your home but its auth.json")
+
+DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
                   "Nobody raised a blocker.")
 
-DEFAULT_SUMMARY = """## Overview
-
-A short standup about the release.
-
-## Decisions
-
-- Ship today.
-
-## Chapters
-
-- [0:04] Greetings
-- [0:35] Release status
-"""
+DEFAULT_SUMMARY = {
+    "summary": "A short standup about the release.", "key_points": [], "decisions": ["Ship today."],
+    "action_items": [{"description": "Cut the tag", "assignee": "Pete", "completed": False}],
+    "chapters": [{"start_ms": 4000, "title": "Greetings"}, {"start_ms": 35000, "title": "Release status"}],
+    "generated_at": "2026-11-11T16:00:00Z", "model": "claude",
+}
 
 
 def save(state):
@@ -235,35 +245,67 @@ def save(state):
         json.dump(state, f)
 
 
-def labels_for(a):
-    a["agent_label"] = next((c.get("label") for c in a["candidates"] if c["id"] == a.get("agent")), a.get("agent"))
-    a["consented"] = any(c["id"] == a.get("agent") and c.get("consented") for c in a["candidates"])
+def assistant_config(state):
+    if "assistant" not in state:
+        state["assistant"] = json.loads(json.dumps(DEFAULT_ASSISTANT))
+    return state["assistant"]
+
+
+def status(state):
+    a = assistant_config(state)
+    cands = []
+    for c in a["candidates"]:
+        cand = {"id": c["id"], "name": c["name"], "path": "/usr/bin/" + c["id"], "found": c.get("found", True),
+                "supported": c.get("supported", True), "tool_less": c["id"] == "claude",
+                "sandbox": "bwrap" if c["id"] == "codex" else None, "consent": c.get("consent", False),
+                "sources": ["path"]}
+        if c["id"] == "codex":
+            cand["note"] = CODEX_NOTE
+        cands.append(cand)
+    usable = [c for c in cands if c["found"] and c["supported"]]
+    agent = next((c for c in cands if c["id"] == a.get("agent")), None) if a.get("agent") else None
+    choice = False
+    if agent is None:
+        allowed = [c for c in usable if c["consent"]]
+        agent = allowed[0] if allowed else (usable[0] if len(usable) == 1 else None)
+        choice = agent is None and len(usable) > 1
+    local = {"model": "llama3.2", "url": "http://localhost:11434", "name": "Local (llama3.2)"}
+    if a.get("local_only"):
+        backend, name, blocked = "local", local["name"], None
+    elif agent and agent["consent"]:
+        backend, name, blocked = "agent", agent["name"], None
+    elif agent or choice:
+        backend, name, blocked = "none", None, "consent_required"
+    else:
+        backend, name, blocked = "none", None, "no_backend"
+    return {"agent": agent["id"] if agent else None, "agent_name": agent["name"] if agent else None,
+            "agent_path": agent["path"] if agent else None, "source": "config" if a.get("agent") else "path",
+            "consent": bool(agent and agent["consent"]), "choice_required": choice, "problem": None,
+            "omarchy_default": None, "local_only": bool(a.get("local_only")), "local": local,
+            "backend": backend, "backend_name": name, "blocked": blocked, "auto_summary": False,
+            "auto_summary_configured": None, "consent_file": "/tmp/assistant-consent.json", "candidates": cands}
 
 
 def assistant(state, args):
-    a = state.setdefault("assistant", dict(DEFAULT_ASSISTANT, candidates=[dict(c) for c in DEFAULT_ASSISTANT["candidates"]]))
+    a = assistant_config(state)
     if args == ["status", "--json"]:
-        print(json.dumps(a))
+        print(json.dumps(status(state), indent=2))
         return 0
     if args[:1] == ["allow"] and len(args) == 2:
         for c in a["candidates"]:
             if c["id"] == args[1]:
-                c["consented"] = True
-        if not a.get("agent"):
-            a["agent"] = args[1]
-        labels_for(a)
+                c["consent"] = True
         save(state)
         return 0
     return 2
 
 
 def config_set(state, key, value):
-    a = state.setdefault("assistant", dict(DEFAULT_ASSISTANT, candidates=[dict(c) for c in DEFAULT_ASSISTANT["candidates"]]))
+    a = assistant_config(state)
     if key == "meeting.assistant.local_only":
         a["local_only"] = value == "true"
     elif key == "meeting.assistant.agent":
         a["agent"] = value
-        labels_for(a)
     else:
         return 2
     save(state)
@@ -278,20 +320,91 @@ def snapshot():
         return {}
 
 
+def asks_path(meeting):
+    return os.path.join(os.environ["FAKE_MEETING_DATA"], "asks-%s.jsonl" % meeting)
+
+
+def load_asks(meeting):
+    try:
+        with open(asks_path(meeting)) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def emit(ev):
+    sys.stdout.write(json.dumps(ev) + "\n")
+    sys.stdout.flush()
+
+
 def ask(state, args):
-    rest = [a for a in args if a not in ("--notify",)]
+    """meeting ask M "Q" [--last D] [--notify] [--json]: the NDJSON stream."""
+    rest = [a for a in args if a not in ("--notify", "--json")]
+    last = None
     if "--last" in rest:
         i = rest.index("--last")
+        last = rest[i + 1]
         rest = rest[:i] + rest[i + 2:]
     if len(rest) != 2:
         return 2
+    meeting = resolve(state, rest[0])
+    st = status(state)
+    if st["backend"] == "none":
+        emit({"event": "error", "code": st["blocked"],
+              "message": "Meeting transcripts can't go to %s until you allow it." % (st["agent_name"] or "an agent")})
+        return 1
+    if state.get("fail", {}).get("ask"):
+        emit({"event": "error", "code": "agent_failed", "message": state["fail"]["ask"]})
+        return 1
+    secs = {"5m": 300, "2m": 120}.get(last)
+    start = {"event": "start", "meeting_id": meeting, "agent": st["agent"] or "local:llama3.2",
+             "agent_name": st["backend_name"], "question": rest[1]}
+    if secs:
+        start["last_secs"] = secs
+    emit(start)
     text = state.get("answer", DEFAULT_ANSWER)
     words = text.split(" ")
     for i in range(0, len(words), 4):
-        sys.stdout.write(" ".join(words[i:i + 4]) + (" " if i + 4 < len(words) else ""))
-        sys.stdout.flush()
+        emit({"event": "delta", "text": " ".join(words[i:i + 4]) + (" " if i + 4 < len(words) else "")})
         time.sleep(0.15)
-    sys.stdout.write("\n")
+    cites = []
+    for ts in re.findall(r"\[(\d{2}:\d{2})\]", text):
+        m, sec = ts.split(":")
+        cites.append({"ts": ts, "ms": (int(m) * 60 + int(sec)) * 1000})
+    record = {"id": "ask-%d" % (len(load_asks(meeting)) + 1), "time": "2026-11-11T16:00:00Z", "question": rest[1],
+              "answer": text, "agent": start["agent"], "agent_name": st["backend_name"], "citations": cites}
+    if secs:
+        record["last_secs"] = secs
+    with open(asks_path(meeting), "a") as f:
+        f.write(json.dumps(record) + "\n")
+    emit(dict(record, event="answer", meeting_id=meeting))
+    return 0
+
+
+def summarize(state, args):
+    """meeting summarize M [--regenerate] [--format json]: prints the saved one unless --regenerate."""
+    meeting = resolve(state, args[0])
+    path = os.path.join(os.environ["FAKE_MEETING_DATA"], "summary-%s.json" % meeting)
+    folder = past_dir(meeting)
+    saved = None
+    if os.path.exists(path):
+        with open(path) as f:
+            saved = json.load(f)
+    elif os.path.exists(os.path.join(folder, "metadata.json")):
+        with open(os.path.join(folder, "metadata.json")) as f:
+            saved = json.load(f).get("summary")
+    if saved is None or "--regenerate" in args:
+        st = status(state)
+        if st["backend"] == "none":
+            print("Error: Meeting transcripts can't go to %s until you allow it (consent_required)"
+                  % (st["agent_name"] or "an agent"), file=sys.stderr)
+            return 1
+        print("Summarizing...", file=sys.stderr)
+        time.sleep(0.6)
+        saved = state.get("summary_json", DEFAULT_SUMMARY)
+        with open(path, "w") as f:
+            json.dump(saved, f)
+    print(json.dumps(saved, indent=2))
     return 0
 
 
@@ -349,7 +462,9 @@ def list_meetings(state, args):
     stored = snapshot().get("stored")
     if stored and stored.get("meeting_id"):
         out.append({"id": stored["meeting_id"], "title": stored.get("title"), "started_at": stored.get("started_at"),
-                    "duration_secs": 70, "status": "completed", "chunk_count": 3, "audio_retained": False})
+                    "duration_secs": 70, "status": "completed", "chunk_count": 3, "audio_retained": False,
+                    "has_summary": False,
+                    "speaker_count": len({segment_key(s) for s in stored.get("segments", [])})})
     out += sorted(state.get("meetings", []), key=lambda m: m["started_at"], reverse=True)
     print(json.dumps(out[:limit], indent=2))
     return 0
@@ -366,7 +481,11 @@ def show(state, args_meeting):
             meta = json.load(f)
         with open(os.path.join(folder, "transcript.json")) as f:
             transcript = json.load(f)
-        print(json.dumps({"metadata": meta, "transcript": transcript, "asks": []}, indent=2))
+        saved = os.path.join(os.environ["FAKE_MEETING_DATA"], "summary-%s.json" % meeting)
+        if os.path.exists(saved):
+            with open(saved) as f:
+                meta["summary"] = json.load(f)
+        print(json.dumps({"metadata": meta, "transcript": transcript, "asks": load_asks(meeting)}, indent=2))
         return 0
     snap = snapshot()
     target = next(m for m in (snap.get("live"), snap.get("stored")) if m and m.get("meeting_id") == meeting)
@@ -374,8 +493,12 @@ def show(state, args_meeting):
             "status": "completed", "chunk_count": 3, "audio_retained": False}
     if snap.get("summary"):
         meta["summary"] = snap["summary"]
+    saved = os.path.join(os.environ["FAKE_MEETING_DATA"], "summary-%s.json" % meeting)
+    if os.path.exists(saved):
+        with open(saved) as f:
+            meta["summary"] = json.load(f)
     print(json.dumps({"metadata": meta, "transcript": {"segments": target["segments"], "total_chunks": 3},
-                      "asks": []}, indent=2))
+                      "asks": load_asks(meeting)}, indent=2))
     return 0
 
 
@@ -401,7 +524,8 @@ def main():
         return 2
     action = args[1]
     failing = state.get("fail", {})
-    if action in failing:
+    # A failing ask answers in its own NDJSON form.
+    if action in failing and action != "ask":
         print(failing[action], file=sys.stderr)
         return 1
     if action == "pause":
@@ -420,8 +544,7 @@ def main():
     elif action == "ask":
         return ask(state, args[2:])
     elif action == "summarize" and len(args) >= 3:
-        time.sleep(0.6)
-        print(state.get("summary_md", DEFAULT_SUMMARY))
+        return summarize(state, args[2:])
     elif action == "show" and len(args) == 4 and args[3] == "--json":
         return show(state, args[2])
     elif action == "list" and "--json" in args:

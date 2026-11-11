@@ -298,7 +298,7 @@ Item {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 visible: lineHover.containsMouse || noteMouse.containsMouse
-                text: line.annotation !== "" ? "Edit note" : "Add note"
+                text: line.marked ? "Edit note" : "Add note"
                 color: noteMouse.containsMouse ? root.theme.fg : root.theme.dim
                 font.family: root.theme.fontFamily
                 font.pixelSize: root.theme.caption
