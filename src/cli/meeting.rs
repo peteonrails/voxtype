@@ -114,6 +114,30 @@ pub enum MeetingAction {
         /// Human-readable label to assign
         label: String,
     },
+    /// Check for a call and say whether voxtype would offer to record it
+    ///
+    /// Meeting detection watches for a call app (Zoom, Teams, or Google Meet
+    /// and Teams in a browser) opening the microphone and offers to record
+    /// it with a notification. The daemon does this when `[meeting.detect]`
+    /// is on; this command shows its reasoning.
+    ///
+    /// With --dry-run, reads the PipeWire and Hyprland state once and prints
+    /// what would be prompted and why. Add --watch to keep running and print
+    /// each decision as calls start and end. Without --dry-run, runs the
+    /// detector in the foreground with real prompts (refused while the
+    /// daemon is already prompting).
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting suggest --dry-run\n  \
+        voxtype meeting suggest --dry-run --watch")]
+    Suggest {
+        /// Print decisions only; never show a notification or start a meeting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Keep running and print each decision
+        #[arg(long)]
+        watch: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
     /// Uses Ollama or a remote API to generate a summary with

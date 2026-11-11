@@ -4339,6 +4339,12 @@ impl Daemon {
             }
         }
 
+        // Offer to record calls as they start ([meeting.detect]). Held for
+        // run()'s lifetime; dropping it stops the watcher.
+        #[cfg(target_os = "linux")]
+        let _meeting_detector =
+            meeting::detect::runner::spawn_in_daemon(&self.config, self.config_path.clone());
+
         crate::daemon_status::publish_version();
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);

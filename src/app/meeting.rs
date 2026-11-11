@@ -430,6 +430,10 @@ pub(crate) async fn run_meeting_command(
             );
         }
 
+        MeetingAction::Suggest { dry_run, watch } => {
+            run_meeting_suggest(config, None, dry_run, watch).await?;
+        }
+
         MeetingAction::Summarize {
             meeting_id,
             format,
@@ -528,6 +532,23 @@ pub(crate) async fn run_meeting_command(
     }
 
     Ok(())
+}
+
+/// `voxtype meeting suggest`; `config_path` is passed on to the
+/// `meeting start` a live prompt runs.
+pub(crate) async fn run_meeting_suggest(
+    config: &config::Config,
+    config_path: Option<PathBuf>,
+    dry_run: bool,
+    watch: bool,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return meeting::detect::runner::suggest(config, config_path, dry_run, watch).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, config_path, dry_run, watch);
+        anyhow::bail!("Meeting detection is only available on Linux.")
+    }
 }
 
 /// Where a meeting is, as the CLI sees it: the daemon's `meeting_state` file
