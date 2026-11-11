@@ -4,6 +4,24 @@ use serde::{Deserialize, Serialize};
 
 use super::default_true;
 
+/// Per-meeting choices given to `voxtype meeting start`. Unset fields keep
+/// the configuration's values. Travels from the CLI to the daemon as JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MeetingStartOptions {
+    /// Engine for this meeting's transcription (`whisper`, `parakeet`, ...)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Model for this meeting; its engine is implied when `engine` is unset
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Language hint for engines that take one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The call's link, stored with the meeting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// Meeting transcription configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingConfig {

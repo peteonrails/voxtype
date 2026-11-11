@@ -32,7 +32,14 @@ pub(crate) async fn run_meeting_command(
     };
 
     match action {
-        MeetingAction::Start { title, diarization } => {
+        MeetingAction::Start {
+            title,
+            diarization,
+            engine,
+            model,
+            language,
+            url,
+        } => {
             // Check if meeting mode is enabled
             if !config.meeting.enabled {
                 eprintln!("Error: Meeting mode is disabled in config.");
@@ -40,6 +47,19 @@ pub(crate) async fn run_meeting_command(
                 eprintln!("Enable it by adding to config.toml:");
                 eprintln!("  [meeting]");
                 eprintln!("  enabled = true");
+                std::process::exit(1);
+            }
+
+            // Refuse a meeting that could not transcribe before it starts,
+            // with the fix, rather than leave the daemon to log it.
+            let options = config::MeetingStartOptions {
+                engine,
+                model,
+                language,
+                url: url.filter(|u| !u.trim().is_empty()),
+            };
+            if let Err(e) = meeting::start::meeting_transcription_config(config, &options) {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
 
@@ -102,6 +122,13 @@ pub(crate) async fn run_meeting_command(
             } else {
                 // Clear any stale override left from a prior run.
                 let _ = std::fs::remove_file(&diarization_file);
+            }
+
+            let options_file = runtime_dir.join("meeting_start_options");
+            if options == config::MeetingStartOptions::default() {
+                let _ = std::fs::remove_file(&options_file);
+            } else {
+                std::fs::write(&options_file, serde_json::to_string(&options)?)?;
             }
 
             // Write start trigger file (with optional title). The claim is
@@ -373,6 +400,9 @@ pub(crate) async fn run_meeting_command(
                     }
                     println!("Status:   {:?}", meeting.metadata.status);
                     println!("Chunks:   {}", meeting.metadata.chunk_count);
+                    if let Some(ref url) = meeting.metadata.url {
+                        println!("Link:     {}", url);
+                    }
                     println!();
                     println!("Transcript:");
                     println!("-----------");

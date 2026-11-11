@@ -30,6 +30,7 @@ pub mod diarization;
 pub mod events;
 pub mod export;
 pub mod notes;
+pub mod start;
 pub mod state;
 pub mod storage;
 pub mod summary;
@@ -144,19 +145,40 @@ pub struct MeetingDaemon {
 }
 
 impl MeetingDaemon {
-    /// Create a new meeting daemon
+    /// Create a new meeting daemon.
+    ///
+    /// `meeting_app_config` is the configuration the meeting transcribes
+    /// with ([`start::meeting_transcription_config`]). `resident` is
+    /// dictation's loaded transcriber when it serves that configuration
+    /// ([`start::shares_dictation_transcriber`]); without one the meeting
+    /// loads its own. Transcribers serialize their own calls, so a shared one
+    /// takes dictation and meeting chunks in turn.
     pub fn new(
         config: MeetingConfig,
-        app_config: &crate::config::Config,
+        meeting_app_config: &crate::config::Config,
         event_tx: mpsc::Sender<MeetingEvent>,
+        resident: Option<Arc<dyn Transcriber>>,
     ) -> Result<Self> {
         let storage = MeetingStorage::open(config.storage.clone())
             .map_err(|e| MeetingError::Storage(e.to_string()))?;
 
-        let meeting_app_config = app_config.with_meeting_mode_overrides();
-        let transcriber: Arc<dyn Transcriber> =
-            Arc::from(transcribe::create_transcriber(&meeting_app_config)?);
+        let transcriber: Arc<dyn Transcriber> = match resident {
+            Some(transcriber) => {
+                tracing::info!("Meeting transcribes with dictation's loaded model");
+                transcriber
+            }
+            None => {
+                let start = std::time::Instant::now();
+                let transcriber = Arc::from(transcribe::create_transcriber(meeting_app_config)?);
+                tracing::info!(
+                    "Meeting model loaded in {:.2}s",
+                    start.elapsed().as_secs_f32()
+                );
+                transcriber
+            }
+        };
         let engine_name = format!("{:?}", meeting_app_config.engine).to_lowercase();
+        let app_config = meeting_app_config;
 
         let post_processor = app_config.output.active_post_process().map(|cfg| {
             tracing::info!(
@@ -222,7 +244,7 @@ impl MeetingDaemon {
     }
 
     /// Start a new meeting
-    pub async fn start(&mut self, title: Option<String>) -> Result<MeetingId> {
+    pub async fn start(&mut self, title: Option<String>, url: Option<String>) -> Result<MeetingId> {
         if !self.state.is_idle() {
             return Err(MeetingError::AlreadyInProgress.into());
         }
@@ -230,6 +252,7 @@ impl MeetingDaemon {
         // Create meeting
         let mut meeting = MeetingData::new(title);
         meeting.metadata.model = Some(self.engine_name.clone());
+        meeting.metadata.url = url;
 
         // Create storage directory
         let storage_path = self
@@ -791,7 +814,7 @@ mod tests {
             Some(Box::new(diarization::simple::SimpleDiarizer::new())),
             tx,
         );
-        daemon.start(Some("Test".to_string())).await.unwrap();
+        daemon.start(Some("Test".to_string()), None).await.unwrap();
         Harness {
             daemon,
             config,
@@ -1165,6 +1188,117 @@ mod tests {
             .map(|s| s.speaker_key())
             .collect();
         assert_eq!(keys, vec!["Remote 1", "Remote 1", "You", "Remote 2"]);
+    }
+
+    /// What the daemon's dictation path does with a loaded model: transcribe
+    /// on another thread while the meeting is mid-chunk.
+    struct Shared {
+        calls: AtomicU32,
+        busy: std::sync::Mutex<()>,
+    }
+
+    impl Transcriber for Shared {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
+        fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
+            // Like the GGUF worker and the ONNX engines: one call at a time.
+            let _turn = self.busy.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(if samples.iter().any(|s| s.abs() > 0.05) {
+                "words".to_string()
+            } else {
+                String::new()
+            })
+        }
+    }
+
+    fn meeting_config(dir: &tempfile::TempDir) -> MeetingConfig {
+        MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A4: a meeting handed dictation's transcriber uses that instance
+    /// rather than loading another, and dictation keeps working on it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resident_transcriber_serves_the_meeting_and_dictation_together() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = Arc::new(Shared {
+            calls: AtomicU32::new(0),
+            busy: std::sync::Mutex::new(()),
+        });
+        let resident: Arc<dyn Transcriber> = shared.clone();
+        let (tx, mut events) = mpsc::channel(64);
+        // An app config whose engine cannot load here: proves no second load.
+        let mut app = crate::config::Config::default();
+        app.whisper.model = "/nonexistent/ggml-model.bin".into();
+        let mut daemon =
+            MeetingDaemon::new(meeting_config(&dir), &app, tx, Some(resident.clone())).unwrap();
+        assert!(Arc::ptr_eq(daemon.transcriber.as_ref().unwrap(), &resident));
+        daemon
+            .start(
+                Some("Shared".into()),
+                Some("https://meet.example.com/x".into()),
+            )
+            .await
+            .unwrap();
+
+        // Dictation transcribes on its own thread while the meeting does.
+        let dictation = {
+            let resident = resident.clone();
+            std::thread::spawn(move || {
+                (0..20)
+                    .map(|_| resident.transcribe(&[0.5; 1600]).unwrap())
+                    .filter(|t| t == "words")
+                    .count()
+            })
+        };
+        for _ in 0..3 {
+            daemon
+                .process_pair(
+                    track(30.0, &[(1.0, 3.0), (10.0, 12.0)]),
+                    track(30.0, &[(5.0, 7.0)]),
+                )
+                .await;
+        }
+        assert_eq!(dictation.join().unwrap(), 20);
+        daemon.stop().await.unwrap();
+
+        let mut segments = 0;
+        while let Ok(event) = events.try_recv() {
+            if let MeetingEvent::ChunkProcessed { segments: s, .. } = event {
+                segments += s.len();
+            }
+        }
+        assert_eq!(segments, 9);
+        assert_eq!(shared.calls.load(Ordering::SeqCst), 20 + 9);
+
+        let saved = get_meeting(&meeting_config(&dir), "latest").unwrap();
+        assert_eq!(
+            saved.metadata.url.as_deref(),
+            Some("https://meet.example.com/x")
+        );
+    }
+
+    /// Without a resident transcriber the meeting loads its own: here the
+    /// load fails, which is how this test sees it was attempted.
+    #[tokio::test]
+    async fn without_a_resident_transcriber_the_meeting_loads_its_own() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (tx, _events) = mpsc::channel(64);
+        let mut app = crate::config::Config::default();
+        app.whisper.model = "/nonexistent/ggml-model.bin".into();
+        app.whisper.on_demand_loading = false;
+        assert!(MeetingDaemon::new(meeting_config(&dir), &app, tx, None).is_err());
     }
 
     #[tokio::test]

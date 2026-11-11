@@ -97,6 +97,33 @@ Only one meeting can run at a time. Starting a second meeting while one is activ
 
 On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs.
 
+Recording starts as soon as the daemon reads the request, before any model loads, so nothing said in the first seconds is lost.
+
+#### Engine, model, language and link
+
+A meeting transcribes with the same engine and model as dictation unless you choose otherwise for that meeting:
+
+```bash
+voxtype meeting start --model large-v3-turbo --language de
+voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf
+voxtype meeting start --title "Planning" --url https://meet.example.com/abc-defg-hij
+```
+
+| Flag | Environment | Meaning |
+|------|-------------|---------|
+| `--engine` | `VOXTYPE_MEETING_ENGINE` | Engine for this meeting. Alone, it uses that engine's configured model. |
+| `--model` | `VOXTYPE_MEETING_MODEL` | Model for this meeting, as `voxtype info models` names it. Its engine is implied. |
+| `--language` | `VOXTYPE_MEETING_LANGUAGE` | Language hint, for checkpoints that take one (multilingual Whisper, Cohere). |
+| `--url` | | Link to the call. Stored with the meeting; `meeting show` and exports with `--metadata` print it. |
+
+A choice the meeting could not use is refused before anything starts, with the fix: an engine this binary was built without (with how to get a build that has it), a model that is not downloaded (with the download command), a model that belongs to a different engine than `--engine`, or a language the checkpoint does not take.
+
+#### Fast start
+
+When the meeting uses dictation's engine and model, and dictation keeps its model loaded (`on_demand_loading = false`, the default), the meeting transcribes with that loaded model instead of loading a second copy, so it is ready at once. This covers the GGUF worker and the in-process engines. Dictation keeps working during the meeting; the two take turns on the model, so a dictation that lands while a meeting chunk is being transcribed waits for it.
+
+A different engine, model or language loads a separate copy for the meeting, as does Whisper with `gpu_isolation = true` (which starts a worker per transcription either way) and Soniox (meetings use its async API). With `on_demand_loading = true` nothing is resident, and the meeting loads its model when it starts.
+
 ### Stopping a Meeting
 
 ```bash
