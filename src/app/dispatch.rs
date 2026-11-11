@@ -418,6 +418,7 @@ pub(crate) async fn dispatch(
                     status,
                     json,
                     remove,
+                    force,
                     target,
                 }) => {
                     if !json {
@@ -427,6 +428,7 @@ pub(crate) async fn dispatch(
                         status,
                         json,
                         remove,
+                        force,
                         target,
                     })?;
                 }

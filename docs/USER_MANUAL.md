@@ -279,6 +279,11 @@ voxtype binary, so run `voxtype setup skill` again after upgrading.
 `voxtype setup skill --status` and `voxtype setup check` tell you when the
 installed copy is out of date, and `voxtype setup skill --remove` uninstalls it.
 
+If you edit the installed `SKILL.md`, voxtype notices. It asks before replacing
+or removing your copy, and when it can't ask (no terminal) it leaves the file
+alone. `--force` replaces it without asking. The same applies if a different
+skill already sits at that path.
+
 ## Table of Contents
 
 - [Getting Started](#getting-started)

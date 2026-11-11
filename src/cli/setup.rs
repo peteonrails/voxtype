@@ -358,6 +358,9 @@ pub enum SetupAction {
         matches this version. Run the command again after upgrading voxtype: \
         --status and `voxtype setup check` report a copy that is out of date. \
         Run it as your own user, not with sudo.\n\n\
+        A SKILL.md you have edited, or a different skill at the same path, \
+        is never replaced or removed without asking. Without a terminal to \
+        ask on, it is left alone; --force replaces it.\n\n\
         --remove deletes only the SKILL.md voxtype wrote, and keeps any other \
         files in that directory.\n\n\
         Examples:\n  \
@@ -378,6 +381,10 @@ pub enum SetupAction {
         /// Remove the skill voxtype installed
         #[arg(long)]
         remove: bool,
+
+        /// Replace or remove a copy you edited, or a different skill at the same path, without asking
+        #[arg(long, conflicts_with = "status")]
+        force: bool,
 
         /// Install for (or remove from) these agents instead of the ones found
         #[arg(
