@@ -33,6 +33,12 @@ pub struct OpenVinoConfig {
     #[serde(default)]
     pub translate: bool,
 
+    /// Text given to the decoder as previous context to bias vocabulary and
+    /// spelling, like `[whisper] initial_prompt`. Not supported on NPU, where
+    /// voxtype drops it after the first rejected transcription.
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
+
     /// Load the model when recording starts instead of at daemon startup.
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
@@ -120,6 +126,7 @@ impl Default for OpenVinoConfig {
             threads: None,
             language: default_openvino_language(),
             translate: false,
+            initial_prompt: None,
             on_demand_loading: false,
             openvino_dir: None,
             streaming: false,

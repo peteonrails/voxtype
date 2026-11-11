@@ -10,9 +10,10 @@
 use super::Transcriber;
 use crate::config::OpenVinoConfig;
 use crate::error::TranscribeError;
-use openvino_genai::WhisperPipeline;
+use openvino_genai::{WhisperGenerationConfig, WhisperPipeline};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// Directory OpenVINO persists compiled device blobs to (`CACHE_DIR`
@@ -171,6 +172,9 @@ pub struct OpenVinoTranscriber {
     pipeline: Mutex<Option<WhisperPipeline>>,
     model_dir: PathBuf,
     config: OpenVinoConfig,
+    /// Set once the device rejects `initial_prompt` (NPU does), so later
+    /// transcriptions skip it instead of failing first every time.
+    prompt_rejected: AtomicBool,
 }
 
 fn device_candidates(configured: &str) -> Vec<&str> {
@@ -243,6 +247,7 @@ impl OpenVinoTranscriber {
             pipeline: Mutex::new(pipeline),
             model_dir,
             config: config.clone(),
+            prompt_rejected: AtomicBool::new(false),
         })
     }
 
@@ -382,6 +387,66 @@ impl OpenVinoTranscriber {
         Ok(pipeline)
     }
 
+    /// Generation config for one transcription: the pipeline's own config
+    /// (it carries the model's token IDs) with voxtype's language, task and
+    /// initial prompt applied.
+    fn generation_config(
+        &self,
+        pipeline: &WhisperPipeline,
+        prompt: Option<&str>,
+    ) -> Result<WhisperGenerationConfig, TranscribeError> {
+        // Get config from the pipeline (inherits model-specific token IDs).
+        // A standalone WhisperGenerationConfig::new() uses generic defaults that may
+        // not match the model; WhisperGenerationConfig::from_json() with the model's
+        // generation_config.json is the alternative for standalone creation.
+        let mut gen_config = pipeline.get_generation_config().map_err(|e| {
+            TranscribeError::InferenceFailed(format!("Failed to get generation config: {}", e))
+        })?;
+
+        // Only set language/task on multilingual models (*.en models are English-only
+        // and reject language/task overrides)
+        let is_multilingual = gen_config.get_is_multilingual().unwrap_or(false);
+
+        if is_multilingual {
+            // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
+            // in generation_config.json), while voxtype config uses bare codes like "en"
+            let lang = &self.config.language;
+            let lang_token = if lang.starts_with("<|") {
+                lang.to_string()
+            } else {
+                format!("<|{}|>", lang)
+            };
+            gen_config.set_language(&lang_token).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
+            })?;
+
+            let task = if self.config.translate {
+                "translate"
+            } else {
+                "transcribe"
+            };
+            gen_config.set_task(task).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to set task: {}", e))
+            })?;
+        } else if self.config.translate {
+            tracing::warn!(
+                "Translation requested but model is not multilingual; ignoring translate setting"
+            );
+        }
+
+        gen_config.set_return_timestamps(false).map_err(|e| {
+            TranscribeError::InferenceFailed(format!("Failed to set return_timestamps: {}", e))
+        })?;
+
+        if let Some(prompt) = prompt {
+            gen_config.set_initial_prompt(prompt).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to set initial_prompt: {}", e))
+            })?;
+        }
+
+        Ok(gen_config)
+    }
+
     /// Ensure the pipeline is created, creating on first use if needed.
     fn ensure_pipeline(
         &self,
@@ -450,52 +515,30 @@ impl Transcriber for OpenVinoTranscriber {
         let mut guard = self.ensure_pipeline()?;
         let pipeline = guard.as_mut().unwrap();
 
-        // Get config from the pipeline (inherits model-specific token IDs).
-        // A standalone WhisperGenerationConfig::new() uses generic defaults that may
-        // not match the model; WhisperGenerationConfig::from_json() with the model's
-        // generation_config.json is the alternative for standalone creation.
-        let mut gen_config = pipeline.get_generation_config().map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to get generation config: {}", e))
-        })?;
-
-        // Only set language/task on multilingual models (*.en models are English-only
-        // and reject language/task overrides)
-        let is_multilingual = gen_config.get_is_multilingual().unwrap_or(false);
-
-        if is_multilingual {
-            // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
-            // in generation_config.json), while voxtype config uses bare codes like "en"
-            let lang = &self.config.language;
-            let lang_token = if lang.starts_with("<|") {
-                lang.to_string()
-            } else {
-                format!("<|{}|>", lang)
-            };
-            gen_config.set_language(&lang_token).map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
-            })?;
-
-            let task = if self.config.translate {
-                "translate"
-            } else {
-                "transcribe"
-            };
-            gen_config.set_task(task).map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to set task: {}", e))
-            })?;
-        } else if self.config.translate {
-            tracing::warn!(
-                "Translation requested but model is not multilingual; ignoring translate setting"
-            );
-        }
-
-        gen_config.set_return_timestamps(false).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to set return_timestamps: {}", e))
-        })?;
-
-        let results = pipeline.generate(samples, Some(&gen_config)).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("OpenVINO GenAI inference failed: {}", e))
-        })?;
+        let prompt = effective_prompt(
+            self.config.initial_prompt.as_deref(),
+            self.prompt_rejected.load(Ordering::Relaxed),
+        );
+        let gen_config = self.generation_config(pipeline, prompt)?;
+        let results = match pipeline.generate(samples, Some(&gen_config)) {
+            Ok(results) => results,
+            // The NPU's static decoder rejects any initial prompt at inference
+            // time ("roi_end <= max_dim"): lose the prompt, not the dictation.
+            Err(e) if prompt.is_some() => {
+                tracing::warn!(
+                    "OpenVINO GenAI rejected initial_prompt on device {} ({}); \
+                     transcribing without it from now on",
+                    self.config.device,
+                    e
+                );
+                self.prompt_rejected.store(true, Ordering::Relaxed);
+                let gen_config = self.generation_config(pipeline, None)?;
+                pipeline
+                    .generate(samples, Some(&gen_config))
+                    .map_err(inference_failed)?
+            }
+            Err(e) => return Err(inference_failed(e)),
+        };
 
         let text = results.get_string().map_err(|e| {
             TranscribeError::InferenceFailed(format!("Failed to get transcription string: {}", e))
@@ -522,6 +565,16 @@ impl Transcriber for OpenVinoTranscriber {
 
         Ok(result)
     }
+}
+
+/// The configured initial prompt, unless it is blank or the device has
+/// already rejected it.
+fn effective_prompt(prompt: Option<&str>, rejected: bool) -> Option<&str> {
+    prompt.filter(|p| !rejected && !p.trim().is_empty())
+}
+
+fn inference_failed(e: impl std::fmt::Display) -> TranscribeError {
+    TranscribeError::InferenceFailed(format!("OpenVINO GenAI inference failed: {}", e))
 }
 
 /// Find the libopenvino_genai_c shared library in a directory.
@@ -709,6 +762,15 @@ mod tests {
         assert_eq!(device_candidates("GPU"), ["GPU", "CPU"]);
         assert_eq!(device_candidates("gpu"), ["gpu", "CPU"]);
         assert_eq!(device_candidates("CPU"), ["CPU", "GPU"]);
+    }
+
+    #[test]
+    fn initial_prompt_is_skipped_when_blank_or_rejected() {
+        assert_eq!(effective_prompt(Some("Voxtype"), false), Some("Voxtype"));
+        assert_eq!(effective_prompt(Some(" \n"), false), None);
+        assert_eq!(effective_prompt(None, false), None);
+        // Once the device rejected a prompt (NPU), it is not sent again.
+        assert_eq!(effective_prompt(Some("Voxtype"), true), None);
     }
 
     #[test]
