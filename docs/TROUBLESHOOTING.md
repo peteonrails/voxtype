@@ -1637,9 +1637,9 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 
 **Codex worked, then fails with an authentication error.** In the jail codex can read `~/.codex/auth.json` but not rewrite it, so it cannot save a refreshed login token there. Run `codex` once in a terminal to refresh the login, then retry.
 
-**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude` and `codex` can be run without tools that reach your files, so voxtype skips other agents and uses `claude` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
+**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude`, `codex` (jailed) and `pi` can be run without tools that reach your files or the network, so voxtype skips other agents and uses `claude` or `pi` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
 
-**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code or Codex, or start Ollama and `ollama pull llama3.2`.
+**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
 
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 

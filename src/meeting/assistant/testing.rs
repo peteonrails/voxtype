@@ -132,6 +132,22 @@ echo 'STDIN<<'; cat; echo '>>'
         );
     }
 
+    /// A fake `pi` that records its argv and the prompt it was handed with
+    /// `@file`, and prints `out/pi.reply`.
+    pub fn fake_pi(&self) {
+        let out = self.out();
+        self.script(
+            "pi",
+            &format!(
+                r#"out='{out}'
+printf '%s\n' "$@" > "$out/pi.argv"
+for a in "$@"; do case "$a" in @*) cat "${{a#@}}" > "$out/pi.prompt";; esac; done
+cat "$out/pi.reply""#,
+                out = out.display()
+            ),
+        );
+    }
+
     pub fn fake_omarchy(&self, prints: &str) {
         self.script(
             "omarchy-default-agent",

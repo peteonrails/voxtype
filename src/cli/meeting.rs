@@ -246,7 +246,7 @@ pub enum MeetingAction {
         #[arg(long)]
         regenerate: bool,
 
-        /// Agent to use for this summary (claude or codex)
+        /// Agent to use for this summary (claude, codex or pi)
         #[arg(long, value_name = "AGENT", env = "VOXTYPE_MEETING_AGENT")]
         agent: Option<String>,
 
@@ -263,7 +263,7 @@ pub enum MeetingAction {
     ///
     /// The assistant is your coding agent run headless with no tools:
     /// [meeting.assistant] agent, else the Omarchy default agent, else
-    /// claude found on PATH. Its first use asks once whether transcripts
+    /// claude or pi found on PATH. Its first use asks once whether transcripts
     /// may go to that agent (see `voxtype meeting assistant`). --local, or
     /// [meeting.assistant] local_only = true, answers with the local Ollama
     /// model instead.
@@ -299,7 +299,7 @@ pub enum MeetingAction {
         #[arg(long)]
         notify: bool,
 
-        /// Agent to use for this question (claude or codex)
+        /// Agent to use for this question (claude, codex or pi)
         #[arg(long, value_name = "AGENT", env = "VOXTYPE_MEETING_AGENT")]
         agent: Option<String>,
 
@@ -329,12 +329,12 @@ pub enum AssistantAction {
     /// the answer. It also turns on summaries at stop unless
     /// [meeting.summary] auto = false.
     Allow {
-        /// Agent: claude or codex
+        /// Agent: claude, codex or pi
         agent: String,
     },
     /// Stop sending meeting transcripts to an agent
     Revoke {
-        /// Agent: claude or codex
+        /// Agent: claude, codex or pi
         agent: String,
     },
     /// Show which agent answers, what was found, and consent per agent

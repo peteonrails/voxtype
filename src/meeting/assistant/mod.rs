@@ -34,7 +34,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Agent ids the assistant can run headless.
-pub const SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
+pub const SUPPORTED_AGENTS: &[&str] = &["claude", "codex", "pi"];
 
 /// Running summary of a long meeting's earlier part, so repeated asks
 /// during a meeting only summarize what is new.
@@ -49,7 +49,7 @@ pub enum AssistantError {
     )]
     ConsentRequired { agent: String, name: String },
 
-    #[error("{0}\n  Supported agents: claude, codex. See: voxtype meeting assistant status")]
+    #[error("{0}\n  Supported agents: claude, codex, pi. See: voxtype meeting assistant status")]
     AgentUnavailable(String),
 
     #[error("Agent '{0}' cannot be run without tools, so voxtype does not use it")]
@@ -68,8 +68,8 @@ pub enum AssistantError {
 
     #[error(
         "Answers and summaries need an agent or a local model.\n  \
-         No supported agent CLI (claude, codex) was found, and the local model failed: {message}\n  \
-         Install Claude Code or Codex, or run Ollama with: ollama pull {model}"
+         No supported agent CLI (claude, codex, pi) was found, and the local model failed: {message}\n  \
+         Install Claude Code, Codex or Pi, or run Ollama with: ollama pull {model}"
     )]
     NoBackend { message: String, model: String },
 
@@ -893,6 +893,35 @@ mod tests {
             std::fs::read_to_string(sb.home().join(".codex/auth.json")).unwrap(),
             r#"{"fake":"auth"}"#
         );
+    }
+
+    #[test]
+    fn pi_answers_with_its_tools_off_from_an_attached_prompt() {
+        let sb = Sandbox::new();
+        sb.fake_pi();
+        sb.allow("pi");
+        std::fs::write(sb.out().join("pi.reply"), "Pi says Friday [00:41].\n").unwrap();
+        let m = steve_meeting(&sb);
+        let mut s = sb.settings();
+        s.agent = Some("pi".into());
+        let (record, streamed) = collect(&s, &m, "When do we ship?", None);
+        let record = record.unwrap();
+        assert_eq!(record.answer, "Pi says Friday [00:41].");
+        assert_eq!(record.agent, "pi");
+        assert_eq!(record.agent_name, "Pi");
+        assert_eq!(streamed, "Pi says Friday [00:41].\n");
+        let argv = std::fs::read_to_string(sb.out().join("pi.argv")).unwrap();
+        let argv: Vec<&str> = argv.lines().collect();
+        assert_eq!(argv[0], "--print");
+        assert!(argv.contains(&"--no-tools") && argv.contains(&"--no-mcp"));
+        assert!(argv.contains(&"--no-extensions") && argv.contains(&"--no-context-files"));
+        assert_eq!(*argv.last().unwrap(), runner::PI_INSTRUCTION);
+        let prompt = std::fs::read_to_string(sb.out().join("pi.prompt")).unwrap();
+        assert!(
+            prompt.contains("[00:41] Steve: We ship on Friday."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Question: When do we ship?"), "{prompt}");
     }
 
     #[test]

@@ -307,12 +307,14 @@ The summary comes from the [meeting assistant](#the-meeting-assistant-and-consen
 
 1. `[meeting.assistant] agent` in config.
 2. Otherwise the Omarchy default agent (`omarchy-default-agent`), when that command exists. Voxtype works the same without Omarchy.
-3. Otherwise a supported agent CLI found on PATH.
+3. Otherwise a supported agent CLI found on PATH: Claude Code or Pi. With both found and neither allowed yet, the consent prompt asks which to use.
 
 | Agent | Support |
 |-------|---------|
 | Claude Code (`claude`) | Supported, no tools: `claude -p --tools "" --strict-mcp-config ...` |
 | Codex (`codex`) | Supported when named in config or as the Omarchy default, and only with bubblewrap (`bwrap`) installed: `codex exec` with its shell and app tools disabled and a read-only sandbox, run inside a bwrap jail. Its command tool cannot be switched off, so the jail is what keeps it away from your files: it sees `/usr`, the codex install, a few `/etc` files for DNS and TLS, and `~/.codex/auth.json` read-only, and nothing else from your home. It is never picked from PATH on its own |
+| Pi (`pi`) | Supported, no tools: `pi --print --no-tools --no-mcp --no-extensions --no-skills --no-context-files --no-session ...`, with the prompt attached as a file. Its answer arrives whole rather than streaming |
+| OpenCode (`opencode`) | Not supported: `opencode run` has no flag that turns its tools off, and its agents allow shell commands and web fetches, so even a filesystem jail could not keep a transcript from leaving the machine |
 | Hermes (`hermes`) | Not supported: its one-shot mode loads tools and auto-approves them, with no documented way to turn them all off |
 
 The first time transcripts would go to an agent, voxtype asks once ("Send to Claude / Use a local model / Not now") and remembers the answer per agent. Without a terminal to ask on, `ask` and `summarize` refuse with a message naming the command that allows it:
@@ -457,8 +459,8 @@ Ollama runs entirely on your machine. No transcript data leaves your computer. A
 
 ```toml
 [meeting.assistant]
-# Agent for ask and summaries: "claude" or "codex".
-# Unset: the Omarchy default agent, then claude found on PATH.
+# Agent for ask and summaries: "claude", "codex" or "pi".
+# Unset: the Omarchy default agent, then claude or pi found on PATH.
 # agent = "claude"
 
 # Never send transcripts to an agent; use the local Ollama model.
