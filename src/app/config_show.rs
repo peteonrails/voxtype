@@ -41,6 +41,7 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     let _ = writeln!(s, "  retain_audio = {}", meeting.retain_audio);
     let _ = writeln!(s, "  max_duration_mins = {}", meeting.max_duration_mins);
     let _ = writeln!(s, "  show_view_on_start = {}", meeting.show_view_on_start);
+    let _ = writeln!(s, "  view_opacity = {}", meeting.view_opacity);
 
     let _ = writeln!(s, "\n[meeting.audio]");
     let _ = writeln!(s, "  mic_device = {:?}", meeting.audio.mic_device);

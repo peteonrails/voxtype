@@ -63,6 +63,7 @@ Scope {
         theme: shellTheme
         shown: root.open
         screen: root.screen
+        host: "standalone"
         onOpenRequested: root.open = true
         onCloseRequested: root.open = false
     }

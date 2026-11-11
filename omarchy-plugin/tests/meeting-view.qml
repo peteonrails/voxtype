@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import "plugin" as Plugin
 import "standalone" as Standalone
+import "standalone/voxtype-meetings" as VM
 
 // Driven by test-meeting-view.py. The meeting view runs under one of its two
 // hosts (__HOST__: "omarchy", the Settings plugin's Panel.qml, or
@@ -127,6 +128,12 @@ Item {
           else if (s === "agent-missing") tc.driveAgentMissing()
           else if (s === "old-voxtype") tc.driveOldVoxtype()
           else if (s === "copy") tc.driveCopy()
+          else if (s === "minimize") tc.driveMinimize()
+          else if (s === "minimize-autoopen") tc.driveMinimizeAutoOpen()
+          else if (s === "resize") tc.driveResize()
+          else if (s === "move") tc.driveMove()
+          else if (s === "opacity") tc.driveOpacity()
+          else if (s === "view-state") tc.driveViewState()
           else if (s === "line-edit") tc.driveLineEdit()
           else if (s === "line-delete") tc.driveLineDelete(false)
           else if (s === "line-delete-flag") tc.driveLineDelete(true)
@@ -282,11 +289,13 @@ Item {
       keyClick(Qt.Key_Return)
     }
 
-    function shot(name) {
+    function shot(name, wholeWindow) {
       if (__EVIDENCE__ === "") return
       var done = false
       wait(150)
-      view().grabToImage(function(result) {
+      // The window's content includes the busy backdrop behind the card.
+      var target = wholeWindow ? host.ctrl().window.shotItem : view()
+      target.grabToImage(function(result) {
         result.saveToFile(__EVIDENCE__ + "/" + (++tc.shotCount) + "-" + name + ".png")
         done = true
       })
@@ -1394,6 +1403,198 @@ Item {
       waitFor(function() { return menu.visible }, "menu")
       click(find(menu, "openMeetingFolder"), "Open meeting folder")
       wait(500)
+    }
+
+    // ------------------------------------------------------------ window
+
+    function placement() { return host.ctrl().placement }
+
+    // A known screen, so the math does not depend on the offscreen one.
+    function screen1600() {
+      placement().screenWidth = 1600
+      placement().screenHeight = 1000
+      placement().screenName = "DP-1"
+    }
+
+    function driveMinimize() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "minimizeButton"), "Minimize")
+      var pill = find(view(), "pill")
+      waitFor(function() { return pill.visible && placement().minimized }, "the pill")
+      var win = host.ctrl().window
+      check(win.implicitWidth === 300 && win.implicitHeight === 40, "pill-sized window: " + win.implicitWidth + "x" + win.implicitHeight)
+      check(host.viewOpen(), "the view is still open (the pill is the view)")
+      check(txt("pillState") === "Recording" && /^1:0\d$/.test(txt("pillElapsed")), "state and time: " + txt("pillState") + " " + txt("pillElapsed"))
+      check(txt("pillLine") === "Remote: The build went green overnight.", "last line: " + txt("pillLine"))
+      shot("pill", true)
+      click(find(view(), "pillDrag"), "the pill")
+      waitFor(function() { return !placement().minimized && shown(find(view(), "transcriptList")) }, "expanded by a click")
+
+      // `voxtype meeting view --minimize`, then `--expand`.
+      request({ window: "minimize" })
+      waitFor(function() { return placement().minimized }, "minimized by request")
+      request({ window: "expand" })
+      waitFor(function() { return !placement().minimized }, "expanded by request")
+      check(host.opens === 1, "one window throughout: " + host.opens)
+    }
+
+    function driveMinimizeAutoOpen() {
+      waitFor(function() { return feed().connected && feed().status === "idle" }, "feed connected")
+      openView()
+      click(find(view(), "minimizeButton"), "Minimize")
+      waitFor(function() { return placement().minimized }, "minimized")
+      ctl({ cmd: "start", title: "Design review" })
+      waitFor(function() { return !placement().minimized && feed().title === "Design review" }, "a meeting start expands the pill")
+      check(host.opens === 1, "no second window: " + host.opens)
+      waitFor(function() { return txt("meetingTitle") === "Design review" }, "the new meeting")
+    }
+
+    function driveResize() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      screen1600()
+      var p = placement()
+      check(p.cardWidth === 460 && p.left === 1600 - 460 - p.gap && p.handleOnLeft, "starts on the right edge: " + p.left)
+      var handle = find(view(), "resizeHandle")
+      // Drag the inner (left) edge 120 px out: wider, right side kept.
+      mousePress(handle, 4, 100)
+      mouseMove(handle, 4 - 120, 100)
+      mouseRelease(handle, 4 - 120, 100)
+      check(p.cardWidth === 580 && p.left + p.cardWidth === 1600 - p.gap, "wider to the left: " + p.cardWidth + " at " + p.left)
+      shot("wide", true)
+      // Clamped: never more than half the screen, never under 280 px.
+      p.resizeBy(-5000)
+      check(p.cardWidth === 800, "max is half the screen: " + p.cardWidth)
+      p.resizeBy(5000)
+      check(p.cardWidth === 280, "min 280: " + p.cardWidth)
+      p.endResize()
+      shot("narrow", true)
+      // Compact height: 40 % of the screen.
+      click(find(view(), "heightToggle"), "compact")
+      check(p.compact && !p.fullHeight && p.windowHeight === 400, "compact 400: " + p.windowHeight)
+      click(find(view(), "heightToggle"), "full")
+      check(!p.compact && p.fullHeight, "full height again")
+      // Reset position in the menu.
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return find(view(), "moreMenu").visible }, "menu")
+      click(find(view(), "resetPosition"), "Reset position")
+      check(p.x === -1 && !p.compact && p.cardWidth === 460 && p.left === 1600 - 460 - p.gap, "back to the default: " + p.left)
+    }
+
+    function driveMove() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      screen1600()
+      var p = placement()
+      click(find(view(), "heightToggle"), "compact, so it can move vertically")
+      var drag = find(view(), "headerDrag")
+      var x0 = p.left
+      var y0 = p.top
+      mousePress(drag, 60, 10)
+      mouseMove(drag, 60 - 500, 10 + 200)
+      check(p.left === x0 - 500 && p.top === y0 + 200, "moved by the drag: " + p.left + "," + p.top)
+      mouseRelease(drag, 60 - 500, 10 + 200)
+      check(p.left === x0 - 500 && p.top === y0 + 200, "nowhere near an edge, so no snap: " + p.left + "," + p.top)
+      // Within 24 px of an edge snaps onto it (a gap in).
+      p.moveBy(-(p.left - 25), 0)
+      p.endMove()
+      check(p.left === p.gap, "snapped to the left edge: " + p.left)
+      p.moveBy(1600 - p.cardWidth - p.left - 30, 0)
+      p.endMove()
+      check(p.left === 1600 - p.cardWidth - p.gap, "snapped to the right edge: " + p.left)
+      p.moveBy(0, -(p.top - 20))
+      p.endMove()
+      check(p.top === p.gap, "snapped to the top: " + p.top)
+      // Clamped to the screen however far it is dragged.
+      p.moveBy(-9999, 9999)
+      check(p.left === 0 && p.top === 1000 - p.windowHeight, "clamped: " + p.left + "," + p.top)
+      p.moveBy(300, -300)
+      p.endMove()
+      var want = { x: p.left, y: p.top, width: p.cardWidth, compact: p.compact }
+      // The card still takes clicks after a drag.
+      click(find(view(), "moreButton"), "More after a drag")
+      waitFor(function() { return find(view(), "moreMenu").visible }, "menu after a drag")
+      keyClick(Qt.Key_Escape)
+      check(!find(view(), "moreMenu").visible && host.viewOpen(), "Escape closes the menu")
+      // The drag needs no keyboard: the window never asked for it.
+      check(host.ctrl().window.keyboardPolicy === "none", "no keyboard for a drag: " + host.ctrl().window.keyboardPolicy)
+
+      // Remembered: a new instance (a restarted shell) reads it back.
+      wait(800)
+      var fresh = Qt.createQmlObject('import "standalone/voxtype-meetings"; MeetingPlacement {}', host)
+      fresh.host = p.host
+      fresh.screenWidth = 1600
+      fresh.screenHeight = 1000
+      fresh.screenName = "DP-1"
+      waitFor(function() { return fresh.loaded }, "state file read")
+      check(fresh.left === want.x && fresh.top === want.y && fresh.cardWidth === want.width && fresh.compact === want.compact,
+            "round trip: " + JSON.stringify({ x: fresh.left, y: fresh.top, w: fresh.cardWidth, c: fresh.compact }) + " vs " + JSON.stringify(want))
+      // Per output: another output starts from the default.
+      fresh.screenName = "HDMI-A-1"
+      wait(100)
+      check(fresh.x === want.x || fresh.saved["standalone:HDMI-A-1"] === undefined, "")
+      check(fresh.saved[p.host + ":HDMI-A-1"] === undefined, "nothing saved for another output")
+
+    }
+
+    function driveOpacity() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      waitFor(function() { return view().restingOpacity === 0.5 }, "view_opacity from config: " + view().restingOpacity)
+      // The pointer away from the card: translucent.
+      mouseMove(view(), -40, -40)
+      waitFor(function() { return !view().engaged && view().cardAlpha === 0.5 }, "translucent at rest: " + view().cardAlpha, 4000)
+      wait(500)
+      shot("translucent", true)
+      // Over the card: opaque at once.
+      mouseMove(view(), 100, 300)
+      waitFor(function() { return view().engaged && view().cardAlpha === 1.0 }, "opaque on hover")
+      check(host.ctrl().window.keyboardPolicy === "none", "hovering the card asks for no keyboard")
+      // Away again: still opaque for a moment, then back.
+      mouseMove(view(), -40, -40)
+      wait(400)
+      check(view().cardAlpha === 1.0, "lingers opaque")
+      waitFor(function() { return view().cardAlpha === 0.5 }, "eases back after the linger", 4000)
+      // Typing: opaque, and now the window asks for the keyboard.
+      tab("ask")
+      var field = find(find(view(), "askPane"), "askField")
+      click(field, "Ask field")
+      mouseMove(view(), -40, -40)
+      wait(2000)
+      check(view().cardAlpha === 1.0 && host.ctrl().window.keyboardPolicy === "on-demand", "opaque while typing, keyboard on demand: "
+            + view().cardAlpha + " " + host.ctrl().window.keyboardPolicy)
+      // Typing ends (here: focus moves elsewhere in the card).
+      view().forceActiveFocus()
+      waitFor(function() { return host.ctrl().window.keyboardPolicy === "none" }, "keyboard given back when typing ends")
+    }
+
+    FileView { id: stateFileView; path: __RUNTIME__ + "/meeting-view.state"; blockLoading: true; printErrors: false }
+    function viewState() {
+      stateFileView.reload()
+      try { return JSON.parse(stateFileView.text()) } catch (e) { return null }
+    }
+
+    function driveViewState() {
+      host.ctrl().stateHeartbeatMs = 300
+      waitFor(function() { var s = viewState(); return s && s.visible === false }, "written as not visible at start")
+      openView()
+      waitFor(function() { var s = viewState(); return s && s.visible === true && s.minimized === false }, "visible on show")
+      var s = viewState()
+      check(s.host === __HOST__ && s.pid > 1, "host and pid: " + JSON.stringify(s))
+      var first = s.updated_at
+      waitFor(function() { var t = viewState(); return t && t.updated_at > first }, "heartbeat while visible", 4000)
+      click(find(view(), "minimizeButton"), "Minimize")
+      waitFor(function() { var t = viewState(); return t && t.visible === true && t.minimized === true }, "minimized counts as visible")
+      click(find(view(), "pillDrag"), "expand")
+      waitFor(function() { var t = viewState(); return t && t.minimized === false }, "expanded")
+      var close = find(view(), "closeButton")
+      tc.parent = host
+      click(close, "Close")
+      waitFor(function() { var t = viewState(); return t && t.visible === false }, "not visible after close")
+      var closed = viewState().updated_at
+      wait(1500)
+      check(viewState().updated_at === closed, "no heartbeat while closed")
     }
 
     function driveAskError() {

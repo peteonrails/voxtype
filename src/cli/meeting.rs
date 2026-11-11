@@ -184,6 +184,14 @@ pub enum MeetingAction {
         /// Do not open the view (with --ask, the answer is a notification)
         #[arg(long)]
         no_open: bool,
+
+        /// Collapse the view to its pill (opening it as one if it is closed)
+        #[arg(long, conflicts_with = "expand")]
+        minimize: bool,
+
+        /// Expand the pill back to the full view
+        #[arg(long)]
+        expand: bool,
     },
     /// Generate an AI summary of a meeting
     ///

@@ -591,6 +591,10 @@ def main():
         print("true" if state.get("show_view_on_start", True) else "false")
         return 0
 
+    if args == ["config", "get", "meeting.view_opacity"]:
+        print(state.get("view_opacity", 0.8))
+        return 0
+
     if args[:3] == ["status", "--format", "json"]:
         if state.get("daemon_running"):
             print(json.dumps({"text": "", "alt": "idle", "class": "idle"}))
