@@ -2947,6 +2947,42 @@ impl Daemon {
             diarization: diarization_config,
         };
 
+        // Start capturing before anything loads. Building the meeting daemon
+        // loads the transcription model (a GGUF worker, seconds on a CPU) and
+        // the diarizer, and `meeting start` has already returned, so anyone
+        // who starts talking then lost the opening of the meeting. The
+        // capture buffers what arrives meanwhile, and the first chunk holds it.
+        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
+            "disabled" | "" => None,
+            other => Some(other),
+        };
+        let mut meeting_audio_config = self.config.audio.clone();
+        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
+        if !matches!(meeting_mic_device, "default" | "") {
+            tracing::info!(
+                "Meeting mic override: {} (dictation uses {})",
+                meeting_mic_device,
+                self.config.audio.device
+            );
+            meeting_audio_config.device = self.config.meeting.audio.mic_device.clone();
+        }
+        let mut capture = match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
+            Ok(capture) => capture,
+            Err(e) => {
+                tracing::error!("Failed to create meeting audio capture: {}", e);
+                return Err(crate::error::VoxtypeError::Audio(e));
+            }
+        };
+        if let Err(e) = capture.start().await {
+            tracing::error!("Failed to start meeting audio: {}", e);
+            return Err(crate::error::VoxtypeError::Audio(e));
+        }
+        if capture.has_loopback() {
+            tracing::info!("Dual audio capture: mic + loopback");
+        } else {
+            tracing::info!("Single audio capture: mic only");
+        }
+
         // Create event channel
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         self.meeting_event_rx = Some(rx);
@@ -2971,44 +3007,7 @@ impl Daemon {
                         };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
-
-                        // Start dual audio capture for meeting (mic + loopback)
-                        let loopback_device =
-                            match self.config.meeting.audio.loopback_device.as_str() {
-                                "disabled" | "" => None,
-                                other => Some(other),
-                            };
-                        let mut meeting_audio_config = self.config.audio.clone();
-                        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
-                        if !matches!(meeting_mic_device, "default" | "") {
-                            tracing::info!(
-                                "Meeting mic override: {} (dictation uses {})",
-                                meeting_mic_device,
-                                self.config.audio.device
-                            );
-                            meeting_audio_config.device =
-                                self.config.meeting.audio.mic_device.clone();
-                        }
-                        match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
-                            Ok(mut capture) => {
-                                if let Err(e) = capture.start().await {
-                                    tracing::error!("Failed to start meeting audio: {}", e);
-                                    let _ = daemon.stop().await;
-                                    return Err(crate::error::VoxtypeError::Audio(e));
-                                }
-                                if capture.has_loopback() {
-                                    tracing::info!("Dual audio capture: mic + loopback");
-                                } else {
-                                    tracing::info!("Single audio capture: mic only");
-                                }
-                                self.meeting_audio_capture = Some(capture);
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to create meeting audio capture: {}", e);
-                                let _ = daemon.stop().await;
-                                return Err(crate::error::VoxtypeError::Audio(e));
-                            }
-                        }
+                        self.meeting_audio_capture = Some(capture);
 
                         // Load GTCRN speech enhancer for echo cancellation
                         #[cfg(feature = "onnx-common")]
@@ -3058,12 +3057,14 @@ impl Daemon {
                     }
                     Err(e) => {
                         tracing::error!("Failed to start meeting: {}", e);
+                        let _ = capture.stop().await;
                         return Err(e);
                     }
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to create meeting daemon: {}", e);
+                let _ = capture.stop().await;
                 return Err(e);
             }
         }
