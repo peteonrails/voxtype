@@ -16,6 +16,8 @@ C.TextField {
   rightPadding: f.theme.padX
   topPadding: f.theme.md
   bottomPadding: f.theme.md
+  InputDemand { theme: f.theme; active: f.visible && f.enabled && (f.hovered || f.activeFocus) }
+
   background: Rectangle {
     radius: Math.min(f.theme.radius, 6)
     color: f.theme.alpha(f.theme.fg, 0.05)

@@ -2226,6 +2226,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Open the live meeting view in the Omarchy shell when a meeting starts.",
     ),
     spec(
+        "meeting.view_opacity",
+        "meeting",
+        "view_opacity",
+        KeyType::Float { min: 0.3, max: 1.0 },
+        "Meeting",
+        "Meeting view opacity",
+        "Background opacity of the meeting view while the pointer is elsewhere. Text stays opaque.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
@@ -3122,6 +3131,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
         "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
         "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
+        // Two places are all an opacity needs, and an f32 such as 0.8 would
+        // otherwise read back as 0.800000011920929.
+        "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),

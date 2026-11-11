@@ -68,6 +68,17 @@ Scenarios:
   export      More > Export (markdown) into Documents/Voxtype, then Open folder;
               Open meeting folder
   export-past an SRT export of a past meeting, and its folder
+  minimize    the pill (state, elapsed, last line), click to expand, the
+              --minimize/--expand requests
+  minimize-autoopen  a meeting start while minimized expands the one window
+  resize      the inner-edge handle (clamped 280 px to half the screen) and
+              compact height
+  move        dragging the header: margin math, clamping, edge snapping, and
+              the position surviving into a new instance from the state file
+  opacity     [meeting] view_opacity, opaque on hover and while typing, back
+              after the linger; the keyboard is asked for only while typing
+  view-state  meeting-view.state: visible, minimized, heartbeat, and the
+              close write
   ask-error   an ask that fails shows the error event's message
   summary-error  a summary that fails after the meeting shows its error
   autoopen    a meeting started elsewhere opens the closed view
@@ -101,7 +112,8 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
              "ask-error", "summary-error", "list-old", "cli-missing", "daemon-old", "agent-missing",
-             "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past")
+             "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
+             "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -114,19 +126,49 @@ FAKE_SOCK = h.HERE / "fake-meeting-sock.py"
 
 MEETING_WINDOW_OLD = """PanelWindow {
   id: window
-  anchors { top: true; right: true; bottom: true }
-  implicitWidth: 460
+  anchors { top: true; left: true; bottom: window.placement.fullHeight }
+  margins { top: window.placement.top; left: window.placement.left; bottom: window.placement.fullHeight ? window.placement.gap : 0 }
+  implicitWidth: window.placement.windowWidth
+  implicitHeight: window.placement.windowHeight
   color: "transparent"
   exclusionMode: ExclusionMode.Normal
   WlrLayershell.namespace: "voxtype-meetings"
   WlrLayershell.layer: WlrLayer.Top
-  WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+  WlrLayershell.keyboardFocus: window.theme.inputDemand > 0 ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
 """
+# A plain window of the card's size (full height is 780 here), over a busy
+# backdrop so a screenshot shows the translucency. The keyboard policy the
+# real window would ask for is kept as a property the driver can read.
 MEETING_WINDOW_NEW = """FloatingWindow {
   id: window
-  implicitWidth: 460
-  implicitHeight: 780
-  color: "black"
+  implicitWidth: window.placement.windowWidth
+  implicitHeight: window.placement.fullHeight ? 780 : window.placement.windowHeight
+  color: "#20242c"
+  readonly property string keyboardPolicy: window.theme.inputDemand > 0 ? "on-demand" : "none"
+  // The backdrop and the card in one item, for a screenshot of both.
+  readonly property alias shotItem: shotRoot
+  // Sized like the real window would be (an offscreen window keeps its first
+  // size), so a narrow card or the pill looks the way it will.
+  Item {
+    id: shotRoot
+    width: window.implicitWidth
+    height: window.implicitHeight
+    Grid {
+      width: 480
+      height: 800
+      columns: 6
+      Repeater {
+        model: 120
+        Rectangle {
+          width: 80
+          height: 40
+          color: ["#3b6ea5", "#a5503b", "#3ba56e", "#a59a3b", "#6e3ba5", "#3ba5a0"][(index + Math.floor(index / 6)) % 6]
+          Text { anchors.centerIn: parent; text: "Zoom call"; color: "white"; font.pixelSize: 11 }
+        }
+      }
+    }
+  }
+  Component.onCompleted: window.view.parent = shotRoot
 """
 
 MEETING_ID = "6f0c2a8e-1b7d-4c55-9a43-2d1e5f7b9c10"
@@ -193,6 +235,11 @@ INITIAL = {
     "line-delete": lambda: [running_meeting()],
     "line-delete-flag": lambda: [running_meeting()],
     "export": lambda: [running_meeting()],
+    "minimize": lambda: [running_meeting()],
+    "resize": lambda: [running_meeting()],
+    "move": lambda: [running_meeting()],
+    "opacity": lambda: [running_meeting()],
+    "view-state": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
 }
 
@@ -219,6 +266,7 @@ STATE = {
         dict(CODEX, supported=False, note="bwrap is not installed, so codex cannot run in its jail")]}},
     "old-voxtype": {"old": True},
     "line-delete-flag": {"delete_shape": "flag"},
+    "opacity": {"view_opacity": 0.5},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
 }
 
@@ -363,7 +411,7 @@ def run(scenario, host, shell, evidence):
                     "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot),
                     "FAKE_MEETING_DATA": str(data),
                     "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
-                    "XDG_DOCUMENTS_DIR": str(documents)}, timeout=120)
+                    "XDG_DOCUMENTS_DIR": str(documents), "XDG_STATE_HOME": str(r.root / "state")}, timeout=120)
         finally:
             with open(ctl, "a") as f:
                 f.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -438,7 +486,9 @@ def check_calls(scenario, calls, runtime_notes=""):
     """What the view ran, beyond what the driver saw on screen."""
     problems = []
     meeting = [c for c in calls if c[:1] == ["meeting"] and not read_only(c)]
-    config = [c for c in calls if c[:2] == ["config", "set"] or c[:2] == ["config", "get"]]
+    # Every open reads meeting.view_opacity; that is not what these check.
+    config = [c for c in calls if (c[:2] == ["config", "set"] or c[:2] == ["config", "get"])
+              and c != ["config", "get", "meeting.view_opacity"]]
     show_key = ["config", "get", "meeting.show_view_on_start"]
 
     def expect(actual, wanted, what):
@@ -501,7 +551,8 @@ def check_calls(scenario, calls, runtime_notes=""):
                         ["config", "set", "meeting.assistant.agent", "codex"],
                         ["config", "set", "meeting.assistant.local_only", "false"]], "config writes")
         expect(meeting, [], "meeting commands")
-    elif scenario in ("cli-missing", "daemon-old", "old-voxtype"):
+    elif scenario in ("cli-missing", "daemon-old", "old-voxtype", "minimize", "minimize-autoopen", "resize", "move",
+                      "opacity", "view-state"):
         pass
     elif scenario == "line-edit":
         expect(meeting, [["meeting", "edit", MEETING_ID, "2", "Yes, very loud and clear.", "--json"],

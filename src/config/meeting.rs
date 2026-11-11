@@ -73,6 +73,11 @@ pub struct MeetingConfig {
     #[serde(default = "default_true")]
     pub show_view_on_start: bool,
 
+    /// How opaque the meeting view's background is while the pointer is
+    /// elsewhere (0.3 to 1.0), so it reads as an overlay. Text stays opaque.
+    #[serde(default = "default_view_opacity")]
+    pub view_opacity: f32,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -117,6 +122,10 @@ pub struct MeetingAudioConfig {
     /// Lower values are more permissive; 0.0 disables the pre-transcription gate.
     #[serde(default = "default_meeting_vad_threshold")]
     pub vad_threshold: f32,
+}
+
+fn default_view_opacity() -> f32 {
+    0.8
 }
 
 fn default_mic_device() -> String {
@@ -388,6 +397,7 @@ impl Default for MeetingConfig {
             post_meeting_timeout_secs: default_post_meeting_timeout(),
             max_duration_mins: default_max_duration(),
             show_view_on_start: true,
+            view_opacity: default_view_opacity(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
@@ -413,6 +423,7 @@ mod tests {
         assert!(config.post_meeting_command.is_none());
         assert_eq!(config.post_meeting_timeout_secs, 300);
         assert!(config.show_view_on_start);
+        assert!((config.view_opacity - 0.8).abs() < f32::EPSILON);
     }
 
     #[test]

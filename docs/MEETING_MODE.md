@@ -469,6 +469,8 @@ The header shows the meeting title, how long it has been running, and whether it
 
 Ask and Summary show the agent in use ("Claude", or "Local (llama3.2)"); click it to pick another agent, switch to **Local model only**, or (in Omarchy) open the settings. The first time an agent is needed the view asks whether to send meeting transcripts to it, with **Use a local model instead** and **Not now**.
 
+The card is an overlay: its background is translucent (`[meeting] view_opacity`, 0.8 by default) and turns opaque while the pointer is on it or you are typing in it. It never takes keyboard focus from your call unless you click into one of its text fields. Drag the header to move it anywhere; it snaps to a screen edge when dropped near one. Drag its inner edge to make it narrower or wider (280 px up to half the screen), and use **↥/↧** for full height or a compact 40 %. **–** shrinks it to a small pill showing the state, the time and the last line; click the pill to bring the card back. A meeting that starts while it is a pill expands it. Position and size are remembered per screen in `~/.local/state/voxtype/meeting-view.json`; **⋯ → Reset position and size** puts it back on the right edge. `voxtype meeting view --minimize` and `--expand` do the same from a keybinding.
+
 Between updates the view says "Listening…": lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word.
 
 When the meeting ends its transcript stays on screen marked **Ended**, with its length and end time, so you can still fix lines, name speakers, take notes and ask questions after the call. It stays until a new meeting starts (**Start meeting** is offered there too), you go **‹ Meetings** back to the list, or you close the view.

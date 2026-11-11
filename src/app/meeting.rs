@@ -473,6 +473,8 @@ pub(crate) async fn run_meeting_command(
             tab,
             ask,
             no_open,
+            minimize,
+            expand,
         } => {
             let path = config::Config::runtime_dir().join("meeting-view.request");
             let request = ViewRequest {
@@ -482,6 +484,13 @@ pub(crate) async fn run_meeting_command(
                 tab: tab.as_deref().or(ask_id.as_ref().map(|_| "ask")),
                 ask: ask.as_deref(),
                 open: !no_open,
+                window: if minimize {
+                    Some("minimize")
+                } else if expand {
+                    Some("expand")
+                } else {
+                    None
+                },
             };
             write_view_request(&path, &request)?;
             if no_open && ask.is_none() {
@@ -961,6 +970,8 @@ struct ViewRequest<'a> {
     tab: Option<&'a str>,
     ask: Option<&'a str>,
     open: bool,
+    /// "minimize" or "expand".
+    window: Option<&'a str>,
 }
 
 /// Write the request every meeting view host watches (see
@@ -978,6 +989,7 @@ fn write_view_request(path: &std::path::Path, req: &ViewRequest) -> std::io::Res
         "tab": req.tab,
         "ask": req.ask,
         "open": req.open,
+        "window": req.window,
         "requested_at": requested_at,
     });
     if let Some(parent) = path.parent() {
@@ -1057,6 +1069,7 @@ mod tests {
             tab: Some("ask"),
             ask: Some("last-5m"),
             open: false,
+            window: Some("minimize"),
         };
         write_view_request(&path, &req).unwrap();
         let req: serde_json::Value =
@@ -1065,6 +1078,7 @@ mod tests {
         assert_eq!(req["tab"], "ask");
         assert_eq!(req["ask"], "last-5m");
         assert_eq!(req["ask_id"], "q1");
+        assert_eq!(req["window"], "minimize");
         assert_eq!(req["open"], false);
         assert!(req["requested_at"].as_u64().unwrap() > 0);
 
@@ -1075,6 +1089,7 @@ mod tests {
             tab: None,
             ask: None,
             open: true,
+            window: None,
         };
         write_view_request(&path, &req).unwrap();
         let req: serde_json::Value =

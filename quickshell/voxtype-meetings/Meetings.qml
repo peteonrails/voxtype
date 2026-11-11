@@ -40,6 +40,29 @@ Item {
   property var screen: null
   // The host can open voxtype's settings ("Change in Settings").
   property bool canOpenSettings: false
+  // "omarchy" or "standalone": named in meeting-view.state, and positions
+  // are remembered per host.
+  property string host: "standalone"
+
+  // Where the card is, how big, and whether it is the pill. Kept here, not in
+  // the window, so it outlives closing the view.
+  readonly property alias placement: placement
+  MeetingPlacement {
+    id: placement
+    host: root.host
+    gap: root.theme.margin
+  }
+
+  // Collapse to the pill, or back to the card (opening the view if it is
+  // not up). One window either way.
+  function minimize() {
+    if (root.window) root.window.view.closeOverlays()
+    placement.minimized = true
+  }
+  function expand() {
+    placement.minimized = false
+    if (!root.shown) root.openRequested()
+  }
 
   signal openRequested()
   signal closeRequested()
@@ -235,7 +258,11 @@ Item {
     // `[meeting] show_view_on_start`, read at the moment it is needed so a
     // change made with `voxtype config set` applies to the next meeting.
     onShowOnStartRead: function(show) {
-      if (show && !root.panelOpen) root.openRequested()
+      if (!show) return
+      // A pill expands; a closed view opens, unless the host has something
+      // else open.
+      if (root.shown) placement.minimized = false
+      else if (!root.panelOpen) root.openRequested()
     }
   }
 
@@ -247,7 +274,7 @@ Item {
   Connections {
     target: feed
     function onMeetingStarted() {
-      if (!root.panelOpen && !root.shown) meetingCli.readShowOnStart()
+      if (root.shown ? placement.minimized : !root.panelOpen) meetingCli.readShowOnStart()
     }
   }
 
@@ -414,20 +441,112 @@ Item {
       root.showTab("ask")
       assistant.askChip(String(req.ask))
     }
-    if (req.open !== false && !root.shown) root.openRequested()
+    if (req.window === "minimize") {
+      root.minimize()
+      if (!root.shown) root.openRequested()
+      return
+    }
+    if (req.window === "expand") {
+      root.expand()
+      return
+    }
+    if (req.open !== false) {
+      // Opening a minimized view means wanting to see it.
+      placement.minimized = false
+      if (!root.shown) root.openRequested()
+    }
   }
 
   onShownChanged: {
+    root.writeViewState()
     // A finished meeting stays on screen until the view is closed.
     if (!root.shown) {
       root.commitDelete()
       feed.clearEnded()
+      placement.minimized = false
       return
     }
     root.actionError = ""
     feed.connectNow()
     assistant.fetchStatus()
     root.refreshList()
+    opacityProc.read()
+  }
+
+  // ------------------------------------------------------------ view state
+  //
+  // $XDG_RUNTIME_DIR/voxtype/meeting-view.state tells the daemon the view is
+  // on screen, so it can leave out its meeting notifications:
+  //   {"visible": bool, "minimized": bool, "host": "omarchy"|"standalone",
+  //    "pid": <this shell's pid>, "updated_at": <unix seconds>}
+  // Rewritten whole (tmp and rename) on every show, hide and minimize, and
+  // every `stateHeartbeatMs` while visible; a reader treats a dead pid or an
+  // `updated_at` older than 30 s as not visible, which covers a crash. A
+  // minimized pill is visible.
+
+  property int stateHeartbeatMs: 10000
+  // The shell's pid: the parent of a `sh` this process starts.
+  property int shellPid: 0
+  property bool stateReady: false
+
+  function writeViewState() {
+    if (!root.stateReady) return
+    var state = { visible: root.shown, minimized: root.shown && placement.minimized, host: root.host,
+                  pid: root.shellPid, updated_at: Math.floor(Date.now() / 1000) }
+    stateFile.setText(JSON.stringify(state) + "\n")
+  }
+
+  Connections {
+    target: placement
+    function onMinimizedChanged() { root.writeViewState() }
+  }
+
+  Timer {
+    interval: root.stateHeartbeatMs
+    repeat: true
+    running: root.shown && root.stateReady
+    onTriggered: root.writeViewState()
+  }
+
+  FileView {
+    id: stateFile
+    path: root.runtimeDir + "/meeting-view.state"
+    printErrors: false
+    atomicWrites: true
+  }
+
+  Process {
+    id: pidProc
+    running: true
+    command: ["sh", "-c", 'mkdir -p "$1"; echo $PPID', "sh", root.runtimeDir]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.shellPid = Number(String(text || "").trim()) || 0
+    }
+    onExited: {
+      root.stateReady = true
+      root.writeViewState()
+    }
+  }
+
+  // ------------------------------------------------------------ opacity
+
+  // `[meeting] view_opacity`, read each time the view opens; a voxtype
+  // without the key leaves the default.
+  property real viewOpacity: 0.8
+  MeetingProcess {
+    id: opacityProc
+    property string out: ""
+    function read() {
+      if (opacityProc.running || opacityProc.startPending) return
+      opacityProc.out = ""
+      opacityProc.launch([root.bin, "config", "get", "meeting.view_opacity"])
+    }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: opacityProc.out = String(text || "").trim() }
+    onExited: function(code) {
+      var v = Number(opacityProc.out)
+      if (code === 0 && isFinite(v) && v > 0) root.viewOpacity = Math.max(0.3, Math.min(1.0, v))
+    }
   }
 
   // ------------------------------------------------------------ requests
@@ -486,15 +605,28 @@ Item {
   // Loaded by URL, not as an inline component: a PanelWindow type needs the
   // Wayland backend just to compile, and the Settings panel's offscreen tests
   // (and any session without layer-shell) must still load the plugin.
+  // The window gets the theme and the placement as it is created, so its
+  // first layout already has them.
   Loader {
     id: windowLoader
     active: root.shown
-    source: active ? Qt.resolvedUrl("MeetingWindow.qml") : ""
+    onActiveChanged: if (windowLoader.active) windowLoader.load()
+    Component.onCompleted: if (windowLoader.active) windowLoader.load()
+    function load() {
+      var props = { theme: root.theme, placement: placement }
+      if (root.screen) props.screen = root.screen
+      windowLoader.setSource(Qt.resolvedUrl("MeetingWindow.qml"), props)
+    }
     onLoaded: {
       var w = windowLoader.item
-      w.theme = root.theme
       if (root.screen) w.screen = Qt.binding(function() { return root.screen })
+      // The output's size and name, for clamping, snapping and the
+      // per-output position.
+      placement.screenWidth = Qt.binding(function() { return w.screen ? w.screen.width : 1920 })
+      placement.screenHeight = Qt.binding(function() { return w.screen ? w.screen.height : 1080 })
+      placement.screenName = Qt.binding(function() { return w.screen && w.screen.name ? String(w.screen.name) : "" })
       var view = w.view
+      view.restingOpacity = Qt.binding(function() { return root.viewOpacity })
       view.feed = feed
       view.assistant = assistant
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
@@ -532,6 +664,8 @@ Item {
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }
+    function onMinimizeRequested() { root.minimize() }
+    function onExpandRequested() { root.expand() }
     function onCopyRequested(text, key) { root.copyText(text, key) }
     function onEditTextRequested(segId, text) { root.editText(segId, text) }
     function onDeleteLineRequested(segId) { root.deleteLine(segId) }

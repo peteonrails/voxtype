@@ -988,7 +988,8 @@ Item {
     id: meetings
     bin: cli.bin
     shown: root.opened && root.view === "meetings"
-    panelOpen: root.opened
+    // Settings open: a meeting start does not take it over.
+    panelOpen: root.opened && root.view !== "meetings"
     onOpenRequested: root.requestOpen(JSON.stringify({ view: "meetings" }))
     onCloseRequested: root.dismiss()
     // "Change in Settings" on the agent chip: the Meeting section.

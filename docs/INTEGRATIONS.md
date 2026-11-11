@@ -447,6 +447,22 @@ meeting a crash left open. To act once a meeting is finished, use
 which runs after the final rewrite and gets the folder and the manifest's
 path in `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST`.
 
+### Is the meeting view on screen: `meeting-view.state`
+
+The meeting view (in the Omarchy plugin or voxtype's Quickshell shell) keeps
+`$XDG_RUNTIME_DIR/voxtype/meeting-view.state` current, so other programs (the
+daemon's meeting notifications) can stay quiet while it shows the meeting:
+
+```json
+{"visible": true, "minimized": false, "host": "omarchy", "pid": 12345, "updated_at": 1794434659}
+```
+
+It is replaced whole (written to a temporary file, then renamed) on every
+show, hide and minimize, and every 10 seconds while visible. A minimized pill
+counts as visible. Closing the view writes `"visible": false`. If the shell
+dies the file is left behind, so treat it as visible only while `pid` is alive
+and `updated_at` is under 30 seconds old.
+
 ## What Voxtype will not do for you
 
 Voxtype does not edit your configuration, and asks that you not edit its own:

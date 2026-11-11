@@ -140,6 +140,7 @@ Item {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: chip.beginEdit()
+              InputDemand { theme: root.theme; active: chipMouse.containsMouse }
             }
           }
 
@@ -320,6 +321,8 @@ Item {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.speakerClicked(line, speakerLabel)
+                    // The chooser has a "New speaker…" field.
+                    InputDemand { theme: root.theme; active: speakerMouse.containsMouse }
                   }
                 }
 
@@ -343,17 +346,21 @@ Item {
                 visible: !line.editing
                   && (lineHover.containsMouse || editAction.hovered || noteAction.hovered || deleteAction.hovered)
 
+                // These open a text field, so they ask for the keyboard on
+                // hover: the click that opens the field then focuses it.
                 LineAction {
                   id: editAction
                   objectName: "lineEditButton"
                   text: "Edit"
                   onActivated: line.beginEdit()
+                  InputDemand { theme: root.theme; active: editAction.hovered }
                 }
                 LineAction {
                   id: noteAction
                   objectName: "lineNoteButton"
                   text: line.marked ? "Edit note" : "Add note"
                   onActivated: root.noteClicked(line, noteAction)
+                  InputDemand { theme: root.theme; active: noteAction.hovered }
                 }
                 LineAction {
                   id: deleteAction
@@ -390,6 +397,7 @@ Item {
               Keys.onEnterPressed: function(event) { line.commitEdit() }
               Keys.onEscapePressed: line.cancelEdit()
               onActiveFocusChanged: if (!activeFocus && line.editing) line.cancelEdit()
+              InputDemand { theme: root.theme; active: editField.visible && (editField.hovered || editField.activeFocus) }
             }
 
             Text {

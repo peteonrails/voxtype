@@ -73,6 +73,7 @@ Item {
           border.color: area.activeFocus ? root.theme.accent : root.theme.alpha(root.theme.fg, 0.2)
         }
         onTextChanged: if (root.assistant) root.assistant.editNotes(area.text)
+        InputDemand { theme: root.theme; active: area.visible && (area.hovered || area.activeFocus) }
         Component.onCompleted: if (root.assistant) area.text = root.assistant.notes
       }
     }

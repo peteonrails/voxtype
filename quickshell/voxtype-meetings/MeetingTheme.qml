@@ -40,5 +40,9 @@ QtObject {
   // Space between the card and the screen edge.
   property int margin: 10
 
+  // Text inputs under the pointer or with focus (InputDemand): the window
+  // takes the keyboard only while this is above zero.
+  property int inputDemand: 0
+
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 }

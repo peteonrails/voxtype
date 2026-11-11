@@ -3818,6 +3818,18 @@ Open the live meeting view when a meeting starts, however it was started: `voxty
 voxtype config set meeting.show_view_on_start false
 ```
 
+### view_opacity
+
+**Type:** Float (0.3 to 1.0)
+**Default:** `0.8`
+**Required:** No
+
+How opaque the meeting view's background is, so it reads as an overlay on the window behind it. The text stays fully opaque, and the card turns fully opaque while the pointer is on it or you are typing in it, easing back about 1.5 seconds later. `1.0` keeps it solid.
+
+```bash
+voxtype config set meeting.view_opacity 0.6
+```
+
 ---
 
 ## [meeting.audio]
