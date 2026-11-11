@@ -1494,6 +1494,22 @@ problem from a missing `playerctl`. Some players (notably certain browsers)
 report unreliable MPRIS status; skip those with
 `pause_media_ignored_players`.
 
+## OSD looks different after upgrading, or styles do nothing
+
+Check which frontend is running and why:
+
+```bash
+voxtype setup osd --status
+```
+
+- **The OSD changed look after an upgrade.** Configs without `[osd] frontend` now default to `auto`, which prefers the Quickshell OSD when it can run. To get the old look back: `voxtype config set osd.frontend gtk4`, then `systemctl --user restart voxtype`.
+- **Picking a style in Settings changes nothing.** Quickshell styles only apply to the Quickshell OSD. If `Active:` says `gtk4` or `native`, either your config names that frontend (switch with `voxtype setup osd --use-auto`) or Quickshell can't run here. The `Reason:` line says which: `voxtype-osd-quickshell is not installed`, Quickshell is not on PATH (install the `quickshell` package), or no Wayland session.
+- **`Reason:` says `gtk4 OSD installed but libgtk4-layer-shell is missing`.** Your distro doesn't package gtk4-layer-shell (Ubuntu 24.04, for example), so voxtype uses the native OSD instead. Install gtk4-layer-shell if your distro has it, or install Quickshell.
+- **`Active: none`.** No OSD frontend is installed, or none can reach a display. Install a frontend, or set `[osd] enabled = false` to silence the warning.
+- **The Settings panel keeps saying "Changes take effect after restart".** It clears after any daemon restart, including `systemctl --user restart voxtype` and `voxtype setup model`, within about five seconds while the panel is open, or the next time you open it.
+
+The choice is made when the daemon starts, so restart it after installing Quickshell or gtk4-layer-shell, or after changing `osd.frontend`.
+
 ## Quickshell OSD Issues
 
 These apply when `[osd] frontend = "quickshell"`. See the

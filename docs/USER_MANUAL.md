@@ -186,6 +186,26 @@ settings application; `voxtype-osd-gtk4` is an OSD, not settings. On a headless 
 run `voxtype configure` directly in your terminal. Concurrent app-open requests
 are coalesced, and Quickshell uses idempotent `open` rather than `toggle`.
 
+## Which OSD frontend runs
+
+New installs use `[osd] frontend = "auto"`, which runs the Quickshell OSD where Quickshell and a Wayland session are available, GTK4 otherwise, and the native frontend as a last resort. Quickshell styles from the style picker apply only to the Quickshell OSD.
+
+```bash
+voxtype setup osd --status          # configured frontend, active frontend, and why
+voxtype setup osd --status --json   # the same for scripts and the Settings panel
+```
+
+If your config names `gtk4` or `native` and Quickshell can run, the Settings panel offers to switch, at the top of its OSD and Engine sections. **Switch** runs `voxtype setup osd --use-auto` and restarts voxtype. **Not now** runs `voxtype setup osd --dismiss-offer`, and the panel stops asking. From the command line:
+
+```bash
+voxtype setup osd --use-auto && systemctl --user restart voxtype   # switch
+voxtype setup osd --dismiss-offer                                  # keep your frontend
+```
+
+The dismissal is stored in `~/.local/state/voxtype/osd-offer.json`, not in config.toml, and `--use-auto` clears it again. If you pick a style in the panel while another OSD is in use, the panel also sets the frontend to `auto` when Quickshell is available and tells you so. If Quickshell is not available, it changes nothing and says why.
+
+A setting left unset shows "default" in the Settings panel. For example, `parakeet.threads` unset uses 4 threads.
+
 ## Omarchy Settings panel
 
 The deb, rpm and AUR packages include a Settings panel for Omarchy's shell,

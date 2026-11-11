@@ -4416,10 +4416,20 @@ the `voxtype-osd` wrapper launches via `[osd] frontend`.
 
 ```toml
 [osd]
-frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
+frontend = "auto"           # Default. Picks the best frontend this system can run.
+# frontend = "gtk4"         # GTK4 + layer-shell (voxtype-osd-gtk4).
 # frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
 # frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
 ```
+
+`auto` resolves in this order when the daemon starts:
+
+1. `quickshell` when `voxtype-osd-quickshell` is installed (next to the voxtype binary or on PATH), `qs` or `quickshell` is on PATH, and a Wayland session is present
+2. `gtk4` when `voxtype-osd-gtk4` is installed, its libraries (gtk4-layer-shell and GTK 4) load, and a display (Wayland or X11) is present
+3. `native` when `voxtype-osd-native` is installed
+4. otherwise no OSD; the daemon logs why and keeps running
+
+The daemon logs its choice and the reason once at startup. `voxtype setup osd --status` shows the same thing without starting anything, and `voxtype status --format json --extended` reports it as `osd_frontend_active`. An explicit `gtk4`, `native` or `quickshell` is never changed: if that binary is missing, the launcher falls back to whichever frontend is installed, as before. `VOXTYPE_OSD_FRONTEND` overrides the config value. Configs written before 1.2.2 that say `frontend = "gtk4"` keep GTK4. Configs without the key now get `auto`.
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
 find it:
