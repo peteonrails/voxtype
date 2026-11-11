@@ -17,6 +17,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Labeling Speakers](#labeling-speakers)
   - [AI Summarization](#ai-summarization)
   - [Deleting Meetings](#deleting-meetings)
+- [Meeting Detection](#meeting-detection)
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
@@ -227,6 +228,67 @@ voxtype meeting delete <meeting-id> --force
 ```
 
 Permanently deletes the meeting record, transcript, and any associated audio files. The `--force` flag is required to confirm deletion.
+
+---
+
+## Meeting Detection
+
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?" with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
+
+Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
+
+```toml
+[meeting]
+enabled = true
+
+[meeting.detect]
+enabled = true          # unset: on for Omarchy, off elsewhere
+auto_record_apps = []   # e.g. ["Zoom"] to record Zoom calls without asking
+debounce_secs = 5
+```
+
+The setting is read when the daemon starts, so restart it after changing it.
+
+### How calls are recognized
+
+- **The microphone.** A call app opening a PipeWire capture stream is the main signal. Native clients (Zoom, `teams-for-linux`) count on that alone.
+- **The window title.** A browser opens the microphone for many things, so a browser's stream only counts when a window title confirms a call: "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web. Titles come from Hyprland; on other compositors browser calls are not detected.
+- **Voxtype's own capture never counts**, nor do other dictation apps or the camera-effects virtual microphone.
+
+### When it prompts
+
+- Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt.
+- Not while a meeting is already recording.
+- Not while you are dictating: the prompt waits until dictation ends.
+- When the call app releases the microphone while a meeting is recording, a second notification offers **Stop meeting**. Voxtype never stops a meeting on its own.
+
+Detection never records by itself, except for apps you list in `auto_record_apps`.
+
+### Checking what it sees
+
+```bash
+# Read the current state once and print what would be prompted and why
+voxtype meeting suggest --dry-run
+
+# Keep watching and print each decision as calls start and end
+voxtype meeting suggest --dry-run --watch
+```
+
+Neither shows a notification or starts anything. Example output during a Meet call in Chromium:
+
+```text
+Meeting detection in the daemon: on (default on Omarchy)
+windows: 4 from Hyprland
+mic streams: 3
+  ignored mic stream 105 (PipeWire ALSA [hex]): another dictation app
+  ignored mic stream 129 (Camera Effects): camera-effects virtual mic
+evidence: Chromium has the mic (stream 211) and window "Meet - abc-defg-hij - Chromium" matches
+would prompt: Record "Meet - abc-defg-hij"? (Google Meet)
+```
+
+Without `--dry-run`, `voxtype meeting suggest` runs the detector in the foreground with real prompts. It refuses while the daemon is already prompting.
+
+To add another call service, see `apps` under [`[meeting.detect]`](CONFIGURATION.md#meetingdetect).
 
 ---
 
