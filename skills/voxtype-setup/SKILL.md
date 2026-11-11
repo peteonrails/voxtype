@@ -223,8 +223,22 @@ What to tell the user about it:
 
 ### Dictation history (on and off)
 
-Voxtype 1.2 has no built-in transcript history. The post-process command can
-keep one. Ask first, and tell the user plainly that the log will contain
+Built-in transcript history is on the roadmap
+([#209](https://github.com/peteonrails/voxtype/issues/209)). Check whether this
+version already has it before doing anything else:
+
+```bash
+voxtype config schema | grep -i history
+voxtype --help | grep -i history
+```
+
+If either shows a history setting or command, use that and skip the rest of
+this section: read its `--help` or `voxtype config schema` entry to turn it on
+and off, and tell the user where it stores transcripts.
+
+Until then, the post-process command can keep a history. Tell the user it is a
+stopgap that built-in history will replace, and that they can switch it off
+once they upgrade. Ask first, and tell them plainly that the log will contain
 everything they dictate, including anything sensitive.
 
 To turn it on, install this script as `~/.local/bin/voxtype-history`:
