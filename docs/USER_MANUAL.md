@@ -179,6 +179,14 @@ control, **Start Recording** / **Stop Recording**, and **Cancel** is available w
 recording or transcribing. Starting another recording is disabled during inference.
 The tray uses the existing daemon control protocol, not a second recording daemon.
 
+Below the dictation entries are the meeting controls. With `[meeting] enabled = true`
+the tray offers **Start Meeting**, which runs `voxtype meeting start` with the default
+title. While a meeting records, it offers **Stop Meeting** and **Pause Meeting**
+(**Resume Meeting** while paused), and shows a greyed **Finishing Meeting...** while the
+last chunks are transcribed. The entries follow meetings started anywhere, including
+`voxtype meeting start` and the detection prompt. Start Meeting is greyed out while you
+are dictating, and when meeting mode is off it reads **Start Meeting (meeting mode is off)**.
+
 The tray and desktop entry share `voxtype-configure-launcher`: it prefers the
 available integrated Quickshell frontend, then a separately installed graphical
 settings desktop entry, then the terminal TUI. The current source ships no GTK

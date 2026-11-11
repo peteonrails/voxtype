@@ -89,6 +89,8 @@ The `--title` flag is optional. If omitted, the meeting is named by its date and
 
 Only one meeting can run at a time. Starting a second meeting while one is active will fail.
 
+On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs.
+
 ### Stopping a Meeting
 
 ```bash
