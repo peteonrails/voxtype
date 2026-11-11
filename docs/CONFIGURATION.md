@@ -3833,15 +3833,21 @@ Enable speaker diarization to identify different speakers in meeting transcripts
 
 ### backend
 
-**Type:** String (`"simple"`, `"ml"`, `"remote"`)
+**Type:** String (`"simple"`, `"ml"`, `"hybrid"`, `"subprocess"`)
 **Default:** `"simple"`
 **Required:** No
+**CLI:** `voxtype meeting start --diarization <backend>` (or `VOXTYPE_MEETING_DIARIZATION`) for one meeting
 
 Diarization backend to use:
 
 - `"simple"` - Uses audio source (mic vs loopback) to attribute speech as "You" or "Remote". No model download required.
 - `"ml"` - ONNX-based speaker embeddings (ECAPA-TDNN) to identify individual remote speakers. The model is downloaded automatically on first use. **Experimental:** speaker clustering works best with longer speech segments; short segments may produce too many unique speaker IDs.
-- `"remote"` - Remote diarization API.
+- `"hybrid"` - Your microphone is always "You"; ECAPA-TDNN clustering runs only over system audio and names the remote participants. One remote voice is "Remote"; once a second voice speaks, they are "Remote 1", "Remote 2" and so on, and segments already saved as "Remote" (with any label given to it) become "Remote 1". Echo of the call on your microphone cannot become a speaker. Requires the `ml-diarization` feature (the ONNX binaries) and the same model as `"ml"`; otherwise it falls back to `"simple"` with a warning, and `--diarization hybrid` on the command line is refused.
+- `"subprocess"` - Same as `"ml"` in a separate process for memory isolation.
+
+```bash
+voxtype config set meeting.diarization.backend hybrid
+```
 
 ### max_speakers
 
@@ -3850,6 +3856,14 @@ Diarization backend to use:
 **Required:** No
 
 Maximum number of speakers to detect.
+
+### similarity_threshold
+
+**Type:** Float
+**Default:** `0.25`
+**Required:** No (used by the `"ml"` and `"hybrid"` backends)
+
+Cosine similarity a voice must reach to join an existing speaker. Lower merges more (fewer speakers), higher splits more. 0.20 to 0.30 is the useful range. If one remote voice shows up as both "Remote 1" and "Remote 2" under `"hybrid"`, lower it; if two people share one name, raise it.
 
 ---
 

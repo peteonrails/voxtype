@@ -19,6 +19,9 @@ pub enum MeetingAction {
         /// `simple` attributes by audio source (You vs Remote) — best for 1:1 calls.
         /// `ml` uses ONNX speaker embeddings for multi-speaker meetings (requires
         /// the `ml-diarization` feature and the ECAPA-TDNN model).
+        /// `hybrid` keeps the microphone as You and clusters only the loopback,
+        /// naming remote voices Remote 1, Remote 2 (one remote voice stays
+        /// Remote). Needs the same feature and model as `ml`.
         ///
         /// When omitted, falls back to `[meeting.diarization].backend` in config.
         #[arg(
@@ -97,18 +100,20 @@ pub enum MeetingAction {
     ///
     /// Assigns a human-readable name to a speaker the transcript contains:
     /// "You" and "Remote" with simple diarization, "SPEAKER_00" and so on
-    /// with ML diarization. Works while the meeting is still recording.
+    /// with ML diarization, "You", "Remote 1", "Remote 2" with hybrid.
+    /// Works while the meeting is still recording.
     /// Giving two speakers the same name merges them in exports.
     #[command(after_help = "Examples:\n  \
         voxtype meeting label latest You Pete\n  \
         voxtype meeting label latest SPEAKER_01 Dana\n  \
+        voxtype meeting label latest 'Remote 2' Dana\n  \
         voxtype meeting label latest Dana 'Dana Smith'")]
     Label {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,
 
         /// Speaker to label: an ID from the transcript (You, Remote,
-        /// SPEAKER_00 or just 0), or a name already assigned
+        /// Remote 1, SPEAKER_00 or just 0), or a name already assigned
         speaker_id: String,
 
         /// Human-readable label to assign
@@ -146,6 +151,19 @@ mod tests {
                 action: MeetingAction::Start { diarization, .. },
             }) => {
                 assert_eq!(diarization.as_deref(), Some("simple"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn test_meeting_start_diarization_hybrid_flag() {
+        let cli = Cli::parse_from(["voxtype", "meeting", "start", "--diarization", "hybrid"]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, .. },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("hybrid"));
             }
             _ => panic!("Expected Meeting Start command"),
         }

@@ -311,7 +311,7 @@ const URGENCY_CHOICES: &[&str] = &["low", "normal", "critical"];
 const PASTE_KEY_CHOICES: &[&str] = &["shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
-const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml"];
+const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
 const SUMMARY_BACKEND_CHOICES: &[&str] = &["local", "remote", "disabled"];
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
@@ -2240,7 +2240,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(DIARIZATION_BACKEND_CHOICES),
         "Meeting",
         "Diarization backend",
-        "simple or ml speaker labelling.",
+        "simple (You/Remote), ml (clusters every voice) or hybrid (You, then Remote 1, Remote 2 by clustering the loopback).",
     ),
     spec(
         "meeting.diarization.max_speakers",

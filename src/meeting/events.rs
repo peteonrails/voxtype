@@ -108,6 +108,15 @@ impl MeetingHudState {
             self.segments.insert(at, segment.clone());
         }
     }
+
+    /// Move the backlog's segments from speaker `from` to `to`.
+    pub fn rename_speaker(&mut self, from: &str, to: &str) {
+        for segment in &mut self.segments {
+            if segment.speaker_id.as_deref() == Some(from) {
+                segment.speaker_id = Some(to.to_string());
+            }
+        }
+    }
 }
 
 /// One line on the wire. Internally tagged on `event` so consumers can
@@ -130,6 +139,10 @@ enum WireEvent {
     Segments {
         chunk_id: u32,
         segments: Vec<TranscriptSegment>,
+    },
+    SpeakerRenamed {
+        from: String,
+        to: String,
     },
     Status {
         status: String,
@@ -252,6 +265,15 @@ impl MeetingEventHub {
         self.publish(WireEvent::Segments {
             chunk_id,
             segments: segments.to_vec(),
+        });
+    }
+
+    /// Broadcast a `speaker_renamed` event: segments already sent under
+    /// speaker `from` now belong to `to`.
+    pub fn publish_speaker_renamed(&self, from: &str, to: &str) {
+        self.publish(WireEvent::SpeakerRenamed {
+            from: from.to_string(),
+            to: to.to_string(),
         });
     }
 
@@ -461,6 +483,21 @@ async fn run_broadcast_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hud_backlog_follows_a_speaker_rename() {
+        let mut seg = TranscriptSegment::new(0, 0, 1_000, "hi".into(), 0);
+        seg.speaker_id = Some("Remote".to_string());
+        let mut you = TranscriptSegment::new(1, 2_000, 3_000, "hey".into(), 0);
+        you.speaker_id = Some("You".to_string());
+        let mut hud = MeetingHudState::idle();
+        hud.push_segments(&[seg, you]);
+
+        hud.rename_speaker("Remote", "Remote 1");
+
+        let ids: Vec<_> = hud.segments.iter().map(|s| s.speaker_key()).collect();
+        assert_eq!(ids, vec!["Remote 1", "You"]);
+    }
 
     #[test]
     fn hud_backlog_interleaves_tracks_by_start_time() {
