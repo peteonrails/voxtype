@@ -3285,59 +3285,7 @@ impl Daemon {
         }
 
         if let Some(ref mut daemon) = self.meeting_daemon {
-            let mut had_loopback = false;
-
-            if !mic_chunk.is_empty() {
-                match daemon
-                    .process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone)
-                    .await
-                {
-                    Ok(Some(segments)) => {
-                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::error!("Error processing mic chunk: {}", e);
-                    }
-                }
-            }
-
-            if !loopback_chunk.is_empty() {
-                match daemon
-                    .process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback)
-                    .await
-                {
-                    Ok(Some(segments)) => {
-                        tracing::debug!(
-                            "Processed loopback chunk with {} segments",
-                            segments.len()
-                        );
-                        if !segments.is_empty() {
-                            had_loopback = true;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::error!("Error processing loopback chunk: {}", e);
-                    }
-                }
-            }
-
-            // Reconcile per-source offsets so any source that received a short
-            // or skipped chunk this iteration catches up to wall-clock before
-            // the next one. Added in PR #330 to fix dual-source timestamp
-            // inflation in meeting mode.
-            daemon.sync_source_offsets();
-
-            // Dedup bleed-through: strip echoed phrases from mic segments
-            if had_loopback {
-                if let Some(ref mut meeting) = daemon.current_meeting_mut() {
-                    let removed = meeting.transcript.dedup_bleed_through();
-                    if removed > 0 {
-                        tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
-                    }
-                }
-            }
+            daemon.process_pair(mic_chunk, loopback_chunk).await;
         }
     }
 

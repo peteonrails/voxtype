@@ -363,6 +363,102 @@ impl MeetingDaemon {
         samples: Vec<f32>,
         source: AudioSource,
     ) -> Result<Option<Vec<TranscriptSegment>>> {
+        let Some((chunk_id, segments)) = self.transcribe_track(samples, source).await? else {
+            return Ok(None);
+        };
+        self.persist_transcript();
+        self.emit_chunk(chunk_id, segments.clone()).await;
+        Ok(Some(segments))
+    }
+
+    /// Process one chunk of each track covering the same stretch of time.
+    ///
+    /// The microphone picks up the remote side through the speakers, so
+    /// once both tracks are transcribed, phrases on the microphone track
+    /// that the loopback track also holds are stripped as echo. Only then
+    /// are the chunks published, so a live consumer never sees the echo as
+    /// something you said. A track that fails to transcribe is logged and
+    /// the other still processed.
+    pub async fn process_pair(&mut self, mic: Vec<f32>, loopback: Vec<f32>) {
+        let mut done = Vec::new();
+        for (samples, source) in [
+            (mic, AudioSource::Microphone),
+            (loopback, AudioSource::Loopback),
+        ] {
+            if samples.is_empty() {
+                continue;
+            }
+            match self.transcribe_track(samples, source).await {
+                Ok(Some(chunk)) => done.push(chunk),
+                Ok(None) => {}
+                Err(e) => tracing::error!("Error processing {} chunk: {}", source, e),
+            }
+        }
+
+        // Keep both timelines on wall-clock even if one track came up short
+        // or was skipped this round (PR #330).
+        self.sync_source_offsets();
+
+        let had_loopback = done
+            .iter()
+            .flat_map(|(_, segments)| segments)
+            .any(|s| s.source == AudioSource::Loopback);
+        if had_loopback {
+            if let Some(ref mut meeting) = self.current_meeting {
+                let removed = meeting.transcript.dedup_bleed_through();
+                if removed > 0 {
+                    tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                }
+                // Publish what is left of each segment after the dedup.
+                let kept = &meeting.transcript.segments;
+                for (_, segments) in &mut done {
+                    segments.retain_mut(|seg| match kept.iter().find(|k| k.id == seg.id) {
+                        Some(k) => {
+                            seg.text = k.text.clone();
+                            true
+                        }
+                        None => false,
+                    });
+                }
+            }
+        }
+
+        self.persist_transcript();
+        for (chunk_id, segments) in done {
+            self.emit_chunk(chunk_id, segments).await;
+        }
+    }
+
+    /// Persist after every chunk, not just on stop(): a crash mid-meeting
+    /// would otherwise lose the whole transcript, and `meeting show --json`
+    /// would report nothing while a meeting is in progress. One small JSON
+    /// write per chunk is negligible next to the transcription.
+    fn persist_transcript(&self) {
+        if let Some(ref meeting) = self.current_meeting {
+            if let Err(e) = self
+                .storage
+                .save_transcript(&meeting.metadata.id, &meeting.transcript)
+            {
+                tracing::warn!("Failed to persist transcript incrementally: {}", e);
+            }
+        }
+    }
+
+    async fn emit_chunk(&self, chunk_id: u32, segments: Vec<TranscriptSegment>) {
+        let _ = self
+            .event_tx
+            .send(MeetingEvent::ChunkProcessed { chunk_id, segments })
+            .await;
+    }
+
+    /// Transcribe, post-process, diarize and label one chunk of one track
+    /// and add it to the transcript. Returns the chunk ID and its segments,
+    /// or `None` when no meeting is recording.
+    async fn transcribe_track(
+        &mut self,
+        samples: Vec<f32>,
+        source: AudioSource,
+    ) -> Result<Option<(u32, Vec<TranscriptSegment>)>> {
         if !self.state.is_active() {
             return Ok(None);
         }
@@ -453,33 +549,10 @@ impl MeetingDaemon {
             meeting.transcript.total_chunks = chunk_id + 1;
         }
 
-        // Persist after every chunk, not just on stop(): a crash mid-meeting
-        // previously lost the entire transcript, and `meeting show`/`--json`
-        // reported chunk_count: 0 while a meeting was in progress. The extra
-        // write is one small JSON file per chunk_duration_secs (default 30s),
-        // negligible next to the transcription work already done this chunk.
-        if let Some(ref meeting) = self.current_meeting {
-            if let Err(e) = self
-                .storage
-                .save_transcript(&meeting.metadata.id, &meeting.transcript)
-            {
-                tracing::warn!("Failed to persist transcript incrementally: {}", e);
-            }
-        }
-
         // Advance state
         self.state = std::mem::take(&mut self.state).next_chunk();
 
-        // Send event
-        let _ = self
-            .event_tx
-            .send(MeetingEvent::ChunkProcessed {
-                chunk_id,
-                segments: result.segments.clone(),
-            })
-            .await;
-
-        Ok(Some(result.segments))
+        Ok(Some((chunk_id, result.segments)))
     }
 
     /// Get storage access
@@ -589,14 +662,8 @@ mod tests {
         /// One chunk of each track, the way the daemon feeds them.
         async fn pair(&mut self, mic: &[(f32, f32)], loopback: &[(f32, f32)]) {
             self.daemon
-                .process_chunk_with_source(track(30.0, mic), AudioSource::Microphone)
-                .await
-                .unwrap();
-            self.daemon
-                .process_chunk_with_source(track(30.0, loopback), AudioSource::Loopback)
-                .await
-                .unwrap();
-            self.daemon.sync_source_offsets();
+                .process_pair(track(30.0, mic), track(30.0, loopback))
+                .await;
         }
 
         fn saved(&self) -> MeetingData {
@@ -657,6 +724,58 @@ mod tests {
             "segment IDs repeat: {:?}",
             saved.transcript.segments
         );
+    }
+
+    /// Says one line per loudness: the remote voice at 0.5, ours at 0.3.
+    struct TwoVoices;
+
+    impl Transcriber for TwoVoices {
+        fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
+            let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            Ok(if peak > 0.4 {
+                "we should ship the release on friday".to_string()
+            } else if peak > 0.2 {
+                "agreed".to_string()
+            } else {
+                String::new()
+            })
+        }
+    }
+
+    /// The remote sentence reaches the microphone through the speakers.
+    /// It must not be published, live or on disk, as something You said.
+    #[tokio::test]
+    async fn echo_on_the_microphone_never_reaches_the_live_feed() {
+        let mut h = harness().await;
+        h.daemon.transcriber = Some(Arc::new(TwoVoices));
+
+        // The echo, as loud as the remote, plus our own quieter "agreed".
+        let mut mic = track(30.0, &[(5.0, 8.0)]);
+        for (m, ours) in mic.iter_mut().zip(track(30.0, &[(10.0, 11.0)])) {
+            *m += ours * 0.6;
+        }
+        let loopback = track(30.0, &[(5.0, 8.0)]);
+        h.daemon.process_pair(mic, loopback).await;
+
+        let mut live = Vec::new();
+        while let Ok(event) = h.events.try_recv() {
+            if let MeetingEvent::ChunkProcessed { segments, .. } = event {
+                live.extend(segments);
+            }
+        }
+        let said = |segs: &[TranscriptSegment]| {
+            segs.iter()
+                .map(|s| format!("{}: {}", s.speaker_display(), s.text))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![
+            "Remote: we should ship the release on friday".to_string(),
+            "You: agreed".to_string(),
+        ];
+        let mut live_said = said(&live);
+        live_said.sort();
+        assert_eq!(live_said, expected);
+        assert_eq!(said(&h.saved().transcript.segments), expected);
     }
 
     #[tokio::test]

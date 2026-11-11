@@ -187,6 +187,52 @@ impl Transcript {
         // We use 4-grams as the minimum match length to avoid false positives.
         let min_ngram = 4;
 
+        let total_removed =
+            self.dedup_short_echoes(min_ngram) + self.dedup_echoed_phrases(min_ngram);
+
+        // A segment that was all echo is gone, not an empty line.
+        self.segments.retain(|s| !s.text.trim().is_empty());
+
+        total_removed
+    }
+
+    /// A microphone segment too short for the phrase match ("Sounds good.")
+    /// is echo when a loopback segment overlapping it in time holds the same
+    /// words in the same order. The overlap is what keeps a reply you make
+    /// later in the same words.
+    fn dedup_short_echoes(&mut self, min_ngram: usize) -> usize {
+        const TOLERANCE_MS: u64 = 1000;
+        let loopback: Vec<(u64, u64, Vec<String>)> = self
+            .segments
+            .iter()
+            .filter(|s| s.source == AudioSource::Loopback)
+            .map(|s| (s.start_ms, s.end_ms, normalize_for_dedup(&s.text)))
+            .collect();
+
+        let mut removed = 0;
+        for seg in &mut self.segments {
+            if seg.source != AudioSource::Microphone {
+                continue;
+            }
+            let words = normalize_for_dedup(&seg.text);
+            if words.is_empty() || words.len() >= min_ngram {
+                continue;
+            }
+            let echoed = loopback.iter().any(|(start, end, said)| {
+                seg.start_ms < end + TOLERANCE_MS
+                    && *start < seg.end_ms + TOLERANCE_MS
+                    && said.windows(words.len()).any(|w| w == words.as_slice())
+            });
+            if echoed {
+                tracing::debug!("Stripping short echo: {:?}", seg.text);
+                removed += words.len();
+                seg.text.clear();
+            }
+        }
+        removed
+    }
+
+    fn dedup_echoed_phrases(&mut self, min_ngram: usize) -> usize {
         let loopback_words: Vec<String> = self
             .segments
             .iter()
@@ -952,6 +998,121 @@ mod tests {
         transcript.sort_chronologically();
         let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
         assert_eq!(order, vec![0, 2, 1]);
+    }
+
+    fn said(
+        id: u32,
+        start_ms: u64,
+        end_ms: u64,
+        source: AudioSource,
+        text: &str,
+    ) -> TranscriptSegment {
+        let mut seg = TranscriptSegment::new(id, start_ms, end_ms, text.to_string(), 0);
+        seg.source = source;
+        seg
+    }
+
+    fn lines(transcript: &Transcript) -> Vec<String> {
+        transcript
+            .segments
+            .iter()
+            .map(|s| format!("{}: {}", s.source, s.text))
+            .collect()
+    }
+
+    #[test]
+    fn dedup_strips_an_echoed_phrase_and_keeps_the_rest() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            1_000,
+            6_000,
+            AudioSource::Loopback,
+            "We should ship the release on Friday.",
+        ));
+        t.add_segment(said(
+            1,
+            1_000,
+            8_000,
+            AudioSource::Microphone,
+            "we should ship the release on Friday agreed",
+        ));
+        assert_eq!(t.dedup_bleed_through(), 7);
+        assert_eq!(
+            lines(&t),
+            vec![
+                "Remote: We should ship the release on Friday.",
+                "You: agreed"
+            ]
+        );
+    }
+
+    /// Bug: a segment that was all echo stayed behind as an empty line.
+    #[test]
+    fn dedup_drops_a_segment_that_was_all_echo() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            1_000,
+            6_000,
+            AudioSource::Loopback,
+            "We should ship the release on Friday.",
+        ));
+        t.add_segment(said(
+            1,
+            1_000,
+            6_000,
+            AudioSource::Microphone,
+            "We should ship the release on Friday.",
+        ));
+        t.dedup_bleed_through();
+        assert_eq!(
+            lines(&t),
+            vec!["Remote: We should ship the release on Friday."]
+        );
+    }
+
+    /// Bug: echoes under four words ("Sounds good.") were never recognised.
+    #[test]
+    fn dedup_strips_a_short_echo_that_overlaps_the_remote_line() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            9_100,
+            10_000,
+            AudioSource::Loopback,
+            "Sounds good.",
+        ));
+        t.add_segment(said(
+            1,
+            9_150,
+            10_050,
+            AudioSource::Microphone,
+            "Sounds good.",
+        ));
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t), vec!["Remote: Sounds good."]);
+    }
+
+    #[test]
+    fn dedup_keeps_a_short_reply_in_the_same_words_said_later() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            9_100,
+            10_000,
+            AudioSource::Loopback,
+            "Sounds good.",
+        ));
+        t.add_segment(said(
+            1,
+            14_000,
+            15_000,
+            AudioSource::Microphone,
+            "Sounds good.",
+        ));
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t), vec!["Remote: Sounds good.", "You: Sounds good."]);
     }
 
     #[test]
