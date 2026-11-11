@@ -60,6 +60,11 @@ Ask only what the output can't tell you:
 3. Is sending audio to a paid cloud service ever acceptable? (Default: no.)
 4. Do you want words to appear while you are still speaking (streaming), or
    only after you release the key?
+5. Where do you dictate most: terminals, chat apps or AI agents, editors,
+   remote desktop sessions? Is your keyboard layout something other than US?
+
+Questions 1 to 4 drive the hardware setup in steps 3 to 5. Question 5 drives
+the output settings in step 6, which come after the basics work.
 
 ## 3. Plan
 
@@ -147,3 +152,115 @@ After the user approves the plan:
 
 Report what you changed, why each choice fits this machine, and the command to
 undo it.
+
+## 6. Beyond the basics
+
+Once dictation works and is fast, go through these with the user. Each one is
+optional. Explain the trade-off, recommend one, and let them choose. Every
+`output.*` setting needs a daemon restart to take effect.
+
+### How text reaches the cursor: type or paste
+
+`voxtype config get output.mode` shows the current mode.
+
+| Mode | What it does | Good for | Costs |
+|------|--------------|----------|-------|
+| `type` | Simulates keystrokes, character by character | Apps that block pasting, keeping the clipboard untouched, CJK text through `wtype` | Slower for long text. Can produce wrong characters on non-US layouts unless the driver knows the layout |
+| `paste` | Copies to the clipboard, then sends the paste keystroke | Long dictations, non-US layouts (no layout mapping involved), apps where typing is slow | Overwrites the clipboard unless `output.restore_clipboard` is on. The paste keystroke has to match the app |
+| `clipboard` | Copies only, the user pastes | Anything where typing into the focused window is unwanted | One extra keystroke every time |
+| `file` | Appends or writes to `output.file_path` | Logging dictation somewhere instead of typing it | Nothing reaches the cursor |
+
+Settings that matter for each:
+
+- **Paste in terminals.** Many terminals don't paste on `ctrl+v`. Set
+  `output.paste_keys` to `shift+insert` (works in terminals and most GUI apps)
+  or `ctrl+shift+v`.
+- **Keep the clipboard.** `voxtype config set output.restore_clipboard true`
+  puts the previous clipboard back after pasting.
+- **Typing on a non-US layout.** Set the layout for the driver in use, for
+  example `voxtype config set output.dotool_xkb_layout de`. Without it, a German
+  layout gets `y` and `z` swapped. Paste mode avoids the problem entirely.
+- **Typing driver order.** `wtype` (wlroots compositors such as Hyprland and
+  Sway, best Unicode), `eitype` (GNOME, KDE), `dotool`, `ydotool`. The order is
+  `driver_order` under `[output]` in `config.toml`. For remote desktop clients
+  such as `xfreerdp`, put `ydotool` first, because `wtype`'s keycodes don't
+  match the remote session.
+- **Chat apps and AI agents.** `output.shift_enter_newlines true` types line
+  breaks as Shift+Enter so a multi-line dictation doesn't send early.
+  `output.auto_submit true` presses Return after the text, which is handy when
+  dictating prompts to an agent and risky everywhere else.
+
+### The post-process command
+
+`output.post_process.command` is a shell command that receives every finished
+transcription on stdin. Whatever it prints on stdout is what gets typed. It is
+Voxtype's general-purpose hook, and it is worth explaining to the user even if
+they don't want it today, because it is usually the answer when they later ask
+for something Voxtype doesn't do on its own:
+
+- **Cleanup or rewriting with a local LLM**, for example
+  `ollama run llama3.2:1b 'Clean up this transcription. Output only the cleaned text:'`
+- **Translation** into another language before typing
+- **Domain vocabulary**: fixing medical, legal or product terms the model gets
+  wrong, with `sed` or a small script
+- **Logging or side effects**: saving a copy of everything dictated, or sending
+  it somewhere else as well (see history below)
+
+What to tell the user about it:
+
+- It adds latency. `sed` is instant, a local LLM takes seconds. Raise
+  `output.post_process.timeout_ms` for an LLM (30000 to 60000).
+- If the command fails, times out or prints nothing, the original
+  transcription is typed instead, so a broken command never loses dictation.
+- It does not run when streaming is enabled.
+- Use instruct or chat models, not reasoning models, which print their
+  thinking into the output.
+- `[profiles.<name>]` sections can hold different commands, chosen by holding a
+  modifier with the hotkey. `docs/CONFIGURATION.md` covers profiles.
+- Check the built-in `[text]` options before reaching for an LLM:
+  `text.filter_filler_words`, `text.spoken_punctuation` and
+  `text.replacements.<spoken> <written>` handle the common cases with no latency.
+
+### Dictation history (on and off)
+
+Voxtype 1.2 has no built-in transcript history. The post-process command can
+keep one. Ask first, and tell the user plainly that the log will contain
+everything they dictate, including anything sensitive.
+
+To turn it on, install this script as `~/.local/bin/voxtype-history`:
+
+```sh
+#!/bin/sh
+# Voxtype post-process command: log each transcription, pass it through unchanged.
+log="${VOXTYPE_HISTORY_FILE:-$HOME/.local/share/voxtype/history.tsv}"
+mkdir -p "$(dirname "$log")"
+text=$(cat)
+umask 077
+printf '%s\t%s\n' "$(date -Iseconds)" "$(printf '%s' "$text" | tr '\t\n' '  ')" >> "$log"
+printf '%s' "$text"
+```
+
+Then:
+
+```bash
+chmod +x ~/.local/bin/voxtype-history
+voxtype config get output.post_process.command      # check for an existing command first
+voxtype config set output.post_process.command "$HOME/.local/bin/voxtype-history"
+systemctl --user restart voxtype
+```
+
+If a post-process command already exists, keep it and chain the logger after
+it, for example `sed 's/uh, //g' | ~/.local/bin/voxtype-history`, so the log
+records the text as typed.
+
+Each line of `~/.local/share/voxtype/history.tsv` is a timestamp, a tab and
+one dictation. The file is readable only by the user.
+
+To turn it off, remove the command, or put back the user's previous command:
+
+```bash
+voxtype config unset output.post_process.command
+systemctl --user restart voxtype
+```
+
+Turning it off keeps the existing log. Delete `history.tsv` only if the user asks.
