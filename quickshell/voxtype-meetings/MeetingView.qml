@@ -28,6 +28,11 @@ Item {
   property string busy: ""
   property string actionError: ""
   property bool canOpenSettings: false
+  // Past meetings for the idle screen (Meetings.qml reads them).
+  property var pastMeetings: []
+  property bool listLoading: false
+  property string listError: ""
+  property bool listHasMore: false
 
   signal pauseRequested()
   signal resumeRequested()
@@ -41,6 +46,10 @@ Item {
   // A note on one line; an empty `text` removes it.
   signal annotateRequested(int segId, string text)
   signal settingsRequested()
+  signal openMeetingRequested(string meetingId)
+  signal moreMeetingsRequested()
+  // From an ended or past meeting back to the list.
+  signal backRequested()
   signal closeRequested()
   signal errorDismissed()
 
@@ -134,8 +143,14 @@ Item {
     return root.clock((root.ended ? root.feed.endedAt : root.now) - started)
   }
 
-  readonly property string endedAtText: root.ended && root.feed.endedAt > 0
-    ? "ended at " + Qt.formatTime(new Date(root.feed.endedAt), "hh:mm") : ""
+  // Today's meeting needs only the time; an older one its date too.
+  readonly property string endedAtText: {
+    if (!root.ended || root.feed.endedAt <= 0) return ""
+    var end = new Date(root.feed.endedAt)
+    if (end.toDateString() === new Date(root.now).toDateString()) return "ended at " + Qt.formatTime(end, "hh:mm")
+    var start = root.parseTime(root.feed.startedAt)
+    return Qt.formatDateTime(isNaN(start) ? end : new Date(start), "ddd d MMM yyyy, hh:mm")
+  }
 
   readonly property string stateLabel: {
     if (root.busy === "pause") return "Pausing…"
@@ -233,6 +248,14 @@ Item {
       RowLayout {
         Layout.fillWidth: true
         spacing: root.theme.gap
+
+        MeetingButton {
+          objectName: "backButton"
+          theme: root.theme
+          visible: root.ended
+          text: "‹ Meetings"
+          onClicked: root.backRequested()
+        }
 
         Text {
           objectName: "meetingTitle"
@@ -515,46 +538,45 @@ Item {
       }
 
       // ------------------------------------------------------- idle
+      //
+      // No meeting on screen: start one, or pick a past one to read and fix.
 
-      Item {
+      ColumnLayout {
         objectName: "idleState"
         Layout.fillWidth: true
         Layout.fillHeight: true
         visible: !root.hasMeeting
+        spacing: root.theme.xxl
 
-        Column {
-          anchors.centerIn: parent
-          width: Math.min(parent.width, 340)
-          spacing: root.theme.xxl
+        Text {
+          objectName: "idleTitle"
+          Layout.fillWidth: true
+          text: root.connected ? "No meeting in progress" : "Voxtype is not running"
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.title
+        }
 
-          Text {
-            objectName: "idleTitle"
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: root.connected ? "No meeting in progress" : "Voxtype is not running"
-            color: root.theme.fg
-            font.family: root.theme.fontFamily
-            font.pixelSize: root.theme.title
-          }
+        Text {
+          objectName: "idleDetail"
+          Layout.fillWidth: true
+          visible: !root.connected
+          text: "Waiting for the voxtype daemon to start a meeting. Past meetings are still here."
+          color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WordWrap
+        }
 
-          Text {
-            objectName: "idleDetail"
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: root.connected
-              ? "Start one here, from the tray, or with voxtype meeting start. This view follows it live."
-              : "Waiting for the voxtype daemon. This view connects as soon as it is running."
-            color: root.theme.dim
-            font.family: root.theme.fontFamily
-            font.pixelSize: root.theme.bodySmall
-            wrapMode: Text.WordWrap
-          }
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: root.theme.gap
 
           MeetingTextField {
             id: titleField
             objectName: "startTitleField"
             theme: root.theme
-            width: parent.width
+            Layout.fillWidth: true
             placeholderText: "Meeting title (optional)"
             enabled: root.connected
             onAccepted: startButton.clicked()
@@ -564,7 +586,6 @@ Item {
             id: startButton
             objectName: "startButton"
             theme: root.theme
-            anchors.horizontalCenter: parent.horizontalCenter
             text: root.busy === "start" ? "Starting…" : "Start meeting"
             bordered: true
             enabled: root.connected && root.busy === ""
@@ -573,6 +594,25 @@ Item {
               root.startRequested(titleField.text)
             }
           }
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          implicitHeight: 1
+          color: root.theme.alpha(root.theme.fg, 0.12)
+        }
+
+        MeetingList {
+          objectName: "meetingListPane"
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          theme: root.theme
+          meetings: root.pastMeetings
+          loading: root.listLoading
+          error: root.listError
+          hasMore: root.listHasMore
+          onOpenRequested: function(meetingId) { root.openMeetingRequested(meetingId) }
+          onMoreRequested: root.moreMeetingsRequested()
         }
       }
     }

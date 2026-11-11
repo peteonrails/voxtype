@@ -114,6 +114,12 @@ Item {
           else if (s === "regenerate") tc.driveRegenerate()
           else if (s === "scroll-tabs") tc.driveScrollTabs()
           else if (s === "view-request") tc.driveViewRequest()
+          else if (s === "list") tc.driveList()
+          else if (s === "past-view") tc.drivePastView()
+          else if (s === "past-summary") tc.drivePastSummary()
+          else if (s === "past-summarize") tc.drivePastSummarize()
+          else if (s === "past-reassign") tc.drivePastReassign()
+          else if (s === "start-while-browsing") tc.driveStartWhileBrowsing()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -1010,6 +1016,121 @@ Item {
       waitFor(function() { return feed().ended && lines().length === 4 }, "saved transcript loaded: " + (view() ? lines().length : -1))
       check(txt("meetingState") === "Ended" && txt("meetingTitle") === "Standup", "shown as Ended: " + txt("meetingState"))
       shot("saved-meeting")
+    }
+
+    // ------------------------------------------------------------ past meetings
+
+    function pastList() { return find(view(), "meetingList") }
+    function row(i) { return pastList().itemAtIndex(i) }
+    function rowText(i, name) { var r = row(i); return r ? String(find(r, name).text) : "<no row " + i + ">" }
+
+    function openList() {
+      openView()
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList() && pastList().count > 0 }, "the list")
+    }
+
+    function openPast(i, title) {
+      click(row(i), "row " + i)
+      waitFor(function() { return feed().ended && txt("meetingTitle") === title }, "opened " + title + ": " + txt("meetingTitle"))
+    }
+
+    function driveList() {
+      openList()
+      check(shown(find(view(), "startButton")) && shown(find(view(), "startTitleField")), "Start meeting stays at the top")
+      check(txt("idleTitle") === "No meeting in progress", "idle title: " + txt("idleTitle"))
+      check(pastList().count === 50, "first page of 50: " + pastList().count)
+      check(rowText(0, "meetingRowTitle") === "Design review" && rowText(1, "meetingRowTitle") === "1:1 with Sam", "newest first")
+      waitFor(function() { return rowText(0, "meetingRowDetails").indexOf("3 speakers") !== -1 }, "speakers read from the folder: " + rowText(0, "meetingRowDetails"))
+      var d = rowText(0, "meetingRowDetails")
+      check(d.indexOf("2026, ") !== -1 && d.indexOf("45 min") !== -1, "date and length: " + d)
+      check(rowText(1, "meetingRowDetails").indexOf("25 min · 2 speakers") !== -1, "second row: " + rowText(1, "meetingRowDetails"))
+      check(find(row(0), "meetingRowSummary").visible, "Summary badge on the summarized meeting")
+      check(!find(row(1), "meetingRowSummary").visible, "no badge without a summary")
+      check(rowText(2, "meetingRowTitle") === "Untitled meeting", "untitled: " + rowText(2, "meetingRowTitle"))
+      shot("list")
+      pastList().positionViewAtEnd()
+      wait(200)
+      var more = find(view(), "meetingListMore")
+      waitFor(function() { return more && shown(more) }, "Show older meetings")
+      click(more, "Show older meetings")
+      waitFor(function() { return pastList().count === 60 }, "all 60 after the second page: " + pastList().count)
+      waitFor(function() { return !shown(find(view(), "meetingListMore")) }, "no more to show")
+    }
+
+    function drivePastView() {
+      openList()
+      openPast(0, "Design review")
+      check(txt("meetingState") === "Ended" && txt("meetingElapsed") === "45:00", "Ended, 45 min: " + txt("meetingState") + " " + txt("meetingElapsed"))
+      check(txt("meetingEndedAt").indexOf("Tue 10 Nov 2026, ") === 0, "its date: " + txt("meetingEndedAt"))
+      waitFor(function() { return lines().length === 4 }, "transcript loaded")
+      check(JSON.stringify(renderedChips()) === '["You","Remote 1","Remote 2"]', "chips: " + renderedChips())
+      check(shown(find(view(), "backButton")), "Back offered")
+      check(!shown(find(view(), "pauseButton")), "no Pause on a past meeting")
+      shot("past-meeting")
+      click(find(view(), "backButton"), "Back")
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList().count === 2 }, "back to the list")
+      check(!feed().ended && feed().meetingId === "", "nothing held after Back")
+      openPast(1, "1:1 with Sam")
+      waitFor(function() { return lines().length === 3 }, "the other meeting's transcript")
+    }
+
+    function drivePastSummary() {
+      openList()
+      openPast(0, "Design review")
+      check(view().currentTab === "transcript", "opens on the transcript")
+      check(shown(find(view(), "tab_summary")), "Summary tab for a past meeting")
+      tab("summary")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary from show --json: " + txt("summaryText"))
+      check(txt("summaryText").indexOf("**Dana**: Draft the empty state") !== -1, "action item: " + txt("summaryText"))
+      check(String(find(view(), "regenerateButton").text) === "Regenerate", "Regenerate offered")
+      shot("past-summary")
+      find(view(), "summaryText").linkActivated("#t=61000")
+      waitFor(function() { return view().currentTab === "transcript" && find(view(), "transcriptPane").flashSegId === 2 }, "chapter jumps to its line")
+      tab("summary")
+      check(txt("summaryText").indexOf("## Overview") === 0, "summary still there")
+    }
+
+    function drivePastSummarize() {
+      openList()
+      openPast(1, "1:1 with Sam")
+      tab("summary")
+      check(shown(find(view(), "summaryEmpty")), "no summary yet")
+      var button = find(view(), "regenerateButton")
+      check(String(button.text) === "Summarize", "Summarize: " + button.text)
+      click(button, "Summarize")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing")
+      waitFor(function() { return txt("summaryText").indexOf("Release status") !== -1 }, "rendered the output", 8000)
+      shot("past-summarized")
+    }
+
+    function drivePastReassign() {
+      openList()
+      openPast(1, "1:1 with Sam")
+      waitFor(function() { return lines().length === 3 }, "transcript loaded")
+      openChooser(1)
+      pick("You")
+      check(lines()[1][1] === "You", "moved at once")
+      waitFor(idleCli, "reassign finished")
+      check(lines()[1][1] === "You" && moved(1) === "moved from Remote", "kept with the CLI's segment: " + JSON.stringify(lines()[1]) + " " + moved(1))
+      // It is stored: Back, then open it again.
+      click(find(view(), "backButton"), "Back")
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList().count > 0 }, "list")
+      openPast(1, "1:1 with Sam")
+      waitFor(function() { return lines().length === 3 && lines()[1][1] === "You" && moved(1) === "moved from Remote" }, "still moved after reopening")
+    }
+
+    function driveStartWhileBrowsing() {
+      openList()
+      openPast(0, "Design review")
+      ctl({ cmd: "start", title: "Live one" })
+      waitFor(function() { return feed().status === "recording" && txt("meetingTitle") === "Live one" }, "the live meeting took over: " + txt("meetingTitle"))
+      check(!feed().ended && lines().length === 0, "the past meeting is gone")
+      check(!shown(find(view(), "backButton")) && shown(find(view(), "pauseButton")), "live controls, no Back")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      click(find(view(), "backButton"), "Back")
+      waitFor(function() { return shown(find(view(), "idleState")) && pastList().count === 3 && rowText(0, "meetingRowTitle") === "Live one" }, "the ended meeting tops the list: " + (pastList() ? rowText(0, "meetingRowTitle") : ""))
+      shot("list-after-meeting")
     }
 
     function driveScroll() {

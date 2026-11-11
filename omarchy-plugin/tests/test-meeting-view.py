@@ -41,6 +41,16 @@ Scenarios:
   scroll-tabs Transcript and Summary keep their scroll positions
   view-request  `voxtype meeting view` requests: a tab, a stale request, and a
               saved meeting that is not on screen
+  list        no meeting: past meetings from `meeting list --json`, newest
+              first, with date, length, speakers and a Summary badge; more on
+              request past the first 50
+  past-view   pick a past meeting (`meeting show --json`), see it as Ended,
+              Back to the list
+  past-summary  a past meeting's summary on the Summary tab
+  past-summarize  a past meeting without one: Summarize renders the output
+  past-reassign   moving a line of a past meeting sticks
+  start-while-browsing  a meeting that starts while a past one is open takes
+              over; when it ends, Back shows it at the top of the list
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -55,6 +65,7 @@ Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
 """
 import argparse
+import calendar
 import json
 import os
 from pathlib import Path
@@ -68,7 +79,8 @@ import panel_harness as h
 SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-settings", "reconnect",
              "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
-             "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request")
+             "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
+             "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 STANDALONE = h.PLUGIN.parent / "quickshell"
@@ -174,8 +186,66 @@ STATE = {
 }
 
 
+PAST = {
+    "design": "a1000000-0000-4000-8000-000000000001",
+    "one2one": "a1000000-0000-4000-8000-000000000002",
+}
+
+PAST_SUMMARY = {
+    "summary": "The team agreed the new layout and who builds which part.",
+    "key_points": [], "decisions": ["Ship the narrow card first."],
+    "action_items": [{"description": "Draft the empty state", "assignee": "Dana", "completed": False}],
+    "chapters": [{"start_ms": 3000, "title": "Layout"}, {"start_ms": 61000, "title": "Who builds what"}],
+    "generated_at": "2026-11-10T16:00:00Z", "model": "claude",
+}
+
+
+def past_meetings(data, scenario):
+    """Write past meetings the way storage keeps them; return the list entries."""
+    entries = []
+
+    def add(mid, title, started, minutes, segs, summary=None):
+        folder = data / "meetings" / mid
+        folder.mkdir(parents=True)
+        start = calendar.timegm(time.strptime(started, "%Y-%m-%dT%H:%M:%SZ"))
+        ended = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + minutes * 60))
+        meta = {"id": mid, "title": title, "started_at": started, "ended_at": ended,
+                "duration_secs": minutes * 60, "status": "completed", "chunk_count": minutes * 2,
+                "storage_path": str(folder), "audio_retained": False}
+        if title is None:
+            meta.pop("title")
+        entries.append(dict(meta))
+        if summary:
+            meta["summary"] = summary
+            (folder / "summary.md").write_text("## Overview\n")
+        (folder / "metadata.json").write_text(json.dumps(meta))
+        (folder / "transcript.json").write_text(json.dumps({"segments": segs, "total_chunks": 2}))
+
+    add(PAST["design"], "Design review", "2026-11-10T15:00:00Z", 45, [
+        seg(0, 3, "Let's look at the new layout.", "microphone", "You"),
+        seg(1, 20, "I like the narrow card.", "loopback", "Remote 1"),
+        seg(2, 61, "Who builds the empty state?", "loopback", "Remote 2"),
+        seg(3, 75, "I can take it.", "loopback", "Remote 1"),
+    ], PAST_SUMMARY)
+    add(PAST["one2one"], "1:1 with Sam", "2026-11-09T10:30:00Z", 25, [
+        seg(0, 2, "How was the week?", "microphone", "You"),
+        seg(1, 9, "Busy, but good.", "loopback", "Remote"),
+        seg(2, 30, "Any blockers?", "microphone", "You"),
+    ])
+    if scenario == "list":
+        for i in range(58):
+            day = 7 - i // 10
+            add("b2%06d-0000-4000-8000-000000000000" % i, None if i == 0 else "Standup %d" % (58 - i),
+                "2026-11-%02dT%02d:00:00Z" % (max(day, 1), 18 - i % 10), 15, [seg(0, 1, "Morning.", "microphone", "You")])
+    return entries
+
+
+PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing"}
+
+
 def run(scenario, host, shell, evidence):
-    with h.Run(shell, STATE.get(scenario, {})) as r:
+    state = dict(STATE.get(scenario, {}))
+    with h.Run(shell, state) as r:
         h.patch(r.plugin / "components/meetings/MeetingWindow.qml", MEETING_WINDOW_OLD, MEETING_WINDOW_NEW)
         # The standalone shell's tree, with the same window swap. Its
         # voxtype-meetings is the directory the plugin's link points at.
@@ -183,6 +253,9 @@ def run(scenario, host, shell, evidence):
         h.patch(r.root / "standalone/voxtype-meetings/MeetingWindow.qml", MEETING_WINDOW_OLD, MEETING_WINDOW_NEW)
         data = r.root / "meeting-data"
         data.mkdir()
+        if scenario in PAST_SCENARIOS:
+            state["meetings"] = past_meetings(data, scenario)
+            r.state.write_text(json.dumps(state))
         h.patch(r.plugin / "Panel.qml", "readonly property alias formTest: form",
                 "readonly property alias formTest: form\n  readonly property alias meetingsTest: meetings")
         fake = r.root / "voxtype-meeting-fake"
@@ -224,6 +297,7 @@ def run(scenario, host, shell, evidence):
                 "__SCENARIO__": scenario, "__CTL__": str(ctl), "__STATE__": str(r.state),
                 "__EVIDENCE__": shots, "__MEETING_ID__": MEETING_ID, "__HOST__": host,
                 "__FAKE_BIN__": str(fake), "__RUNTIME__": str(runtime / "voxtype"), "__DATA__": str(data),
+                "__PAST_DESIGN__": PAST["design"], "__PAST_ONE2ONE__": PAST["one2one"],
             }, env={"XDG_RUNTIME_DIR": str(runtime), "FAKE_MEETING_CTL": str(ctl),
                     "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot),
                     "FAKE_MEETING_DATA": str(data)}, timeout=120)
@@ -253,7 +327,7 @@ def run(scenario, host, shell, evidence):
 
 def read_only(argv):
     """Reads the view makes on its own (notes, assistant status, show)."""
-    if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] == ["meeting", "show"]:
+    if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -262,8 +336,8 @@ def ask_call(question, *extra):
     return ["meeting", "ask", MEETING_ID, question] + list(extra)
 
 
-def summarize_call():
-    return ["meeting", "summarize", MEETING_ID, "--regenerate"]
+def summarize_call(meeting=MEETING_ID):
+    return ["meeting", "summarize", meeting]
 
 
 def reassign(segment, speaker):
@@ -314,8 +388,8 @@ def check_calls(scenario, calls, runtime_notes=""):
             problems.append("notes saves: %s, expected only %s" % (json.dumps(sets), json.dumps(want)))
         expect([c for c in meeting if c[:2] != ["meeting", "notes"]], [], "other meeting commands")
     elif scenario == "annotate":
-        expect(meeting, [["meeting", "annotate", MEETING_ID, "3", "check this number"],
-                         ["meeting", "annotate", MEETING_ID, "3", "--remove"]], "meeting commands")
+        expect(meeting, [["meeting", "annotate", MEETING_ID, "3", "check this number", "--json"],
+                         ["meeting", "annotate", MEETING_ID, "3", "--remove", "--json"]], "meeting commands")
     elif scenario == "ask":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario == "ask-chips":
@@ -342,6 +416,19 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call()], "meeting commands")
     elif scenario == "scroll-tabs":
         expect(meeting, [["meeting", "stop"], summarize_call()], "meeting commands")
+    elif scenario in ("list", "past-view", "past-summary"):
+        expect(meeting, [], "meeting commands")
+        lists = [c for c in calls if c[:2] == ["meeting", "list"]]
+        if not lists or any(c[2:4] != ["--json", "--limit"] for c in lists):
+            problems.append("list calls: " + json.dumps(lists))
+        if scenario == "list" and ["meeting", "list", "--json", "--limit", "100"] not in lists:
+            problems.append("no second page asked for: " + json.dumps(lists))
+    elif scenario == "past-summarize":
+        expect(meeting, [summarize_call(PAST["one2one"])], "meeting commands")
+    elif scenario == "past-reassign":
+        expect(meeting, [["meeting", "reassign", PAST["one2one"], "1", "You", "--json"]], "meeting commands")
+    elif scenario == "start-while-browsing":
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
     elif scenario == "ended-edit":
         expect(meeting, [["meeting", "stop"], reassign("2", "You"), ["meeting", "label", MEETING_ID, "Remote", "Sam"],
                          ["meeting", "start", "--title", "Second"], ["meeting", "stop"]], "meeting commands")

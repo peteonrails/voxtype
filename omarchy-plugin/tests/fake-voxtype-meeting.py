@@ -35,14 +35,22 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
   meeting ask M "Q" [--last 5m] [--notify]
                                     streams state["answer"] (or a default with
                                     [m:ss] citations) in chunks
-  meeting summarize M --regenerate  prints state["summary_md"] (or a default)
-  meeting show M --json             MeetingData for M from the fake socket's
-                                    snapshot, with the socket's summary
-  meeting notes M [--set-file F]    notes kept in FAKE_MEETING_DATA; a set also
+  meeting summarize M               prints state["summary_md"] (or a default)
+  meeting list --json [--limit N]   the socket's last meeting, then
+                                    state["meetings"], newest first
+  meeting show M --json             MeetingData for M: a past meeting's folder,
+                                    or the fake socket's snapshot with its summary
+  meeting notes M [--set-file F] [--json]
+                                    notes kept in FAKE_MEETING_DATA; --json gives
+                                    {meeting_id, notes, updated_at}; a set also
                                     makes the socket send notes_updated
-  meeting annotate M SEG TEXT|--remove
-                                    sets the segment's `annotation` through the
-                                    socket, like reassign; prints the segment
+  meeting annotate M SEG [TEXT] [--highlight] [--json] | M SEG --remove [--json]
+                                    `annotation` {text, highlight} on the segment;
+                                    --json prints the segment
+
+A meeting ID may be a unique prefix, as with the real CLI. Edits to a past
+meeting rewrite its transcript.json; edits to the socket's meetings go through
+the socket, which announces live ones as segment_updated.
 
 state["fail"] maps an action ("pause", "label", …) to the stderr it should
 fail with (exit 1), changing nothing.
@@ -84,63 +92,118 @@ def segment_key(seg):
     return seg.get("speaker_id") or {"microphone": "You", "loopback": "Remote"}.get(seg.get("source"), "Unknown")
 
 
-def reassign(args):
+# Meetings live in three places: the fake socket's running meeting and the
+# last one it ended (its snapshot, edited through its control file so the
+# socket can announce live changes), and past meetings in FAKE_MEETING_DATA/
+# meetings/<id>/ (metadata.json, transcript.json), listed by state["meetings"].
+
+def past_dir(meeting_id):
+    return os.path.join(os.environ["FAKE_MEETING_DATA"], "meetings", meeting_id)
+
+
+def all_ids(state):
+    ids = [m["id"] for m in state.get("meetings", [])]
+    snap = snapshot()
+    for name in ("live", "stored"):
+        m = snap.get(name)
+        if m and m.get("meeting_id"):
+            ids.append(m["meeting_id"])
+    return ids
+
+
+def resolve(state, meeting):
+    """The full ID for an ID or a unique prefix, as the real CLI accepts."""
+    ids = all_ids(state)
+    if meeting in ids:
+        return meeting
+    hits = [i for i in ids if i.startswith(meeting)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def segments_of(state, meeting):
+    snap = snapshot()
+    for name in ("live", "stored"):
+        m = snap.get(name)
+        if m and m.get("meeting_id") == meeting:
+            return m["segments"]
+    path = os.path.join(past_dir(meeting), "transcript.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)["segments"]
+    return None
+
+
+def put_segment(state, meeting, seg):
+    """Store one changed segment; a socket meeting announces it."""
+    path = os.path.join(past_dir(meeting), "transcript.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            t = json.load(f)
+        t["segments"] = [seg if s["id"] == seg["id"] else s for s in t["segments"]]
+        with open(path, "w") as f:
+            json.dump(t, f)
+        return True
+    nonce = "edit-%f" % time.time()
+    control({"cmd": "update", "meeting_id": meeting, "segment": seg, "key": "event", "nonce": nonce})
+    return wait_applied(nonce)
+
+
+def find_segment(state, args_meeting, seg_arg):
+    meeting = resolve(state, args_meeting)
+    if meeting is None:
+        print("error: Meeting not found: " + args_meeting, file=sys.stderr)
+        return None, None, None
+    segs = segments_of(state, meeting)
+    seg = next((s for s in segs or [] if str(s["id"]) == seg_arg), None)
+    if seg is None:
+        print("error: no segment %s in meeting %s" % (seg_arg, meeting), file=sys.stderr)
+        return None, None, None
+    return meeting, segs, dict(seg)
+
+
+def reassign(state, args):
     """meeting reassign M SEG SPEAKER|--reset [--json]"""
     want_json = "--json" in args
     rest = [a for a in args if a != "--json"]
     if len(rest) != 3:
         return 2
-    meeting, seg_arg, speaker = rest
-    with open(os.environ["FAKE_MEETING_SNAPSHOT"]) as f:
-        snap = json.load(f)
-    target = None
-    for name in ("live", "stored"):
-        m = snap.get(name)
-        if m and m.get("meeting_id") and m["meeting_id"] == meeting:
-            target = m
-            break
-    if target is None:
-        print("error: Meeting not found: " + meeting, file=sys.stderr)
-        return 1
-    seg = next((s for s in target["segments"] if str(s["id"]) == seg_arg), None)
+    meeting, segs, seg = find_segment(state, rest[0], rest[1])
     if seg is None:
-        print("error: no segment %s in meeting %s" % (seg_arg, meeting), file=sys.stderr)
         return 1
+    speaker = rest[2]
     current = segment_key(seg)
-    seg = dict(seg)
     original = seg.pop("original_speaker", None)
     if speaker == "--reset":
         if original is None:
-            print("error: segment %s has not been reassigned" % seg_arg, file=sys.stderr)
+            print("error: segment %s has not been reassigned" % rest[1], file=sys.stderr)
             return 1
         new = original
         seg.pop("speaker_label", None)
     else:
         new = None
-        for s in target["segments"]:
+        for s in segs:
             key = segment_key(s)
             if key.lower() == speaker.lower() or (s.get("speaker_label") or "").lower() == speaker.lower():
                 new = key
                 if s.get("speaker_label"):
                     seg["speaker_label"] = s["speaker_label"]
+                else:
+                    seg.pop("speaker_label", None)
                 break
         if new is None:
-            new = speaker
-            seg.pop("speaker_label", None)
+            # A new speaker, as the daemon names one: "Person N", labelled.
+            n = 1 + len({segment_key(s) for s in segs if segment_key(s).startswith("Person ")})
+            new = "Person %d" % n
+            seg["speaker_label"] = speaker
         if original is None:
             original = current
         if original != new:
             seg["original_speaker"] = original
     seg["speaker_id"] = new
-    nonce = "reassign-%f" % time.time()
-    control({"cmd": "update", "meeting_id": meeting, "segment": seg, "key": "event", "nonce": nonce})
-    if not wait_applied(nonce):
+    if not put_segment(state, meeting, seg):
         print("error: the fake socket did not apply the change", file=sys.stderr)
         return 1
-    if want_json:
-        print(json.dumps(seg))
-    else:
-        print("Moved segment %s to %s" % (seg_arg, new))
+    print(json.dumps(seg, indent=2) if want_json else "Moved segment %s to %s" % (rest[1], new))
     return 0
 
 
@@ -208,17 +271,11 @@ def config_set(state, key, value):
 
 
 def snapshot():
-    with open(os.environ["FAKE_MEETING_SNAPSHOT"]) as f:
-        return json.load(f)
-
-
-def find_meeting(meeting):
-    snap = snapshot()
-    for name in ("live", "stored"):
-        m = snap.get(name)
-        if m and m.get("meeting_id") and m["meeting_id"] == meeting:
-            return m, snap
-    return None, snap
+    try:
+        with open(os.environ["FAKE_MEETING_SNAPSHOT"]) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
 
 def ask(state, args):
@@ -238,61 +295,87 @@ def ask(state, args):
     return 0
 
 
-def notes(args):
-    data = os.environ["FAKE_MEETING_DATA"]
-    meeting = args[0]
-    path = os.path.join(data, "notes-%s.md" % meeting)
-    if len(args) == 1:
-        try:
-            with open(path) as f:
-                sys.stdout.write(f.read())
-        except FileNotFoundError:
-            pass
-        return 0
-    if len(args) == 3 and args[1] == "--set-file":
-        with open(args[2]) as src, open(path, "w") as dst:
+def notes(state, args):
+    """meeting notes M [--set-file PATH] [--json]"""
+    want_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    meeting = resolve(state, rest[0]) if rest else None
+    if meeting is None:
+        print("error: Meeting not found", file=sys.stderr)
+        return 1
+    path = os.path.join(os.environ["FAKE_MEETING_DATA"], "notes-%s.md" % meeting)
+    if len(rest) == 3 and rest[1] == "--set-file":
+        with open(rest[2]) as src, open(path, "w") as dst:
             dst.write(src.read())
         control({"cmd": "notes_updated", "meeting_id": meeting})
-        return 0
-    return 2
-
-
-def annotate(args):
-    if len(args) != 3:
+    elif len(rest) != 1:
         return 2
-    meeting, seg_arg, text = args
-    target, _ = find_meeting(meeting)
-    if target is None:
-        print("error: Meeting not found: " + meeting, file=sys.stderr)
-        return 1
-    seg = next((s for s in target["segments"] if str(s["id"]) == seg_arg), None)
-    if seg is None:
-        print("error: no segment %s" % seg_arg, file=sys.stderr)
-        return 1
-    seg = dict(seg)
-    if text == "--remove":
-        seg.pop("annotation", None)
-    else:
-        seg["annotation"] = text
-    nonce = "annotate-%f" % time.time()
-    control({"cmd": "update", "meeting_id": meeting, "segment": seg, "key": "event", "nonce": nonce})
-    if not wait_applied(nonce):
-        print("error: the fake socket did not apply the change", file=sys.stderr)
-        return 1
-    print(json.dumps(seg))
+    text = None
+    if os.path.exists(path):
+        with open(path) as f:
+            text = f.read()
+    if want_json:
+        print(json.dumps({"meeting_id": meeting, "notes": text, "updated_at": None}, indent=2))
+    elif text is not None:
+        sys.stdout.write(text)
     return 0
 
 
-def show(meeting):
-    target, snap = find_meeting(meeting)
-    if target is None:
-        print("error: Meeting not found: " + meeting, file=sys.stderr)
+def annotate(state, args):
+    """meeting annotate M SEG [TEXT] [--highlight] [--json] | M SEG --remove [--json]"""
+    want_json = "--json" in args
+    highlight = "--highlight" in args
+    rest = [a for a in args if a not in ("--json", "--highlight")]
+    if len(rest) not in (2, 3):
+        return 2
+    meeting, _, seg = find_segment(state, rest[0], rest[1])
+    if seg is None:
         return 1
-    meta = {"id": target["meeting_id"], "title": target.get("title"), "started_at": target.get("started_at"),
-            "ended_at": target.get("ended_at"), "status": "completed", "chunk_count": 3, "audio_retained": False}
+    if len(rest) == 3 and rest[2] == "--remove":
+        seg.pop("annotation", None)
+    else:
+        seg["annotation"] = {"text": rest[2] if len(rest) == 3 else "", "highlight": highlight}
+    if not put_segment(state, meeting, seg):
+        print("error: the fake socket did not apply the change", file=sys.stderr)
+        return 1
+    print(json.dumps(seg, indent=2) if want_json else "Annotated segment %s" % rest[1])
+    return 0
+
+
+def list_meetings(state, args):
+    """meeting list --json [--limit N]: the socket's last meeting, then the past ones."""
+    limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 10
+    out = []
+    stored = snapshot().get("stored")
+    if stored and stored.get("meeting_id"):
+        out.append({"id": stored["meeting_id"], "title": stored.get("title"), "started_at": stored.get("started_at"),
+                    "duration_secs": 70, "status": "completed", "chunk_count": 3, "audio_retained": False})
+    out += sorted(state.get("meetings", []), key=lambda m: m["started_at"], reverse=True)
+    print(json.dumps(out[:limit], indent=2))
+    return 0
+
+
+def show(state, args_meeting):
+    meeting = resolve(state, args_meeting)
+    if meeting is None:
+        print("error: Meeting not found: " + args_meeting, file=sys.stderr)
+        return 1
+    folder = past_dir(meeting)
+    if os.path.isdir(folder):
+        with open(os.path.join(folder, "metadata.json")) as f:
+            meta = json.load(f)
+        with open(os.path.join(folder, "transcript.json")) as f:
+            transcript = json.load(f)
+        print(json.dumps({"metadata": meta, "transcript": transcript, "asks": []}, indent=2))
+        return 0
+    snap = snapshot()
+    target = next(m for m in (snap.get("live"), snap.get("stored")) if m and m.get("meeting_id") == meeting)
+    meta = {"id": meeting, "title": target.get("title"), "started_at": target.get("started_at"),
+            "status": "completed", "chunk_count": 3, "audio_retained": False}
     if snap.get("summary"):
         meta["summary"] = snap["summary"]
-    print(json.dumps({"metadata": meta, "transcript": {"segments": target["segments"], "total_chunks": 3}}))
+    print(json.dumps({"metadata": meta, "transcript": {"segments": target["segments"], "total_chunks": 3},
+                      "asks": []}, indent=2))
     return 0
 
 
@@ -331,20 +414,22 @@ def main():
         title = args[args.index("--title") + 1] if "--title" in args else ""
         control({"cmd": "start", "title": title})
     elif action == "reassign":
-        return reassign(args[2:])
+        return reassign(state, args[2:])
     elif action == "assistant":
         return assistant(state, args[2:])
     elif action == "ask":
         return ask(state, args[2:])
-    elif action == "summarize" and "--regenerate" in args:
+    elif action == "summarize" and len(args) >= 3:
         time.sleep(0.6)
         print(state.get("summary_md", DEFAULT_SUMMARY))
     elif action == "show" and len(args) == 4 and args[3] == "--json":
-        return show(args[2])
+        return show(state, args[2])
+    elif action == "list" and "--json" in args:
+        return list_meetings(state, args)
     elif action == "notes":
-        return notes(args[2:])
+        return notes(state, args[2:])
     elif action == "annotate":
-        return annotate(args[2:])
+        return annotate(state, args[2:])
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))

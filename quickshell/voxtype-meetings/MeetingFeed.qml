@@ -68,9 +68,10 @@ Item {
   // Notes changed outside this view (`notes_updated`). `notes` is the new text
   // when the event carries it, otherwise null and the reader fetches it.
   signal notesUpdated(string meetingId, var notes)
-  // The summary is written (`summary_ready`). `markdown` is "" unless the event
-  // carries it.
-  signal summaryReady(string meetingId, string markdown)
+  // The summary is written (`summary_ready`). The daemon's event carries the
+  // MeetingSummary as `summary` (and summary.md's `path`); `markdown` is ""
+  // unless an event carries text.
+  signal summaryReady(string meetingId, string markdown, var summary)
   // A meeting began while this feed was watching: an idle (or ended) meeting
   // gave way to a recording one. Never fired for a meeting already running
   // when the feed first connected.
@@ -417,7 +418,8 @@ Item {
     } else if (kind === "notes_updated") {
       root.notesUpdated(String(ev.meeting_id || root.meetingId), ev.notes !== undefined ? ev.notes : null)
     } else if (kind === "summary_ready") {
-      root.summaryReady(String(ev.meeting_id || root.meetingId), ev.markdown ? String(ev.markdown) : "")
+      root.summaryReady(String(ev.meeting_id || root.meetingId), ev.markdown ? String(ev.markdown) : "",
+                        ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
     } else if (kind === "speaker_renamed") {

@@ -149,9 +149,17 @@ written) apply live, so a change made elsewhere shows up too. A line is marked
 `reassigned: true`, or it was moved from this view.
 
 A meeting that ends is kept on screen as **Ended** (title, length, end time)
-with renames and reassignment still working, until a new meeting starts or the
-view is closed. A daemon that goes away mid-meeting leaves it Ended the same
-way.
+with renames and reassignment still working, until a new meeting starts, Back
+returns to the list, or the view is closed. A daemon that goes away
+mid-meeting leaves it Ended the same way.
+
+With no meeting on screen the view lists past meetings from `voxtype meeting
+list --json` (50, then more on request), newest first. That list carries
+metadata only, so each row reads its own folder (`storage_path`) for the
+speaker count (transcript.json) and the Summary badge (metadata.json's
+`summary`, or summary.md), and only for rows actually built. Opening one runs
+`voxtype meeting show <id> --json` and shows it as Ended; edits go to the
+stored meeting.
 
 ```bash
 omarchy-shell io.voxtype.settings meetings

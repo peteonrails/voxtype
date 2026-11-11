@@ -73,10 +73,18 @@ Item {
   // `segment` is the updated segment from --json, or null if it printed none.
   signal reassignFinished(var extra, bool ok, string message, var segment)
 
-  // A note on one line, or its removal with an empty `text`.
-  function annotate(meeting, segId, text, extra) {
+  // A note on one line, or its removal with an empty `text`. Annotating
+  // replaces the annotation, so a highlight is passed on to keep it.
+  function annotate(meeting, segId, text, highlight, extra) {
     var t = String(text || "").trim()
-    root.enqueue("annotate", ["meeting", "annotate", meeting || "latest", String(segId)].concat(t === "" ? ["--remove"] : [t]), extra)
+    var args = ["meeting", "annotate", meeting || "latest", String(segId)]
+    if (t === "") args.push("--remove")
+    else {
+      args.push(t)
+      if (highlight) args.push("--highlight")
+    }
+    args.push("--json")
+    root.enqueue("annotate", args, extra)
   }
 
   signal annotateFinished(var extra, bool ok, string message, var segment)

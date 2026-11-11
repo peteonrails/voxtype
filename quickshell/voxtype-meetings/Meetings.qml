@@ -57,6 +57,78 @@ Item {
 
   MeetingFeed { id: feed }
 
+  // ------------------------------------------------------------ past meetings
+
+  // `voxtype meeting list --json`, newest first, for the view's idle screen.
+  property var pastMeetings: []
+  property int listLimit: 50
+  property string listError: ""
+  readonly property bool listLoading: listProc.running || listProc.startPending
+  readonly property bool listHasMore: root.pastMeetings.length >= root.listLimit
+
+  function refreshList() {
+    if (listProc.running || listProc.startPending) {
+      listProc.again = true
+      return
+    }
+    listProc.out = ""
+    listProc.err = ""
+    listProc.launch([root.bin, "meeting", "list", "--json", "--limit", String(root.listLimit)])
+  }
+
+  function loadMoreMeetings() {
+    root.listLimit += 50
+    root.refreshList()
+  }
+
+  // A past meeting, shown the way an ended one is.
+  function openPast(meetingId) {
+    root.actionError = ""
+    storedProc.load(meetingId)
+  }
+
+  // Back to the list from an ended or past meeting.
+  function back() {
+    feed.clearEnded()
+    root.refreshList()
+  }
+
+  MeetingProcess {
+    id: listProc
+    property string out: ""
+    property string err: ""
+    property bool again: false
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: listProc.out = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: listProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (listProc.again) {
+        listProc.again = false
+        Qt.callLater(root.refreshList)
+        return
+      }
+      if (code !== 0) {
+        root.listError = listProc.err || "voxtype meeting list exited " + code
+        return
+      }
+      var parsed = null
+      try { parsed = JSON.parse(listProc.out) } catch (e) {}
+      if (!parsed || parsed.length === undefined) {
+        root.listError = "voxtype meeting list did not return a list"
+        return
+      }
+      root.listError = ""
+      root.pastMeetings = parsed
+    }
+    onFailedToStart: root.listError = "Could not run " + root.bin
+  }
+
+  Connections {
+    target: feed
+    // A meeting that ended belongs at the top of the list.
+    function onTransitioned(from, to) { if (to === "idle" && root.shown) root.refreshList() }
+    function onHasMeetingChanged() { if (!feed.hasMeeting && root.shown) root.refreshList() }
+  }
+
   MeetingAssistant {
     id: assistant
     bin: root.bin
@@ -126,8 +198,9 @@ Item {
     var snap = feed.annotationSnapshot(segId)
     if (!snap) return
     root.actionError = ""
-    feed.setAnnotation(segId, text, snap.highlight && String(text).trim() !== "")
-    meetingCli.annotate(feed.meetingId, segId, text, { snapshot: snap })
+    var keepHighlight = snap.highlight && String(text).trim() !== ""
+    feed.setAnnotation(segId, text, keepHighlight)
+    meetingCli.annotate(feed.meetingId, segId, text, keepHighlight, { snapshot: snap })
   }
 
   // A host's own open request with a payload ({"tab", "meeting_id"}), such as
@@ -164,6 +237,7 @@ Item {
     root.actionError = ""
     feed.connectNow()
     assistant.fetchStatus()
+    root.refreshList()
   }
 
   // ------------------------------------------------------------ requests
@@ -202,8 +276,12 @@ Item {
     onExited: function(code) {
       var data = null
       try { data = JSON.parse(storedProc.out) } catch (e) {}
-      if (code !== 0 || !data || !feed.loadStored(data))
+      if (code !== 0 || !data || !feed.loadStored(data)) {
         root.actionError = storedProc.err || "Could not open that meeting."
+        return
+      }
+      if (data.metadata && data.metadata.summary) assistant.setStoredSummary(feed.meetingId, data.metadata.summary)
+      root.showTab("transcript")
     }
   }
 
@@ -226,6 +304,10 @@ Item {
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })
+      view.pastMeetings = Qt.binding(function() { return root.pastMeetings })
+      view.listLoading = Qt.binding(function() { return root.listLoading })
+      view.listError = Qt.binding(function() { return root.listError })
+      view.listHasMore = Qt.binding(function() { return root.listHasMore })
       if (root.pendingTab !== "") view.selectTab(root.pendingTab)
       root.pendingTab = ""
       w.visible = true
@@ -248,6 +330,9 @@ Item {
     function onRestoreRequested(segId) { root.restoreSpeaker(segId) }
     function onAnnotateRequested(segId, text) { root.annotate(segId, text) }
     function onSettingsRequested() { root.settingsRequested() }
+    function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
+    function onMoreMeetingsRequested() { root.loadMoreMeetings() }
+    function onBackRequested() { root.back() }
     function onCloseRequested() { root.closeRequested() }
     function onErrorDismissed() { root.actionError = "" }
   }

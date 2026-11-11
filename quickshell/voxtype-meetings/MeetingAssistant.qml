@@ -18,11 +18,12 @@ import Quickshell.Io
 //   voxtype config set meeting.assistant.agent <id>
 //   voxtype meeting ask <id> "<question>" [--last 5m] [--notify]
 //       the answer streams on stdout; failure exits non-zero with stderr
-//   voxtype meeting summarize <id> --regenerate      summary markdown on stdout
+//   voxtype meeting summarize <id>                   summary markdown on stdout
 //   voxtype meeting show <id> --json                 metadata.summary for a
 //                                                    summary_ready without text
-//   voxtype meeting notes <id>                       the notes on stdout
+//   voxtype meeting notes <id> --json                {"meeting_id", "notes", "updated_at"}
 //   voxtype meeting notes <id> --set-file <path>
+//   socket: {"event": "notes_updated", "meeting_id", "updated_at"} (no text)
 Item {
   id: root
 
@@ -193,7 +194,16 @@ Item {
     root.summaryError = ""
     summaryProc.out = ""
     summaryProc.err = ""
-    summaryProc.launch([root.bin, "meeting", "summarize", root.feed.meetingId, "--regenerate"])
+    summaryProc.launch([root.bin, "meeting", "summarize", root.feed.meetingId])
+  }
+
+  // A summary that came with the meeting (`meeting show --json`).
+  function setStoredSummary(meetingId, summary) {
+    var md = root.summaryToMarkdown(summary)
+    if (md === "" || meetingId !== root.feed.meetingId) return
+    root.summaryMeeting = meetingId
+    root.summaryMarkdown = md
+    root.summaryState = "ready"
   }
 
   // The stored summary, for a summary_ready that does not carry its text.
@@ -244,7 +254,7 @@ Item {
     }
     notesReadProc.meeting = root.feed.meetingId
     notesReadProc.out = ""
-    notesReadProc.launch([root.bin, "meeting", "notes", root.feed.meetingId])
+    notesReadProc.launch([root.bin, "meeting", "notes", root.feed.meetingId, "--json"])
   }
 
   function editNotes(text) {
@@ -298,11 +308,12 @@ Item {
       if (notes !== null && notes !== undefined) root.notes = String(notes)
       else root.loadNotes()
     }
-    function onSummaryReady(meetingId, markdown) {
+    function onSummaryReady(meetingId, markdown, summary) {
       if (meetingId !== root.feed.meetingId) return
       root.summaryMeeting = meetingId
-      if (markdown !== "") {
-        root.summaryMarkdown = markdown
+      var md = markdown !== "" ? markdown : root.summaryToMarkdown(summary)
+      if (md !== "") {
+        root.summaryMarkdown = md
         root.summaryState = "ready"
       } else {
         root.loadSummary(meetingId)
@@ -498,7 +509,9 @@ Item {
         return
       }
       if (code !== 0 || notesReadProc.meeting !== root.notesMeeting || root.notesDirty) return
-      root.notes = notesReadProc.out.replace(/\n$/, "")
+      var parsed = null
+      try { parsed = JSON.parse(notesReadProc.out) } catch (e) {}
+      root.notes = parsed && parsed.notes !== undefined && parsed.notes !== null ? String(parsed.notes) : ""
     }
   }
 
