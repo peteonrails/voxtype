@@ -966,8 +966,9 @@ option = "value"</code></pre>
 2. Add matching article to `website/news/index.html`
 3. Update download examples in `website/index.html` (deb/rpm URLs with new version)
 4. Update `packaging/arch-bin/voxtype-bin.install` post_upgrade() message with current version highlights
-5. Commit and push website changes
-6. Push AUR package updates
+5. Check `skills/voxtype-setup/SKILL.md` against the release: every command, flag and config key it names still exists (`voxtype --help`, `voxtype config schema`), and its engine, model and output advice covers what shipped. Features it calls "on the roadmap" (such as built-in history, #209) get rewritten once they ship
+6. Commit and push website changes
+7. Push AUR package updates
 
 ### Shipping a Release: Sequencing
 
