@@ -17,6 +17,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Labeling Speakers](#labeling-speakers)
   - [AI Summarization](#ai-summarization)
   - [Deleting Meetings](#deleting-meetings)
+- [Live Meeting View (Omarchy)](#live-meeting-view-omarchy)
 - [Meeting Detection](#meeting-detection)
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
@@ -234,6 +235,37 @@ Permanently deletes the meeting record, transcript, and any associated audio fil
 
 ---
 
+## Live Meeting View (Omarchy)
+
+On Omarchy, the Voxtype shell plugin has a Meetings view that follows a meeting as it happens. It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
+
+It shows:
+
+- The meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop** buttons
+- The transcript, one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up to read something; **Jump to latest** takes you back
+- A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip
+- "Listening…" between updates. Lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word
+
+With no meeting running it offers a **Start meeting** button and an optional title.
+
+Open it yourself with:
+
+```bash
+omarchy-shell io.voxtype.settings meetings
+# or, to toggle it:
+omarchy-shell shell toggle io.voxtype.settings '{"view":"meetings"}'
+```
+
+To stop it opening on its own:
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
+The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#live-transcript-and-status-meetingsock). It does not open over an open Voxtype Settings panel.
+
+---
+
 ## Meeting Detection
 
 Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?" with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
@@ -320,6 +352,10 @@ retain_audio = false
 
 # Maximum meeting duration in minutes (default: 180, 0 = unlimited)
 max_duration_mins = 180
+
+# Open the live meeting view in the Omarchy shell when a meeting starts
+# (default: true; no effect on other desktops)
+show_view_on_start = true
 ```
 
 ### Audio Settings

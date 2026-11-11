@@ -21,7 +21,7 @@ FAKE = HERE / "fake-voxtype-migrate.py"
 
 WINDOW_OLD = """  PanelWindow {
     id: window
-    visible: root.opened
+    visible: root.opened && root.view === "settings"
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
@@ -31,7 +31,7 @@ WINDOW_OLD = """  PanelWindow {
 """
 WINDOW_NEW = """  FloatingWindow {
     id: window
-    visible: root.opened
+    visible: root.opened && root.view === "settings"
     implicitWidth: 1280
     implicitHeight: 900
     color: "black"

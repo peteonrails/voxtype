@@ -3756,6 +3756,18 @@ Keep raw audio chunk files after transcription. Useful for debugging or re-trans
 
 Maximum meeting duration in minutes. Set to `0` for unlimited.
 
+### show_view_on_start
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view belongs to the Voxtype plugin for the Omarchy shell, so this does nothing on other desktops. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
 ---
 
 ## [meeting.audio]

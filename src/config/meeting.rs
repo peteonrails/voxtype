@@ -28,6 +28,12 @@ pub struct MeetingConfig {
     #[serde(default = "default_max_duration")]
     pub max_duration_mins: u32,
 
+    /// Open the live meeting view when a meeting starts. Read by the Omarchy
+    /// plugin, which is the only frontend with such a view; elsewhere it does
+    /// nothing.
+    #[serde(default = "default_true")]
+    pub show_view_on_start: bool,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -268,6 +274,7 @@ impl Default for MeetingConfig {
             storage_path: default_storage_path(),
             retain_audio: false,
             max_duration_mins: default_max_duration(),
+            show_view_on_start: true,
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
@@ -289,6 +296,18 @@ mod tests {
         assert_eq!(config.storage_path, "auto");
         assert!(!config.retain_audio);
         assert_eq!(config.max_duration_mins, 180);
+        assert!(config.show_view_on_start);
+    }
+
+    #[test]
+    fn test_show_view_on_start_defaults_on_and_can_be_turned_off() {
+        // A config written before the key existed keeps the view opening.
+        let config: Config = toml::from_str("[meeting]\nenabled = true\n").unwrap();
+        assert!(config.meeting.show_view_on_start);
+
+        let config: Config =
+            toml::from_str("[meeting]\nenabled = true\nshow_view_on_start = false\n").unwrap();
+        assert!(!config.meeting.show_view_on_start);
     }
 
     #[test]

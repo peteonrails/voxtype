@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Commons as ShellTheme
 import qs.Ui
 import "components"
+import "components/meetings"
 
 // Voxtype settings, as an Omarchy panel plugin.
 //
@@ -18,6 +19,10 @@ import "components"
 //
 //   omarchy-shell io.voxtype.settings toggle
 //   omarchy-shell io.voxtype.settings section Hotkey
+//
+// The live meeting view is the same plugin with {"view":"meetings"}, or the
+// `meetings` verb; it also opens by itself when a meeting starts (see
+// components/meetings/Meetings.qml).
 //
 // The panel owns no settings model of its own: `voxtype config schema --json`
 // is the whole source of truth, re-read on every summon and after every write,
@@ -35,6 +40,8 @@ Item {
   property string omarchyPath: ""
 
   property bool opened: false
+  // "settings" or "meetings": which of the plugin's two windows `opened` shows.
+  property string view: "settings"
 
   // ---------------------------------------------------------------- state
 
@@ -256,7 +263,9 @@ Item {
     var payload = {}
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
 
+    root.view = payload.view === "meetings" ? "meetings" : "settings"
     root.opened = true
+    if (root.view === "meetings") return
     if (cli.downloading) root.browsingEngine = cli.downloadEngine
     // Re-read on every summon: the config file may have been edited by the
     // TUI, another shell, or an upgrade since the last time we looked.
@@ -525,7 +534,7 @@ Item {
     function open(): string {
       // Already up: leave the panel as the user left it rather than resetting
       // its search and section.
-      if (root.opened) return "ok"
+      if (root.opened && root.view === "settings") return "ok"
       return root.requestOpen("{}")
     }
 
@@ -545,7 +554,7 @@ Item {
     function section(name: string): string {
       var wanted = root.canonicalSection(name || "")
       if (wanted === "") return "usage: section <name>"
-      if (root.opened) {
+      if (root.opened && root.view === "settings") {
         // The tray's "Model update available" lands here on an open panel,
         // and so can a jump made after the binary or config changed. Re-read
         // everything, as a summon does, not just the upgrade offers.
@@ -565,6 +574,12 @@ Item {
         return "ok"
       }
       return root.requestOpen(JSON.stringify({ section: wanted }))
+    }
+
+    // The live meeting view, or a no-op if it is already up.
+    function meetings(): string {
+      if (root.opened && root.view === "meetings") return "ok"
+      return root.requestOpen(JSON.stringify({ view: "meetings" }))
     }
 
     // Restarts the daemon, not the panel — the same button the restart banner
@@ -891,7 +906,7 @@ Item {
     property int ticks: 0
 
     interval: 5000
-    running: root.opened && !root.degraded
+    running: root.opened && root.view === "settings" && !root.degraded
     repeat: true
     onTriggered: {
       cli.fetchStatus()
@@ -919,7 +934,7 @@ Item {
   // already doing.
   FileView {
     id: configWatcher
-    path: root.opened && root.configPath !== "" ? root.configPath : ""
+    path: root.opened && root.view === "settings" && root.configPath !== "" ? root.configPath : ""
     watchChanges: true
     printErrors: false
     // `voxtype config set` writes atomically, so the path is replaced rather
@@ -966,9 +981,18 @@ Item {
 
   // ---------------------------------------------------------------- window
 
+  Meetings {
+    id: meetings
+    bin: cli.bin
+    shown: root.opened && root.view === "meetings"
+    panelOpen: root.opened
+    onOpenRequested: root.requestOpen(JSON.stringify({ view: "meetings" }))
+    onCloseRequested: root.dismiss()
+  }
+
   PanelWindow {
     id: window
-    visible: root.opened
+    visible: root.opened && root.view === "settings"
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
