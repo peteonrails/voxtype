@@ -232,6 +232,7 @@ what is wrong instead of showing an empty pane:
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
+- [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
@@ -1632,6 +1633,79 @@ cat "$XDG_RUNTIME_DIR/voxtype/outcome.json"   # after a session ends
 
 No result is shown for cancelled recordings, accidental taps, or
 `record start --no-osd` sessions; that is expected.
+
+---
+
+## Meeting Audio and Post-Meeting Command
+
+### Meeting audio is saved as WAV instead of Opus
+
+With `[meeting] retain_audio = true`, voxtype encodes the audio with
+`ffmpeg`. When `ffmpeg` is not on the daemon's `PATH`, or was built without
+libopus, the daemon logs one of these and keeps `mic.wav`, `loopback.wav` and
+`mixed.wav` instead (about 115 MB per hour per file, against about 10 MB for
+Opus):
+
+```
+ffmpeg not found; keeping meeting audio as WAV ...
+/usr/bin/ffmpeg has no libopus encoder; keeping meeting audio as WAV ...
+```
+
+Install `ffmpeg` (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`,
+`sudo dnf install ffmpeg-free`) and check it has the encoder:
+
+```bash
+ffmpeg -hide_banner -encoders | grep libopus
+```
+
+Then restart the daemon (`systemctl --user restart voxtype`); the check runs
+once per daemon. Meetings already saved as WAV stay WAV. To convert one:
+
+```bash
+cd ~/.local/share/voxtype/meetings/<meeting>
+for t in mic loopback mixed; do
+  [ -f $t.wav ] && ffmpeg -i $t.wav -c:a libopus -b:a 24k $t.opus && rm $t.wav
+done
+```
+
+`meeting.json` lists whichever files are there the next time it is rewritten.
+
+### `meeting play` fails or plays nothing
+
+- **"needs ffmpeg and one of pw-play (PipeWire), paplay (PulseAudio) or
+  aplay (ALSA)"**: install what the message names as missing. `pw-play`
+  comes with PipeWire (`pipewire` or `pipewire-bin`), `paplay` with
+  `pulseaudio-utils` or `libpulse`, `aplay` with `alsa-utils`.
+- **"This meeting was recorded without keeping audio"**: the meeting was
+  recorded with `retain_audio` off. Turn it on for future meetings; there is
+  nothing to play for this one.
+- **It says it is playing but you hear nothing**: playback goes to your
+  default output. Check it with `wpctl status` (PipeWire) or
+  `pactl get-default-sink`, and look at
+  `$XDG_RUNTIME_DIR/voxtype/meeting_playback.log` for errors from ffmpeg or
+  the player.
+
+### The post-meeting command did not run, or did not finish
+
+`post_meeting_command` runs in the background once the meeting's folder is
+final, and its outcome is in the daemon log:
+
+```bash
+journalctl --user -u voxtype | grep post_meeting_command
+```
+
+- **"failed ... (exit status: 127)"**: the shell could not find the program.
+  The daemon's `PATH` under systemd is shorter than your terminal's; use an
+  absolute path.
+- **"ran past 300s and was killed"**: raise `post_meeting_timeout_secs`, or
+  have the command start its long work with `systemd-run --user` so it is no
+  longer the command's child.
+- **Nothing logged**: check that `post_meeting_command` is under `[meeting]`
+  and the daemon was restarted after you set it (`voxtype config` shows it).
+
+The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
+`VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
+terminal: anything that prompts for input fails.
 
 ---
 

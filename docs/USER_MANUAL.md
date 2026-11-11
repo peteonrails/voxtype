@@ -2799,7 +2799,7 @@ Meeting mode is disabled by default. Enable it in `~/.config/voxtype/config.toml
 enabled = true
 chunk_duration_secs = 30         # Audio chunk size for processing
 storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
-retain_audio = false             # Keep raw audio files after transcription
+retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the meeting folder
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
 show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
 

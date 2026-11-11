@@ -3244,17 +3244,26 @@ impl Daemon {
                     self.update_meeting_state("idle", None);
                     tracing::info!("Meeting stopped: {}", meeting_id);
 
-                    // Summarize in the background: the meeting is already
-                    // saved, and a slow or failing agent must not hold up
-                    // the daemon or the next meeting.
-                    if let Some(job) = daemon.auto_summary(meeting_id) {
-                        let hub = self.meeting_event_hub.clone();
-                        tokio::spawn(job.run(move |event| {
-                            if let Some(ref hub) = hub {
-                                hub.publish_summary_event(event);
-                            }
-                        }));
-                    }
+                    // Summarize, then rewrite meeting.json and run
+                    // post_meeting_command, in the background: the meeting
+                    // is already saved, and a slow or failing agent or
+                    // command must not hold up the daemon or the next
+                    // meeting. The command runs after the summary so it
+                    // sees summary.md, and the manifest lists it.
+                    let summary = daemon.auto_summary(meeting_id);
+                    let post = daemon.post_meeting(meeting_id);
+                    let hub = self.meeting_event_hub.clone();
+                    tokio::spawn(async move {
+                        if let Some(job) = summary {
+                            job.run(move |event| {
+                                if let Some(ref hub) = hub {
+                                    hub.publish_summary_event(event);
+                                }
+                            })
+                            .await;
+                        }
+                        post.run().await;
+                    });
 
                     self.play_feedback(SoundEvent::RecordingStop);
 
@@ -3416,6 +3425,13 @@ impl Daemon {
             });
             if let (Some(notes), Some(ref hub)) = (notes, &self.meeting_event_hub) {
                 hub.publish_notes_updated(&notes);
+            }
+        }
+
+        // `meeting play` started or stopped, or a playback ran to its end.
+        if take_trigger(meeting::playback::TRIGGER) {
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.publish_playback(&meeting::playback::status(&Config::runtime_dir()));
             }
         }
 

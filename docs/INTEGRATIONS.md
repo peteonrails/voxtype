@@ -164,6 +164,7 @@ needed:
 {"event": "segment_deleted", "meeting_id": "...", "segment_id": 31}
 {"event": "notes_updated", "meeting_id": "...", "updated_at": "2026-11-11T20:00:00Z"}
 {"event": "status", "status": "paused"}
+{"event": "playback", "meeting_id": "...", "track": "mixed", "state": "playing", "from_ms": 61250}
 {"event": "error", "message": "..."}
 ```
 
@@ -222,6 +223,14 @@ Events fire roughly once per `chunk_duration_secs` (default 30s), not per
 word — meeting mode transcribes in chunks, it does not stream. A UI built on
 this socket should show a "listening…" affordance between updates, not
 imitate word-by-word streaming it cannot actually deliver.
+
+`playback` follows `voxtype meeting play` (below): `state` is `playing`
+when a playback starts and `stopped` when it is stopped or reaches the end
+of the track. It describes the current playback when the daemon sends it, so
+changes made in quick succession can arrive as one event with the latest
+state. It is sent whether or not a meeting is recording, and not at all
+while the daemon is down; poll `meeting play --status --json` if you need
+certainty.
 
 #### Summary at stop: `summarizing` and `summary_ready`
 
@@ -308,6 +317,135 @@ What a UI needs for an agent chip and a consent dialog:
 - The consent dialog's three answers map to `voxtype meeting assistant allow
   <id>`, `voxtype config set meeting.assistant.local_only true` (or `ask
   --local` for one question), and doing nothing.
+
+### Playing meeting audio: `meeting play`
+
+A meeting kept with `retain_audio = true` can be played from any point. The
+command starts the playback in the background (`ffmpeg` seeking and decoding
+into `pw-play`, `paplay` or `aplay`, whichever is found first) and returns at
+once. One playback runs at a time; starting another stops the one before.
+
+```sh
+voxtype meeting play <meeting> [--segment <id> | --at <time>] [--track mixed|mic|loopback] [--json]
+voxtype meeting play --status [--json]
+voxtype meeting play --stop [--json]
+```
+
+- `<meeting>` is a meeting ID, a unique start of one, or `latest`.
+- `--segment` starts at that segment's `start_ms` (`id` from `transcript.json`
+  or `meeting show --json`). `--at` takes seconds (`95`, `95.5`), `mm:ss` or
+  `hh:mm:ss`, from the start of the meeting. Neither starts at 0.
+- `--track` defaults to `mixed`.
+
+Starting prints, with `--json`, one line:
+
+```json
+{"meeting_id": "b6b2e5b2-...", "track": "mixed", "from_ms": 61250, "pid": 48211}
+```
+
+`pid` is the playback's process group. `--status --json` and `--stop --json`
+print the current or last playback (`--stop` prints what it stopped, with
+`state` already `stopped`):
+
+```json
+{"state": "playing", "meeting_id": "b6b2e5b2-...", "track": "mixed", "from_ms": 61250, "pid": 48211, "started_at": "2026-11-11T22:58:38.164Z", "position_ms": 64105}
+```
+
+- `state` is `playing` or `stopped`. Before anything has played, every other
+  field is `null`.
+- `position_ms` estimates where playback is now (`from_ms` plus the time
+  since `started_at`), for highlighting the line being heard. It is `null`
+  unless playing.
+
+A failure exits 1 with the reason on stderr: the meeting has no kept audio
+("This meeting was recorded without keeping audio. Turn on
+meeting.retain_audio for future meetings."), the track is missing (a
+meeting recorded without loopback has no `loopback` track), the segment is
+unknown, or `ffmpeg` or a player is not installed (the message names what is
+missing).
+
+### The meeting folder and `meeting.json`
+
+Every meeting has a folder under the meeting storage path
+(`~/.local/share/voxtype/meetings/<date>-<title>/` by default), and every
+folder has a `meeting.json` manifest describing the meeting and the files
+beside it. Read the manifest rather than guessing at file names or at
+`metadata.json`, which is voxtype's internal record and may change.
+
+```json
+{
+  "manifest_version": 1,
+  "id": "b6b2e5b2-4c1e-4a57-9a0e-2f6f3c1d8e41",
+  "title": "Weekly standup",
+  "url": null,
+  "status": "completed",
+  "started_at": "2026-11-11T15:00:04Z",
+  "ended_at": "2026-11-11T15:31:12Z",
+  "duration_secs": 1868,
+  "engine": "parakeet",
+  "model": "parakeet-tdt-0.6b-v3",
+  "diarization": "hybrid",
+  "speakers": [
+    { "id": "Remote 1", "name": "Dana" },
+    { "id": "Remote 2", "name": "Remote 2" },
+    { "id": "You", "name": "Pete" }
+  ],
+  "audio_retained": true,
+  "files": [
+    { "name": "transcript.json", "kind": "transcript", "bytes": 48211 },
+    { "name": "transcript.md", "kind": "transcript_markdown", "bytes": 21980 },
+    { "name": "notes.md", "kind": "notes", "bytes": 412 },
+    { "name": "summary.md", "kind": "summary", "bytes": 1893 },
+    { "name": "mic.opus", "kind": "audio_mic", "bytes": 4981233 },
+    { "name": "loopback.opus", "kind": "audio_loopback", "bytes": 5310877 },
+    { "name": "mixed.opus", "kind": "audio_mixed", "bytes": 5402115 }
+  ],
+  "voxtype_version": "1.3.0"
+}
+```
+
+This is a stable contract:
+
+- Every field above is always present. A value that is unknown or does not
+  apply is `null` (`title`, `url`, `ended_at` and `duration_secs` while the
+  meeting records, `engine`, `model` and `diarization` for meetings recorded
+  before voxtype kept them, `diarization` when it was off).
+- New fields may be added. Ignore fields you do not know.
+- `manifest_version` changes only if an existing field changes meaning.
+- Keys are written in the order shown, pretty-printed, with a trailing
+  newline. The file is replaced atomically, so a reader never sees half of
+  it.
+
+The fields:
+
+- `url`: the call's link, from `voxtype meeting start --url`.
+- `status`: `active`, `paused`, `completed` or `cancelled`. A meeting left
+  `active` by a crash becomes `completed` the next time the daemon starts.
+- `started_at`, `ended_at`: RFC 3339, UTC. `duration_secs` is wall-clock
+  time from start to stop.
+- `engine`, `model`: the transcription engine and model the meeting used,
+  including a `meeting start --engine` or `--model` override.
+  `voxtype_version` is the version that recorded the meeting.
+- `speakers`: each speaker in the transcript, sorted by `id`. `id` is the
+  speaker as the diarizer named it (the `speaker_id` in `transcript.json`, or
+  `You`/`Remote` without diarization); `name` is the name given with
+  `voxtype meeting label`, or `id` when there is none. Two speakers given the
+  same name keep separate entries.
+- `files`: the meeting's files that exist, in the order shown, with their
+  size in bytes when the manifest was written. `kind` is one of
+  `transcript`, `transcript_markdown`, `notes`, `summary`, `audio_mic`,
+  `audio_loopback` or `audio_mixed`. Names are relative to the folder.
+  Audio files end in `.opus` (Ogg Opus, 16 kHz mono) or, when ffmpeg was
+  missing, `.wav` (16-bit PCM, 16 kHz mono); match on `kind`, not on the
+  name.
+- `audio_retained`: whether the meeting kept its audio (`retain_audio`).
+
+The manifest is written when a meeting starts and rewritten when it stops,
+when its notes or summary change, and when a daemon restart completes a
+meeting a crash left open. To act once a meeting is finished, use
+`post_meeting_command` (see [Meeting Mode](MEETING_MODE.md#running-a-command-after-a-meeting)),
+which runs after the final rewrite and gets the folder and the manifest's
+path in `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST`.
 
 ## What Voxtype will not do for you
 

@@ -721,6 +721,79 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Play {
+            meeting_id,
+            segment,
+            at,
+            track,
+            stop,
+            status,
+            json,
+        } => {
+            use meeting::playback;
+            let runtime_dir = config::Config::runtime_dir();
+
+            if stop || status {
+                let mut stop_message = "Nothing was playing";
+                let report = if stop {
+                    let before = playback::stop(&runtime_dir);
+                    if before.state == "playing" {
+                        stop_message = "Playback stopped";
+                    }
+                    playback::PlaybackStatus {
+                        state: "stopped".to_string(),
+                        position_ms: None,
+                        ..before
+                    }
+                } else {
+                    playback::status(&runtime_dir)
+                };
+                if json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else if stop {
+                    println!("{}", stop_message);
+                } else if report.state == "playing" {
+                    println!(
+                        "Playing the {} track of meeting {} from {}",
+                        report.track.map(|t| t.to_string()).unwrap_or_default(),
+                        report.meeting_id.as_deref().unwrap_or("?"),
+                        format_ms(report.position_ms.or(report.from_ms).unwrap_or(0)),
+                    );
+                } else {
+                    println!("Nothing is playing");
+                }
+                return Ok(());
+            }
+
+            let meeting_id = meeting_id.expect("clap requires a meeting without --stop/--status");
+            let track: playback::Track = track.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let start_at = match (segment, at) {
+                (Some(segment), _) => Some(playback::StartAt::Segment(segment)),
+                (None, Some(at)) => Some(playback::StartAt::Time(playback::parse_time(&at)?)),
+                (None, None) => None,
+            };
+            let from_ms = playback::resolve_start(&storage, &id, start_at)?;
+            let file = playback::track_file(&storage, &id, track)?;
+            let tools = playback::Tools::detect()?;
+            let started = playback::start(&runtime_dir, &tools, &id, track, &file, from_ms)?;
+
+            if json {
+                println!("{}", serde_json::to_string(&started)?);
+            } else {
+                println!(
+                    "Playing the {} track of meeting {} from {}. Stop it with: voxtype meeting play --stop",
+                    track,
+                    id,
+                    format_ms(from_ms)
+                );
+            }
+        }
+
         MeetingAction::Summarize {
             meeting_id,
             format,
@@ -949,6 +1022,17 @@ fn refuse_start() -> ! {
     eprintln!("Error: A meeting is already in progress.");
     eprintln!("Use 'voxtype meeting stop' to end it first.");
     std::process::exit(1);
+}
+
+/// `m:ss`, or `h:mm:ss` past an hour, as transcript timestamps read.
+fn format_ms(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 #[cfg(test)]

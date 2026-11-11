@@ -3768,7 +3768,35 @@ Directory for meeting transcript storage.
 **Default:** `false`
 **Required:** No
 
-Keep raw audio chunk files after transcription. Useful for debugging or re-transcribing with different settings.
+Keep the meeting's audio in its folder: `mic.opus` (your microphone, after echo cancellation when it runs), `loopback.opus` (the other side) and `mixed.opus` (both). The files are written chunk by chunk as the meeting records, so a crash loses at most the last chunk (`chunk_duration_secs`). Opus at 24 kbps takes about 10 MB per hour per file for speech.
+
+Needs `ffmpeg` with libopus. Without it the audio is kept as WAV (`mic.wav` and so on, about 115 MB per hour per file) and a warning is logged. See [Meeting Mode](MEETING_MODE.md#keeping-the-audio).
+
+```toml
+[meeting]
+retain_audio = true
+```
+
+### post_meeting_command
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Shell command run once a meeting has stopped and its folder is final (after the automatic summary, when one runs). It runs through `sh -c` in the meeting folder, in the background, with `VOXTYPE_MEETING_ID`, `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` (the path of `meeting.json`) set. Its output goes to the daemon log, and a failure never affects the daemon.
+
+```toml
+[meeting]
+post_meeting_command = 'cp -r "$VOXTYPE_MEETING_DIR" ~/Documents/meetings/'
+```
+
+### post_meeting_timeout_secs
+
+**Type:** Integer
+**Default:** `300`
+**Required:** No
+
+Seconds before `post_meeting_command` is killed, along with anything it started.
 
 ### max_duration_mins
 

@@ -29,7 +29,11 @@ pub mod detect;
 pub mod diarization;
 pub mod events;
 pub mod export;
+pub mod hook;
+pub mod manifest;
 pub mod notes;
+pub mod playback;
+pub mod retained_audio;
 pub mod start;
 pub mod state;
 pub mod status_notice;
@@ -144,6 +148,12 @@ pub struct MeetingDaemon {
     /// ID for the meeting's next transcript segment, unique across chunks
     /// and tracks so consumers (the HUD, edits) can address a segment.
     next_segment_id: u32,
+    /// The engine's model, for meeting.json
+    model_name: Option<String>,
+    /// Writes the meeting's audio into its folder when `retain_audio` is on
+    audio: Option<retained_audio::AudioRetainer>,
+    /// `post_meeting_command`, run once a stopped meeting's folder is final
+    post_meeting: hook::PostMeetingSettings,
     /// Assistant settings for the summary written when a meeting stops
     assistant: Option<assistant::AssistantSettings>,
 }
@@ -182,6 +192,7 @@ impl MeetingDaemon {
             }
         };
         let engine_name = format!("{:?}", meeting_app_config.engine).to_lowercase();
+        let model_name = Some(meeting_app_config.model_name().to_string());
         let app_config = meeting_app_config;
 
         let post_processor = app_config.output.active_post_process().map(|cfg| {
@@ -217,6 +228,9 @@ impl MeetingDaemon {
             last_chunk_text: HashMap::new(),
             source_offsets: HashMap::new(),
             next_segment_id: 0,
+            model_name,
+            audio: None,
+            post_meeting: hook::PostMeetingSettings::from_config(app_config),
             assistant: Some(assistant::AssistantSettings::from_config(app_config)),
         })
     }
@@ -243,6 +257,9 @@ impl MeetingDaemon {
             last_chunk_text: HashMap::new(),
             source_offsets: HashMap::new(),
             next_segment_id: 0,
+            model_name: Some("test-model".to_string()),
+            audio: None,
+            post_meeting: hook::PostMeetingSettings::default(),
             assistant: None,
         }
     }
@@ -263,7 +280,7 @@ impl MeetingDaemon {
             .storage
             .create_meeting(&meeting.metadata)
             .map_err(|e| MeetingError::Storage(e.to_string()))?;
-        meeting.metadata.storage_path = Some(storage_path);
+        meeting.metadata.storage_path = Some(storage_path.clone());
 
         let meeting_id = meeting.metadata.id;
         let title = meeting.metadata.title.clone();
@@ -272,6 +289,33 @@ impl MeetingDaemon {
             Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
             None => (false, None),
         };
+
+        let context = manifest::MeetingContext {
+            engine: Some(self.engine_name.clone()),
+            model: self.model_name.clone(),
+            diarization: diarization_backend.clone().filter(|_| diarization_enabled),
+            voxtype_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        };
+        if let Err(e) = self.storage.set_context(&meeting_id, &context) {
+            tracing::warn!("Failed to record the meeting's engine and model: {}", e);
+        }
+
+        self.audio = None;
+        if self.config.retain_audio {
+            match retained_audio::AudioRetainer::start(
+                &storage_path,
+                retained_audio::Encoder::detect(),
+            ) {
+                Ok(audio) => {
+                    self.audio = Some(audio);
+                    meeting.metadata.audio_retained = true;
+                    if let Err(e) = self.storage.update_meeting(&meeting.metadata) {
+                        tracing::warn!("Failed to mark the meeting's audio as kept: {}", e);
+                    }
+                }
+                Err(e) => tracing::error!("Failed to start keeping meeting audio: {}", e),
+            }
+        }
         self.current_meeting = Some(meeting);
         self.state = MeetingState::start();
         self.next_segment_id = 0;
@@ -327,10 +371,19 @@ impl MeetingDaemon {
         self.last_chunk_text.clear();
         self.source_offsets.clear();
 
+        // Close the audio files first, so the manifest written below sees
+        // their final sizes.
+        if let Some(audio) = self.audio.take() {
+            audio.finish();
+        }
+
         // Finalize meeting
         if let Some(ref mut meeting) = self.current_meeting {
             meeting.complete();
             meeting.metadata.chunk_count = meeting.transcript.total_chunks;
+            if let Some(ref dir) = meeting.metadata.storage_path {
+                meeting.metadata.audio_retained = !retained_audio::retained_files(dir).is_empty();
+            }
 
             // Save transcript
             self.storage
@@ -360,6 +413,17 @@ impl MeetingDaemon {
         self.current_meeting = None;
 
         Ok(meeting_id)
+    }
+
+    /// What runs once a stopped meeting's folder is final: the manifest
+    /// rewrite and `post_meeting_command`. The daemon spawns it after the
+    /// auto-summary, off its event loop.
+    pub fn post_meeting(&self, meeting_id: MeetingId) -> hook::PostMeeting {
+        hook::PostMeeting {
+            storage: self.config.storage.clone(),
+            meeting_id,
+            settings: self.post_meeting.clone(),
+        }
     }
 
     /// The summary to run for a meeting that just stopped, unless
@@ -437,6 +501,15 @@ impl MeetingDaemon {
     /// something you said. A track that fails to transcribe is logged and
     /// the other still processed.
     pub async fn process_pair(&mut self, mic: Vec<f32>, loopback: Vec<f32>) {
+        // Kept as recorded, before VAD skips anything, so the files hold
+        // the whole meeting on the transcript's timeline. Paused audio is
+        // dropped like it is from the transcript.
+        if self.state.is_active() {
+            if let Some(ref mut audio) = self.audio {
+                audio.push(mic.clone(), loopback.clone());
+            }
+        }
+
         let mut done = Vec::new();
         for (samples, source) in [
             (mic, AudioSource::Microphone),
@@ -808,8 +881,12 @@ mod tests {
     }
 
     async fn harness() -> Harness {
+        harness_with(|_| {}).await
+    }
+
+    async fn harness_with(tweak: impl FnOnce(&mut MeetingConfig)) -> Harness {
         let dir = tempfile::TempDir::new().unwrap();
-        let config = MeetingConfig {
+        let mut config = MeetingConfig {
             enabled: true,
             chunk_duration_secs: 30,
             storage: StorageConfig {
@@ -819,6 +896,7 @@ mod tests {
             },
             ..Default::default()
         };
+        tweak(&mut config);
         let (tx, events) = mpsc::channel(64);
         let mut daemon = MeetingDaemon::for_test(
             config.clone(),
@@ -846,6 +924,341 @@ mod tests {
         fn saved(&self) -> MeetingData {
             get_meeting(&self.config, "latest").unwrap()
         }
+
+        fn folder(&self) -> std::path::PathBuf {
+            self.saved().metadata.storage_path.unwrap()
+        }
+
+        fn manifest(&self) -> manifest::Manifest {
+            manifest::Manifest::read(&self.folder()).unwrap()
+        }
+    }
+
+    /// Seconds of audio in a retained track, decoded the way a player would.
+    fn audio_secs(path: &std::path::Path) -> f32 {
+        try_audio_secs(path).unwrap_or_else(|| panic!("{} does not decode", path.display()))
+    }
+
+    fn try_audio_secs(path: &std::path::Path) -> Option<f32> {
+        if path.extension().is_some_and(|e| e == "wav") {
+            let reader = hound::WavReader::open(path).ok()?;
+            return Some(reader.duration() as f32 / 16000.0);
+        }
+        let retained_audio::Encoder::Ffmpeg(ffmpeg) = retained_audio::Encoder::detect() else {
+            panic!("an Opus file without ffmpeg");
+        };
+        let out = std::process::Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(path)
+            .args(["-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| out.stdout.len() as f32 / 2.0 / 16000.0)
+    }
+
+    fn file_names(m: &manifest::Manifest) -> Vec<&str> {
+        m.files.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn retain_audio_off_writes_no_audio() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+        assert!(retained_audio::retained_files(&h.folder()).is_empty());
+        assert!(!h.saved().metadata.audio_retained);
+        let m = h.manifest();
+        assert!(!m.audio_retained);
+        assert_eq!(file_names(&m), ["transcript.json", "transcript.md"]);
+    }
+
+    #[tokio::test]
+    async fn retain_audio_keeps_both_tracks_and_a_mix() {
+        let mut h = harness_with(|c| c.retain_audio = true).await;
+        let ext = retained_audio::Encoder::detect().format().extension();
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        // Paused audio is dropped, as it is from the transcript.
+        h.daemon.pause().await.unwrap();
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.resume().await.unwrap();
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+
+        let dir = h.folder();
+        for stem in ["mic", "loopback", "mixed"] {
+            let secs = audio_secs(&dir.join(format!("{stem}.{ext}")));
+            assert!((secs - 60.0).abs() < 0.1, "{stem}: {secs}s");
+        }
+        assert!(h.saved().metadata.audio_retained);
+        let m = h.manifest();
+        assert!(m.audio_retained);
+        let audio: Vec<(&str, &str)> = m
+            .files
+            .iter()
+            .filter(|f| f.kind.starts_with("audio_"))
+            .map(|f| (f.name.as_str(), f.kind.as_str()))
+            .collect();
+        assert_eq!(
+            audio,
+            [
+                (format!("mic.{ext}").as_str(), "audio_mic"),
+                (format!("loopback.{ext}").as_str(), "audio_loopback"),
+                (format!("mixed.{ext}").as_str(), "audio_mixed"),
+            ]
+        );
+        for f in &m.files {
+            assert_eq!(f.bytes, std::fs::metadata(dir.join(&f.name)).unwrap().len());
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_describes_the_meeting() {
+        let mut h = harness().await;
+        let m = h.manifest();
+        assert_eq!(m.status, "active", "written when the meeting starts");
+        assert!(m.ended_at.is_none());
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let id = h.daemon.current_meeting_id().unwrap();
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        cli.set_speaker_label(&id, "You", "Pete").unwrap();
+        h.daemon.stop().await.unwrap();
+
+        let m = h.manifest();
+        assert_eq!(m.manifest_version, 1);
+        assert_eq!(m.id, id.to_string());
+        assert_eq!(m.title.as_deref(), Some("Test"));
+        assert_eq!(m.url, None);
+        assert_eq!(m.status, "completed");
+        assert!(m.ended_at.is_some() && m.duration_secs.is_some());
+        assert_eq!(m.engine.as_deref(), Some("test"));
+        assert_eq!(m.model.as_deref(), Some("test-model"));
+        assert_eq!(m.diarization, None, "the harness config has none");
+        let speakers: Vec<(&str, &str)> = m
+            .speakers
+            .iter()
+            .map(|s| (s.id.as_str(), s.name.as_str()))
+            .collect();
+        assert_eq!(speakers, [("Remote", "Remote"), ("You", "Pete")]);
+        assert_eq!(m.voxtype_version, env!("CARGO_PKG_VERSION"));
+
+        // transcript.md sits beside it and carries the same names.
+        let md = std::fs::read_to_string(h.folder().join("transcript.md")).unwrap();
+        assert!(md.contains("Pete"), "{md}");
+
+        // Human-readable: pretty JSON, keys in a fixed order.
+        let raw = std::fs::read_to_string(h.folder().join("meeting.json")).unwrap();
+        assert!(raw.starts_with("{\n  \"manifest_version\": 1,\n  \"id\""));
+        assert!(raw.ends_with("}\n"));
+    }
+
+    /// Engine and model come from the meeting's own transcription config,
+    /// with `meeting start --model` applied, and the URL from `--url`.
+    #[tokio::test]
+    async fn manifest_names_what_the_meeting_was_started_with() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+            },
+            ..Default::default()
+        };
+        let app = crate::config::Config::default();
+        let options = crate::config::MeetingStartOptions {
+            model: Some("small.en".to_string()),
+            ..Default::default()
+        };
+        assert_ne!(app.model_name(), "small.en");
+        let effective = app.with_meeting_mode_overrides(&options).unwrap();
+        let (tx, _events) = mpsc::channel(8);
+        let resident: Arc<dyn Transcriber> = Arc::new(CountingTranscriber(AtomicU32::new(0)));
+        let mut daemon =
+            MeetingDaemon::new(config.clone(), &effective, tx, Some(resident)).unwrap();
+        let url = "https://meet.example.com/abc-defg-hij";
+        let id = daemon
+            .start(Some("Call".to_string()), Some(url.to_string()))
+            .await
+            .unwrap();
+        daemon.stop().await.unwrap();
+
+        let storage = MeetingStorage::open(config.storage).unwrap();
+        let m = manifest::Manifest::read(&storage.get_meeting_path(&id).unwrap()).unwrap();
+        assert_eq!(m.engine.as_deref(), Some("whisper"));
+        assert_eq!(m.model.as_deref(), Some("small.en"));
+        assert_eq!(m.url.as_deref(), Some(url));
+    }
+
+    #[tokio::test]
+    async fn manifest_follows_notes_written_after_the_meeting() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[]).await;
+        let id = h.daemon.stop().await.unwrap();
+        assert!(!file_names(&h.manifest()).contains(&"notes.md"));
+
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        cli.set_notes(&id, "Ship it.\n").unwrap();
+        let m = h.manifest();
+        let notes = m.files.iter().find(|f| f.name == "notes.md").unwrap();
+        assert_eq!((notes.kind.as_str(), notes.bytes), ("notes", 9));
+        assert_eq!(
+            file_names(&m),
+            ["transcript.json", "transcript.md", "notes.md"]
+        );
+
+        // A summary written later (by the meeting assistant) appears on the
+        // post-meeting rewrite.
+        std::fs::write(h.folder().join("summary.md"), "# Summary\n").unwrap();
+        h.daemon.post_meeting(id).run().await;
+        assert!(file_names(&h.manifest()).contains(&"summary.md"));
+    }
+
+    #[tokio::test]
+    async fn a_crashed_meeting_is_completed_in_its_manifest_on_restart() {
+        let mut h = harness_with(|c| c.retain_audio = true).await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let folder = h.folder();
+        // The daemon goes away without stopping the meeting.
+        drop(h.daemon);
+        assert_eq!(manifest::Manifest::read(&folder).unwrap().status, "active");
+
+        // Whatever reached the disk plays; the writer thread drains its
+        // queue on its own once the daemon is gone.
+        let ext = retained_audio::Encoder::detect().format().extension();
+        let mic = folder.join(format!("mic.{ext}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while try_audio_secs(&mic).unwrap_or(0.0) < 25.0 {
+            assert!(std::time::Instant::now() < deadline, "audio never landed");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // The next daemon start.
+        let storage = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        assert_eq!(storage.complete_stale_meetings().unwrap(), 1);
+        let m = manifest::Manifest::read(&folder).unwrap();
+        assert_eq!(m.status, "completed");
+        assert!(m.audio_retained);
+        assert!(m.files.iter().any(|f| f.kind == "audio_mic"));
+    }
+
+    fn with_command(h: &mut Harness, command: &str, timeout: std::time::Duration) {
+        h.daemon.post_meeting = hook::PostMeetingSettings {
+            command: Some(command.to_string()),
+            timeout,
+        };
+    }
+
+    #[tokio::test]
+    async fn post_meeting_command_gets_the_meeting() {
+        let mut h = harness().await;
+        with_command(
+            &mut h,
+            r#"test -f "$VOXTYPE_MEETING_MANIFEST" && printf '%s\n%s\n%s\n%s\n' \
+                "$VOXTYPE_MEETING_ID" "$VOXTYPE_MEETING_DIR" \
+                "$VOXTYPE_MEETING_MANIFEST" "$PWD" > hook.out"#,
+            std::time::Duration::from_secs(10),
+        );
+        h.pair(&[(1.0, 3.0)], &[]).await;
+        let id = h.daemon.stop().await.unwrap();
+        let outcome = h.daemon.post_meeting(id).run().await;
+        assert_eq!(outcome, Some(hook::HookOutcome::Succeeded));
+
+        let dir = h.folder();
+        let out = std::fs::read_to_string(dir.join("hook.out")).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], id.to_string());
+        assert_eq!(lines[1], dir.to_str().unwrap());
+        assert_eq!(lines[2], dir.join("meeting.json").to_str().unwrap());
+        assert_eq!(
+            lines[3],
+            dir.to_str().unwrap(),
+            "runs in the meeting folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_post_meeting_command_still_rewrites_the_manifest() {
+        let mut h = harness().await;
+        let id = h.daemon.stop().await.unwrap();
+        std::fs::remove_file(h.folder().join("meeting.json")).unwrap();
+        assert_eq!(h.daemon.post_meeting(id).run().await, None);
+        assert_eq!(h.manifest().status, "completed");
+    }
+
+    #[tokio::test]
+    async fn a_slow_post_meeting_command_is_killed_with_its_children() {
+        let mut h = harness().await;
+        with_command(
+            &mut h,
+            "sleep 30 & echo $! > child.pid; wait",
+            std::time::Duration::from_millis(500),
+        );
+        let id = h.daemon.stop().await.unwrap();
+        let started = std::time::Instant::now();
+        let outcome = h.daemon.post_meeting(id).run().await;
+        assert_eq!(outcome, Some(hook::HookOutcome::TimedOut));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let pid: i32 = std::fs::read_to_string(h.folder().join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Killed; reaped by init or a zombie until then, but never running.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let running = state
+            .rsplit(')')
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|s| s != "Z");
+        assert!(!running, "sleep {pid} outlived its timeout: {state}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_post_meeting_command_leaves_the_daemon_working() {
+        let mut h = harness().await;
+        with_command(
+            &mut h,
+            "echo nope >&2; exit 3",
+            std::time::Duration::from_secs(10),
+        );
+        h.pair(&[(1.0, 3.0)], &[]).await;
+        let id = h.daemon.stop().await.unwrap();
+        // Spawned the way the daemon does it: stop has already returned.
+        let job = tokio::spawn(h.daemon.post_meeting(id).run());
+        h.daemon
+            .start(Some("Next".to_string()), None)
+            .await
+            .unwrap();
+        h.pair(&[(1.0, 3.0)], &[]).await;
+        assert_eq!(job.await.unwrap(), Some(hook::HookOutcome::Failed(Some(3))));
+        let next = h.daemon.stop().await.unwrap();
+        let saved = MeetingStorage::open(h.config.storage.clone())
+            .unwrap()
+            .load_meeting_data(&next)
+            .unwrap();
+        assert_eq!(saved.metadata.title.as_deref(), Some("Next"));
+        assert_eq!(saved.transcript.segments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_missing_post_meeting_program_is_only_logged() {
+        let mut h = harness().await;
+        with_command(
+            &mut h,
+            "/nonexistent/voxtype-hook",
+            std::time::Duration::from_secs(10),
+        );
+        let id = h.daemon.stop().await.unwrap();
+        assert_eq!(
+            h.daemon.post_meeting(id).run().await,
+            Some(hook::HookOutcome::Failed(Some(127)))
+        );
     }
 
     #[tokio::test]

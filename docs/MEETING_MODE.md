@@ -15,6 +15,10 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Viewing Meeting Details](#viewing-meeting-details)
   - [Exporting Transcripts](#exporting-transcripts)
   - [Labeling Speakers](#labeling-speakers)
+  - [The Meeting Folder](#the-meeting-folder)
+  - [Keeping the Audio](#keeping-the-audio)
+  - [Playing a Meeting Back](#playing-a-meeting-back)
+  - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
   - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
@@ -292,7 +296,72 @@ A line has at most one annotation; annotating it again replaces it. Annotations 
 
 ### The Meeting Folder
 
-Each meeting folder holds `metadata.json`, `transcript.json` (the segments, with speaker names, moves, annotations and text corrections applied, and deleted lines kept but marked `"deleted": true`), `transcript.md` (the same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change), and `notes.md` once you write notes.
+Each meeting folder holds:
+
+| File | What it is |
+|------|------------|
+| `meeting.json` | The manifest: title, times, engine and model, speakers and their names, and every file below with its size. A stable format for scripts; see [INTEGRATIONS.md](INTEGRATIONS.md#the-meeting-folder-and-meetingjson) |
+| `transcript.json` | The segments, with speaker names, moves, annotations and text corrections applied. Deleted lines stay here, marked `"deleted": true`, and appear nowhere else |
+| `transcript.md` | The same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change |
+| `notes.md` | Your notes, once you write any |
+| `summary.md` | The meeting summary, once there is one |
+| `mic.opus`, `loopback.opus`, `mixed.opus` | The meeting's audio, with `retain_audio = true` (below) |
+| `metadata.json` | Voxtype's own record of the meeting; read `meeting.json` instead |
+
+`meeting.json` is written when the meeting starts and rewritten when it stops, when its notes or summary change, and when a daemon restart finishes a meeting a crash left open.
+
+### Keeping the Audio
+
+With `retain_audio = true` the meeting folder also keeps the meeting's audio, as three Ogg Opus files at 16 kHz mono and 24 kbps:
+
+- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (`echo_cancel = "auto"` with the GTCRN model present), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
+- `loopback.opus`: the other side, from the loopback device. A meeting recorded without loopback has no loopback file.
+- `mixed.opus`: the two summed, for listening back.
+
+The three files are the same length and start when the meeting starts, so a transcript timestamp is the same moment in each. Time spent paused is left out of both the audio and the transcript.
+
+Audio goes to disk chunk by chunk as the meeting records (every `chunk_duration_secs`, 30 seconds by default), not at the end. If voxtype crashes mid-meeting, the files keep everything up to the last chunk handed over before the crash and play as they are; the next daemon start marks the meeting completed in `meeting.json`.
+
+Opus takes about 10 MB per hour per file for speech, so a one-hour meeting with all three files uses about 30 MB (less where a side is silent).
+
+Encoding needs `ffmpeg` with libopus, which most distributions' `ffmpeg` package includes. Without it voxtype logs a warning and keeps the audio as `mic.wav`, `loopback.wav` and `mixed.wav` instead, at about 115 MB per hour per file. See [Troubleshooting](TROUBLESHOOTING.md#meeting-audio-is-saved-as-wav-instead-of-opus).
+
+### Playing a Meeting Back
+
+`voxtype meeting play` plays a meeting's kept audio from the start, from a transcript line, or from a time, and returns straight away while it plays in the background:
+
+```bash
+voxtype meeting play latest                       # from the start
+voxtype meeting play latest --segment 28          # from line 28 (its id in meeting show --json)
+voxtype meeting play latest --at 12:40            # 12 minutes 40 seconds in (also 760 or 1:12:40)
+voxtype meeting play latest --track loopback      # only the other side (mixed, mic or loopback)
+voxtype meeting play --status                     # what is playing
+voxtype meeting play --stop
+```
+
+Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
+
+Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
+
+### Running a Command After a Meeting
+
+`post_meeting_command` runs a shell command once a meeting has stopped and its folder is final: after the transcript, audio and `meeting.json` are written, and after the automatic summary when one runs. Use it to copy the folder somewhere, file it in your notes, or start your own processing.
+
+```toml
+[meeting]
+post_meeting_command = 'rsync -a "$VOXTYPE_MEETING_DIR" nas:meetings/'
+post_meeting_timeout_secs = 300   # default
+```
+
+The command runs through `sh -c` in the meeting folder, with these variables set:
+
+| Variable | Value |
+|----------|-------|
+| `VOXTYPE_MEETING_ID` | The meeting's ID |
+| `VOXTYPE_MEETING_DIR` | The meeting folder |
+| `VOXTYPE_MEETING_MANIFEST` | The path of its `meeting.json` |
+
+It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
 
 ### Asking About a Meeting
 
@@ -513,9 +582,17 @@ chunk_duration_secs = 30
 # "auto" uses ~/.local/share/voxtype/meetings/
 storage_path = "auto"
 
-# Keep raw audio files after transcription (default: false)
-# Enable if you want to re-transcribe with a different model later
+# Keep the meeting's audio in its folder as mic.opus, loopback.opus and
+# mixed.opus (default: false). About 30 MB per hour; needs ffmpeg for Opus,
+# otherwise WAV. See "Keeping the Audio".
 retain_audio = false
+
+# Shell command run once a meeting's folder is final (default: unset).
+# Gets VOXTYPE_MEETING_ID, VOXTYPE_MEETING_DIR and VOXTYPE_MEETING_MANIFEST.
+# post_meeting_command = 'notify-send "Meeting saved" "$VOXTYPE_MEETING_DIR"'
+
+# Seconds before post_meeting_command is killed (default: 300)
+post_meeting_timeout_secs = 300
 
 # Maximum meeting duration in minutes (default: 180, 0 = unlimited)
 max_duration_mins = 180
@@ -664,11 +741,19 @@ Each meeting gets its own directory named by date and title:
 ~/.local/share/voxtype/meetings/
   index.db                          # SQLite database with meeting metadata
   2026-02-16-weekly-standup/
-    metadata.json                   # Meeting metadata
+    meeting.json                    # Manifest: what the meeting is and what is here
     transcript.json                 # Full transcript with segments
+    transcript.md                   # The same, readable
+    notes.md                        # Your notes, if any
+    mic.opus                        # Audio, with retain_audio = true
+    loopback.opus
+    mixed.opus
+    metadata.json                   # Voxtype's own record
   2026-02-14-project-kickoff/
-    metadata.json
+    meeting.json
     transcript.json
+    transcript.md
+    metadata.json
 ```
 
 The `index.db` SQLite database stores meeting metadata for fast listing and lookup. Transcripts are stored as JSON files alongside the metadata for easy access and portability.

@@ -39,6 +39,14 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     let _ = writeln!(s, "  chunk_duration_secs = {}", meeting.chunk_duration_secs);
     let _ = writeln!(s, "  storage_path = {:?}", meeting.storage_path);
     let _ = writeln!(s, "  retain_audio = {}", meeting.retain_audio);
+    if let Some(ref cmd) = meeting.post_meeting_command {
+        let _ = writeln!(s, "  post_meeting_command = {:?}", cmd);
+    }
+    let _ = writeln!(
+        s,
+        "  post_meeting_timeout_secs = {}",
+        meeting.post_meeting_timeout_secs
+    );
     let _ = writeln!(s, "  max_duration_mins = {}", meeting.max_duration_mins);
     let _ = writeln!(s, "  show_view_on_start = {}", meeting.show_view_on_start);
 
