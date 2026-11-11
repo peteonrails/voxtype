@@ -142,6 +142,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Canonical's DNS can go down while public resolvers still answer
+      # (2026-11-11), and then apt fails on the runner and in Docker builds.
+      # No-op whenever the Ubuntu mirrors resolve.
+      - name: Pin Ubuntu mirror addresses if DNS is down
+        run: bash scripts/ci/pin-ubuntu-mirrors.sh
+
       # The CUDA, MIGraphX and ONNX images can exhaust the stock runner's disk.
       # build-onnx-cuda-13 died on 2026-10-31 with 99 MB free while cargo was
       # cloning a git dependency's submodules, which surfaced as the misleading
@@ -200,10 +206,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
-          # Host networking: on 2026-11-11 DNS failed inside the build
-          # containers on GitHub runners for hours while the host resolved
-          # fine, so every apt mirror (including Azure's) was unreachable.
-          docker build --no-cache --network host \
+          # DOCKER_ADD_HOSTS is empty unless the pin step found the Ubuntu
+          # mirrors unresolvable.
+          # shellcheck disable=SC2086
+          docker build --no-cache ${DOCKER_ADD_HOSTS:-} \
             -f '${{ matrix.dockerfile }}' \
             -t 'voxtype-${{ matrix.variant }}' \
             --build-arg "VERSION=${VERSION}" \
@@ -471,6 +477,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      # Canonical's DNS can go down while public resolvers still answer
+      # (2026-11-11), and then apt fails on the runner and in Docker builds.
+      # No-op whenever the Ubuntu mirrors resolve.
+      - name: Pin Ubuntu mirror addresses if DNS is down
+        run: bash scripts/ci/pin-ubuntu-mirrors.sh
 
       - name: Determine version
         id: version
