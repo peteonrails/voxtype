@@ -90,3 +90,26 @@ fn the_screen_needs_a_terminal() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("voxtype meeting watch --json"), "{err}");
 }
+
+#[test]
+fn meeting_view_says_why_nothing_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    for (choice, why) in [
+        ("none", "configured none"),
+        ("gtk4", "configured gtk4, but"),
+    ] {
+        let out = command(dir.path())
+            .args(["meeting", "view"])
+            .env("VOXTYPE_MEETING_VIEW", choice)
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{choice}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("No meeting view to open"), "{err}");
+        assert!(err.contains(why), "{choice}: {err}");
+        assert!(err.contains("voxtype meeting watch"), "{err}");
+    }
+}

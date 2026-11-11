@@ -1359,6 +1359,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Allow `voxtype meeting` to record and transcribe long sessions.",
     ),
     spec(
+        "meeting.view",
+        "meeting",
+        "view",
+        closed(crate::meeting::view::frontend::VIEW_CHOICES),
+        "Meeting",
+        "Meeting view",
+        "Where `voxtype meeting view` opens the meeting: auto uses Quickshell, then the GTK4 window; terminal runs `meeting watch`.",
+    )
+    .live(),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -2973,6 +2983,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "vad.threshold" => f32_json(cfg.vad.threshold),
 
         "meeting.enabled" => json!(cfg.meeting.enabled),
+        "meeting.view" => json!(cfg.meeting.view),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),

@@ -210,6 +210,7 @@ graphical frontend is installed, install a supported terminal or run
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
+- [No Meeting Window Appears](#no-meeting-window-appears)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1611,6 +1612,16 @@ No result is shown for cancelled recordings, accidental taps, or
 `record start --no-osd` sessions; that is expected.
 
 ---
+
+## No Meeting Window Appears
+
+`voxtype meeting view` opens the view `[meeting] view` resolves to, and when nothing can open it says why:
+
+- **"No meeting view to open (auto: no Quickshell; voxtype-meetings-gtk4 is not installed)".** Install the deb/rpm, which ship the window in `/usr/lib/voxtype/`, or watch in a terminal with `voxtype meeting watch`.
+- **"…voxtype-meetings-gtk4 is installed but libgtk-4 is missing".** Install GTK 4: `libgtk-4-1` (Debian, Ubuntu), `gtk4` (Fedora, Arch).
+- **"no display".** The command ran without `WAYLAND_DISPLAY` or `DISPLAY` (over SSH, or from a service started before the desktop). Run `voxtype meeting watch` there instead.
+- **Quickshell is installed but you want the window.** `voxtype config set meeting.view gtk4`.
+- **On Quickshell, nothing happens.** The Quickshell view opens only in a running Omarchy shell or voxtype's standalone shell (`voxtype setup quickshell`).
 
 ## Meeting Assistant: Summaries Don't Appear
 

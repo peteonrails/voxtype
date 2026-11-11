@@ -465,6 +465,7 @@ jobs:
           name: voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd
           path: |
             releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd*
+            releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-meetings-gtk4*
             releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-audio-bridge
           if-no-files-found: error
           retention-days: 14

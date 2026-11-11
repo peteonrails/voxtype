@@ -590,6 +590,10 @@ install_companion_binary() {
 }
 install_companion_binary osd "$STAGING/usr/lib/voxtype/voxtype-osd"
 install_companion_binary osd-gtk4 "$STAGING/usr/lib/voxtype/voxtype-osd-gtk4"
+# The meeting window for desktops without Quickshell. `voxtype meeting view`
+# finds it beside the running binary, like the OSD launcher finds its
+# frontends, and only uses it when libgtk-4 loads.
+install_companion_binary meetings-gtk4 "$STAGING/usr/lib/voxtype/voxtype-meetings-gtk4"
 install_companion_binary osd-quickshell "$STAGING/usr/lib/voxtype/voxtype-osd-quickshell"
 if [[ -f "$STAGING/usr/lib/voxtype/voxtype-osd" ]]; then
     ln -sf /usr/lib/voxtype/voxtype-osd "$STAGING/usr/bin/voxtype-osd"

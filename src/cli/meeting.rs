@@ -247,6 +247,11 @@ pub enum MeetingAction {
     /// need to know which one you use. An Ask notification's Open action runs
     /// it. Nothing opens if neither is running.
     ///
+    /// Without Quickshell (GNOME, Plasma, Sway, X11), this opens the meeting
+    /// window `voxtype-meetings-gtk4` instead. `[meeting] view` (or
+    /// VOXTYPE_MEETING_VIEW) chooses: auto, quickshell, gtk4, terminal (runs
+    /// `voxtype meeting watch`) or none.
+    ///
     /// With a meeting ID other than the current one, the view opens on that
     /// meeting's saved transcript. --ask asks one of the view's quick
     /// questions; with --no-open the answer arrives as a notification instead.

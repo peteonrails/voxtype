@@ -116,13 +116,14 @@ RUN scripts/verify-gguf-companion.sh --cpu-only --run \
 # set Dockerfile.onnx produces for x86_64: the quickshell launcher and the
 # audio bridge are engine- and arch-agnostic, and an Asahi user running the
 # Quickshell OSD needs both (#579).
-RUN cargo build --release --features osd-gtk4 \
-    --bin voxtype-osd --bin voxtype-osd-gtk4 \
+RUN cargo build --release --features osd-gtk4,meetings-gtk4 \
+    --bin voxtype-osd --bin voxtype-osd-gtk4 --bin voxtype-meetings-gtk4 \
     --bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype-osd /tmp/voxtype-osd \
     && cp target/release/voxtype-osd-gtk4 /tmp/voxtype-osd-gtk4 \
+    && cp target/release/voxtype-meetings-gtk4 /tmp/voxtype-meetings-gtk4 \
     && cp target/release/voxtype-osd-quickshell /tmp/voxtype-osd-quickshell \
     && cp target/release/voxtype-audio-bridge /tmp/voxtype-audio-bridge
 
@@ -138,6 +139,7 @@ CMD mkdir -p /output \
     && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-aarch64-onnx.gguf-worker \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-aarch64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-aarch64-osd-gtk4 \
+    && cp /tmp/voxtype-meetings-gtk4 /output/voxtype-${VERSION}-linux-aarch64-meetings-gtk4 \
     && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-aarch64-osd-quickshell \
     && cp /tmp/voxtype-audio-bridge /output/voxtype-${VERSION}-linux-aarch64-audio-bridge \
     && echo "Binaries copied to /output:" \

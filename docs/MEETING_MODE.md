@@ -397,6 +397,8 @@ voxtype meeting view latest --tab summary
 voxtype meeting view --ask last-5m --no-open   # answer arrives as a notification
 ```
 
+`voxtype meeting view` opens the view that `[meeting] view` picks (see [Without Quickshell](#without-quickshell-the-meeting-window) below); on a Quickshell desktop that is this one.
+
 In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
 
 An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
@@ -411,6 +413,34 @@ To stop it opening on its own:
 ```bash
 voxtype config set meeting.show_view_on_start false
 ```
+
+### Without Quickshell: the meeting window
+
+On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, `voxtype meeting view` opens the meeting in an ordinary window, `voxtype-meetings-gtk4`, which you can move, resize and alt-tab to like any other. It shows the same meeting the same way:
+
+- the title, state and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar;
+- the transcript, one colored line per utterance with annotations under their lines, following new lines until you scroll up (**Follow new lines** goes back);
+- **Move line to…** and **Note on line…** for the selected line, speaker buttons that rename a speaker, your **Notes** with **Save notes**, the **Summary** once it is written, and an **Ask** box whose answer streams in under it;
+- with no meeting running, your recent meetings; **Meetings** in the title bar goes back to that list.
+
+Every button runs the matching `voxtype meeting` command, so it behaves as the command line does. A second `voxtype meeting view` brings the open window forward instead of opening another.
+
+Which view opens is `[meeting] view`:
+
+| Value | Opens |
+|-------|-------|
+| `auto` (default) | The Quickshell view when Quickshell can run here, else the GTK4 window when it is installed and GTK 4 loads, else nothing |
+| `quickshell` | The Quickshell view (the Omarchy plugin or the standalone shell) |
+| `gtk4` | The GTK4 window |
+| `terminal` | `voxtype meeting watch`, in this terminal or a new one through `xdg-terminal-exec` |
+| `none` | Nothing |
+
+```bash
+voxtype config set meeting.view gtk4
+VOXTYPE_MEETING_VIEW=terminal voxtype meeting view
+```
+
+The deb and rpm packages install the window as `/usr/lib/voxtype/voxtype-meetings-gtk4`; it needs GTK 4 (`libgtk-4-1` on Debian and Ubuntu, `gtk4` on Fedora and Arch) but not gtk4-layer-shell.
 
 The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#live-transcript-and-status-meetingsock). It does not open over an open Voxtype Settings panel.
 

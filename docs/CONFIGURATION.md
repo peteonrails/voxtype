@@ -3768,6 +3768,21 @@ Open the live meeting view when a meeting starts, however it was started: `voxty
 voxtype config set meeting.show_view_on_start false
 ```
 
+### view
+
+**Type:** String (`"auto"`, `"quickshell"`, `"gtk4"`, `"terminal"`, `"none"`)
+**Default:** `"auto"`
+**Required:** No
+
+Which meeting view `voxtype meeting view` opens, including from an Ask notification's Open action. `auto` uses the Quickshell view when Quickshell can run (its launcher is installed, `qs` is on PATH and there is a Wayland session), else the GTK4 window `voxtype-meetings-gtk4` when it is installed, GTK 4 loads and there is a display, else nothing. `terminal` runs `voxtype meeting watch`, opening a terminal with `xdg-terminal-exec` when not already in one, and is never picked by `auto`. See [MEETING_MODE.md](MEETING_MODE.md#without-quickshell-the-meeting-window).
+
+**Environment variable:** `VOXTYPE_MEETING_VIEW`
+
+```toml
+[meeting]
+view = "gtk4"
+```
+
 ---
 
 ## [meeting.audio]

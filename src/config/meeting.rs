@@ -34,6 +34,12 @@ pub struct MeetingConfig {
     #[serde(default = "default_true")]
     pub show_view_on_start: bool,
 
+    /// Which meeting view `voxtype meeting view` opens: "auto", "quickshell",
+    /// "gtk4", "terminal" or "none". auto uses Quickshell when it can run,
+    /// then the GTK4 window. Also set with VOXTYPE_MEETING_VIEW.
+    #[serde(default = "default_meeting_view")]
+    pub view: String,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -182,6 +188,10 @@ fn default_vad_hop_secs() -> f32 {
 
 fn default_vad_rms_floor() -> f32 {
     0.005
+}
+
+fn default_meeting_view() -> String {
+    "auto".to_string()
 }
 
 fn default_chunk_duration() -> u32 {
@@ -337,6 +347,7 @@ impl Default for MeetingConfig {
             retain_audio: false,
             max_duration_mins: default_max_duration(),
             show_view_on_start: true,
+            view: default_meeting_view(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),

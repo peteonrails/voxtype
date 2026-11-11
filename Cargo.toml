@@ -196,6 +196,9 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
+# The meetings window (voxtype-meetings-gtk4): plain GTK4 in a normal
+# window, so no layer-shell and no cairo.
+meetings-gtk4 = ["dep:gtk4"]
 gpu-vulkan = [
     "whisper-rs/vulkan",
     "cohere-gguf",
@@ -333,6 +336,11 @@ required-features = ["osd-native"]
 name = "voxtype-osd-gtk4"
 path = "src/bin/voxtype_osd_gtk4.rs"
 required-features = ["osd-gtk4"]
+
+[[bin]]
+name = "voxtype-meetings-gtk4"
+path = "src/bin/voxtype_meetings_gtk4.rs"
+required-features = ["meetings-gtk4"]
 
 # Tiny launcher that picks between voxtype-osd-gtk4, voxtype-osd-native,
 # and voxtype-osd-quickshell at runtime based on config/env/CLI. Always

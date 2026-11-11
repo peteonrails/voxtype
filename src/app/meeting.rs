@@ -438,38 +438,6 @@ pub(crate) async fn run_meeting_command(
         }
 
         MeetingAction::Reassign {
-        MeetingAction::View {
-            meeting_id,
-            ask_id,
-            tab,
-            ask,
-            no_open,
-        } => {
-            let path = config::Config::runtime_dir().join("meeting-view.request");
-            let request = ViewRequest {
-                meeting_id: meeting_id.as_deref(),
-                ask_id: ask_id.as_deref(),
-                // An answer is shown on the Ask tab.
-                tab: tab.as_deref().or(ask_id.as_ref().map(|_| "ask")),
-                ask: ask.as_deref(),
-                open: !no_open,
-            };
-            write_view_request(&path, &request)?;
-            if no_open && ask.is_none() {
-                println!("Nothing to do: --no-open without --ask.");
-            } else {
-                println!(
-                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin or voxtype's Quickshell shell, whichever is running.",
-                    if no_open { "ask" } else { "open" }
-                );
-            }
-        }
-
-        MeetingAction::Suggest { dry_run, watch } => {
-            run_meeting_suggest(config, None, dry_run, watch).await?;
-        }
-
-        MeetingAction::Summarize {
             meeting_id,
             segment_id,
             speaker,
@@ -615,6 +583,53 @@ pub(crate) async fn run_meeting_command(
             } else {
                 println!("Annotated segment {} in meeting {}", segment.id, meeting_id);
             }
+        }
+
+        MeetingAction::View {
+            meeting_id,
+            ask_id,
+            tab,
+            ask,
+            no_open,
+        } => {
+            use voxtype::meeting::view::frontend::{self, ViewFrontend};
+            let resolution = frontend::resolve(
+                frontend::effective_configured(&config.meeting.view),
+                &voxtype::osd::frontend::SystemProbe,
+            );
+            tracing::debug!("Meeting view: {}", resolution.reason);
+            if resolution.active != ViewFrontend::Quickshell {
+                let args = super::meeting_watch::ViewArgs {
+                    meeting_id,
+                    ask_id,
+                    tab,
+                    ask,
+                    no_open,
+                };
+                return super::meeting_watch::open_view(&meeting_config, &resolution, args).await;
+            }
+            let path = config::Config::runtime_dir().join("meeting-view.request");
+            let request = ViewRequest {
+                meeting_id: meeting_id.as_deref(),
+                ask_id: ask_id.as_deref(),
+                // An answer is shown on the Ask tab.
+                tab: tab.as_deref().or(ask_id.as_ref().map(|_| "ask")),
+                ask: ask.as_deref(),
+                open: !no_open,
+            };
+            write_view_request(&path, &request)?;
+            if no_open && ask.is_none() {
+                println!("Nothing to do: --no-open without --ask.");
+            } else {
+                println!(
+                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin or voxtype's Quickshell shell, whichever is running.",
+                    if no_open { "ask" } else { "open" }
+                );
+            }
+        }
+
+        MeetingAction::Suggest { dry_run, watch } => {
+            run_meeting_suggest(config, None, dry_run, watch).await?;
         }
 
         MeetingAction::Summarize {
