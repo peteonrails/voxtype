@@ -59,10 +59,12 @@ Scenarios:
               unsupported agent shows its note in the menu
   old-voxtype a voxtype without the 1.3.0 commands: each feature says to update
   copy        Copy on an answer and on the summary (wl-copy), and wl-copy missing
-  line-edit   Edit a line's text inline: Enter saves, Escape cancels, a refusal
-              rolls back
+  line-edit   Edit a line's text inline: Enter saves, Escape cancels, "edited"
+              and Restore original text (`edit --reset`), a refusal rolls back
   line-delete Delete a line with Undo; it commits after the window, and the
-              daemon's segment_deleted (or one from elsewhere) removes lines
+              daemon's segment_deleted (or one from elsewhere) removes lines; a
+              restored line (segment_updated for a line not shown) comes back
+              in its place
   line-delete-flag  the same with deletion as segment_updated "deleted": true;
               closing the view commits a pending delete
   export      More > Export (markdown) into Documents/Voxtype, then Open folder;
@@ -556,6 +558,7 @@ def check_calls(scenario, calls, runtime_notes=""):
         pass
     elif scenario == "line-edit":
         expect(meeting, [["meeting", "edit", MEETING_ID, "2", "Yes, very loud and clear.", "--json"],
+                         ["meeting", "edit", MEETING_ID, "2", "--reset", "--json"],
                          ["meeting", "edit", MEETING_ID, "4", "It went red again.", "--json"]], "meeting commands")
     elif scenario in ("line-delete", "line-delete-flag"):
         expect(meeting, [["meeting", "delete-line", MEETING_ID, "2", "--json"]], "meeting commands")

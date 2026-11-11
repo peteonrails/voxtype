@@ -57,12 +57,17 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
                                     `annotation` {text, highlight} on the segment;
                                     --json prints the segment
 
-  meeting edit M SEG TEXT [--json] a line's new text; prints the segment
+  meeting edit M SEG TEXT|--reset [--json]
+                                    a line's new text, keeping what was
+                                    transcribed in `original_text`; --reset puts
+                                    it back; empty TEXT is refused; prints the
+                                    segment
   meeting delete-line M SEG [--json]
                                     removes the line; the socket announces it as
-                                    {"event":"segment_deleted"} or, with
-                                    state["delete_shape"] == "flag", as
-                                    segment_updated with "deleted": true
+                                    {"event":"segment_deleted"} (the daemon's
+                                    shape) or, with state["delete_shape"] ==
+                                    "flag", as segment_updated with "deleted":
+                                    true, which the view also tolerates
   meeting export M --format F --output PATH [--timestamps --speakers --metadata]
                                     writes a small stand-in file at PATH
 
@@ -478,7 +483,17 @@ def edit_text(state, args):
     meeting, _, seg = find_segment(state, rest[0], rest[1])
     if seg is None:
         return 1
-    seg["text"] = rest[2]
+    if rest[2] == "--reset":
+        if "original_text" in seg:
+            seg["text"] = seg.pop("original_text")
+    elif rest[2].strip() == "":
+        print("error: the new text is empty; use `voxtype meeting delete-line` to remove a line", file=sys.stderr)
+        return 1
+    else:
+        seg.setdefault("original_text", seg["text"])
+        seg["text"] = rest[2]
+        if seg["text"] == seg["original_text"]:
+            seg.pop("original_text")
     if not put_segment(state, meeting, seg):
         print("error: the fake socket did not apply the change", file=sys.stderr)
         return 1

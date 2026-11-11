@@ -241,8 +241,12 @@ Item {
     }
     onSegmentActionFinished: function(action, extra, ok, message, segment) {
       if (action === "edit") {
-        if (!ok && extra && feed.textOf(extra.segId) !== null) feed.setText(extra.segId, extra.before)
-        else if (ok && segment) feed.updateSegment(segment)
+        if (!ok && extra && feed.textOf(extra.segId) !== null) {
+          feed.setText(extra.segId, extra.before)
+          feed.setOriginalText(extra.segId, extra.original)
+        } else if (ok && segment) {
+          feed.updateSegment(segment)
+        }
       } else if (action === "delete-line" && !ok && extra && extra.meeting === feed.meetingId) {
         feed.restoreRow(extra.row)
       }
@@ -309,11 +313,25 @@ Item {
   // A line's text, shown at once and put back if the CLI refuses it.
   function editText(segId, text) {
     var before = feed.textOf(segId)
+    var original = feed.originalTextOf(segId)
     var next = String(text).trim()
     if (before === null || next === "" || next === before) return
     root.actionError = ""
     feed.setText(segId, next)
-    meetingCli.editText(feed.meetingId, segId, next, { segId: segId, before: before })
+    // The first correction keeps what was transcribed.
+    if (original === "") feed.setOriginalText(segId, before)
+    meetingCli.editText(feed.meetingId, segId, next, { segId: segId, before: before, original: original })
+  }
+
+  // "Restore original text": the line's transcribed text back.
+  function resetText(segId) {
+    var before = feed.textOf(segId)
+    var original = feed.originalTextOf(segId)
+    if (before === null || !original) return
+    root.actionError = ""
+    feed.setText(segId, original)
+    feed.setOriginalText(segId, "")
+    meetingCli.resetText(feed.meetingId, segId, { segId: segId, before: before, original: original })
   }
 
   // Delete with an undo window: the line goes at once, and the CLI only runs
@@ -668,6 +686,7 @@ Item {
     function onExpandRequested() { root.expand() }
     function onCopyRequested(text, key) { root.copyText(text, key) }
     function onEditTextRequested(segId, text) { root.editText(segId, text) }
+    function onResetTextRequested(segId) { root.resetText(segId) }
     function onDeleteLineRequested(segId) { root.deleteLine(segId) }
     function onUndoDeleteRequested() { root.undoDelete() }
     function onExportRequested(format) { root.exportMeeting(format) }

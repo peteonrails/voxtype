@@ -18,6 +18,7 @@ Item {
   signal speakerClicked(var line, var anchor)
   signal noteClicked(var line, var anchor)
   signal editRequested(int segId, string text)
+  signal resetTextRequested(int segId)
   signal deleteRequested(int segId)
 
   // A small text action that shows on a line's hover.
@@ -221,6 +222,7 @@ Item {
           required property real startMs
           required property int segId
           required property string originalSpeaker
+          required property string originalText
           required property string annotation
           required property bool highlight
           objectName: "transcriptLine"
@@ -327,6 +329,17 @@ Item {
                 }
 
                 Text {
+                  objectName: "lineEdited"
+                  visible: line.originalText !== ""
+                  anchors.baseline: speakerLabel.baseline
+                  text: "edited"
+                  color: root.theme.dim
+                  font.family: root.theme.fontFamily
+                  font.pixelSize: root.theme.caption
+                  font.italic: true
+                }
+
+                Text {
                   objectName: "lineMoved"
                   visible: line.originalSpeaker !== ""
                   anchors.baseline: speakerLabel.baseline
@@ -344,7 +357,8 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: root.theme.lg
                 visible: !line.editing
-                  && (lineHover.containsMouse || editAction.hovered || noteAction.hovered || deleteAction.hovered)
+                  && (lineHover.containsMouse || editAction.hovered || restoreAction.hovered || noteAction.hovered
+                    || deleteAction.hovered)
 
                 // These open a text field, so they ask for the keyboard on
                 // hover: the click that opens the field then focuses it.
@@ -354,6 +368,13 @@ Item {
                   text: "Edit"
                   onActivated: line.beginEdit()
                   InputDemand { theme: root.theme; active: editAction.hovered }
+                }
+                LineAction {
+                  id: restoreAction
+                  objectName: "lineRestoreTextButton"
+                  visible: line.originalText !== ""
+                  text: "Restore original text"
+                  onActivated: root.resetTextRequested(line.segId)
                 }
                 LineAction {
                   id: noteAction
