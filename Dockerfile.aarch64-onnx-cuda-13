@@ -1,0 +1,111 @@
+# Build environment for voxtype aarch64 with ONNX CUDA 13 support
+#
+# Microsoft publishes no aarch64 GPU ORT tarball. Its PyPI GPU wheel supplies
+# the runtime and CUDA EP instead. ORT 1.31.1 includes sm_121a kernels for
+# GB10 / RTX Spark N1X, unlike the x86_64 variant's ORT 1.24.4 bundle.
+# Keep x86_64 on its existing version; both use ort/load-dynamic and ship
+# three companion libraries alongside voxtype in /usr/lib/voxtype/cuda-13/.
+# The wheel's Python bindings are unused: only the three .so files ship.
+#
+# Requires the host's CUDA 13 runtime and cuDNN 9. No OpenVINO on aarch64.
+# Usage:
+#   docker build -f Dockerfile.aarch64-onnx-cuda-13 -t voxtype-aarch64-onnx-cuda-13 .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-aarch64-onnx-cuda-13
+FROM nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
+
+ARG VERSION=0.7.2
+ARG DEBIAN_FRONTEND=noninteractive
+ENV VERSION=${VERSION}
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libx11-dev \
+    libxi-dev \
+    libxtst-dev \
+    libgtk-3-dev \
+    libglib2.0-dev \
+    libappindicator3-dev \
+    libssl-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    git \
+    binutils \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY . .
+
+# Pinned cp312 manylinux_2_34_aarch64 wheel from PyPI's 1.31.1 JSON manifest.
+ENV ORT_VERSION=1.31.1
+ENV ORT_DIR=/opt/onnxruntime
+RUN set -eux; \
+    curl -fsSL -o /tmp/ort.whl \
+      "https://files.pythonhosted.org/packages/7b/dc/0e7674377dd204170a4e077c719ee735a2eea6b7f102aa66873af74cced4/onnxruntime_gpu-1.31.1-cp312-cp312-manylinux_2_34_aarch64.whl"; \
+    echo 'a0f1725c5a6d1ef82d63498b5ebc25e2c90c9560e91dc76db9be4a49162d4d33  /tmp/ort.whl' | sha256sum -c -; \
+    mkdir -p "${ORT_DIR}/lib"; \
+    unzip -j /tmp/ort.whl \
+      "onnxruntime/capi/libonnxruntime.so.${ORT_VERSION}" \
+      onnxruntime/capi/libonnxruntime_providers_cuda.so \
+      onnxruntime/capi/libonnxruntime_providers_shared.so \
+      -d "${ORT_DIR}/lib"; \
+    rm /tmp/ort.whl; \
+    test -f "${ORT_DIR}/lib/libonnxruntime.so.${ORT_VERSION}"; \
+    test -f "${ORT_DIR}/lib/libonnxruntime_providers_shared.so"; \
+    # Match compiler directives / PTX targets, as in Dockerfile.onnx-cuda-13.
+    strings "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so" \
+      | grep -qE '(\.target sm_120|sm_120a)\b' \
+      || { echo "FAIL: ORT ${ORT_VERSION} CUDA EP lacks sm_120 coverage."; exit 1; }; \
+    strings "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so" \
+      | grep -qE 'sm_121a\b' \
+      || { echo "FAIL: ORT ${ORT_VERSION} CUDA EP lacks sm_121a coverage."; exit 1; }; \
+    echo "ORT ${ORT_VERSION} staged at ${ORT_DIR}: sm_120 and sm_121a coverage verified."
+
+# Match the aarch64 CPU variant's ISA floor; ggml detects NEON itself.
+ENV RUSTFLAGS="-C target-cpu=neoverse-n1"
+ENV GGML_NATIVE=OFF
+# build.rs bakes this into the runtime CUDA-major probe even with load-dynamic.
+ENV ORT_CUDA_VERSION=13
+RUN cargo build --release \
+        --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,onnx-load-dynamic,ml-diarization \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype /tmp/voxtype-onnx-cuda-13
+
+# ort/load-dynamic opens libonnxruntime.so next to the executable.
+RUN set -eux; \
+    mkdir -p /tmp/onnx-cuda-13-libs; \
+    cp -L "${ORT_DIR}/lib/libonnxruntime.so.${ORT_VERSION}" \
+        "/tmp/onnx-cuda-13-libs/libonnxruntime.so.${ORT_VERSION}"; \
+    ln -s "libonnxruntime.so.${ORT_VERSION}" /tmp/onnx-cuda-13-libs/libonnxruntime.so; \
+    cp -L "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so" \
+        /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so; \
+    cp -L "${ORT_DIR}/lib/libonnxruntime_providers_shared.so" \
+        /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so
+
+RUN /tmp/voxtype-onnx-cuda-13 --version \
+    && ls -lh /tmp/voxtype-onnx-cuda-13 /tmp/onnx-cuda-13-libs/ \
+    && strings /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so \
+        | grep -oE 'sm_[0-9]+[a-z]?' | sort -u
+RUN if objdump -p /tmp/voxtype-onnx-cuda-13 | grep -q 'NEEDED.*libonnxruntime'; then \
+        echo "FAIL: voxtype links ORT at startup; load-dynamic did not take effect."; exit 1; \
+    fi
+
+# Match the workflow's <binary>.<companion> release asset convention.
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-onnx-cuda-13 /output/voxtype-${VERSION}-linux-aarch64-onnx-cuda-13 \
+    && cp /tmp/onnx-cuda-13-libs/libonnxruntime.so.${ORT_VERSION} \
+        /output/voxtype-${VERSION}-linux-aarch64-onnx-cuda-13.libonnxruntime.so.${ORT_VERSION} \
+    && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so \
+        /output/voxtype-${VERSION}-linux-aarch64-onnx-cuda-13.libonnxruntime_providers_cuda.so \
+    && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so \
+        /output/voxtype-${VERSION}-linux-aarch64-onnx-cuda-13.libonnxruntime_providers_shared.so \
+    && ls -la /output/voxtype-${VERSION}-linux-aarch64-onnx-cuda-13*
