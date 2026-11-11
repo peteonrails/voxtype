@@ -144,6 +144,14 @@ different schema for downstream tooling that already consumes it.
 
 ### Live transcript and status: `meeting.sock`
 
+`voxtype meeting watch --json` relays this socket to stdout line for line,
+waiting for the daemon if it is not running and reconnecting after it
+restarts, so a shell script can follow a meeting without a socket client:
+
+```sh
+voxtype meeting watch --json | jq -c 'select(.event == "segments") | .segments[].text'
+```
+
 While a meeting is active (and even when one isn't — the socket is always
 bound), the daemon publishes meeting lifecycle and transcript events as
 newline-delimited JSON (NDJSON) over a Unix socket at

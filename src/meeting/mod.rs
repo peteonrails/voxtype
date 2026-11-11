@@ -32,6 +32,8 @@ pub mod notes;
 pub mod state;
 pub mod storage;
 pub mod summary;
+#[cfg(unix)]
+pub mod view;
 
 pub use chunk::{ChunkBuffer, ChunkConfig, ChunkProcessor, ProcessedChunk, VoiceActivityDetector};
 pub use data::{

@@ -15,6 +15,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Viewing Meeting Details](#viewing-meeting-details)
   - [Exporting Transcripts](#exporting-transcripts)
   - [Labeling Speakers](#labeling-speakers)
+  - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
   - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
@@ -249,6 +250,34 @@ A line has at most one annotation; annotating it again replaces it. Annotations 
 ### The Meeting Folder
 
 Each meeting folder holds `metadata.json`, `transcript.json` (the segments, with speaker names, moves and annotations applied), `transcript.md` (the same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change), and `notes.md` once you write notes.
+
+### Watching a Meeting in the Terminal
+
+`voxtype meeting watch` shows the running meeting in the terminal, on any desktop and over SSH:
+
+```bash
+voxtype meeting watch
+```
+
+- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time.
+- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
+- The side panel lists the speakers, merged by the names you gave them, and the summary once it is written.
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause or resume |
+| `s` | Stop (asks first) |
+| `r` | Move the selected line to another speaker: pick one, or "New speaker…" and type a name (`meeting reassign`) |
+| `n` | Add a note to the selected line (`meeting annotate`) |
+| `a` | Ask the assistant about the meeting; the answer streams into a pane at the bottom (`meeting ask`) |
+| `Esc` | Close the answer, or go to the list of meetings |
+| `q` | Quit |
+
+Each key runs the matching `voxtype meeting` command, so it behaves exactly as typing it would, including the assistant's consent: if transcripts have not been allowed to go to an agent yet, the answer pane says how to allow it.
+
+With no meeting running, `watch` lists recent meetings with their length, speaker count and whether they have a summary. Enter opens one (ended meetings still take `r`, `n` and `a`), Esc goes back, and a meeting that starts meanwhile appears at the top of the list. If the daemon restarts, the view says it is reconnecting and catches up when it is back.
+
+For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md)), reconnecting on its own; every connection starts with a `hello` snapshot.
 
 ### Asking About a Meeting
 

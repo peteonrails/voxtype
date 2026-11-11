@@ -14,6 +14,8 @@ mod engine;
 mod general;
 mod hotkey;
 mod meeting_section;
+#[cfg(unix)]
+pub mod meeting_watch;
 mod notifications_section;
 mod osd_section;
 mod output_section;
@@ -51,7 +53,7 @@ use std::time::Duration;
 use app::{Action, App};
 use section::Section;
 
-type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// Entry point for the hidden `voxtype configure --probe-audio-devices`
 /// flag: print detected input devices and exit. See
@@ -82,14 +84,14 @@ pub fn run(
     Ok(())
 }
 
-fn enter_terminal() -> anyhow::Result<Tui> {
+pub(crate) fn enter_terminal() -> anyhow::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
-fn leave_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
+pub(crate) fn leave_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
