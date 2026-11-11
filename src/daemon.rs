@@ -2872,6 +2872,16 @@ impl Daemon {
         }
     }
 
+    /// Add a processed chunk to the HUD snapshot and stream it on meeting.sock.
+    fn publish_meeting_chunk(&mut self, chunk_id: u32, segments: &[meeting::TranscriptSegment]) {
+        self.meeting_hud.push_segments(segments);
+        self.meeting_hud.chunk_count = chunk_id + 1;
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_segments(chunk_id, segments);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
@@ -3092,6 +3102,18 @@ impl Daemon {
 
             // Flush the final partial chunk so speech near stop is not dropped.
             self.process_buffered_meeting_audio(true).await;
+
+            // The event channel is dropped below, so publish the tail chunk's
+            // segments now or meeting.sock never sees them.
+            let pending: Vec<MeetingEvent> = match self.meeting_event_rx.as_mut() {
+                Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+                None => Vec::new(),
+            };
+            for event in pending {
+                if let MeetingEvent::ChunkProcessed { chunk_id, segments } = event {
+                    self.publish_meeting_chunk(chunk_id, &segments);
+                }
+            }
 
             let mut daemon = self.meeting_daemon.take().expect("checked above");
             match daemon.stop().await {
@@ -5563,12 +5585,7 @@ impl Daemon {
                         Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
                             tracing::debug!("Meeting event: chunk {} processed with {} segments",
                                 chunk_id, segments.len());
-                            self.meeting_hud.push_segments(&segments);
-                            self.meeting_hud.chunk_count = chunk_id + 1;
-                            if let Some(ref hub) = self.meeting_event_hub {
-                                hub.publish_segments(chunk_id, &segments);
-                                hub.update_snapshot(&self.meeting_hud);
-                            }
+                            self.publish_meeting_chunk(chunk_id, &segments);
                         }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via
