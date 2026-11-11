@@ -37,6 +37,7 @@ Item {
     actionProc.action = op.action
     actionProc.extra = op.extra
     actionProc.err = ""
+    actionProc.out = ""
     actionProc.launch(op.args)
   }
 
@@ -58,6 +59,20 @@ Item {
                    { key: String(keys[i]), name: String(name) })
   }
 
+  // Move one line to another speaker: an existing ID or display name, or a new
+  // name. `extra` comes back with reassignFinished, so the caller can roll its
+  // optimistic change back.
+  function reassign(meeting, segId, speaker, extra) {
+    root.enqueue("reassign", ["meeting", "reassign", meeting || "latest", String(segId), String(speaker), "--json"], extra)
+  }
+
+  function restoreSpeaker(meeting, segId, extra) {
+    root.enqueue("reassign", ["meeting", "reassign", meeting || "latest", String(segId), "--reset", "--json"], extra)
+  }
+
+  // `segment` is the updated segment from --json, or null if it printed none.
+  signal reassignFinished(var extra, bool ok, string message, var segment)
+
   // `[meeting] show_view_on_start`. A CLI that predates the key exits non-zero
   // on it; that reads as the default, which is on.
   function readShowOnStart() {
@@ -73,7 +88,12 @@ Item {
     property string action: ""
     property var extra: null
     property string err: ""
+    property string out: ""
 
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: actionProc.out = String(text || "").trim()
+    }
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: actionProc.err = String(text || "").trim()
@@ -85,13 +105,25 @@ Item {
       var message = ok ? "" : (actionProc.err || ("voxtype meeting " + action + " exited " + exitCode))
       actionProc.action = ""
       if (ok && action === "label" && extra) root.labelApplied(extra.key, extra.name)
+      if (action === "reassign") {
+        var segment = null
+        if (ok) {
+          try { segment = JSON.parse(actionProc.out) } catch (e) { segment = null }
+          if (segment && segment.segment && segment.id === undefined) segment = segment.segment
+          if (!segment || typeof segment !== "object" || segment.id === undefined) segment = null
+        }
+        root.reassignFinished(extra, ok, message, segment)
+      }
       root.actionFinished(action, ok, message)
       Qt.callLater(root.pump)
     }
     onFailedToStart: {
       var action = actionProc.action
+      var extra = actionProc.extra
+      var message = "Could not run " + root.bin + ". Is voxtype installed?"
       actionProc.action = ""
-      root.actionFinished(action, false, "Could not run " + root.bin + ". Is voxtype installed?")
+      if (action === "reassign") root.reassignFinished(extra, false, message, null)
+      root.actionFinished(action, false, message)
       Qt.callLater(root.pump)
     }
   }

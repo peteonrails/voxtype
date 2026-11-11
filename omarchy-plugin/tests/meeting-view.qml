@@ -57,6 +57,12 @@ Item {
           else if (s === "idle") tc.driveIdle()
           else if (s === "nodaemon") tc.driveNoDaemon()
           else if (s === "scroll") tc.driveScroll()
+          else if (s === "reassign") tc.driveReassign()
+          else if (s === "reassign-fails") tc.driveReassignFails()
+          else if (s === "new-speaker") tc.driveNewSpeaker()
+          else if (s === "restore") tc.driveRestore()
+          else if (s === "external-update") tc.driveExternalUpdate()
+          else if (s === "ended-edit") tc.driveEndedEdit()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -272,12 +278,11 @@ Item {
       check(!find(view(), "pauseButton").enabled && !find(view(), "stopButton").enabled, "no controls while finalizing")
       check(lines().length === 8, "transcript kept while finalizing")
       shot("finalizing")
-      waitFor(function() { return shown(find(view(), "idleState")) }, "idle after stop")
-      check(txt("idleTitle") === "No meeting in progress", "idle title: " + txt("idleTitle"))
-      check(txt("lastMeeting").indexOf("“Standup” ended at") === 0 && txt("lastMeeting").indexOf("8 lines") !== -1,
-            "last meeting: " + txt("lastMeeting"))
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended after stop: " + txt("meetingState"))
+      check(!shown(find(view(), "idleState")), "the ended meeting stays on screen")
+      check(lines().length === 8 && txt("meetingTitle") === "Standup", "transcript and title kept")
       check(panel.opened && panel.view === "meetings", "view stays open after the meeting")
-      shot("idle-after")
+      shot("ended")
     }
 
     function driveAutoOpen(expectOpen) {
@@ -341,8 +346,10 @@ Item {
       waitFor(function() { return !feed().connected }, "second disconnect")
       ctl({ cmd: "status", status: "idle" })
       ctl({ cmd: "up" })
-      waitFor(function() { return feed().connected && shown(find(view(), "idleState")) }, "idle after a restart", 12000)
-      check(txt("idleTitle") === "No meeting in progress", "idle title: " + txt("idleTitle"))
+      // The daemon restarts: the meeting is gone, but its lines stay to fix.
+      waitFor(function() { return feed().connected && txt("meetingState") === "Ended" }, "Ended after a restart", 12000)
+      check(lines().length === 5, "transcript kept after a restart")
+      check(!shown(find(view(), "reconnectNotice")), "no reconnect notice once connected")
     }
 
     function driveIdle() {
@@ -379,6 +386,204 @@ Item {
       waitFor(function() { return feed().connected }, "connected once the daemon is up", 12000)
       waitFor(function() { return txt("idleTitle") === "No meeting in progress" }, "idle title: " + txt("idleTitle"))
       check(find(view(), "startButton").enabled, "Start enabled")
+    }
+
+    // ------------------------------------------------------------ reassign
+
+    function lineItem(i) { return find(view(), "transcriptList").itemAtIndex(i) }
+    function popup() { return find(view(), "reassignPopup") }
+
+    function openChooser(i) {
+      click(find(lineItem(i), "lineSpeakerButton"), "speaker on line " + i)
+      waitFor(function() { return popup().visible }, "chooser open for line " + i)
+    }
+
+    // [name, current] for each chip the chooser offers.
+    function chooserChips() {
+      var flow = find(popup(), "reassignChips")
+      var out = []
+      for (var i = 0; i < flow.children.length; i++) {
+        var c = flow.children[i]
+        if (String(c.objectName).indexOf("reassignChip_") === 0) out.push([String(c.name), c.current])
+      }
+      return out
+    }
+
+    function pick(name) {
+      var flow = find(popup(), "reassignChips")
+      for (var i = 0; i < flow.children.length; i++) {
+        var c = flow.children[i]
+        if (String(c.objectName).indexOf("reassignChip_") === 0 && String(c.name) === name) {
+          click(c, "chooser chip " + name)
+          return
+        }
+      }
+      check(false, "no chooser chip " + name + ": " + JSON.stringify(chooserChips()))
+    }
+
+    function moved(i) {
+      var m = find(lineItem(i), "lineMoved")
+      return m && m.visible ? String(m.text) : ""
+    }
+
+    function idleCli() { return panel.meetingsTest.cli.busy === "" && panel.meetingsTest.cli.queue.length === 0 }
+
+    function typeNewSpeaker(name) {
+      var field = find(popup(), "newSpeakerField")
+      click(field, "New speaker field")
+      waitFor(function() { return field.activeFocus }, "New speaker field focused")
+      field.text = name
+      keyClick(Qt.Key_Return)
+    }
+
+    function driveReassign() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      openChooser(1)
+      check(txt("reassignLineText") === "“Yes, loud and clear.”", "chooser names the line: " + txt("reassignLineText"))
+      check(JSON.stringify(chooserChips()) === '[["You",false],["Remote",true]]', "chooser chips: " + JSON.stringify(chooserChips()))
+      check(!shown(find(popup(), "restoreButton")), "no Restore for a line never moved")
+      shot("chooser")
+      // Escape closes the chooser, not the view.
+      keyClick(Qt.Key_Escape)
+      waitFor(function() { return !popup().visible }, "Escape closed the chooser")
+      check(panel.opened && view() !== null, "view still open")
+
+      openChooser(1)
+      pick("You")
+      check(!popup().visible, "chooser closes on a pick")
+      check(lines()[1][1] === "You", "moved at once: " + lines()[1][1])
+      waitFor(idleCli, "reassign finished")
+      wait(300)
+      check(lines()[1][1] === "You", "still moved after the CLI and the socket's echo: " + lines()[1][1])
+      check(moved(1) === "moved from Remote", "marked moved: " + moved(1))
+      check(JSON.stringify(renderedChips()) === '["You","Remote"]', "chips: " + renderedChips())
+      check(!shown(find(view(), "actionError")), "no error")
+      shot("moved")
+    }
+
+    function driveReassignFails() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      openChooser(1)
+      pick("You")
+      check(lines()[1][1] === "You", "moved at once: " + lines()[1][1])
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      check(view().actionError.indexOf("cannot be reassigned") !== -1, "stderr in the banner: " + view().actionError)
+      check(lines()[1][1] === "Remote", "rolled back: " + lines()[1][1])
+      check(moved(1) === "", "not marked moved after a rollback: " + moved(1))
+      shot("reassign-failed")
+    }
+
+    function driveNewSpeaker() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      openChooser(3)
+      typeNewSpeaker("Dana")
+      waitFor(function() { return !popup().visible }, "chooser closed")
+      check(lines()[3][1] === "Dana", "moved to Dana at once: " + lines()[3][1])
+      waitFor(idleCli, "reassign finished")
+      wait(300)
+      check(lines()[3][1] === "Dana", "Dana after the CLI: " + lines()[3][1])
+      check(JSON.stringify(renderedChips()) === '["You","Remote","Dana"]', "a chip for Dana: " + renderedChips())
+      shot("new-speaker")
+
+      // A typed name that is an existing speaker's goes to that speaker.
+      openChooser(1)
+      typeNewSpeaker("you")
+      waitFor(idleCli, "second reassign finished")
+      wait(300)
+      check(lines()[1][1] === "You", "matched You: " + lines()[1][1])
+      // Remote has no lines left, so its chip goes.
+      check(JSON.stringify(renderedChips()) === '["You","Dana"]', "no new chip for you: " + renderedChips())
+    }
+
+    function driveRestore() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      openChooser(1)
+      pick("You")
+      waitFor(idleCli, "reassign finished")
+      wait(300)
+      openChooser(1)
+      var restore = find(popup(), "restoreButton")
+      check(shown(restore), "Restore original offered")
+      check(String(restore.text) === "Restore original (Remote)", "names the original: " + restore.text)
+      shot("restore-offered")
+      click(restore, "Restore original")
+      check(lines()[1][1] === "Remote", "restored at once: " + lines()[1][1])
+      waitFor(idleCli, "reset finished")
+      wait(300)
+      check(lines()[1][1] === "Remote" && moved(1) === "", "restored: " + lines()[1][1] + " " + moved(1))
+      openChooser(1)
+      check(!shown(find(popup(), "restoreButton")), "no Restore after restoring")
+      keyClick(Qt.Key_Escape)
+    }
+
+    function driveExternalUpdate() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // As the contract writes it: tagged `type`.
+      ctl({ cmd: "update", key: "type", segment: seg(4, 35, "The build went green overnight.", "loopback", "You", 1) })
+      waitFor(function() { return lines()[3][1] === "You" }, "segment_updated (type) applied: " + JSON.stringify(lines()))
+      check(moved(3) === "moved from Remote", "marked moved: " + moved(3))
+      // Tagged `event` like every other event, saying where it came from.
+      var s3 = seg(3, 21, "Great, let's start with the release.", "microphone", "Remote", 0)
+      s3.original_speaker_id = "You"
+      ctl({ cmd: "update", key: "event", segment: s3 })
+      waitFor(function() { return lines()[2][1] === "Remote" }, "segment_updated (event) applied")
+      check(moved(2) === "moved from You", "original from the segment: " + moved(2))
+      openChooser(2)
+      check(String(find(popup(), "restoreButton").text) === "Restore original (You)", "Restore offered from the segment")
+      shot("external-update")
+      keyClick(Qt.Key_Escape)
+      // A segment saying it is no longer reassigned clears the mark.
+      var back = seg(3, 21, "Great, let's start with the release.", "microphone", "You", 0)
+      back.reassigned = false
+      ctl({ cmd: "update", key: "event", segment: back })
+      waitFor(function() { return lines()[2][1] === "You" && moved(2) === "" }, "reset from elsewhere")
+      check(lines().length === 4, "no line added or lost")
+    }
+
+    function driveEndedEdit() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended: " + txt("meetingState"))
+      check(lines().length === 4 && txt("meetingTitle") === "Standup", "transcript and title kept")
+      check(txt("meetingEndedAt").indexOf("ended at ") === 0, "end time: " + txt("meetingEndedAt"))
+      check(/^1:0\d$/.test(txt("meetingElapsed")), "length: " + txt("meetingElapsed"))
+      check(!shown(find(view(), "pauseButton")) && !shown(find(view(), "stopButton")), "no Pause or Stop")
+      check(shown(find(view(), "endedStartButton")) && find(view(), "endedStartButton").enabled, "Start meeting offered")
+      check(!shown(find(view(), "idleState")), "not the idle screen")
+      shot("ended")
+
+      // Fixing a line after the call. No socket echo: only --json answers.
+      openChooser(1)
+      pick("You")
+      waitFor(idleCli, "reassign finished")
+      check(lines()[1][1] === "You" && moved(1) === "moved from Remote", "moved after the end: " + JSON.stringify(lines()[1]))
+      rename(1, "Sam")
+      waitFor(function() { return lines()[3][1] === "Sam" }, "rename after the end: " + JSON.stringify(lines()))
+      check(JSON.stringify(renderedChips()) === '["You","Sam"]', "chips: " + renderedChips())
+      shot("ended-edited")
+
+      // A new meeting replaces it.
+      find(view(), "endedTitleField").text = "Second"
+      click(find(view(), "endedStartButton"), "Start meeting")
+      waitFor(function() { return feed().status === "recording" && txt("meetingTitle") === "Second" }, "new meeting: " + txt("meetingTitle"))
+      check(lines().length === 0 && renderedChips().length === 0, "old transcript gone")
+
+      // Closing the view drops an ended meeting.
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "second meeting ended")
+      var close = find(view(), "closeButton")
+      tc.parent = host
+      click(close, "Close")
+      waitFor(function() { return !panel.opened && view() === null }, "view closed")
+      check(!feed().ended && feed().segments.count === 0, "ended meeting dropped on close")
+      openView()
+      waitFor(function() { return shown(find(view(), "idleState")) }, "idle after reopening")
     }
 
     function driveScroll() {

@@ -11,12 +11,22 @@ records summons, so auto-open is observed without an Omarchy shell running.
 Scenarios:
   live        a meeting already running: hello backlog, new segments inserted
               by start time, speaker_renamed, chip rename and merge through
-              `meeting label`, pause, resume, stop through finalizing to idle
+              `meeting label`, pause, resume, stop through finalizing to Ended
+  reassign    a line's speaker opens the chooser; Escape closes it; picking a
+              speaker runs `meeting reassign` and moves the line
+  reassign-fails  a refused reassign is rolled back and its stderr shown
+  new-speaker     a typed name moves the line to a new speaker, or to an
+                  existing one matched case-insensitively
+  restore     Restore original runs `meeting reassign --reset`
+  external-update segment_updated from elsewhere (tagged `type` or `event`)
+  ended-edit  an ended meeting stays on screen and can still be edited, until a
+              new meeting starts or the view closes
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
   autoopen-settings  an open Settings panel is not taken over
-  reconnect   the socket going away and coming back (daemon drop, restart)
+  reconnect   the socket going away and coming back (daemon drop, restart,
+              which leaves the meeting on screen as Ended)
   idle        the idle state, a failed start, a start with a title
   nodaemon    no socket at all, then the daemon arrives
   scroll      auto-scroll follows new lines until the user scrolls up
@@ -35,7 +45,8 @@ import time
 import panel_harness as h
 
 SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-settings", "reconnect",
-             "idle", "nodaemon", "scroll")
+             "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
+             "external-update", "ended-edit")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 FAKE_SOCK = h.HERE / "fake-meeting-sock.py"
@@ -90,16 +101,24 @@ def scroll_meeting():
     return m
 
 
+# Built per run, so a meeting's start time is relative to its own scenario.
 INITIAL = {
-    "live": [running_meeting()],
-    "reconnect": [running_meeting()],
-    "scroll": [scroll_meeting()],
+    "live": lambda: [running_meeting()],
+    "reconnect": lambda: [running_meeting()],
+    "scroll": lambda: [scroll_meeting()],
+    "reassign": lambda: [running_meeting()],
+    "reassign-fails": lambda: [running_meeting()],
+    "new-speaker": lambda: [running_meeting()],
+    "restore": lambda: [running_meeting()],
+    "external-update": lambda: [running_meeting()],
+    "ended-edit": lambda: [running_meeting()],
 }
 
 STATE = {
     "autoopen-off": {"show_view_on_start": False},
     "autoopen-oldcli": {"no_show_key": True},
     "idle": {"fail": {"start": "Error: Meeting mode is disabled in config."}},
+    "reassign-fails": {"fail": {"reassign": "Error: segment 2 cannot be reassigned: the transcript is locked."}},
 }
 
 
@@ -116,16 +135,18 @@ def run(scenario, shell, evidence):
         runtime = r.root / "run"
         (runtime / "voxtype").mkdir(parents=True)
         ctl = r.root / "meeting-ctl.jsonl"
-        ctl.write_text("".join(json.dumps(c) + "\n" for c in INITIAL.get(scenario, [])))
+        ctl.write_text("".join(json.dumps(c) + "\n" for c in INITIAL.get(scenario, lambda: [])()))
         srv_log = r.root / "meeting-srv.jsonl"
         srv_log.write_text("")
+        snapshot = r.root / "meeting-snapshot.json"
         sock = runtime / "voxtype" / "meeting.sock"
         shots = ""
         if evidence:
             shots = str((evidence / scenario).resolve())
             Path(shots).mkdir(parents=True, exist_ok=True)
 
-        server = subprocess.Popen([sys.executable, "-I", str(FAKE_SOCK), str(sock), str(ctl), str(srv_log)])
+        server = subprocess.Popen([sys.executable, "-I", str(FAKE_SOCK), str(sock), str(ctl), str(srv_log),
+                                   str(snapshot)])
         try:
             # The server binds before its first poll; wait for it so the plugin's
             # first attempt finds it (except where its absence is the point).
@@ -143,7 +164,8 @@ def run(scenario, shell, evidence):
             output, code = r.run(h.HERE / "meeting-view.qml", {
                 "__SCENARIO__": scenario, "__CTL__": str(ctl), "__STATE__": str(r.state),
                 "__EVIDENCE__": shots, "__MEETING_ID__": MEETING_ID,
-            }, env={"XDG_RUNTIME_DIR": str(runtime), "FAKE_MEETING_CTL": str(ctl)}, timeout=90)
+            }, env={"XDG_RUNTIME_DIR": str(runtime), "FAKE_MEETING_CTL": str(ctl),
+                    "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot)}, timeout=90)
         finally:
             with open(ctl, "a") as f:
                 f.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -161,6 +183,10 @@ def run(scenario, shell, evidence):
     problems = h.driver_problems(output, code, "MEETING_VIEW", scenario)
     problems += check_calls(scenario, calls)
     return output, problems, calls
+
+
+def reassign(segment, speaker):
+    return ["meeting", "reassign", MEETING_ID, segment, speaker, "--json"]
 
 
 def check_calls(scenario, calls):
@@ -192,8 +218,17 @@ def check_calls(scenario, calls):
     elif scenario == "idle":
         expect(meeting, [["meeting", "start", "--title", "Retro"], ["meeting", "start", "--title", "Retro"]],
                "meeting commands")
-    elif scenario in ("reconnect", "nodaemon", "scroll"):
+    elif scenario in ("reconnect", "nodaemon", "scroll", "external-update"):
         expect(meeting, [], "meeting commands")
+    elif scenario in ("reassign", "reassign-fails"):
+        expect(meeting, [reassign("2", "You")], "meeting commands")
+    elif scenario == "new-speaker":
+        expect(meeting, [reassign("4", "Dana"), reassign("2", "You")], "meeting commands")
+    elif scenario == "restore":
+        expect(meeting, [reassign("2", "You"), reassign("2", "--reset")], "meeting commands")
+    elif scenario == "ended-edit":
+        expect(meeting, [["meeting", "stop"], reassign("2", "You"), ["meeting", "label", MEETING_ID, "Remote", "Sam"],
+                         ["meeting", "start", "--title", "Second"], ["meeting", "stop"]], "meeting commands")
     return problems
 
 
