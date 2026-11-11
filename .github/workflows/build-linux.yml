@@ -200,7 +200,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
-          docker build --no-cache \
+          # Host networking: on 2026-11-11 DNS failed inside the build
+          # containers on GitHub runners for hours while the host resolved
+          # fine, so every apt mirror (including Azure's) was unreachable.
+          docker build --no-cache --network host \
             -f '${{ matrix.dockerfile }}' \
             -t 'voxtype-${{ matrix.variant }}' \
             --build-arg "VERSION=${VERSION}" \
