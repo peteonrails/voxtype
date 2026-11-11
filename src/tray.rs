@@ -61,6 +61,9 @@ impl TrayState {
 pub enum MeetingTrayState {
     #[default]
     Idle,
+    /// Start Meeting was clicked and the daemon has not reported recording
+    /// yet. Tray-local: the daemon never writes it.
+    Starting,
     Recording,
     Paused,
     /// Stopped and writing out the last chunks; nothing can be done until
@@ -79,8 +82,18 @@ impl MeetingTrayState {
     }
 }
 
+/// How long the tray shows "Starting meeting..." before it gives up waiting
+/// for the daemon to report the meeting, so a start that failed in the
+/// daemon cannot leave the entry stuck.
+const MEETING_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Raised when `voxtype meeting start` from the tray exits with an error,
+/// so the tray drops "Starting meeting..." at once instead of waiting out
+/// the timeout.
+static MEETING_START_FAILED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 /// What the meeting entries need: whether meeting mode is on at all, and
-/// where the current meeting is.
+/// where the current meeting is, as the daemon reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MeetingMenu {
     pub enabled: bool,
@@ -184,9 +197,55 @@ struct VoxtypeTray {
     language: Option<Arc<Mutex<crate::language_selection::LanguageMenu>>>,
     upgrade: UpgradeMenu,
     meeting: MeetingMenu,
+    /// When Start Meeting was clicked, while waiting for the daemon.
+    starting: Option<std::time::Instant>,
+    /// Tells the tray task to arm the start timeout.
+    start_clicked: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl VoxtypeTray {
+    /// The meeting state the tray shows: the daemon's, or Starting while a
+    /// click from this menu is still on its way.
+    fn meeting_state(&self) -> MeetingTrayState {
+        match (self.meeting.state, self.starting) {
+            (MeetingTrayState::Idle, Some(_)) => MeetingTrayState::Starting,
+            (state, _) => state,
+        }
+    }
+
+    /// The status line, tooltip title and tooltip body. Dictation wins while
+    /// it is doing something; only its idle "Ready" gives way to a meeting.
+    fn status_text(&self) -> &'static str {
+        if self.state != TrayState::Idle {
+            return self.state.tooltip_body();
+        }
+        match self.meeting_state() {
+            MeetingTrayState::Idle => self.state.tooltip_body(),
+            MeetingTrayState::Starting => "Starting meeting...",
+            MeetingTrayState::Recording => "Meeting in progress",
+            MeetingTrayState::Paused => "Meeting paused",
+            MeetingTrayState::Finalizing => "Finishing meeting...",
+        }
+    }
+
+    /// Take the daemon's meeting state. Anything but idle settles a start.
+    fn set_meeting(&mut self, meeting: MeetingMenu) {
+        if meeting.state != MeetingTrayState::Idle {
+            self.starting = None;
+        }
+        self.meeting = meeting;
+    }
+
+    /// Drop a start the daemon never confirmed.
+    fn expire_start(&mut self) {
+        if self
+            .starting
+            .is_some_and(|t| t.elapsed() >= MEETING_START_TIMEOUT)
+        {
+            self.starting = None;
+        }
+    }
+
     /// Dictation holds the mic or the daemon is gone: a meeting can't start.
     fn dictation_busy(&self) -> bool {
         matches!(
@@ -217,19 +276,19 @@ impl VoxtypeTray {
             .into()
         }
         fn can_start(t: &VoxtypeTray) -> bool {
-            t.meeting.enabled && t.meeting.state == MeetingTrayState::Idle && !t.dictation_busy()
+            t.meeting.enabled && t.meeting_state() == MeetingTrayState::Idle && !t.dictation_busy()
         }
         fn active(t: &VoxtypeTray) -> bool {
             matches!(
-                t.meeting.state,
+                t.meeting_state(),
                 MeetingTrayState::Recording | MeetingTrayState::Paused
             )
         }
         fn recording(t: &VoxtypeTray) -> bool {
-            t.meeting.state == MeetingTrayState::Recording
+            t.meeting_state() == MeetingTrayState::Recording
         }
         fn paused(t: &VoxtypeTray) -> bool {
-            t.meeting.state == MeetingTrayState::Paused
+            t.meeting_state() == MeetingTrayState::Paused
         }
 
         if !self.meeting.enabled {
@@ -240,12 +299,27 @@ impl VoxtypeTray {
                 can_start,
             )];
         }
-        match self.meeting.state {
-            MeetingTrayState::Idle => vec![entry(
-                "Start Meeting",
-                can_start(self),
+        match self.meeting_state() {
+            MeetingTrayState::Idle => vec![StandardItem {
+                label: "Start Meeting".into(),
+                enabled: can_start(self),
+                activate: Box::new(|this: &mut VoxtypeTray| {
+                    if can_start(this) {
+                        this.starting = Some(std::time::Instant::now());
+                        if let Some(tx) = &this.start_clicked {
+                            let _ = tx.send(());
+                        }
+                        (this.actions)(TrayAction::StartMeeting);
+                    }
+                }),
+                ..Default::default()
+            }
+            .into()],
+            MeetingTrayState::Starting => vec![entry(
+                "Starting Meeting...",
+                false,
                 TrayAction::StartMeeting,
-                can_start,
+                |_| false,
             )],
             MeetingTrayState::Recording => vec![
                 entry("Stop Meeting", true, TrayAction::StopMeeting, active),
@@ -365,12 +439,9 @@ impl VoxtypeTray {
 
     fn tooltip_title(&self) -> String {
         if self.upgrade.has_offers() {
-            format!(
-                "Voxtype: {} (model update available)",
-                self.state.tooltip_body()
-            )
+            format!("Voxtype: {} (model update available)", self.status_text())
         } else {
-            format!("Voxtype: {}", self.state.tooltip_body())
+            format!("Voxtype: {}", self.status_text())
         }
     }
 }
@@ -406,13 +477,9 @@ impl Tray for VoxtypeTray {
     }
     fn tool_tip(&self) -> ToolTip {
         let description = if self.upgrade.has_offers() {
-            format!(
-                "{}\n{}",
-                self.state.tooltip_body(),
-                self.upgrade.offers.join("\n")
-            )
+            format!("{}\n{}", self.status_text(), self.upgrade.offers.join("\n"))
         } else {
-            self.state.tooltip_body().into()
+            self.status_text().into()
         };
         ToolTip {
             // Omarchy's compact tooltip displays the title, not the body.
@@ -426,7 +493,7 @@ impl Tray for VoxtypeTray {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         let mut menu: Vec<ksni::MenuItem<Self>> = vec![
             StandardItem {
-                label: format!("Voxtype: {}", self.state.tooltip_body()),
+                label: format!("Voxtype: {}", self.status_text()),
                 enabled: false,
                 ..Default::default()
             }
@@ -581,12 +648,15 @@ fn spawn_inner(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let initial = *rx.borrow_and_update();
+        let (start_tx, mut start_rx) = mpsc::unbounded_channel();
         let tray = VoxtypeTray {
             state: initial,
             actions,
             language,
             upgrade: UpgradeMenu::default(),
             meeting: *meeting_rx.borrow_and_update(),
+            starting: None,
+            start_clicked: Some(start_tx),
         };
         let start = tray.assume_sni_available(true).spawn();
         // Bounded, cancellable startup. D-Bus must never hold dictation startup hostage.
@@ -605,7 +675,7 @@ fn spawn_inner(
             .0
             .update(|tray| {
                 tray.state = state;
-                tray.meeting = meeting;
+                tray.set_meeting(meeting);
             })
             .await;
         // The state channel alone decides the tray's lifetime; upgrade senders
@@ -613,8 +683,29 @@ fn spawn_inner(
         // does the meeting channel.
         let mut upgrades_open = true;
         let mut meeting_open = true;
+        let mut start_deadline: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
+                Some(()) = start_rx.recv() => {
+                    start_deadline = Some(tokio::time::Instant::now() + MEETING_START_TIMEOUT);
+                }
+                _ = async {
+                    match start_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    start_deadline = None;
+                    if handle.0.update(|tray| tray.expire_start()).await.is_none() {
+                        break;
+                    }
+                }
+                _ = MEETING_START_FAILED.notified() => {
+                    start_deadline = None;
+                    if handle.0.update(|tray| tray.starting = None).await.is_none() {
+                        break;
+                    }
+                }
                 changed = rx.changed() => {
                     if changed.is_err() {
                         break;
@@ -638,7 +729,7 @@ fn spawn_inner(
                         continue;
                     }
                     let meeting = *meeting_rx.borrow_and_update();
-                    if handle.0.update(|tray| tray.meeting = meeting).await.is_none() {
+                    if handle.0.update(|tray| tray.set_meeting(meeting)).await.is_none() {
                         break;
                     }
                 }
@@ -722,7 +813,12 @@ fn dispatch_action(action: TrayAction) {
         }
         match result {
             Ok(status) if status.success() => {}
-            error => tracing::warn!(?action, ?error, "Tray action failed"),
+            error => {
+                tracing::warn!(?action, ?error, "Tray action failed");
+                if action == TrayAction::StartMeeting {
+                    MEETING_START_FAILED.notify_one();
+                }
+            }
         }
     });
 }
@@ -1158,6 +1254,8 @@ mod tests {
             ))),
             upgrade: UpgradeMenu::default(),
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         };
         let ksni::MenuItem::SubMenu(menu) = tray.language_menu() else {
             panic!("submenu missing")
@@ -1180,6 +1278,8 @@ mod tests {
             actions: Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         };
         assert!(tray.menu().iter().any(|item| matches!(item,
             ksni::MenuItem::SubMenu(menu) if menu.label.starts_with("Language"))));
@@ -1193,6 +1293,8 @@ mod tests {
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         };
         let menu = tray.menu();
         let items: Vec<_> = menu
@@ -1235,6 +1337,8 @@ mod tests {
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         };
         let idle = tray.icon_pixmap();
         tray.state = TrayState::Recording;
@@ -1277,6 +1381,8 @@ mod tests {
             actions: Arc::new(move |action| log.lock().unwrap().push(action)),
             upgrade,
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         }
     }
 
@@ -1549,6 +1655,8 @@ mod tests {
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         };
         assert!(t.icon_name().is_empty());
     }
@@ -1562,6 +1670,8 @@ mod tests {
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
             meeting: MeetingMenu::default(),
+            starting: None,
+            start_clicked: None,
         };
         assert!(t.attention_icon_name().is_empty());
     }
@@ -1621,6 +1731,8 @@ mod tests {
             actions: Arc::new(move |action| log.lock().unwrap().push(action)),
             upgrade: UpgradeMenu::default(),
             meeting,
+            starting: None,
+            start_clicked: None,
         }
     }
 
@@ -1635,7 +1747,7 @@ mod tests {
     fn meeting_entries(tray: &VoxtypeTray) -> Vec<(String, bool)> {
         standard_items(tray)
             .into_iter()
-            .filter(|i| i.label.contains("Meeting"))
+            .filter(|i| i.label.contains("Meeting") && !i.label.starts_with("Voxtype:"))
             .map(|i| (i.label, i.enabled))
             .collect()
     }
@@ -1837,5 +1949,101 @@ mod tests {
             std::fs::read_to_string(&out).unwrap(),
             "meeting start\nmeeting stop\n"
         );
+    }
+
+    // ── status text ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn status_text_for_every_dictation_and_meeting_state() {
+        use MeetingTrayState as M;
+        use TrayState as D;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let meeting_text = |m: M| match m {
+            M::Idle => "Ready",
+            M::Starting => "Starting meeting...",
+            M::Recording => "Meeting in progress",
+            M::Paused => "Meeting paused",
+            M::Finalizing => "Finishing meeting...",
+        };
+        for d in [D::Idle, D::Recording, D::Transcribing, D::Error, D::Stopped] {
+            for m in [M::Idle, M::Starting, M::Recording, M::Paused, M::Finalizing] {
+                let mut tray = meeting_tray(d, on(M::Idle), log.clone());
+                if m == M::Starting {
+                    tray.starting = Some(std::time::Instant::now());
+                } else {
+                    tray.meeting = on(m);
+                }
+                assert_eq!(tray.meeting_state(), m);
+                // Dictation wins unless it is idle; only "Ready" gives way.
+                let want = if d == D::Idle {
+                    meeting_text(m)
+                } else {
+                    d.tooltip_body()
+                };
+                assert_eq!(tray.status_text(), want, "{d:?} + {m:?}");
+                assert_eq!(tray.tool_tip().title, format!("Voxtype: {want}"));
+                assert_eq!(tray.tool_tip().description, want);
+                let header = standard_items(&tray).remove(0).label;
+                assert_eq!(header, format!("Voxtype: {want}"), "{d:?} + {m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn meeting_mode_off_keeps_ready() {
+        let tray = meeting_tray(
+            TrayState::Idle,
+            MeetingMenu::default(),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        assert_eq!(tray.status_text(), "Ready");
+    }
+
+    #[test]
+    fn start_click_shows_starting_until_the_daemon_reports() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(TrayState::Idle, on(MeetingTrayState::Idle), log.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tray.start_clicked = Some(tx);
+        click(&mut tray, "Start Meeting");
+        assert_eq!(*log.lock().unwrap(), vec![TrayAction::StartMeeting]);
+        assert!(rx.try_recv().is_ok(), "the tray task arms the timeout");
+        assert_eq!(
+            meeting_entries(&tray),
+            entries(&[("Starting Meeting...", false)])
+        );
+        assert_eq!(tray.status_text(), "Starting meeting...");
+        // A second click on the stale menu does nothing.
+        click(&mut tray, "Starting Meeting...");
+        assert_eq!(log.lock().unwrap().len(), 1);
+        // The daemon reports the meeting: Starting is settled.
+        tray.set_meeting(on(MeetingTrayState::Recording));
+        assert_eq!(tray.starting, None);
+        assert_eq!(tray.status_text(), "Meeting in progress");
+        assert_eq!(
+            meeting_entries(&tray),
+            entries(&[("Stop Meeting", true), ("Pause Meeting", true)])
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_start_expires() {
+        let mut tray = meeting_tray(
+            TrayState::Idle,
+            on(MeetingTrayState::Idle),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        tray.starting = Some(std::time::Instant::now());
+        tray.expire_start();
+        assert_eq!(
+            tray.meeting_state(),
+            MeetingTrayState::Starting,
+            "too early"
+        );
+        tray.starting = Some(std::time::Instant::now() - MEETING_START_TIMEOUT);
+        tray.expire_start();
+        assert_eq!(tray.meeting_state(), MeetingTrayState::Idle);
+        assert_eq!(tray.status_text(), "Ready");
+        assert_eq!(meeting_entries(&tray), entries(&[("Start Meeting", true)]));
     }
 }
