@@ -29,6 +29,10 @@ pub struct MeetingConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// While meeting mode is off, offer to turn it on from the tray
+    #[serde(default = "default_true")]
+    pub offer_enable: bool,
+
     /// Duration of each audio chunk in seconds
     #[serde(default = "default_chunk_duration")]
     pub chunk_duration_secs: u32,
@@ -350,6 +354,7 @@ impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            offer_enable: true,
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,

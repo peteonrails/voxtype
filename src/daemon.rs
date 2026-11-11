@@ -4448,7 +4448,8 @@ impl Daemon {
         // The single-instance lock is already held. Never register a duplicate tray.
         #[cfg(target_os = "linux")]
         if self.tray.is_none() {
-            self.tray = crate::tray::TrayRuntime::start_for_config(&self.config);
+            self.tray =
+                crate::tray::TrayRuntime::start_for_daemon(&self.config, self.config_path.clone());
         }
 
         // Start the meeting-event broadcaster for the meeting HUD. Bound

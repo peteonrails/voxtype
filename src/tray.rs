@@ -98,6 +98,10 @@ static MEETING_START_FAILED: tokio::sync::Notify = tokio::sync::Notify::const_ne
 pub struct MeetingMenu {
     pub enabled: bool,
     pub state: MeetingTrayState,
+    /// Meeting mode is off and the user may be offered to turn it on.
+    pub offer: bool,
+    /// Meeting mode was turned on but the daemon has to restart first.
+    pub restart_pending: bool,
 }
 
 /// Closed set of actions. No user-controlled command strings or shell evaluation.
@@ -121,6 +125,9 @@ pub enum TrayAction {
     PauseMeeting,
     /// `voxtype meeting resume`.
     ResumeMeeting,
+    /// Turn meeting mode on: `voxtype config set meeting.enabled true`,
+    /// then restart the daemon.
+    EnableMeetings,
 }
 
 impl TrayAction {
@@ -292,6 +299,22 @@ impl VoxtypeTray {
         }
 
         if !self.meeting.enabled {
+            if self.meeting.restart_pending {
+                return vec![entry(
+                    "Start Meeting (restart Voxtype first)",
+                    false,
+                    TrayAction::StartMeeting,
+                    |_| false,
+                )];
+            }
+            if self.meeting.offer {
+                return vec![entry(
+                    "Turn on meetings...",
+                    true,
+                    TrayAction::EnableMeetings,
+                    |t| !t.meeting.enabled && t.meeting.offer,
+                )];
+            }
             return vec![entry(
                 "Start Meeting (meeting mode is off)",
                 false,
@@ -831,6 +854,86 @@ fn cli_command(bin: &std::path::Path, action: TrayAction) -> Command {
     command
 }
 
+// ------------------------------------------------------- meeting mode offer
+
+/// On daemon start: show "Turn on meetings..." while meeting mode is off,
+/// and post the offer notification when one is due.
+async fn offer_meetings(
+    enabled: bool,
+    offer_enabled: bool,
+    config_path: Option<std::path::PathBuf>,
+    meeting_tx: watch::Sender<MeetingMenu>,
+) {
+    use crate::meeting_offer as offer;
+    if enabled || !offer_enabled {
+        return;
+    }
+    let path = offer::OfferState::path();
+    let decision = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            offer::on_daemon_start(
+                &path,
+                enabled,
+                offer_enabled,
+                offer::recorder_installed_here(),
+                offer::now_secs(),
+            )
+        })
+        .await
+        .unwrap_or_default()
+    };
+    meeting_tx.send_modify(|m| m.offer = decision.show_entry);
+    let Some(kind) = decision.notify else { return };
+    let answer = match zbus::Connection::session().await {
+        Ok(conn) => offer::notify::ask(&conn, kind).await,
+        Err(e) => Err(e.into()),
+    };
+    match answer {
+        Ok(offer::Answer::TurnOn) => enable_meetings(config_path, meeting_tx).await,
+        Ok(answer) => {
+            offer::record_answer(&path, answer);
+            if answer == offer::Answer::Never {
+                meeting_tx.send_modify(|m| m.offer = false);
+            }
+        }
+        Err(e) => tracing::debug!("Meeting offer notification unavailable: {}", e),
+    }
+}
+
+/// Turn meeting mode on from the tray or the offer notification.
+async fn enable_meetings(
+    config_path: Option<std::path::PathBuf>,
+    meeting_tx: watch::Sender<MeetingMenu>,
+) {
+    use crate::meeting_offer as offer;
+    let result = match offer::Enabler::for_daemon(config_path) {
+        Ok(enabler) => enabler.enable().await,
+        Err(e) => Err(e),
+    };
+    match result {
+        // The restart replaces this process; nothing more to show.
+        Ok(offer::Enabled::Restarting) => meeting_tx.send_modify(|m| m.offer = false),
+        Ok(offer::Enabled::RestartNeeded(why)) => {
+            tracing::info!("Meeting mode turned on; restart needed: {}", why);
+            meeting_tx.send_modify(|m| {
+                m.offer = false;
+                m.restart_pending = true;
+            });
+            let (summary, body) = offer::restart_needed_wording();
+            crate::notification::send(summary, body).await;
+        }
+        Err(e) => {
+            tracing::warn!("Could not turn on meeting mode: {}", e);
+            crate::notification::send(
+                "Could not turn on meetings",
+                "Run: voxtype config set meeting.enabled true",
+            )
+            .await;
+        }
+    }
+}
+
 // ------------------------------------------------------------ model upgrades
 
 const SETTINGS_PLUGIN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1093,6 +1196,53 @@ impl TrayRuntime {
         }));
         Some(runtime)
     }
+    /// The daemon's tray, with the offer to turn meeting mode on when it is
+    /// off. `config_path` is the config the daemon runs on, for the
+    /// `config set` that Turn on runs.
+    pub fn start_for_daemon(
+        config: &crate::config::Config,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Option<Self> {
+        let (upgrade_tx, upgrade_rx) = mpsc::unbounded_channel();
+        let refresher = upgrade_tx.clone();
+        // Filled in once the runtime exists; the action closure needs it to
+        // update the meeting entries.
+        let meeting_slot: Arc<OnceLock<watch::Sender<MeetingMenu>>> = Arc::new(OnceLock::new());
+        let slot = meeting_slot.clone();
+        let enable_path = config_path.clone();
+        let actions: Actions = Arc::new(move |action| match action {
+            TrayAction::CleanupOldModels => {
+                let refresher = refresher.clone();
+                tokio::spawn(async move {
+                    run_cleanup().await;
+                    refresh_upgrade(refresher).await;
+                });
+            }
+            TrayAction::EnableMeetings => {
+                if let Some(tx) = slot.get().cloned() {
+                    tokio::spawn(enable_meetings(enable_path.clone(), tx));
+                }
+            }
+            action => dispatch_action(action),
+        });
+        let mut runtime = Self::start_controlled(config, actions, upgrade_tx, upgrade_rx)?;
+        let _ = meeting_slot.set(runtime.meeting_tx.clone());
+        let initial = runtime.upgrade_tx.clone();
+        let meeting_tx = runtime.meeting_tx.clone();
+        let (enabled, offer_enabled) = (config.meeting.enabled, config.meeting.offer_enable);
+        runtime.upgrade_refresh = Some(tokio::spawn(async move {
+            tokio::time::sleep(MIGRATE_STATUS_DELAY).await;
+            tokio::spawn(offer_meetings(
+                enabled,
+                offer_enabled,
+                config_path,
+                meeting_tx,
+            ));
+            refresh_upgrade(initial).await;
+        }));
+        Some(runtime)
+    }
+
     /// Recording-free host harness; non-language actions are delivered, never executed.
     pub fn start_for_config_with_actions(
         config: &crate::config::Config,
@@ -1130,7 +1280,7 @@ impl TrayRuntime {
         });
         let (meeting_tx, meeting_rx) = watch::channel(MeetingMenu {
             enabled: config.meeting.enabled,
-            state: MeetingTrayState::Idle,
+            ..Default::default()
         });
         let task = spawn_inner(rx, actions, Some(language.clone()), upgrade_rx, meeting_rx);
         Some(Self {
@@ -1740,6 +1890,7 @@ mod tests {
         MeetingMenu {
             enabled: true,
             state,
+            ..Default::default()
         }
     }
 
@@ -2044,6 +2195,90 @@ mod tests {
         tray.expire_start();
         assert_eq!(tray.meeting_state(), MeetingTrayState::Idle);
         assert_eq!(tray.status_text(), "Ready");
+        assert_eq!(meeting_entries(&tray), entries(&[("Start Meeting", true)]));
+    }
+
+    // ── meeting mode offer ────────────────────────────────────────────────────
+
+    fn off(offer: bool, restart_pending: bool) -> MeetingMenu {
+        MeetingMenu {
+            enabled: false,
+            offer,
+            restart_pending,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn meeting_mode_off_offers_to_turn_it_on() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(TrayState::Idle, off(true, false), log.clone());
+        assert_eq!(
+            meeting_entries(&tray),
+            Vec::<(String, bool)>::new(),
+            "no Start Meeting while the offer shows"
+        );
+        let labels: Vec<_> = standard_items(&tray).into_iter().map(|i| i.label).collect();
+        assert_eq!(
+            labels
+                .iter()
+                .position(|l| l == "Turn on meetings...")
+                .unwrap(),
+            labels.iter().position(|l| l == "Cancel").unwrap() + 1
+        );
+        click(&mut tray, "Turn on meetings...");
+        assert_eq!(*log.lock().unwrap(), vec![TrayAction::EnableMeetings]);
+    }
+
+    #[test]
+    fn declined_offer_falls_back_to_the_greyed_hint() {
+        let tray = meeting_tray(
+            TrayState::Idle,
+            off(false, false),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        assert_eq!(
+            meeting_entries(&tray),
+            entries(&[("Start Meeting (meeting mode is off)", false)])
+        );
+        assert!(!standard_items(&tray)
+            .iter()
+            .any(|i| i.label == "Turn on meetings..."));
+    }
+
+    #[test]
+    fn turned_on_without_a_restart_says_so() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(TrayState::Idle, off(false, true), log.clone());
+        assert_eq!(
+            meeting_entries(&tray),
+            entries(&[("Start Meeting (restart Voxtype first)", false)])
+        );
+        click(&mut tray, "Start Meeting (restart Voxtype first)");
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_turn_on_click_after_enabling_is_dropped() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(TrayState::Idle, off(true, false), log.clone());
+        let item = standard_items(&tray)
+            .into_iter()
+            .find(|i| i.label == "Turn on meetings...")
+            .unwrap();
+        tray.meeting.offer = false;
+        (item.activate)(&mut tray);
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn meeting_mode_on_never_shows_the_offer() {
+        let mut menu = on(MeetingTrayState::Idle);
+        menu.offer = true;
+        let tray = meeting_tray(TrayState::Idle, menu, Arc::new(Mutex::new(Vec::new())));
+        assert!(!standard_items(&tray)
+            .iter()
+            .any(|i| i.label == "Turn on meetings..."));
         assert_eq!(meeting_entries(&tray), entries(&[("Start Meeting", true)]));
     }
 }

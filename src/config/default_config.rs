@@ -414,6 +414,11 @@ backend = "energy"
 threshold = 0.5      # 0.0 = sensitive, 1.0 = aggressive
 min_speech_duration_ms = 100  # Minimum speech required
 
+[meeting]
+# Meeting mode: record and transcribe calls and long sessions with
+# `voxtype meeting start`, the tray, or Voxtype Meetings.
+enabled = true
+
 # Native Linux system tray is enabled by default. Set false to opt out.
 # [tray]
 # enabled = true
@@ -510,6 +515,8 @@ mod tests {
 
         assert!(config.output.notification.on_no_speech);
         assert!(config.output.notification.show_edits);
+
+        assert!(config.meeting.enabled, "new installs get meeting mode");
     }
 
     #[test]
@@ -523,6 +530,10 @@ mod tests {
         assert!(!config.text.collapse_restarts);
         assert!(config.vad.enabled);
         assert_eq!(config.vad.backend, VadBackend::Energy);
+        // This file is installed as /etc/voxtype/config.toml, which users
+        // without their own config already run on. Turning meetings on here
+        // would flip them on upgrade; they get the tray offer instead.
+        assert!(!config.meeting.enabled);
     }
 
     #[test]
@@ -540,6 +551,11 @@ mod tests {
         assert!(!config.text.collapse_restarts);
         assert!(!config.vad.enabled);
         assert_eq!(config.vad.backend, VadBackend::Auto);
+        assert!(!config.meeting.enabled, "upgrades keep meeting mode off");
+        assert!(
+            config.meeting.offer_enable,
+            "and get the tray offer instead"
+        );
     }
 
     #[test]
