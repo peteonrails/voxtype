@@ -1,29 +1,31 @@
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
-import qs.Commons
 
-// The meeting view's own surface: a card down the right edge, under the bar.
+// The meeting view's own surface: a card down the right edge.
 //
-// Unlike the Settings panel this is not a modal overlay. It sits on the Top
-// layer without a scrim, reserves no space (windows are not re-tiled when a
-// meeting starts), and takes the keyboard only when clicked, so the call and
-// whatever the user is typing in keep focus while it follows the meeting.
+// Not a modal overlay. It sits on the Top layer without a scrim, reserves no
+// space (windows are not re-tiled when a meeting starts), and takes the
+// keyboard only when clicked, so the call and whatever the user is typing in
+// keep focus while it follows the meeting. Generic layer-shell, so every host
+// uses it as is.
 PanelWindow {
   id: window
   anchors { top: true; right: true; bottom: true }
-  implicitWidth: Style.space(460)
+  implicitWidth: 460
   color: "transparent"
   exclusionMode: ExclusionMode.Normal
   WlrLayershell.namespace: "voxtype-meetings"
   WlrLayershell.layer: WlrLayer.Top
   WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
+  property var theme: MeetingTheme {}
   readonly property alias view: meetingView
 
   MeetingView {
     id: meetingView
     anchors.fill: parent
-    anchors.margins: Style.gapsOut * 2
+    anchors.margins: window.theme ? window.theme.margin : 10
+    theme: window.theme
   }
 }

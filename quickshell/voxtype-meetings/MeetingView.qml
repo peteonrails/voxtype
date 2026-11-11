@@ -1,17 +1,19 @@
 import QtQuick
 import QtQuick.Layouts
-import qs.Commons
-import qs.Commons as ShellTheme
-import qs.Ui
 
-// The live meeting view: a header with the meeting's state and controls,
-// speaker chips, and the transcript as the daemon streams it. Everything shown
-// comes from `feed` (MeetingFeed); everything done goes out as a signal, which
-// Meetings.qml turns into a `voxtype meeting` command.
+// The meeting view: a header with the meeting's state and controls, then four
+// tabs: Transcript, Notes, Ask, and Summary (once the meeting has stopped).
+// Everything shown comes from `feed` (MeetingFeed) and `assistant`
+// (MeetingAssistant); everything done goes out as a signal, which Meetings.qml
+// turns into a `voxtype meeting` command.
 //
 // A meeting that has ended stays on screen ("Ended") so its lines can still be
-// fixed: chip renames and per-line reassignment work the same as during it.
-// Clicking a line's speaker opens a small chooser to move just that line.
+// fixed: chip renames, per-line reassignment and notes work the same as during
+// it. Tabs keep their own scroll position: switching never rebuilds one.
+//
+// Overlays (the reassign chooser, the note editor, the agent menu and the
+// consent dialog) are plain items, not Popups: a layer-shell surface has no
+// window overlay for a Popup to render into.
 //
 // No level meters: meeting.sock carries no levels yet. No countdown either: it
 // carries no chunk timing, so between updates the view says "Listening" and
@@ -19,10 +21,13 @@ import qs.Ui
 Item {
   id: root
 
+  property var theme: MeetingTheme {}
   property var feed: null
+  property var assistant: null
   // The action running now, from MeetingCli.busy.
   property string busy: ""
   property string actionError: ""
+  property bool canOpenSettings: false
 
   signal pauseRequested()
   signal resumeRequested()
@@ -33,6 +38,9 @@ Item {
   // speaker key to show until it answers.
   signal reassignRequested(int segId, string speaker, string key)
   signal restoreRequested(int segId)
+  // A note on one line; an empty `text` removes it.
+  signal annotateRequested(int segId, string text)
+  signal settingsRequested()
   signal closeRequested()
   signal errorDismissed()
 
@@ -42,10 +50,24 @@ Item {
   readonly property bool ended: feed ? feed.ended : false
   // Something to show: a meeting running, or one that ended and is kept.
   readonly property bool hasMeeting: live || ended
-  readonly property color fg: ShellTheme.Color.foreground
-  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
-  readonly property color accent: ShellTheme.Color.accent
-  readonly property color urgent: ShellTheme.Color.urgent
+
+  // ------------------------------------------------------------- tabs
+
+  readonly property var tabs: root.ended ? ["transcript", "notes", "ask", "summary"] : ["transcript", "notes", "ask"]
+  property string tab: "transcript"
+  readonly property string currentTab: root.tabs.indexOf(root.tab) === -1 ? "transcript" : root.tab
+
+  function selectTab(name) { root.tab = String(name) }
+
+  function tabTitle(name) {
+    return name === "transcript" ? "Transcript" : name === "notes" ? "Notes" : name === "ask" ? "Ask" : "Summary"
+  }
+
+  // A citation or chapter link: show that line of the transcript.
+  function jumpTo(ms) {
+    root.tab = "transcript"
+    Qt.callLater(function() { transcriptPane.jumpTo(ms) })
+  }
 
   // Ticks once a second while it matters, so elapsed and "ago" stay current.
   property real now: Date.now()
@@ -58,7 +80,10 @@ Item {
 
   focus: true
   Keys.onEscapePressed: {
-    if (reassignPopup.visible) reassignPopup.close()
+    if (consent.visible) consent.dismiss()
+    else if (agentMenu.visible) agentMenu.close()
+    else if (reassignPopup.visible) reassignPopup.close()
+    else if (noteEditor.visible) noteEditor.close()
     else root.closeRequested()
   }
 
@@ -73,8 +98,20 @@ Item {
 
   Connections {
     target: root.feed
-    function onTransitioned(from, to) { root.now = Date.now() }
+    function onTransitioned(from, to) {
+      root.now = Date.now()
+      // A new meeting opens on its transcript.
+      if (to === "recording" && from !== "paused") root.tab = "transcript"
+      // Its summary is what a stopped meeting is for.
+      if (to === "summarizing") root.tab = "summary"
+    }
   }
+
+  Connections {
+    target: root.assistant
+    function onConsentNeeded() { consent.visible = true }
+  }
+  onAssistantChanged: if (root.assistant && root.assistant.pending !== null) consent.visible = true
 
   // chrono writes nanoseconds; JavaScript dates take milliseconds at most.
   function parseTime(iso) {
@@ -107,6 +144,7 @@ Item {
     if (root.status === "recording") return "Recording"
     if (root.status === "paused") return "Paused"
     if (root.status === "finalizing") return "Finalizing"
+    if (root.status === "summarizing") return "Summarizing"
     if (root.ended) return "Ended"
     return "Idle"
   }
@@ -131,11 +169,7 @@ Item {
     reassignPopup.originalSpeaker = line.originalSpeaker
     reassignPopup.lineText = line.text
     newSpeakerField.text = ""
-    var p = anchor.mapToItem(root, 0, 0)
-    reassignPopup.anchorTop = p.y
-    reassignPopup.anchorBottom = p.y + anchor.height
-    reassignPopup.x = Math.max(Style.spacing.lg, Math.min(p.x - Style.spacing.lg,
-                                 root.width - reassignPopup.width - Style.spacing.lg))
+    root.place(reassignPopup, anchor)
     reassignPopup.visible = true
     // The keyboard is already this window's (the click gave it focus); taking
     // it here only makes Escape reach the chooser.
@@ -161,44 +195,44 @@ Item {
     root.chooseSpeaker(wanted, [wanted])
   }
 
-  function chipColor(index) {
-    var hues = [0.58, 0.08, 0.33, 0.83, 0.15, 0.5, 0.0, 0.7]
-    return Qt.hsla(hues[index % hues.length], 0.55, 0.62, 1.0)
+  function openNoteEditor(line, anchor) {
+    noteEditor.segId = line.segId
+    noteEditor.existing = line.annotation
+    noteEditor.lineText = line.text
+    noteField.text = line.annotation
+    root.place(noteEditor, anchor)
+    noteEditor.visible = true
+    noteField.forceActiveFocus()
+  }
+
+  // Under `anchor`, or above it if there is no room.
+  function place(popup, anchor) {
+    var p = anchor.mapToItem(root, 0, 0)
+    popup.anchorTop = p.y
+    popup.anchorBottom = p.y + anchor.height
+    popup.x = Math.max(root.theme.lg, Math.min(p.x - root.theme.lg, root.width - popup.width - root.theme.lg))
   }
 
   // ------------------------------------------------------------- surface
 
-  BorderSurface {
+  MeetingSurface {
     id: card
+    theme: root.theme
     anchors.fill: parent
-    color: ShellTheme.Color.popups.background
-    radius: Style.cornerRadius
-    borderSpec: Border.surfaceSpec("popups", "border", ShellTheme.Color.popups.border, Math.max(1, Style.normalBorderWidth))
-    padding: Style.spacing.panelPadding
 
     // Focus for Escape once the card is clicked.
     MouseArea { anchors.fill: parent; onClicked: root.forceActiveFocus() }
 
     ColumnLayout {
       anchors.fill: parent
-      anchors.topMargin: card.contentTopInset
-      anchors.rightMargin: card.contentRightInset
-      anchors.bottomMargin: card.contentBottomInset
-      anchors.leftMargin: card.contentLeftInset
-      spacing: Style.spacing.xxl
+      anchors.margins: root.theme.padding
+      spacing: root.theme.xxl
 
       // ------------------------------------------------------- header
 
       RowLayout {
         Layout.fillWidth: true
-        spacing: Style.spacing.controlGap
-
-        Text {
-          text: "󰍬"
-          color: root.hasMeeting ? root.accent : root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.iconLarge
-        }
+        spacing: root.theme.gap
 
         Text {
           objectName: "meetingTitle"
@@ -206,16 +240,17 @@ Item {
           text: root.hasMeeting
             ? (root.feed.title !== "" ? root.feed.title : "Untitled meeting")
             : "Meetings"
-          color: root.fg
-          font.family: Style.font.family
-          font.pixelSize: Style.font.heading
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.heading
           font.bold: true
           elide: Text.ElideRight
         }
 
-        Button {
+        MeetingButton {
           objectName: "closeButton"
-          iconText: "󰅖"
+          theme: root.theme
+          text: "Close"
           onClicked: root.closeRequested()
         }
       }
@@ -223,14 +258,14 @@ Item {
       RowLayout {
         Layout.fillWidth: true
         visible: root.hasMeeting
-        spacing: Style.spacing.controlGap
+        spacing: root.theme.gap
 
         Rectangle {
           id: stateDot
-          implicitWidth: Style.space(9)
-          implicitHeight: Style.space(9)
-          radius: width / 2
-          color: root.status === "recording" ? root.urgent : root.dim
+          implicitWidth: 9
+          implicitHeight: 9
+          radius: 4.5
+          color: root.status === "recording" ? root.theme.urgent : root.theme.dim
           SequentialAnimation on opacity {
             running: root.status === "recording" && root.visible
             loops: Animation.Infinite
@@ -243,50 +278,48 @@ Item {
         Text {
           objectName: "meetingState"
           text: root.stateLabel
-          color: root.fg
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.body
         }
 
         Text {
           objectName: "meetingElapsed"
           text: root.elapsedText
           visible: text !== ""
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
+          color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.body
         }
 
         Text {
           objectName: "meetingEndedAt"
           text: root.endedAtText
           visible: text !== ""
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
+          color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.body
         }
 
         Item { Layout.fillWidth: true }
 
-        Button {
+        MeetingButton {
           objectName: "pauseButton"
+          theme: root.theme
           visible: root.live
           text: root.status === "paused" ? "Resume" : "Pause"
-          iconText: root.status === "paused" ? "󰐊" : "󰏤"
           bordered: true
           enabled: root.connected && root.busy === "" && (root.status === "recording" || root.status === "paused")
-          opacity: enabled ? 1 : 0.5
           onClicked: root.status === "paused" ? root.resumeRequested() : root.pauseRequested()
         }
 
-        Button {
+        MeetingButton {
           objectName: "stopButton"
+          theme: root.theme
           visible: root.live
           text: "Stop"
-          iconText: "󰓛"
           bordered: true
           enabled: root.connected && root.busy === "" && (root.status === "recording" || root.status === "paused")
-          opacity: enabled ? 1 : 0.5
           onClicked: root.stopRequested()
         }
       }
@@ -296,19 +329,19 @@ Item {
         objectName: "listeningIndicator"
         Layout.fillWidth: true
         visible: root.live && root.connected || root.ended
-        spacing: Style.spacing.md
+        spacing: root.theme.md
 
         Row {
-          spacing: Style.spacing.xs
+          spacing: root.theme.xs
           visible: root.status === "recording"
           Repeater {
             model: 3
             Rectangle {
               required property int index
-              width: Style.space(4)
-              height: Style.space(4)
-              radius: width / 2
-              color: root.accent
+              width: 4
+              height: 4
+              radius: 2
+              color: root.theme.accent
               opacity: 0.3
               SequentialAnimation on opacity {
                 running: root.status === "recording" && root.visible
@@ -326,9 +359,9 @@ Item {
           objectName: "listeningText"
           Layout.fillWidth: true
           text: root.listeningText
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
           elide: root.ended ? Text.ElideNone : Text.ElideRight
           wrapMode: root.ended ? Text.WordWrap : Text.NoWrap
         }
@@ -339,25 +372,25 @@ Item {
         objectName: "endedStartRow"
         Layout.fillWidth: true
         visible: root.ended
-        spacing: Style.spacing.controlGap
+        spacing: root.theme.gap
 
-        TextField {
+        MeetingTextField {
           id: endedTitleField
           objectName: "endedTitleField"
+          theme: root.theme
           Layout.fillWidth: true
           placeholderText: "New meeting title (optional)"
           enabled: root.connected
           onAccepted: endedStartButton.clicked()
         }
 
-        Button {
+        MeetingButton {
           id: endedStartButton
           objectName: "endedStartButton"
+          theme: root.theme
           text: root.busy === "start" ? "Starting…" : "Start meeting"
-          iconText: "󰑊"
           bordered: true
           enabled: root.connected && root.busy === ""
-          opacity: enabled ? 1 : 0.5
           onClicked: {
             if (!endedStartButton.enabled) return
             root.startRequested(endedTitleField.text)
@@ -372,41 +405,43 @@ Item {
         Layout.fillWidth: true
         visible: !root.connected && (root.live || root.feed && root.feed.everConnected) && !root.ended
         text: "Lost the connection to voxtype. Reconnecting…"
-        color: root.urgent
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        color: root.theme.urgent
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
         wrapMode: Text.WordWrap
       }
 
-      BorderSurface {
+      Rectangle {
         objectName: "actionError"
         Layout.fillWidth: true
         visible: root.actionError !== "" || (root.feed && root.feed.lastError !== "")
-        implicitHeight: errorText.implicitHeight + Style.spacing.controlPaddingX * 2
-        color: Util.alpha(root.urgent, 0.12)
-        radius: Style.cornerRadius
-        borderSpec: Border.flat(Util.alpha(root.urgent, 0.45), Math.max(1, Style.normalBorderWidth))
+        implicitHeight: errorText.implicitHeight + root.theme.padX * 2
+        radius: Math.min(root.theme.radius, 6)
+        color: root.theme.alpha(root.theme.urgent, 0.12)
+        border.width: 1
+        border.color: root.theme.alpha(root.theme.urgent, 0.45)
 
         Text {
           id: errorText
           anchors.left: parent.left
           anchors.right: dismissError.left
           anchors.verticalCenter: parent.verticalCenter
-          anchors.leftMargin: Style.spacing.controlPaddingX
-          anchors.rightMargin: Style.spacing.controlGap
+          anchors.leftMargin: root.theme.padX
+          anchors.rightMargin: root.theme.gap
           text: root.actionError !== "" ? root.actionError : (root.feed ? root.feed.lastError : "")
-          color: root.fg
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
           wrapMode: Text.WordWrap
         }
 
-        Button {
+        MeetingButton {
           id: dismissError
+          theme: root.theme
           anchors.right: parent.right
-          anchors.rightMargin: Style.spacing.sm
+          anchors.rightMargin: root.theme.sm
           anchors.verticalCenter: parent.verticalCenter
-          iconText: "󰅖"
+          text: "Dismiss"
           onClicked: {
             if (root.feed) root.feed.lastError = ""
             root.errorDismissed()
@@ -414,245 +449,68 @@ Item {
         }
       }
 
-      // ------------------------------------------------------- speakers
+      // ------------------------------------------------------- tabs
 
-      Flow {
-        objectName: "speakerChips"
+      Row {
+        objectName: "tabBar"
         Layout.fillWidth: true
-        visible: root.hasMeeting && root.feed.chips.length > 0
-        spacing: Style.spacing.md
+        visible: root.hasMeeting
+        spacing: root.theme.sm
 
         Repeater {
-          model: root.feed ? root.feed.chips : []
-
-          delegate: Item {
-            id: chip
-            required property var modelData
-            required property int index
-            property bool editing: false
-            objectName: "speakerChip_" + index
-            readonly property string name: modelData.name
-            implicitWidth: editing ? Style.space(170) : chipRow.implicitWidth + Style.spacing.controlPaddingX * 2
-            implicitHeight: Style.spacing.controlHeight
-
-            function beginEdit() {
-              chip.editing = true
-              renameField.text = chip.name
-              renameField.forceActiveFocus()
-              renameField.selectAll()
-            }
-
-            function commit() {
-              var next = renameField.text.trim()
-              chip.editing = false
-              root.forceActiveFocus()
-              if (next !== "" && next !== chip.name) root.renameRequested(chip.modelData.keys, next)
-            }
-
-            Rectangle {
-              anchors.fill: parent
-              visible: !chip.editing
-              radius: height / 2
-              color: chipMouse.containsMouse ? Util.alpha(root.fg, 0.12) : Util.alpha(root.fg, 0.06)
-              border.width: 1
-              border.color: Util.alpha(root.chipColor(chip.index), 0.6)
-
-              Row {
-                id: chipRow
-                anchors.centerIn: parent
-                spacing: Style.spacing.md
-                Rectangle {
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(8)
-                  height: Style.space(8)
-                  radius: width / 2
-                  color: root.chipColor(chip.index)
-                }
-                Text {
-                  objectName: "speakerChipName"
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: chip.name
-                  color: root.fg
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-
-              MouseArea {
-                id: chipMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: chip.beginEdit()
-              }
-            }
-
-            TextField {
-              id: renameField
-              objectName: "speakerRenameField"
-              anchors.fill: parent
-              visible: chip.editing
-              font.pixelSize: Style.font.bodySmall
-              verticalPadding: 0
-              placeholderText: "Name"
-              onAccepted: chip.commit()
-              Keys.onEscapePressed: {
-                chip.editing = false
-                root.forceActiveFocus()
-              }
-              onActiveFocusChanged: if (!activeFocus && chip.editing) chip.editing = false
-            }
+          model: root.tabs
+          MeetingButton {
+            required property string modelData
+            objectName: "tab_" + modelData
+            theme: root.theme
+            text: root.tabTitle(modelData)
+            active: root.currentTab === modelData
+            onClicked: root.tab = modelData
           }
         }
       }
 
-      Text {
-        Layout.fillWidth: true
-        visible: root.hasMeeting && root.feed.chips.length > 0
-        text: "Click a chip to name a speaker; two given the same name are merged. Click a line's speaker to move just that line."
-        color: root.dim
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
-      }
-
-      Rectangle {
-        Layout.fillWidth: true
-        implicitHeight: 1
-        visible: root.hasMeeting
-        color: Util.alpha(root.fg, 0.12)
-      }
-
-      // ------------------------------------------------------- transcript
-
-      Item {
+      StackLayout {
+        objectName: "tabStack"
         Layout.fillWidth: true
         Layout.fillHeight: true
         visible: root.hasMeeting
+        currentIndex: ["transcript", "notes", "ask", "summary"].indexOf(root.currentTab)
 
-        Text {
-          anchors.centerIn: parent
-          width: parent.width
-          visible: transcript.count === 0
-          horizontalAlignment: Text.AlignHCenter
-          text: root.ended ? "Nothing was transcribed in this meeting." : "Lines appear here as each chunk is transcribed."
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
+        TranscriptPane {
+          id: transcriptPane
+          objectName: "transcriptPane"
+          theme: root.theme
+          feed: root.feed
+          ended: root.ended
+          onRenameRequested: function(keys, name) { root.renameRequested(keys, name) }
+          onSpeakerClicked: function(line, anchor) { root.openReassign(line, anchor) }
+          onNoteClicked: function(line, anchor) { root.openNoteEditor(line, anchor) }
         }
 
-        ListView {
-          id: transcript
-          objectName: "transcriptList"
-          anchors.fill: parent
-          clip: true
-          spacing: Style.spacing.lg
-          model: root.feed ? root.feed.segments : null
-          boundsBehavior: Flickable.StopAtBounds
-
-          // Follow new lines until the user scrolls up; scrolling back to the
-          // bottom (or Jump to latest) resumes following.
-          property bool follow: true
-          onMovementEnded: transcript.follow = transcript.atYEnd
-          onCountChanged: if (transcript.follow) Qt.callLater(transcript.positionViewAtEnd)
-          onHeightChanged: if (transcript.follow) Qt.callLater(transcript.positionViewAtEnd)
-
-
-          delegate: Item {
-            id: line
-            required property int index
-            required property string text
-            required property string speaker
-            required property real startMs
-            required property int segId
-            required property string originalSpeaker
-            objectName: "transcriptLine"
-            width: ListView.view.width
-            implicitHeight: lineColumn.implicitHeight
-            readonly property string speakerName: root.feed.displayName(line.speaker)
-            readonly property int chipIndex: root.feed.chipIndexFor(line.speaker)
-
-            Text {
-              id: stamp
-              objectName: "lineTime"
-              width: Style.space(46)
-              text: root.clock(line.startMs)
-              color: root.dim
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-                  topPadding: 2
-            }
-
-            Column {
-              id: lineColumn
-              anchors.left: stamp.right
-              anchors.right: parent.right
-              spacing: Style.spacing.xxs
-
-              Row {
-                spacing: Style.spacing.md
-
-                // The speaker is the handle for moving this line elsewhere.
-                Text {
-                  id: speakerLabel
-                  objectName: "lineSpeaker"
-                  text: line.speakerName
-                  color: root.chipColor(Math.max(0, line.chipIndex))
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
-                  font.underline: speakerMouse.containsMouse
-
-                  MouseArea {
-                    id: speakerMouse
-                    objectName: "lineSpeakerButton"
-                    anchors.fill: parent
-                    anchors.margins: -Style.spacing.xs
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.openReassign(line, speakerLabel)
-                  }
-                }
-
-                Text {
-                  objectName: "lineMoved"
-                  visible: line.originalSpeaker !== ""
-                  anchors.baseline: speakerLabel.baseline
-                  text: "moved from " + root.feed.displayName(line.originalSpeaker)
-                  color: root.dim
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  font.italic: true
-                }
-              }
-              Text {
-                objectName: "lineText"
-                width: parent.width
-                text: line.text
-                color: root.fg
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
-              }
-            }
-          }
+        NotesPane {
+          objectName: "notesPane"
+          theme: root.theme
+          assistant: root.assistant
         }
 
-        Button {
-          objectName: "jumpToLatest"
-          anchors.horizontalCenter: parent.horizontalCenter
-          anchors.bottom: parent.bottom
-          anchors.bottomMargin: Style.spacing.lg
-          visible: !transcript.follow && transcript.count > 0
-          text: "Jump to latest"
-          iconText: "󰁅"
-          bordered: true
-          background: ShellTheme.Color.popups.background
-          onClicked: {
-            transcript.follow = true
-            transcript.positionViewAtEnd()
-          }
+        AskPane {
+          objectName: "askPane"
+          theme: root.theme
+          assistant: root.assistant
+          feed: root.feed
+          onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
+          onCitationActivated: function(ms) { root.jumpTo(ms) }
+        }
+
+        SummaryPane {
+          id: summaryPane
+          objectName: "summaryPane"
+          theme: root.theme
+          assistant: root.assistant
+          feed: root.feed
+          onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
+          onCitationActivated: function(ms) { root.jumpTo(ms) }
         }
       }
 
@@ -666,25 +524,17 @@ Item {
 
         Column {
           anchors.centerIn: parent
-          width: Math.min(parent.width, Style.space(340))
-          spacing: Style.spacing.xxl
-
-          Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "󰍬"
-            color: root.dim
-            font.family: Style.font.family
-            font.pixelSize: Style.font.displayLarge
-          }
+          width: Math.min(parent.width, 340)
+          spacing: root.theme.xxl
 
           Text {
             objectName: "idleTitle"
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             text: root.connected ? "No meeting in progress" : "Voxtype is not running"
-            color: root.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.title
+            color: root.theme.fg
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.title
           }
 
           Text {
@@ -694,30 +544,30 @@ Item {
             text: root.connected
               ? "Start one here, from the tray, or with voxtype meeting start. This view follows it live."
               : "Waiting for the voxtype daemon. This view connects as soon as it is running."
-            color: root.dim
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.bodySmall
             wrapMode: Text.WordWrap
           }
 
-          TextField {
+          MeetingTextField {
             id: titleField
             objectName: "startTitleField"
+            theme: root.theme
             width: parent.width
             placeholderText: "Meeting title (optional)"
             enabled: root.connected
             onAccepted: startButton.clicked()
           }
 
-          Button {
+          MeetingButton {
             id: startButton
             objectName: "startButton"
+            theme: root.theme
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.busy === "start" ? "Starting…" : "Start meeting"
-            iconText: "󰑊"
             bordered: true
             enabled: root.connected && root.busy === ""
-            opacity: enabled ? 1 : 0.5
             onClicked: {
               if (!startButton.enabled) return
               root.startRequested(titleField.text)
@@ -728,34 +578,34 @@ Item {
     }
   }
 
-  // ------------------------------------------------------------- chooser
-  //
-  // A plain item, not a Popup: Qt Quick Controls popups need a window overlay
-  // that a layer-shell surface does not provide (see the plugin README).
+  // ------------------------------------------------------------- overlays
 
+  // Behind any open overlay: a click outside closes it.
   MouseArea {
-    objectName: "reassignScrim"
+    objectName: "overlayScrim"
     anchors.fill: parent
-    visible: reassignPopup.visible
+    visible: reassignPopup.visible || noteEditor.visible || agentMenu.visible || consent.visible
     z: 9
-    onClicked: reassignPopup.close()
+    onClicked: {
+      if (consent.visible) return
+      reassignPopup.close()
+      noteEditor.close()
+      agentMenu.close()
+    }
   }
 
-  BorderSurface {
+  MeetingSurface {
     id: reassignPopup
     objectName: "reassignPopup"
+    theme: root.theme
     visible: false
     z: 10
-    width: Math.min(root.width - Style.spacing.lg * 2, Style.space(340))
-    implicitHeight: popupColumn.implicitHeight + Style.spacing.controlPaddingX * 2
-    height: implicitHeight
+    width: Math.min(root.width - root.theme.lg * 2, 340)
+    height: popupColumn.implicitHeight + root.theme.padX * 2
     // Below the speaker it was opened from, or above it if there is no room.
-    y: anchorBottom + Style.spacing.xs + height <= root.height - Style.spacing.lg
-      ? anchorBottom + Style.spacing.xs
-      : Math.max(Style.spacing.lg, anchorTop - Style.spacing.xs - height)
-    color: ShellTheme.Color.popups.background
-    radius: Style.cornerRadius
-    borderSpec: Border.surfaceSpec("popups", "border", ShellTheme.Color.popups.border, Math.max(1, Style.normalBorderWidth))
+    y: anchorBottom + root.theme.xs + height <= root.height - root.theme.lg
+      ? anchorBottom + root.theme.xs
+      : Math.max(root.theme.lg, anchorTop - root.theme.xs - height)
 
     property int segId: -1
     property string speaker: ""
@@ -779,31 +629,31 @@ Item {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: parent.top
-      anchors.margins: Style.spacing.controlPaddingX
-      spacing: Style.spacing.lg
+      anchors.margins: root.theme.padX
+      spacing: root.theme.lg
 
       Text {
         width: parent.width
         text: "Move this line to"
-        color: root.dim
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
       }
 
       Text {
         objectName: "reassignLineText"
         width: parent.width
         text: "“" + reassignPopup.lineText + "”"
-        color: root.fg
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
         elide: Text.ElideRight
       }
 
       Flow {
         objectName: "reassignChips"
         width: parent.width
-        spacing: Style.spacing.md
+        spacing: root.theme.md
 
         Repeater {
           model: reassignPopup.visible && root.feed ? root.feed.chips : []
@@ -815,31 +665,31 @@ Item {
             objectName: "reassignChip_" + index
             readonly property string name: modelData.name
             readonly property bool current: modelData.keys.indexOf(reassignPopup.speaker) !== -1
-            implicitWidth: pickRow.implicitWidth + Style.spacing.controlPaddingX * 2
-            implicitHeight: Style.spacing.controlHeight
+            implicitWidth: pickRow.implicitWidth + root.theme.padX * 2
+            implicitHeight: root.theme.controlHeight
             radius: height / 2
-            color: pick.current ? Util.alpha(root.chipColor(pick.index), 0.25)
-              : pickMouse.containsMouse ? Util.alpha(root.fg, 0.12) : Util.alpha(root.fg, 0.06)
+            color: pick.current ? root.theme.alpha(transcriptPane.chipColor(pick.index), 0.25)
+              : pickMouse.containsMouse ? root.theme.alpha(root.theme.fg, 0.12) : root.theme.alpha(root.theme.fg, 0.06)
             border.width: 1
-            border.color: Util.alpha(root.chipColor(pick.index), pick.current ? 1.0 : 0.6)
+            border.color: root.theme.alpha(transcriptPane.chipColor(pick.index), pick.current ? 1.0 : 0.6)
 
             Row {
               id: pickRow
               anchors.centerIn: parent
-              spacing: Style.spacing.md
+              spacing: root.theme.md
               Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(8)
-                height: Style.space(8)
-                radius: width / 2
-                color: root.chipColor(pick.index)
+                width: 8
+                height: 8
+                radius: 4
+                color: transcriptPane.chipColor(pick.index)
               }
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: pick.current ? pick.name + " (now)" : pick.name
-                color: root.fg
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
               }
             }
 
@@ -857,39 +707,313 @@ Item {
 
       RowLayout {
         width: parent.width
-        spacing: Style.spacing.controlGap
+        spacing: root.theme.gap
 
-        TextField {
+        MeetingTextField {
           id: newSpeakerField
           objectName: "newSpeakerField"
+          theme: root.theme
           Layout.fillWidth: true
           placeholderText: "New speaker…"
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: root.theme.bodySmall
           onAccepted: root.chooseNewSpeaker(newSpeakerField.text)
           Keys.onEscapePressed: reassignPopup.close()
         }
 
-        Button {
+        MeetingButton {
           objectName: "newSpeakerButton"
+          theme: root.theme
           text: "Move"
           bordered: true
           enabled: newSpeakerField.text.trim() !== ""
-          opacity: enabled ? 1 : 0.5
           onClicked: root.chooseNewSpeaker(newSpeakerField.text)
         }
       }
 
-      Button {
+      MeetingButton {
         objectName: "restoreButton"
+        theme: root.theme
         visible: reassignPopup.originalSpeaker !== ""
-        text: "Restore original (" + root.feed.displayName(reassignPopup.originalSpeaker) + ")"
-        iconText: "󰕌"
+        text: "Restore original (" + (root.feed ? root.feed.displayName(reassignPopup.originalSpeaker) : "") + ")"
         bordered: true
         onClicked: {
           var segId = reassignPopup.segId
           reassignPopup.close()
           root.restoreRequested(segId)
         }
+      }
+    }
+  }
+
+  MeetingSurface {
+    id: noteEditor
+    objectName: "noteEditor"
+    theme: root.theme
+    visible: false
+    z: 10
+    width: Math.min(root.width - root.theme.lg * 2, 340)
+    height: noteColumn.implicitHeight + root.theme.padX * 2
+    y: anchorBottom + root.theme.xs + height <= root.height - root.theme.lg
+      ? anchorBottom + root.theme.xs
+      : Math.max(root.theme.lg, anchorTop - root.theme.xs - height)
+
+    property int segId: -1
+    property string existing: ""
+    property string lineText: ""
+    property real anchorTop: 0
+    property real anchorBottom: 0
+
+    function close() {
+      noteEditor.visible = false
+      root.forceActiveFocus()
+    }
+
+    function save() {
+      var segId = noteEditor.segId
+      var text = noteField.text.trim()
+      noteEditor.close()
+      if (text === noteEditor.existing) return
+      root.annotateRequested(segId, text)
+    }
+
+    MouseArea { anchors.fill: parent; onClicked: noteField.forceActiveFocus() }
+
+    Column {
+      id: noteColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.theme.padX
+      spacing: root.theme.lg
+
+      Text {
+        width: parent.width
+        text: "Note on “" + noteEditor.lineText + "”"
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+        elide: Text.ElideRight
+      }
+
+      MeetingTextField {
+        id: noteField
+        objectName: "noteField"
+        theme: root.theme
+        width: parent.width
+        placeholderText: "Add a note…"
+        onAccepted: noteEditor.save()
+        Keys.onEscapePressed: noteEditor.close()
+      }
+
+      Row {
+        spacing: root.theme.gap
+        MeetingButton {
+          objectName: "noteSaveButton"
+          theme: root.theme
+          text: "Save note"
+          bordered: true
+          onClicked: noteEditor.save()
+        }
+        MeetingButton {
+          objectName: "noteRemoveButton"
+          theme: root.theme
+          visible: noteEditor.existing !== ""
+          text: "Remove"
+          bordered: true
+          onClicked: {
+            noteField.text = ""
+            noteEditor.save()
+          }
+        }
+      }
+    }
+  }
+
+  // The agent chip's menu: agents to pick from, the local-only switch, and
+  // the way to the rest of the assistant settings.
+  MeetingSurface {
+    id: agentMenu
+    objectName: "agentMenu"
+    theme: root.theme
+    visible: false
+    z: 10
+    width: 260
+    height: menuColumn.implicitHeight + root.theme.padX * 2
+
+    function openAt(anchor) {
+      if (root.assistant) root.assistant.fetchStatus()
+      var p = anchor.mapToItem(root, 0, 0)
+      agentMenu.x = Math.max(root.theme.lg, Math.min(p.x + anchor.width - agentMenu.width, root.width - agentMenu.width - root.theme.lg))
+      agentMenu.y = p.y + anchor.height + root.theme.xs
+      agentMenu.visible = true
+      agentMenu.forceActiveFocus()
+    }
+    function close() {
+      agentMenu.visible = false
+      root.forceActiveFocus()
+    }
+    Keys.onEscapePressed: agentMenu.close()
+
+    MouseArea { anchors.fill: parent; onClicked: {} }
+
+    Column {
+      id: menuColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.theme.padX
+      spacing: root.theme.sm
+
+      Text {
+        width: parent.width
+        text: "Answers and summaries from"
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+      }
+
+      Repeater {
+        model: root.assistant ? root.assistant.candidates : []
+        MeetingButton {
+          required property var modelData
+          objectName: "agentOption_" + modelData.id
+          theme: root.theme
+          width: menuColumn.width
+          text: (modelData.label || modelData.id)
+          active: root.assistant && !root.assistant.localOnly && root.assistant.status
+            && root.assistant.status.agent === modelData.id
+          onClicked: {
+            root.assistant.chooseAgent(modelData.id)
+            agentMenu.close()
+          }
+        }
+      }
+
+      MeetingButton {
+        objectName: "localOnlyToggle"
+        theme: root.theme
+        width: menuColumn.width
+        text: (root.assistant && root.assistant.localOnly ? "✓ " : "") + "Local model only"
+        active: root.assistant !== null && root.assistant.localOnly
+        onClicked: {
+          root.assistant.setLocalOnly(!root.assistant.localOnly)
+          agentMenu.close()
+        }
+      }
+
+      MeetingButton {
+        objectName: "openSettings"
+        theme: root.theme
+        width: menuColumn.width
+        visible: root.canOpenSettings
+        text: "Change in Settings"
+        onClicked: {
+          agentMenu.close()
+          root.settingsRequested()
+        }
+      }
+    }
+  }
+
+  // The first time an agent is needed: send this meeting to it (once, for
+  // good), use a local model, or not now.
+  MeetingSurface {
+    id: consent
+    objectName: "consentDialog"
+    theme: root.theme
+    visible: false
+    z: 11
+    anchors.centerIn: parent
+    width: Math.min(root.width - root.theme.lg * 4, 360)
+    height: consentColumn.implicitHeight + root.theme.padding * 2
+
+    readonly property bool choosing: root.assistant !== null && root.assistant.blocker === "choose"
+    readonly property var agents: {
+      if (!root.assistant || !root.assistant.status) return []
+      if (consent.choosing) return root.assistant.candidates
+      var s = root.assistant.status
+      return [{ id: s.agent, label: s.agent_label || s.agent }]
+    }
+    readonly property string agentNames: {
+      var names = []
+      for (var i = 0; i < consent.agents.length; i++) names.push(consent.agents[i].label || consent.agents[i].id)
+      return names.join(" or ")
+    }
+
+    function dismiss() {
+      if (root.assistant) root.assistant.declinePending()
+      consent.visible = false
+      root.forceActiveFocus()
+    }
+    onVisibleChanged: if (consent.visible) consent.forceActiveFocus()
+    Keys.onEscapePressed: consent.dismiss()
+
+    MouseArea { anchors.fill: parent; onClicked: {} }
+
+    Column {
+      id: consentColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.theme.padding
+      spacing: root.theme.lg
+
+      Text {
+        objectName: "consentTitle"
+        width: parent.width
+        text: "Send meeting transcripts to " + consent.agentNames + "?"
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.title
+        font.bold: true
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        width: parent.width
+        text: "Questions and summaries send this meeting's transcript, speaker names and notes to "
+          + consent.agentNames + ", through your own account with it. You are asked once per agent. "
+          + "A local model keeps everything on this computer."
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+        wrapMode: Text.WordWrap
+      }
+
+      Repeater {
+        model: consent.agents
+        MeetingButton {
+          required property var modelData
+          objectName: "consentAllow_" + modelData.id
+          theme: root.theme
+          text: "Send to " + (modelData.label || modelData.id)
+          bordered: true
+          active: true
+          onClicked: {
+            consent.visible = false
+            root.forceActiveFocus()
+            root.assistant.allowAndContinue(modelData.id)
+          }
+        }
+      }
+
+      MeetingButton {
+        objectName: "consentLocal"
+        theme: root.theme
+        text: "Use a local model instead"
+        bordered: true
+        onClicked: {
+          consent.visible = false
+          root.forceActiveFocus()
+          root.assistant.useLocalAndContinue()
+        }
+      }
+
+      MeetingButton {
+        objectName: "consentNotNow"
+        theme: root.theme
+        text: "Not now"
+        onClicked: consent.dismiss()
       }
     }
   }

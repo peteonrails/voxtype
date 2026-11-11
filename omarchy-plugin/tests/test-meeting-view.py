@@ -22,6 +22,25 @@ Scenarios:
                   mark and Restore, and survives a reconnect
   ended-edit  an ended meeting stays on screen and can still be edited, until a
               new meeting starts or the view closes
+  notes       the Notes tab autosaves through `meeting notes --set-file`,
+              reloads on notes_updated, and never overwrites unsaved typing
+  annotate    Add note on a line (`meeting annotate`), the margin marker, a
+              highlight from elsewhere, and removing the note
+  ask         a question streams its answer; a [m:ss] citation click shows
+              that line of the transcript
+  ask-chips   the three quick questions
+  ask-notify  a quick question with the view closed goes out with --notify;
+              the notification's Open raises the view on the Ask tab
+  consent     first use of an agent asks; Not now asks nothing; Send allows it
+  consent-choose  several agents and none allowed: one button each, or local
+  local-only  the agent chip's menu: Local model only on and off, another
+              agent, and (Omarchy) Change in Settings
+  summary     stop with auto-summary: Summarizing, then summary_ready read
+              through `show --json`, rendered with chapter links
+  regenerate  Summarize, then Regenerate with new text
+  scroll-tabs Transcript and Summary keep their scroll positions
+  view-request  `voxtype meeting view` requests: a tab, a stale request, and a
+              saved meeting that is not on screen
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -39,6 +58,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -47,15 +67,20 @@ import panel_harness as h
 
 SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-settings", "reconnect",
              "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
-             "external-update", "ended-edit")
+             "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
+             "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
+STANDALONE = h.PLUGIN.parent / "quickshell"
+HOSTS = ("omarchy", "standalone")
+# Scenarios about the Omarchy Settings panel itself.
+OMARCHY_ONLY = {"autoopen-settings"}
 FAKE_SOCK = h.HERE / "fake-meeting-sock.py"
 
 MEETING_WINDOW_OLD = """PanelWindow {
   id: window
   anchors { top: true; right: true; bottom: true }
-  implicitWidth: Style.space(460)
+  implicitWidth: 460
   color: "transparent"
   exclusionMode: ExclusionMode.Normal
   WlrLayershell.namespace: "voxtype-meetings"
@@ -113,19 +138,51 @@ INITIAL = {
     "restore": lambda: [running_meeting()],
     "external-update": lambda: [running_meeting()],
     "ended-edit": lambda: [running_meeting()],
+    "notes": lambda: [running_meeting()],
+    "annotate": lambda: [running_meeting()],
+    "ask": lambda: [running_meeting()],
+    "ask-chips": lambda: [running_meeting()],
+    "ask-notify": lambda: [running_meeting()],
+    "consent": lambda: [running_meeting()],
+    "consent-choose": lambda: [running_meeting()],
+    "local-only": lambda: [running_meeting()],
+    "summary": lambda: [running_meeting()],
+    "regenerate": lambda: [running_meeting()],
+    "scroll-tabs": lambda: [scroll_meeting()],
+    "view-request": lambda: [running_meeting()],
 }
+
+CLAUDE = {"id": "claude", "label": "Claude", "consented": True}
+CODEX = {"id": "codex", "label": "Codex", "consented": True}
+LONG_SUMMARY = "## Overview\n\n" + "\n\n".join("### Section %d\n\nA paragraph of summary text for section %d, long "
+                                                  "enough to take a couple of lines in the narrow view." % (i, i)
+                                                  for i in range(1, 41))
 
 STATE = {
     "autoopen-off": {"show_view_on_start": False},
     "autoopen-oldcli": {"no_show_key": True},
     "idle": {"fail": {"start": "Error: Meeting mode is disabled in config."}},
     "reassign-fails": {"fail": {"reassign": "Error: segment 2 cannot be reassigned: the transcript is locked."}},
+    "consent": {"assistant": {"local_only": False, "local_model": "llama3.2", "agent": "claude", "agent_label": "Claude",
+                              "consented": False, "candidates": [dict(CLAUDE, consented=False)]}},
+    "consent-choose": {"assistant": {"local_only": False, "local_model": "llama3.2", "agent": None, "agent_label": None,
+                                     "consented": False, "candidates": [dict(CLAUDE, consented=False),
+                                                                         dict(CODEX, consented=False)]}},
+    "local-only": {"assistant": {"local_only": False, "local_model": "llama3.2", "agent": "claude", "agent_label": "Claude",
+                                 "consented": True, "candidates": [CLAUDE, CODEX]}},
+    "scroll-tabs": {"summary_md": LONG_SUMMARY},
 }
 
 
-def run(scenario, shell, evidence):
+def run(scenario, host, shell, evidence):
     with h.Run(shell, STATE.get(scenario, {})) as r:
         h.patch(r.plugin / "components/meetings/MeetingWindow.qml", MEETING_WINDOW_OLD, MEETING_WINDOW_NEW)
+        # The standalone shell's tree, with the same window swap. Its
+        # voxtype-meetings is the directory the plugin's link points at.
+        shutil.copytree(STANDALONE, r.root / "standalone")
+        h.patch(r.root / "standalone/voxtype-meetings/MeetingWindow.qml", MEETING_WINDOW_OLD, MEETING_WINDOW_NEW)
+        data = r.root / "meeting-data"
+        data.mkdir()
         h.patch(r.plugin / "Panel.qml", "readonly property alias formTest: form",
                 "readonly property alias formTest: form\n  readonly property alias meetingsTest: meetings")
         fake = r.root / "voxtype-meeting-fake"
@@ -142,8 +199,9 @@ def run(scenario, shell, evidence):
         snapshot = r.root / "meeting-snapshot.json"
         sock = runtime / "voxtype" / "meeting.sock"
         shots = ""
+        label = host + "-" + scenario
         if evidence:
-            shots = str((evidence / scenario).resolve())
+            shots = str((evidence / label).resolve())
             Path(shots).mkdir(parents=True, exist_ok=True)
 
         server = subprocess.Popen([sys.executable, "-I", str(FAKE_SOCK), str(sock), str(ctl), str(srv_log),
@@ -164,9 +222,11 @@ def run(scenario, shell, evidence):
                     time.sleep(0.02)
             output, code = r.run(h.HERE / "meeting-view.qml", {
                 "__SCENARIO__": scenario, "__CTL__": str(ctl), "__STATE__": str(r.state),
-                "__EVIDENCE__": shots, "__MEETING_ID__": MEETING_ID,
+                "__EVIDENCE__": shots, "__MEETING_ID__": MEETING_ID, "__HOST__": host,
+                "__FAKE_BIN__": str(fake), "__RUNTIME__": str(runtime / "voxtype"), "__DATA__": str(data),
             }, env={"XDG_RUNTIME_DIR": str(runtime), "FAKE_MEETING_CTL": str(ctl),
-                    "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot)}, timeout=90)
+                    "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot),
+                    "FAKE_MEETING_DATA": str(data)}, timeout=120)
         finally:
             with open(ctl, "a") as f:
                 f.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -176,25 +236,45 @@ def run(scenario, shell, evidence):
                 server.kill()
         calls = r.calls()
         if evidence:
-            out = evidence / scenario
+            out = evidence / label
             (out / "qml.log").write_text(output)
             (out / "commands.jsonl").write_text(r.log.read_text())
             (out / "socket.jsonl").write_text(srv_log.read_text())
 
+        notes_file = data / ("notes-%s.md" % MEETING_ID)
+        saved_notes = notes_file.read_text() if notes_file.exists() else None
+
     problems = h.driver_problems(output, code, "MEETING_VIEW", scenario)
-    problems += check_calls(scenario, calls)
+    problems += check_calls(scenario, calls, runtime_notes=str(runtime / "voxtype"))
+    if scenario == "notes" and saved_notes != "Mine":
+        problems.append("notes on disk: %r, expected 'Mine'" % saved_notes)
     return output, problems, calls
+
+
+def read_only(argv):
+    """Reads the view makes on its own (notes, assistant status, show)."""
+    if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] == ["meeting", "show"]:
+        return True
+    return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
+
+
+def ask_call(question, *extra):
+    return ["meeting", "ask", MEETING_ID, question] + list(extra)
+
+
+def summarize_call():
+    return ["meeting", "summarize", MEETING_ID, "--regenerate"]
 
 
 def reassign(segment, speaker):
     return ["meeting", "reassign", MEETING_ID, segment, speaker, "--json"]
 
 
-def check_calls(scenario, calls):
+def check_calls(scenario, calls, runtime_notes=""):
     """What the view ran, beyond what the driver saw on screen."""
     problems = []
-    meeting = [c for c in calls if c[:1] == ["meeting"]]
-    config = [c for c in calls if c[:1] == ["config"]]
+    meeting = [c for c in calls if c[:1] == ["meeting"] and not read_only(c)]
+    config = [c for c in calls if c[:2] == ["config", "set"] or c[:2] == ["config", "get"]]
     show_key = ["config", "get", "meeting.show_view_on_start"]
 
     def expect(actual, wanted, what):
@@ -227,6 +307,41 @@ def check_calls(scenario, calls):
         expect(meeting, [reassign("4", "Dana"), reassign("2", "You")], "meeting commands")
     elif scenario == "restore":
         expect(meeting, [reassign("2", "You"), reassign("2", "--reset")], "meeting commands")
+    elif scenario == "notes":
+        sets = [c for c in meeting if c[:2] == ["meeting", "notes"]]
+        want = ["meeting", "notes", MEETING_ID, "--set-file", runtime_notes + "/meeting-notes-%s.md" % MEETING_ID]
+        if not sets or any(c != want for c in sets):
+            problems.append("notes saves: %s, expected only %s" % (json.dumps(sets), json.dumps(want)))
+        expect([c for c in meeting if c[:2] != ["meeting", "notes"]], [], "other meeting commands")
+    elif scenario == "annotate":
+        expect(meeting, [["meeting", "annotate", MEETING_ID, "3", "check this number"],
+                         ["meeting", "annotate", MEETING_ID, "3", "--remove"]], "meeting commands")
+    elif scenario == "ask":
+        expect(meeting, [ask_call("What did we decide?")], "meeting commands")
+    elif scenario == "ask-chips":
+        expect(meeting, [ask_call("Summarize the last 5 minutes.", "--last", "5m"),
+                         ask_call("What did Remote just say?", "--last", "2m"),
+                         ask_call("What are the action items so far, and who owns each?")], "meeting commands")
+    elif scenario == "ask-notify":
+        expect(meeting, [ask_call("Summarize the last 5 minutes.", "--last", "5m", "--notify")], "meeting commands")
+    elif scenario == "consent":
+        expect(meeting, [["meeting", "assistant", "allow", "claude"], ask_call("What did we decide?"),
+                         ask_call("And the date?")], "meeting commands")
+    elif scenario == "consent-choose":
+        expect(config, [["config", "set", "meeting.assistant.local_only", "true"]], "config writes")
+        expect(meeting, [ask_call("What did we decide?")], "meeting commands")
+    elif scenario == "local-only":
+        expect(config, [["config", "set", "meeting.assistant.local_only", "true"],
+                        ["config", "set", "meeting.assistant.local_only", "false"],
+                        ["config", "set", "meeting.assistant.agent", "codex"],
+                        ["config", "set", "meeting.assistant.local_only", "false"]], "config writes")
+        expect(meeting, [], "meeting commands")
+    elif scenario in ("summary", "view-request"):
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "regenerate":
+        expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call()], "meeting commands")
+    elif scenario == "scroll-tabs":
+        expect(meeting, [["meeting", "stop"], summarize_call()], "meeting commands")
     elif scenario == "ended-edit":
         expect(meeting, [["meeting", "stop"], reassign("2", "You"), ["meeting", "label", MEETING_ID, "Remote", "Sam"],
                          ["meeting", "start", "--title", "Second"], ["meeting", "stop"]], "meeting commands")
@@ -238,17 +353,21 @@ def main():
     parser.add_argument("--shell", type=Path, default=Path(os.environ.get("OMARCHY_PATH", "/usr/share/omarchy")) / "shell")
     parser.add_argument("--evidence", type=Path, help="save logs and screenshots per scenario here")
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
+    parser.add_argument("--host", choices=HOSTS, action="append", help="default: both")
     args = parser.parse_args()
     h.guard_environment(parser, args.shell)
     failed = False
-    for scenario in args.scenario or SCENARIOS:
-        output, problems, calls = run(scenario, args.shell, args.evidence)
-        if problems:
-            failed = True
-            print(output)
-            print("FAIL " + scenario + ": " + "; ".join(problems))
-        else:
-            print("PASS " + scenario)
+    for host in args.host or HOSTS:
+        for scenario in args.scenario or SCENARIOS:
+            if host != "omarchy" and scenario in OMARCHY_ONLY:
+                continue
+            output, problems, calls = run(scenario, host, args.shell, args.evidence)
+            if problems:
+                failed = True
+                print(output)
+                print("FAIL " + host + " " + scenario + ": " + "; ".join(problems))
+            else:
+                print("PASS " + host + " " + scenario)
     return 1 if failed else 0
 
 

@@ -28,6 +28,12 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    in the stored one (after the meeting ended)
                                    nothing is sent, as the daemon only announces
                                    live changes
+  {"cmd": "notes_updated", "meeting_id": M, "notes": N?}
+  {"cmd": "autosummary", "summary": {...}|null, "markdown": "..."|null}
+                                   the next stop goes finalizing, summarizing,
+                                   then summary_ready (carrying `markdown` if
+                                   given; `summary` is what `show --json` then
+                                   reports), then idle
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -60,6 +66,9 @@ class Server:
         self.log = log
         self.snapshot = snapshot
         self.stored = None
+        self.summary = None
+        self.autosummary = None
+        self.pending = []
         self.offset = 0
         self.sel = selectors.DefaultSelector()
         self.listener = None
@@ -71,7 +80,8 @@ class Server:
 
     def idle(self):
         if getattr(self, "state", None) and self.state.get("meeting_id"):
-            self.stored = {"meeting_id": self.state["meeting_id"], "segments": self.state["segments"]}
+            self.stored = {"meeting_id": self.state["meeting_id"], "segments": self.state["segments"],
+                           "title": self.state.get("title"), "started_at": self.state.get("started_at")}
         self.state = {"status": "idle", "meeting_id": None, "title": None, "started_at": None,
                       "chunk_count": 0, "diarization": {"enabled": False}, "segments": []}
         self.labels = {}
@@ -171,7 +181,25 @@ class Server:
             self.broadcast({"event": "status", "status": "recording"})
         elif kind == "stop":
             self.set_status("finalizing")
-            self.pending_idle = time.monotonic() + 1.0
+            if self.autosummary is not None:
+                auto, mid = self.autosummary, self.state.get("meeting_id")
+                self.autosummary = None
+                ready = {"event": "summary_ready", "meeting_id": mid}
+                if auto.get("markdown"):
+                    ready["markdown"] = auto["markdown"]
+                now = time.monotonic()
+                self.pending += [(now + 0.6, {"event": "status", "status": "summarizing"}, None),
+                                 (now + 2.0, ready, auto.get("summary")),
+                                 (now + 2.3, {"event": "status", "status": "idle"}, None)]
+            else:
+                self.pending_idle = time.monotonic() + 1.0
+        elif kind == "autosummary":
+            self.autosummary = cmd
+        elif kind == "notes_updated":
+            ev = {"event": "notes_updated", "meeting_id": cmd["meeting_id"]}
+            if "notes" in cmd:
+                ev["notes"] = cmd["notes"]
+            self.broadcast(ev)
         elif kind == "error":
             self.broadcast({"event": "error", "message": cmd["message"]})
         elif kind == "label":
@@ -197,12 +225,16 @@ class Server:
             return False
         with open(self.log, "a") as f:
             f.write(json.dumps(cmd) + "\n")
-        live = {"meeting_id": self.state.get("meeting_id"), "segments": self.state["segments"]}
+        self.write_snapshot()
+        return True
+
+    def write_snapshot(self):
+        live = {"meeting_id": self.state.get("meeting_id"), "segments": self.state["segments"],
+                "title": self.state.get("title"), "started_at": self.state.get("started_at")}
         tmp = self.snapshot + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"live": live, "stored": self.stored}, f)
+            json.dump({"live": live, "stored": self.stored, "summary": self.summary}, f)
         os.replace(tmp, self.snapshot)
-        return True
 
     def poll_control(self):
         try:
@@ -228,9 +260,24 @@ class Server:
                     conn, _ = self.listener.accept()
                     if self.send(conn, self.hello()):
                         self.clients.append(conn)
+            due = [p for p in self.pending if p[0] <= time.monotonic()]
+            for p in due:
+                self.pending.remove(p)
+                ev, summary = p[1], p[2]
+                if ev.get("event") == "status" and ev["status"] == "idle":
+                    self.set_status("idle")
+                elif ev.get("event") == "status":
+                    self.state["status"] = ev["status"]
+                    self.broadcast(ev)
+                else:
+                    if summary is not None:
+                        self.summary = summary
+                    self.broadcast(ev)
+                self.write_snapshot()
             if self.pending_idle and time.monotonic() >= self.pending_idle:
                 self.pending_idle = None
                 self.set_status("idle")
+                self.write_snapshot()
             if not self.poll_control():
                 self.down()
                 return

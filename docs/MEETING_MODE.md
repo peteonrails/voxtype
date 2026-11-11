@@ -17,7 +17,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Labeling Speakers](#labeling-speakers)
   - [AI Summarization](#ai-summarization)
   - [Deleting Meetings](#deleting-meetings)
-- [Live Meeting View (Omarchy)](#live-meeting-view-omarchy)
+- [Live Meeting View](#live-meeting-view)
 - [Meeting Detection](#meeting-detection)
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
@@ -233,27 +233,35 @@ Permanently deletes the meeting record, transcript, and any associated audio fil
 
 ---
 
-## Live Meeting View (Omarchy)
+## Live Meeting View
 
-On Omarchy, the Voxtype shell plugin has a Meetings view that follows a meeting as it happens. It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
+The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
 
-It shows:
+The header shows the meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. Below it are four tabs:
 
-- The meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop** buttons
-- The transcript, one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up to read something; **Jump to latest** takes you back
-- A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip
-- Click the speaker name on a line to move just that line to someone else: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign` for you; if it is refused, the line goes back and the error is shown. Escape closes the chooser
-- "Listening…" between updates. Lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word
+- **Transcript**: one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up; **Jump to latest** takes you back.
+  - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
+  - Click the speaker name on a line to move just that line: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign`; if it is refused, the line goes back and the error is shown.
+  - Hover a line for **Add note** (`voxtype meeting annotate`). Lines with a note or a highlight get a marker in the margin.
+- **Notes**: your notes for the meeting. They save as you type and go into the summary as guidance.
+- **Ask**: ask about what has been said, or use a quick question: "Last 5 minutes", "What did *the last remote speaker* just say?", "Action items so far". Answers stream in, say which agent gave them, and cite times like [1:58] that jump to that line.
+- **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing…" while it is written, and **Regenerate** after you fix speakers or lines.
 
-When the meeting ends, its transcript stays on screen marked **Ended**, with its length and end time, so you can still fix lines and name speakers after the call. It stays until a new meeting starts (**Start meeting** is offered there too) or you close the view. With no meeting at all it offers **Start meeting** and an optional title.
+Ask and Summary show the agent in use ("Claude", or "Local (llama3.2)"); click it to pick another agent, switch to **Local model only**, or (in Omarchy) open the settings. The first time an agent is needed the view asks whether to send meeting transcripts to it, with **Use a local model instead** and **Not now**.
 
-Open it yourself with:
+Between updates the view says "Listening…": lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word.
+
+When the meeting ends its transcript stays on screen marked **Ended**, with its length and end time, so you can still fix lines, name speakers, take notes and ask questions after the call. It stays until a new meeting starts (**Start meeting** is offered there too) or you close the view. With no meeting at all the view offers **Start meeting** and an optional title.
+
+Open it yourself, in whichever shell is running:
 
 ```bash
-omarchy-shell io.voxtype.settings meetings
-# or, to toggle it:
-omarchy-shell shell toggle io.voxtype.settings '{"view":"meetings"}'
+voxtype meeting view                      # the current or last meeting
+voxtype meeting view latest --tab summary
+voxtype meeting view --ask last-5m --no-open   # answer arrives as a notification
 ```
+
+In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
 
 To stop it opening on its own:
 

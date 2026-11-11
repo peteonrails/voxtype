@@ -42,10 +42,12 @@ omarchy plugin add https://github.com/peteonrails/omarchy-voxtype-settings.git -
 ```
 
 Or by hand, from a checkout of this directory (the one holding
-`manifest.json`):
+`manifest.json`). `-L` matters: `components/meetings` is a link to the meeting
+view in `../quickshell/voxtype-meetings`, shared with the standalone
+Quickshell shell, and has to be copied as files:
 
 ```bash
-cp -r . ~/.config/omarchy/plugins/io.voxtype.settings
+cp -rL . ~/.config/omarchy/plugins/io.voxtype.settings
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.voxtype.settings
 ```
@@ -105,7 +107,30 @@ target exists from the start. Adding or removing that flag needs a full
 
 ## Meetings
 
-The plugin's second view follows a meeting live: title, elapsed time, state
+The meeting view's QML lives in `quickshell/voxtype-meetings/`, shared with
+voxtype's standalone Quickshell shell; `components/meetings` here is a link to
+it, `scripts/stage-omarchy-plugin.sh` copies it into packages, and
+`components/OmarchyMeetingsHost.qml` adapts it to this plugin (the shell's
+theme, `shell.summon`, and "Change in Settings" opening the Meeting section).
+The view uses only QtQuick and Quickshell, never `qs.Commons` or `qs.Ui`, so it
+runs under both hosts.
+
+Tabs: **Transcript**, **Notes** (an autosaving pad over `voxtype meeting notes
+--set-file`, reloaded on `notes_updated`), **Ask** (questions streamed from
+`voxtype meeting ask`, with quick chips and `[m:ss]` citations that jump into
+the transcript) and, once the meeting stops, **Summary** (summary.md, a
+Summarizing state driven by `status: summarizing` and `summary_ready`, and
+Regenerate). Each tab keeps its scroll position. Ask and Summary carry an agent
+chip ("Claude", "Local (llama3.2)") from `voxtype meeting assistant status
+--json`, with a menu to pick an agent, turn on Local model only, or open
+Settings; the first use of an agent asks for consent. Transcript lines get
+"Add note" on hover (`voxtype meeting annotate`), and annotated or highlighted
+lines a margin marker. A question asked while the view is closed (`voxtype
+meeting view --ask last-5m --no-open`) runs with `--notify`; the
+notification's Open runs `voxtype meeting view <id> --tab ask`, which every
+host reads from `$XDG_RUNTIME_DIR/voxtype/meeting-view.request`.
+
+The view follows a meeting live: title, elapsed time, state
 (recording, paused, finalizing), Pause/Resume and Stop, a chip per speaker
 (click to rename, which runs `voxtype meeting label <meeting id> <key> <name>`;
 two chips renamed alike merge), and the transcript in start-time order with a

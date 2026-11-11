@@ -1,6 +1,6 @@
 import QtQuick
 import Quickshell.Io
-import ".."
+
 
 // The meeting view's subprocesses: `voxtype meeting …` and the one config read
 // it needs. Kept apart from VoxtypeCli so the Settings panel's process plumbing
@@ -73,6 +73,14 @@ Item {
   // `segment` is the updated segment from --json, or null if it printed none.
   signal reassignFinished(var extra, bool ok, string message, var segment)
 
+  // A note on one line, or its removal with an empty `text`.
+  function annotate(meeting, segId, text, extra) {
+    var t = String(text || "").trim()
+    root.enqueue("annotate", ["meeting", "annotate", meeting || "latest", String(segId)].concat(t === "" ? ["--remove"] : [t]), extra)
+  }
+
+  signal annotateFinished(var extra, bool ok, string message, var segment)
+
   // `[meeting] show_view_on_start`. A CLI that predates the key exits non-zero
   // on it; that reads as the default, which is on.
   function readShowOnStart() {
@@ -83,7 +91,7 @@ Item {
 
   signal labelApplied(string key, string name)
 
-  CliProcess {
+  MeetingProcess {
     id: actionProc
     property string action: ""
     property var extra: null
@@ -105,14 +113,15 @@ Item {
       var message = ok ? "" : (actionProc.err || ("voxtype meeting " + action + " exited " + exitCode))
       actionProc.action = ""
       if (ok && action === "label" && extra) root.labelApplied(extra.key, extra.name)
-      if (action === "reassign") {
+      if (action === "reassign" || action === "annotate") {
         var segment = null
         if (ok) {
           try { segment = JSON.parse(actionProc.out) } catch (e) { segment = null }
           if (segment && segment.segment && segment.id === undefined) segment = segment.segment
           if (!segment || typeof segment !== "object" || segment.id === undefined) segment = null
         }
-        root.reassignFinished(extra, ok, message, segment)
+        if (action === "reassign") root.reassignFinished(extra, ok, message, segment)
+        else root.annotateFinished(extra, ok, message, segment)
       }
       root.actionFinished(action, ok, message)
       Qt.callLater(root.pump)
@@ -123,12 +132,13 @@ Item {
       var message = "Could not run " + root.bin + ". Is voxtype installed?"
       actionProc.action = ""
       if (action === "reassign") root.reassignFinished(extra, false, message, null)
+      if (action === "annotate") root.annotateFinished(extra, false, message, null)
       root.actionFinished(action, false, message)
       Qt.callLater(root.pump)
     }
   }
 
-  CliProcess {
+  MeetingProcess {
     id: configProc
     property string out: ""
 
