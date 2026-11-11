@@ -3,7 +3,8 @@
 
 Runs scripts/stage-omarchy-plugin.sh into a temp dir, checks the tree is
 exactly the packaged layout (manifest, LICENSE, <version>/Panel.qml,
-<version>/components/*.qml and nothing else), then links it into a temp
+<version>/components/*.qml, <version>/components/<view>/*.qml and nothing
+else), then links it into a temp
 plugins directory the way `voxtype setup omarchy` does and loads it the way
 Omarchy does:
 
@@ -155,6 +156,7 @@ def check_tree(plugin_dir, version):
     problems = []
     want = {"LICENSE", "manifest.json", version + "/Panel.qml"}
     want |= {version + "/components/" + p.name for p in (PLUGIN / "components").glob("*.qml")}
+    want |= {version + "/components/" + p.parent.name + "/" + p.name for p in (PLUGIN / "components").glob("*/*.qml")}
     have = {str(p.relative_to(plugin_dir)) for p in plugin_dir.rglob("*") if not p.is_dir()}
     if have != want:
         problems.append("tree differs: missing " + json.dumps(sorted(want - have))

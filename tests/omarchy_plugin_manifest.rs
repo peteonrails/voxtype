@@ -100,6 +100,14 @@ fn stage_script_produces_the_packaged_layout() {
         let name = component.file_name().to_string_lossy().into_owned();
         if name.ends_with(".qml") {
             want.push(format!("{version}/components/{name}"));
+        } else if component.path().is_dir() {
+            // One level of view directories (components/meetings/) ships too.
+            for file in std::fs::read_dir(component.path()).unwrap().flatten() {
+                let file = file.file_name().to_string_lossy().into_owned();
+                if file.ends_with(".qml") {
+                    want.push(format!("{version}/components/{name}/{file}"));
+                }
+            }
         }
     }
     want.sort();

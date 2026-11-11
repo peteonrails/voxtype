@@ -14,6 +14,7 @@
 #     LICENSE
 #     <version>/Panel.qml
 #     <version>/components/*.qml
+#     <version>/components/<view>/*.qml   one level of view directories
 #
 # <version> is the manifest's version string, including any -rcN suffix.
 # The QML lives under a versioned directory so every upgrade gives Omarchy a
@@ -74,6 +75,17 @@ install -d -m 755 "$DEST_ROOT" "$PLUGIN_DIR" "$PLUGIN_DIR/$VERSION" "$PLUGIN_DIR
 install -m 644 "$SRC/LICENSE" "$PLUGIN_DIR/LICENSE"
 install -m 644 "$SRC/Panel.qml" "$PLUGIN_DIR/$VERSION/Panel.qml"
 install -m 644 "${COMPONENTS[@]}" "$PLUGIN_DIR/$VERSION/components/"
+
+# A view with several files keeps them in its own directory (components/meetings/).
+for VIEW_DIR in "$SRC"/components/*/; do
+    VIEW=$(basename "$VIEW_DIR")
+    shopt -s nullglob
+    VIEW_FILES=("$VIEW_DIR"*.qml)
+    shopt -u nullglob
+    [[ ${#VIEW_FILES[@]} -gt 0 ]] || continue
+    install -d -m 755 "$PLUGIN_DIR/$VERSION/components/$VIEW"
+    install -m 644 "${VIEW_FILES[@]}" "$PLUGIN_DIR/$VERSION/components/$VIEW/"
+done
 
 sed "s|$ENTRY_PATTERN|\"panel\": \"$VERSION/Panel.qml\"|" "$SRC/manifest.json" > "$PLUGIN_DIR/manifest.json"
 chmod 644 "$PLUGIN_DIR/manifest.json"
