@@ -17,6 +17,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Labeling Speakers](#labeling-speakers)
   - [The Meeting Folder](#the-meeting-folder)
   - [Keeping the Audio](#keeping-the-audio)
+  - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
   - [AI Summarization](#ai-summarization)
   - [Deleting Meetings](#deleting-meetings)
 - [Configuration](#configuration)
@@ -276,6 +277,26 @@ Opus takes about 10 MB per hour per file for speech, so a one-hour meeting with 
 
 Encoding needs `ffmpeg` with libopus, which most distributions' `ffmpeg` package includes. Without it voxtype logs a warning and keeps the audio as `mic.wav`, `loopback.wav` and `mixed.wav` instead, at about 115 MB per hour per file. See [Troubleshooting](TROUBLESHOOTING.md#meeting-audio-is-saved-as-wav-instead-of-opus).
 
+### Running a Command After a Meeting
+
+`post_meeting_command` runs a shell command once a meeting has stopped and its folder is final: after the transcript, audio and `meeting.json` are written, and after the automatic summary when one runs. Use it to copy the folder somewhere, file it in your notes, or start your own processing.
+
+```toml
+[meeting]
+post_meeting_command = 'rsync -a "$VOXTYPE_MEETING_DIR" nas:meetings/'
+post_meeting_timeout_secs = 300   # default
+```
+
+The command runs through `sh -c` in the meeting folder, with these variables set:
+
+| Variable | Value |
+|----------|-------|
+| `VOXTYPE_MEETING_ID` | The meeting's ID |
+| `VOXTYPE_MEETING_DIR` | The meeting folder |
+| `VOXTYPE_MEETING_MANIFEST` | The path of its `meeting.json` |
+
+It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
+
 ### AI Summarization
 
 Generate a summary with key points, action items, and decisions:
@@ -332,6 +353,13 @@ storage_path = "auto"
 # mixed.opus (default: false). About 30 MB per hour; needs ffmpeg for Opus,
 # otherwise WAV. See "Keeping the Audio".
 retain_audio = false
+
+# Shell command run once a meeting's folder is final (default: unset).
+# Gets VOXTYPE_MEETING_ID, VOXTYPE_MEETING_DIR and VOXTYPE_MEETING_MANIFEST.
+# post_meeting_command = 'notify-send "Meeting saved" "$VOXTYPE_MEETING_DIR"'
+
+# Seconds before post_meeting_command is killed (default: 300)
+post_meeting_timeout_secs = 300
 
 # Maximum meeting duration in minutes (default: 180, 0 = unlimited)
 max_duration_mins = 180

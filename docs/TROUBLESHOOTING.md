@@ -209,7 +209,7 @@ graphical frontend is installed, install a supported terminal or run
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
-- [Meeting Audio](#meeting-audio)
+- [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1612,7 +1612,7 @@ No result is shown for cancelled recordings, accidental taps, or
 
 ---
 
-## Meeting Audio
+## Meeting Audio and Post-Meeting Command
 
 ### Meeting audio is saved as WAV instead of Opus
 
@@ -1645,6 +1645,28 @@ done
 ```
 
 `meeting.json` lists whichever files are there the next time it is rewritten.
+
+### The post-meeting command did not run, or did not finish
+
+`post_meeting_command` runs in the background once the meeting's folder is
+final, and its outcome is in the daemon log:
+
+```bash
+journalctl --user -u voxtype | grep post_meeting_command
+```
+
+- **"failed ... (exit status: 127)"**: the shell could not find the program.
+  The daemon's `PATH` under systemd is shorter than your terminal's; use an
+  absolute path.
+- **"ran past 300s and was killed"**: raise `post_meeting_timeout_secs`, or
+  have the command start its long work with `systemd-run --user` so it is no
+  longer the command's child.
+- **Nothing logged**: check that `post_meeting_command` is under `[meeting]`
+  and the daemon was restarted after you set it (`voxtype config` shows it).
+
+The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
+`VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
+terminal: anything that prompts for input fails.
 
 ---
 

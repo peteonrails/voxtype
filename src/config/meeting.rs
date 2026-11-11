@@ -25,6 +25,16 @@ pub struct MeetingConfig {
     #[serde(default)]
     pub retain_audio: bool,
 
+    /// Shell command run after a meeting stops and its folder is final
+    /// (after the auto-summary, when one runs). Gets VOXTYPE_MEETING_ID,
+    /// VOXTYPE_MEETING_DIR and VOXTYPE_MEETING_MANIFEST.
+    #[serde(default)]
+    pub post_meeting_command: Option<String>,
+
+    /// Seconds before post_meeting_command is killed
+    #[serde(default = "default_post_meeting_timeout")]
+    pub post_meeting_timeout_secs: u64,
+
     /// Maximum meeting duration in minutes (0 = unlimited)
     #[serde(default = "default_max_duration")]
     pub max_duration_mins: u32,
@@ -184,6 +194,10 @@ fn default_max_duration() -> u32 {
     180
 }
 
+fn default_post_meeting_timeout() -> u64 {
+    300
+}
+
 impl Default for MeetingDiarizationConfig {
     fn default() -> Self {
         Self {
@@ -264,6 +278,8 @@ impl Default for MeetingConfig {
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,
+            post_meeting_command: None,
+            post_meeting_timeout_secs: default_post_meeting_timeout(),
             max_duration_mins: default_max_duration(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
@@ -285,6 +301,8 @@ mod tests {
         assert_eq!(config.storage_path, "auto");
         assert!(!config.retain_audio);
         assert_eq!(config.max_duration_mins, 180);
+        assert!(config.post_meeting_command.is_none());
+        assert_eq!(config.post_meeting_timeout_secs, 300);
     }
 
     #[test]
@@ -346,6 +364,8 @@ mod tests {
             storage_path = "/tmp/meetings"
             retain_audio = true
             max_duration_mins = 60
+            post_meeting_command = "notify-send done"
+            post_meeting_timeout_secs = 30
         "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -354,6 +374,11 @@ mod tests {
         assert_eq!(config.meeting.storage_path, "/tmp/meetings");
         assert!(config.meeting.retain_audio);
         assert_eq!(config.meeting.max_duration_mins, 60);
+        assert_eq!(
+            config.meeting.post_meeting_command.as_deref(),
+            Some("notify-send done")
+        );
+        assert_eq!(config.meeting.post_meeting_timeout_secs, 30);
     }
 
     #[test]

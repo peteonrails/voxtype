@@ -275,7 +275,10 @@ The fields:
 
 The manifest is written when a meeting starts and rewritten when it stops,
 when its notes or summary change, and when a daemon restart completes a
-meeting a crash left open.
+meeting a crash left open. To act once a meeting is finished, use
+`post_meeting_command` (see [Meeting Mode](MEETING_MODE.md#running-a-command-after-a-meeting)),
+which runs after the final rewrite and gets the folder and the manifest's
+path in `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST`.
 
 ## What Voxtype will not do for you
 

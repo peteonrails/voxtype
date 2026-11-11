@@ -3173,6 +3173,11 @@ impl Daemon {
                     self.update_meeting_state("idle", None);
                     tracing::info!("Meeting stopped: {}", meeting_id);
 
+                    // Rewrite meeting.json and run post_meeting_command in
+                    // the background: a slow or failing command must not
+                    // hold up the daemon or the next meeting.
+                    tokio::spawn(daemon.post_meeting(meeting_id).run());
+
                     self.play_feedback(SoundEvent::RecordingStop);
 
                     if self.config.output.notification.on_recording_stop {
