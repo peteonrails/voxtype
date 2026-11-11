@@ -363,29 +363,46 @@ async fn meeting_entries_follow_the_daemon_and_send_meeting_actions() {
     let (actions, mut events) = mpsc::channel(8);
     let runtime = tray::TrayRuntime::start_for_config_with_actions(&config, actions).unwrap();
     let name = registered(&w).await;
-    let sni = zbus::Proxy::new(
-        &bus,
-        name.as_str(),
-        "/StatusNotifierItem",
-        "org.kde.StatusNotifierItem",
-    )
-    .await
-    .unwrap();
+    // Uncached: SNI announces tooltip changes with NewToolTip, not
+    // PropertiesChanged, so a cached proxy would read stale values.
+    let sni: zbus::Proxy<'_> = zbus::proxy::Builder::new(&bus)
+        .destination(name.as_str())
+        .unwrap()
+        .path("/StatusNotifierItem")
+        .unwrap()
+        .interface("org.kde.StatusNotifierItem")
+        .unwrap()
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+        .unwrap();
     let path: OwnedObjectPath = sni.get_property("Menu").await.unwrap();
     let dbusmenu = zbus::Proxy::new(&bus, name.as_str(), path.as_str(), "com.canonical.dbusmenu")
         .await
         .unwrap();
+    let tooltip = || async {
+        let t: Tooltip = sni.get_property("ToolTip").await.unwrap();
+        (t.2, t.3)
+    };
+    let says = |text: &str| (format!("Voxtype: {text}"), text.to_string());
 
     let idle = menu_with(&dbusmenu, "Start Meeting").await;
     assert!(label_enabled(&idle, "Start Meeting"));
+    assert_eq!(tooltip().await, says("Ready"));
     click(&dbusmenu, item(&idle, "Start Meeting").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::StartMeeting));
+    let starting = menu_with(&dbusmenu, "Starting Meeting...").await;
+    assert!(!label_enabled(&starting, "Starting Meeting..."));
+    assert!(has(&starting, "Voxtype: Starting meeting..."));
+    assert_eq!(tooltip().await, says("Starting meeting..."));
 
     // A meeting started anywhere (CLI, detection prompt) reaches the tray
     // through the daemon's meeting state.
     runtime.update_meeting(tray::MeetingTrayState::Recording);
     let recording = menu_with(&dbusmenu, "Stop Meeting").await;
     assert!(!has(&recording, "Start Meeting"));
+    assert!(has(&recording, "Voxtype: Meeting in progress"));
+    assert_eq!(tooltip().await, says("Meeting in progress"));
     click(&dbusmenu, item(&recording, "Pause Meeting").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::PauseMeeting));
     click(&dbusmenu, item(&recording, "Stop Meeting").0).await;
@@ -393,12 +410,14 @@ async fn meeting_entries_follow_the_daemon_and_send_meeting_actions() {
 
     runtime.update_meeting(tray::MeetingTrayState::Paused);
     let paused = menu_with(&dbusmenu, "Resume Meeting").await;
+    assert_eq!(tooltip().await, says("Meeting paused"));
     click(&dbusmenu, item(&paused, "Resume Meeting").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::ResumeMeeting));
 
     runtime.update_meeting(tray::MeetingTrayState::Finalizing);
     let finalizing = menu_with(&dbusmenu, "Finishing Meeting...").await;
     assert!(!label_enabled(&finalizing, "Finishing Meeting..."));
+    assert_eq!(tooltip().await, says("Finishing meeting..."));
     click(&dbusmenu, item(&finalizing, "Finishing Meeting...").0).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(100), events.recv())
@@ -410,6 +429,7 @@ async fn meeting_entries_follow_the_daemon_and_send_meeting_actions() {
     runtime.update_meeting(tray::MeetingTrayState::Idle);
     let again = menu_with(&dbusmenu, "Start Meeting").await;
     assert!(label_enabled(&again, "Start Meeting"));
+    assert_eq!(tooltip().await, says("Ready"));
     runtime.shutdown().await;
 }
 
