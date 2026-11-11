@@ -6,6 +6,7 @@
 //! when unknown), and `manifest_version` changes only if a field's meaning
 //! does.
 
+use crate::meeting::assistant::summarize::SUMMARY_FILE;
 use crate::meeting::data::MeetingMetadata;
 use crate::meeting::retained_audio;
 use crate::meeting::storage::{NOTES_FILE, TRANSCRIPT_MARKDOWN_FILE};
@@ -23,9 +24,6 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// The transcript as JSON.
 pub const TRANSCRIPT_JSON_FILE: &str = "transcript.json";
 
-/// The meeting summary in Markdown, written by the meeting assistant.
-pub const SUMMARY_FILE: &str = "summary.md";
-
 /// What a meeting was recorded with, fixed when it starts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MeetingContext {
@@ -35,8 +33,6 @@ pub struct MeetingContext {
     pub model: Option<String>,
     /// Diarization backend, `None` when diarization was off
     pub diarization: Option<String>,
-    /// The call's URL, when the meeting was started with one
-    pub url: Option<String>,
     /// The voxtype version that recorded the meeting
     pub voxtype_version: Option<String>,
 }
@@ -98,7 +94,7 @@ impl Manifest {
             manifest_version: MANIFEST_VERSION,
             id: metadata.id.to_string(),
             title: metadata.title.clone(),
-            url: context.url.clone(),
+            url: metadata.url.clone(),
             status: serde_json::to_value(metadata.status)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string))

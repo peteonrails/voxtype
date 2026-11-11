@@ -25,6 +25,7 @@ mod info;
 #[cfg(target_os = "macos")]
 mod macos;
 mod meeting;
+mod meeting_assistant;
 mod migrate;
 mod overrides;
 mod record;

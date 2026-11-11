@@ -48,6 +48,7 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
         meeting.post_meeting_timeout_secs
     );
     let _ = writeln!(s, "  max_duration_mins = {}", meeting.max_duration_mins);
+    let _ = writeln!(s, "  show_view_on_start = {}", meeting.show_view_on_start);
 
     let _ = writeln!(s, "\n[meeting.audio]");
     let _ = writeln!(s, "  mic_device = {:?}", meeting.audio.mic_device);
@@ -78,6 +79,39 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
         let _ = writeln!(s, "  remote_api_key = (set)");
     }
     let _ = writeln!(s, "  timeout_secs = {}", meeting.summary.timeout_secs);
+    match meeting.summary.auto {
+        Some(auto) => {
+            let _ = writeln!(s, "  auto = {}", auto);
+        }
+        None => {
+            let _ = writeln!(s, "  auto = (on once an agent is allowed)");
+        }
+    }
+
+    let a = &meeting.assistant;
+    let _ = writeln!(s, "\n[meeting.assistant]");
+    match a.agent {
+        Some(ref agent) => {
+            let _ = writeln!(s, "  agent = {:?}", agent);
+        }
+        None => {
+            let _ = writeln!(s, "  agent = (Omarchy default, then PATH)");
+        }
+    }
+    let _ = writeln!(s, "  local_only = {}", a.local_only);
+    let _ = writeln!(s, "  timeout_secs = {}", a.timeout_secs);
+    let _ = writeln!(s, "  max_transcript_chars = {}", a.max_transcript_chars);
+    match a.open_command.as_deref() {
+        None => {
+            let _ = writeln!(s, "  open_command = (open the meeting view)");
+        }
+        Some(cmd) if cmd.trim().is_empty() => {
+            let _ = writeln!(s, "  open_command = \"\" (no Open action)");
+        }
+        Some(cmd) => {
+            let _ = writeln!(s, "  open_command = {:?}", cmd);
+        }
+    }
 
     s
 }
@@ -278,6 +312,7 @@ mod tests {
             "[meeting.audio]",
             "[meeting.diarization]",
             "[meeting.summary]",
+            "[meeting.assistant]",
         ] {
             assert!(
                 rendered.contains(header),

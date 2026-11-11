@@ -312,7 +312,8 @@ const PASTE_KEY_CHOICES: &[&str] = &["shift+insert", "ctrl+v", "ctrl+shift+v", "
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
 const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
-const SUMMARY_BACKEND_CHOICES: &[&str] = &["local", "remote", "disabled"];
+const SUMMARY_BACKEND_CHOICES: &[&str] = &["agent", "local", "remote", "disabled"];
+const ASSISTANT_AGENT_CHOICES: &[&str] = crate::meeting::assistant::SUPPORTED_AGENTS;
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
     // -- Engine -------------------------------------------------------------
@@ -1358,6 +1359,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Allow `voxtype meeting` to record and transcribe long sessions.",
     ),
     spec(
+        "meeting.offer_enable",
+        "meeting",
+        "offer_enable",
+        KeyType::Bool,
+        "Meeting",
+        "Offer meeting mode",
+        "While meeting mode is off, the tray offers to turn it on. Set false to stop the offer.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -2198,6 +2208,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Minutes before a meeting stops on its own. 0 is unlimited.",
     ),
     spec(
+        "meeting.show_view_on_start",
+        "meeting",
+        "show_view_on_start",
+        KeyType::Bool,
+        "Meeting",
+        "Show meeting view on start",
+        "Open the live meeting view in the Omarchy shell when a meeting starts.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
@@ -2330,7 +2349,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(SUMMARY_BACKEND_CHOICES),
         "Meeting",
         "Summary backend",
-        "local uses Ollama, remote an API, disabled turns summaries off.",
+        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama) or remote (an API). disabled, the default, also uses the assistant.",
     ),
     spec(
         "meeting.summary.ollama_url",
@@ -2377,6 +2396,96 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Summary timeout",
         "Seconds to wait for a summary request.",
     ),
+    spec(
+        "meeting.detect.enabled",
+        "meeting.detect",
+        "enabled",
+        KeyType::Bool,
+        "Meeting",
+        "Offer to record calls",
+        "Notice a Zoom, Teams or Google Meet call starting and offer to record it. Unset is on for Omarchy, off elsewhere. Needs meeting mode on.",
+    ),
+    spec(
+        "meeting.detect.auto_record_apps",
+        "meeting.detect",
+        "auto_record_apps",
+        KeyType::String,
+        "Meeting",
+        "Record without asking",
+        "Comma-separated call apps (Zoom, Google Meet, Microsoft Teams) whose calls are recorded without a prompt.",
+    ),
+    spec(
+        "meeting.detect.debounce_secs",
+        "meeting.detect",
+        "debounce_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Call detection delay",
+        "Seconds a call app must hold the mic before the prompt, so a quick mic test does not count.",
+    ),
+    spec(
+        "meeting.summary.auto",
+        "meeting.summary",
+        "auto",
+        KeyType::Bool,
+        "Meeting",
+        "Summarize at stop",
+        "Summarize each meeting when it stops. Unset is on once an agent is allowed.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.local_only",
+        "meeting.assistant",
+        "local_only",
+        KeyType::Bool,
+        "Meeting",
+        "Local model only",
+        "Never send transcripts to an agent; answer and summarize with the local Ollama model.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.agent",
+        "meeting.assistant",
+        "agent",
+        open(ASSISTANT_AGENT_CHOICES),
+        "Meeting",
+        "Assistant agent",
+        "Agent that answers questions and writes summaries. Unset uses the Omarchy default, then PATH.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.timeout_secs",
+        "meeting.assistant",
+        "timeout_secs",
+        KeyType::Int { min: 5, max: 3600 },
+        "Meeting",
+        "Assistant timeout",
+        "Seconds to wait for an answer or a summary.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.max_transcript_chars",
+        "meeting.assistant",
+        "max_transcript_chars",
+        KeyType::Int {
+            min: 2_000,
+            max: 2_000_000,
+        },
+        "Meeting",
+        "Assistant transcript budget",
+        "Transcript characters sent verbatim; longer meetings send a summary of the earlier part.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.open_command",
+        "meeting.assistant",
+        "open_command",
+        KeyType::String,
+        "Meeting",
+        "Answer Open command",
+        "Command the Open action of an ask notification runs. Unset opens the meeting view's Ask tab; empty turns Open off.",
+    )
+    .live(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -2891,6 +3000,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "vad.threshold" => f32_json(cfg.vad.threshold),
 
         "meeting.enabled" => json!(cfg.meeting.enabled),
+        "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),
@@ -3001,6 +3111,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
         "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
         "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
+        "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
@@ -3020,6 +3131,20 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
         "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
+        "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
+        "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {
+            [] => Json::Null,
+            apps => json!(apps.join(",")),
+        },
+        "meeting.detect.debounce_secs" => json!(cfg.meeting.detect.debounce_secs),
+        "meeting.summary.auto" => json!(cfg.meeting.summary.auto),
+        "meeting.assistant.local_only" => json!(cfg.meeting.assistant.local_only),
+        "meeting.assistant.agent" => opt_str(cfg.meeting.assistant.agent.as_ref()),
+        "meeting.assistant.timeout_secs" => json!(cfg.meeting.assistant.timeout_secs),
+        "meeting.assistant.max_transcript_chars" => {
+            json!(cfg.meeting.assistant.max_transcript_chars)
+        }
+        "meeting.assistant.open_command" => opt_str(cfg.meeting.assistant.open_command.as_ref()),
 
         _ => return None,
     };

@@ -22,8 +22,10 @@
 //! - **Phase 4 (v0.6.0):** Remote server sync for corporate deployments
 //! - **Phase 5 (v0.6.1):** AI summarization with action items
 
+pub mod assistant;
 pub mod chunk;
 pub mod data;
+pub mod detect;
 pub mod diarization;
 pub mod events;
 pub mod export;
@@ -32,6 +34,7 @@ pub mod manifest;
 pub mod notes;
 pub mod playback;
 pub mod retained_audio;
+pub mod start;
 pub mod state;
 pub mod storage;
 pub mod summary;
@@ -44,7 +47,7 @@ pub use data::{
 pub use events::{DiarizationInfo, MeetingEventHub, MeetingHudState};
 pub use export::{export_meeting, export_meeting_to_file, ExportFormat, ExportOptions};
 pub use state::{ChunkState, MeetingState};
-pub use storage::{MeetingStorage, StorageConfig, StorageError};
+pub use storage::{MeetingListEntry, MeetingStorage, StorageConfig, StorageError};
 
 use crate::error::{MeetingError, Result};
 use crate::output::post_process::PostProcessor;
@@ -147,23 +150,46 @@ pub struct MeetingDaemon {
     audio: Option<retained_audio::AudioRetainer>,
     /// `post_meeting_command`, run once a stopped meeting's folder is final
     post_meeting: hook::PostMeetingSettings,
+    /// Assistant settings for the summary written when a meeting stops
+    assistant: Option<assistant::AssistantSettings>,
 }
 
 impl MeetingDaemon {
-    /// Create a new meeting daemon
+    /// Create a new meeting daemon.
+    ///
+    /// `meeting_app_config` is the configuration the meeting transcribes
+    /// with ([`start::meeting_transcription_config`]). `resident` is
+    /// dictation's loaded transcriber when it serves that configuration
+    /// ([`start::shares_dictation_transcriber`]); without one the meeting
+    /// loads its own. Transcribers serialize their own calls, so a shared one
+    /// takes dictation and meeting chunks in turn.
     pub fn new(
         config: MeetingConfig,
-        app_config: &crate::config::Config,
+        meeting_app_config: &crate::config::Config,
         event_tx: mpsc::Sender<MeetingEvent>,
+        resident: Option<Arc<dyn Transcriber>>,
     ) -> Result<Self> {
         let storage = MeetingStorage::open(config.storage.clone())
             .map_err(|e| MeetingError::Storage(e.to_string()))?;
 
-        let meeting_app_config = app_config.with_meeting_mode_overrides();
-        let transcriber: Arc<dyn Transcriber> =
-            Arc::from(transcribe::create_transcriber(&meeting_app_config)?);
+        let transcriber: Arc<dyn Transcriber> = match resident {
+            Some(transcriber) => {
+                tracing::info!("Meeting transcribes with dictation's loaded model");
+                transcriber
+            }
+            None => {
+                let start = std::time::Instant::now();
+                let transcriber = Arc::from(transcribe::create_transcriber(meeting_app_config)?);
+                tracing::info!(
+                    "Meeting model loaded in {:.2}s",
+                    start.elapsed().as_secs_f32()
+                );
+                transcriber
+            }
+        };
         let engine_name = format!("{:?}", meeting_app_config.engine).to_lowercase();
         let model_name = Some(meeting_app_config.model_name().to_string());
+        let app_config = meeting_app_config;
 
         let post_processor = app_config.output.active_post_process().map(|cfg| {
             tracing::info!(
@@ -201,6 +227,7 @@ impl MeetingDaemon {
             model_name,
             audio: None,
             post_meeting: hook::PostMeetingSettings::from_config(app_config),
+            assistant: Some(assistant::AssistantSettings::from_config(app_config)),
         })
     }
 
@@ -229,11 +256,12 @@ impl MeetingDaemon {
             model_name: Some("test-model".to_string()),
             audio: None,
             post_meeting: hook::PostMeetingSettings::default(),
+            assistant: None,
         }
     }
 
     /// Start a new meeting
-    pub async fn start(&mut self, title: Option<String>) -> Result<MeetingId> {
+    pub async fn start(&mut self, title: Option<String>, url: Option<String>) -> Result<MeetingId> {
         if !self.state.is_idle() {
             return Err(MeetingError::AlreadyInProgress.into());
         }
@@ -241,6 +269,7 @@ impl MeetingDaemon {
         // Create meeting
         let mut meeting = MeetingData::new(title);
         meeting.metadata.model = Some(self.engine_name.clone());
+        meeting.metadata.url = url;
 
         // Create storage directory
         let storage_path = self
@@ -261,7 +290,6 @@ impl MeetingDaemon {
             engine: Some(self.engine_name.clone()),
             model: self.model_name.clone(),
             diarization: diarization_backend.clone().filter(|_| diarization_enabled),
-            url: None,
             voxtype_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };
         if let Err(e) = self.storage.set_context(&meeting_id, &context) {
@@ -392,6 +420,22 @@ impl MeetingDaemon {
             meeting_id,
             settings: self.post_meeting.clone(),
         }
+    }
+
+    /// The summary to run for a meeting that just stopped, unless
+    /// `[meeting.summary] auto = false`. Whether it runs when auto is unset
+    /// (consent given or not) is decided by the job itself, off the event
+    /// loop, since that means asking `omarchy-default-agent`.
+    pub fn auto_summary(&self, meeting_id: MeetingId) -> Option<assistant::summarize::AutoSummary> {
+        let settings = self.assistant.clone()?;
+        if settings.summary_auto == Some(false) {
+            return None;
+        }
+        Some(assistant::summarize::AutoSummary {
+            settings,
+            storage: self.config.storage.clone(),
+            meeting_id,
+        })
     }
 
     /// Get current meeting state
@@ -750,6 +794,16 @@ pub fn list_meetings(
     storage.list_meetings(limit)
 }
 
+/// List meetings with each one's summary flag and speaker count, from the
+/// index (see [`MeetingStorage::list_meeting_entries`])
+pub fn list_meeting_entries(
+    config: &MeetingConfig,
+    limit: Option<u32>,
+) -> std::result::Result<Vec<storage::MeetingListEntry>, StorageError> {
+    let storage = MeetingStorage::open(config.storage.clone())?;
+    storage.list_meeting_entries(limit)
+}
+
 /// Get a meeting by ID (or "latest")
 pub fn get_meeting(
     config: &MeetingConfig,
@@ -838,7 +892,7 @@ mod tests {
             Some(Box::new(diarization::simple::SimpleDiarizer::new())),
             tx,
         );
-        daemon.start(Some("Test".to_string())).await.unwrap();
+        daemon.start(Some("Test".to_string()), None).await.unwrap();
         Harness {
             daemon,
             config,
@@ -988,6 +1042,45 @@ mod tests {
         assert!(raw.ends_with("}\n"));
     }
 
+    /// Engine and model come from the meeting's own transcription config,
+    /// with `meeting start --model` applied, and the URL from `--url`.
+    #[tokio::test]
+    async fn manifest_names_what_the_meeting_was_started_with() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+            },
+            ..Default::default()
+        };
+        let app = crate::config::Config::default();
+        let options = crate::config::MeetingStartOptions {
+            model: Some("small.en".to_string()),
+            ..Default::default()
+        };
+        assert_ne!(app.model_name(), "small.en");
+        let effective = app.with_meeting_mode_overrides(&options).unwrap();
+        let (tx, _events) = mpsc::channel(8);
+        let resident: Arc<dyn Transcriber> = Arc::new(CountingTranscriber(AtomicU32::new(0)));
+        let mut daemon =
+            MeetingDaemon::new(config.clone(), &effective, tx, Some(resident)).unwrap();
+        let url = "https://meet.example.com/abc-defg-hij";
+        let id = daemon
+            .start(Some("Call".to_string()), Some(url.to_string()))
+            .await
+            .unwrap();
+        daemon.stop().await.unwrap();
+
+        let storage = MeetingStorage::open(config.storage).unwrap();
+        let m = manifest::Manifest::read(&storage.get_meeting_path(&id).unwrap()).unwrap();
+        assert_eq!(m.engine.as_deref(), Some("whisper"));
+        assert_eq!(m.model.as_deref(), Some("small.en"));
+        assert_eq!(m.url.as_deref(), Some(url));
+    }
+
     #[tokio::test]
     async fn manifest_follows_notes_written_after_the_meeting() {
         let mut h = harness().await;
@@ -1126,7 +1219,10 @@ mod tests {
         let id = h.daemon.stop().await.unwrap();
         // Spawned the way the daemon does it: stop has already returned.
         let job = tokio::spawn(h.daemon.post_meeting(id).run());
-        h.daemon.start(Some("Next".to_string())).await.unwrap();
+        h.daemon
+            .start(Some("Next".to_string()), None)
+            .await
+            .unwrap();
         h.pair(&[(1.0, 3.0)], &[]).await;
         assert_eq!(job.await.unwrap(), Some(hook::HookOutcome::Failed(Some(3))));
         let next = h.daemon.stop().await.unwrap();
@@ -1507,6 +1603,117 @@ mod tests {
         assert_eq!(keys, vec!["Remote 1", "Remote 1", "You", "Remote 2"]);
     }
 
+    /// What the daemon's dictation path does with a loaded model: transcribe
+    /// on another thread while the meeting is mid-chunk.
+    struct Shared {
+        calls: AtomicU32,
+        busy: std::sync::Mutex<()>,
+    }
+
+    impl Transcriber for Shared {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
+        fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
+            // Like the GGUF worker and the ONNX engines: one call at a time.
+            let _turn = self.busy.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(if samples.iter().any(|s| s.abs() > 0.05) {
+                "words".to_string()
+            } else {
+                String::new()
+            })
+        }
+    }
+
+    fn meeting_config(dir: &tempfile::TempDir) -> MeetingConfig {
+        MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A4: a meeting handed dictation's transcriber uses that instance
+    /// rather than loading another, and dictation keeps working on it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resident_transcriber_serves_the_meeting_and_dictation_together() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = Arc::new(Shared {
+            calls: AtomicU32::new(0),
+            busy: std::sync::Mutex::new(()),
+        });
+        let resident: Arc<dyn Transcriber> = shared.clone();
+        let (tx, mut events) = mpsc::channel(64);
+        // An app config whose engine cannot load here: proves no second load.
+        let mut app = crate::config::Config::default();
+        app.whisper.model = "/nonexistent/ggml-model.bin".into();
+        let mut daemon =
+            MeetingDaemon::new(meeting_config(&dir), &app, tx, Some(resident.clone())).unwrap();
+        assert!(Arc::ptr_eq(daemon.transcriber.as_ref().unwrap(), &resident));
+        daemon
+            .start(
+                Some("Shared".into()),
+                Some("https://meet.example.com/x".into()),
+            )
+            .await
+            .unwrap();
+
+        // Dictation transcribes on its own thread while the meeting does.
+        let dictation = {
+            let resident = resident.clone();
+            std::thread::spawn(move || {
+                (0..20)
+                    .map(|_| resident.transcribe(&[0.5; 1600]).unwrap())
+                    .filter(|t| t == "words")
+                    .count()
+            })
+        };
+        for _ in 0..3 {
+            daemon
+                .process_pair(
+                    track(30.0, &[(1.0, 3.0), (10.0, 12.0)]),
+                    track(30.0, &[(5.0, 7.0)]),
+                )
+                .await;
+        }
+        assert_eq!(dictation.join().unwrap(), 20);
+        daemon.stop().await.unwrap();
+
+        let mut segments = 0;
+        while let Ok(event) = events.try_recv() {
+            if let MeetingEvent::ChunkProcessed { segments: s, .. } = event {
+                segments += s.len();
+            }
+        }
+        assert_eq!(segments, 9);
+        assert_eq!(shared.calls.load(Ordering::SeqCst), 20 + 9);
+
+        let saved = get_meeting(&meeting_config(&dir), "latest").unwrap();
+        assert_eq!(
+            saved.metadata.url.as_deref(),
+            Some("https://meet.example.com/x")
+        );
+    }
+
+    /// Without a resident transcriber the meeting loads its own: here the
+    /// load fails, which is how this test sees it was attempted.
+    #[tokio::test]
+    async fn without_a_resident_transcriber_the_meeting_loads_its_own() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (tx, _events) = mpsc::channel(64);
+        let mut app = crate::config::Config::default();
+        app.whisper.model = "/nonexistent/ggml-model.bin".into();
+        app.whisper.on_demand_loading = false;
+        assert!(MeetingDaemon::new(meeting_config(&dir), &app, tx, None).is_err());
+    }
+
     #[tokio::test]
     async fn label_given_mid_meeting_survives_stop() {
         let mut h = harness().await;
@@ -1536,6 +1743,121 @@ mod tests {
         assert_eq!(speakers, vec!["You", "Dana", "You", "Dana"]);
         // Segments streamed after the label carry it too.
         assert_eq!(live.last().unwrap().speaker_display(), "Dana");
+    }
+
+    use assistant::summarize::SummaryEvent;
+
+    /// Stop the harness meeting and run its auto-summary, returning the
+    /// events it emitted.
+    async fn stop_and_summarize(h: &mut Harness) -> (bool, Vec<SummaryEvent>) {
+        let id = h.daemon.stop().await.unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let ran = match h.daemon.auto_summary(id) {
+            Some(job) => job.run(move |e| sink.lock().unwrap().push(e)).await,
+            None => false,
+        };
+        let events = events.lock().unwrap().clone();
+        (ran, events)
+    }
+
+    const SUMMARY_REPLY: &str = r#"{"overview": "A short test meeting.", "decisions": [],
+        "action_items": [{"description": "Follow up", "owner": "Dana"}],
+        "chapters": [{"start": "00:01", "title": "Start"}]}"#;
+
+    #[tokio::test]
+    async fn auto_summary_reports_summarizing_then_ready() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], SUMMARY_REPLY);
+        let mut h = harness().await;
+        h.daemon.assistant = Some(sb.settings());
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Dana").unwrap();
+
+        let (ran, events) = stop_and_summarize(&mut h).await;
+        assert!(ran);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(
+            matches!(&events[0], SummaryEvent::Summarizing { meeting_id } if *meeting_id == id.to_string())
+        );
+        let SummaryEvent::Ready(outcome) = &events[1] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(outcome.agent, "claude");
+        assert_eq!(
+            outcome.summary.action_items[0].assignee.as_deref(),
+            Some("Dana")
+        );
+        let md = std::fs::read_to_string(outcome.path.as_ref().unwrap()).unwrap();
+        assert!(md.contains("A short test meeting."));
+        assert!(
+            sb.claude_stdin(0).contains("Dana: u1"),
+            "{}",
+            sb.claude_stdin(0)
+        );
+
+        let saved = h.saved();
+        assert_eq!(saved.metadata.status, MeetingStatus::Completed);
+        assert_eq!(saved.metadata.summary.unwrap().chapters[0].title, "Start");
+    }
+
+    #[tokio::test]
+    async fn a_failing_agent_still_stops_cleanly() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        std::fs::write(sb.out().join("claude.fail"), "").unwrap();
+        let mut h = harness().await;
+        h.daemon.assistant = Some(sb.settings());
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+
+        let (ran, events) = stop_and_summarize(&mut h).await;
+        assert!(ran);
+        assert!(matches!(events[0], SummaryEvent::Summarizing { .. }));
+        match &events[1] {
+            SummaryEvent::Failed { code, message, .. } => {
+                assert_eq!(*code, "agent_failed");
+                assert!(message.contains("Not logged in"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(h.daemon.state().is_idle());
+        let saved = h.saved();
+        assert_eq!(saved.transcript.segments.len(), 2);
+        assert_eq!(saved.metadata.status, MeetingStatus::Completed);
+        assert!(saved.metadata.summary.is_none());
+        assert!(!saved
+            .metadata
+            .storage_path
+            .unwrap()
+            .join(assistant::summarize::SUMMARY_FILE)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn auto_summary_waits_for_consent_and_honors_auto_false() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.claude_replies(&[], SUMMARY_REPLY);
+        let mut h = harness().await;
+        h.daemon.assistant = Some(sb.settings());
+        h.pair(&[(1.0, 3.0)], &[]).await;
+        let (ran, events) = stop_and_summarize(&mut h).await;
+        assert!(!ran, "no consent, auto unset: off");
+        assert!(events.is_empty());
+        assert_eq!(sb.claude_calls(), 0);
+
+        let mut h = harness().await;
+        sb.allow("claude");
+        let mut settings = sb.settings();
+        settings.summary_auto = Some(false);
+        h.daemon.assistant = Some(settings);
+        let id = h.daemon.stop().await.unwrap();
+        assert!(h.daemon.auto_summary(id).is_none());
     }
 
     #[test]

@@ -543,6 +543,9 @@ pub struct MeetingMetadata {
     /// Whisper model used
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The call's link, from `meeting start --url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Summary (Phase 5)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<MeetingSummary>,
@@ -565,6 +568,7 @@ impl MeetingMetadata {
             storage_path: None,
             audio_retained: false,
             model: None,
+            url: None,
             summary: None,
             synced_at: None,
         }
@@ -634,11 +638,23 @@ pub struct MeetingSummary {
     /// Decisions made
     #[serde(default)]
     pub decisions: Vec<String>,
+    /// Topics in order, each starting at a transcript time
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
     /// When the summary was generated
     pub generated_at: DateTime<Utc>,
     /// Model used to generate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+/// One topic of a meeting summary, starting at a transcript time
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Chapter {
+    /// Where the topic begins, in milliseconds from meeting start
+    pub start_ms: u64,
+    /// Short title of the topic
+    pub title: String,
 }
 
 /// An action item from the meeting

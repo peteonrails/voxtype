@@ -31,8 +31,14 @@
 //! {"event":"error","message":"..."}
 //! ```
 //!
-//! `speakers` and `summary` events belong to later phases (live speaker
-//! naming and auto-summarization) and are not emitted yet.
+//! After a meeting stops, auto-summary reports on the meeting it just
+//! finished, naming it, without changing the `hello` snapshot:
+//!
+//! ```text
+//! {"event":"status","status":"summarizing","meeting_id":"..."}
+//! {"event":"summary_ready","meeting_id":"...","agent":"claude","agent_name":"Claude","path":".../summary.md","summary":{...}}
+//! {"event":"error","message":"Summary failed: ...","meeting_id":"...","code":"consent_required"}
+//! ```
 //!
 //! Delivery is lossy and best-effort, like `audio::levels`: a subscriber
 //! whose queue fills up gets dropped rather than allowed to back-pressure
@@ -164,6 +170,8 @@ enum WireEvent {
     },
     Status {
         status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meeting_id: Option<String>,
     },
     Playback {
         meeting_id: String,
@@ -173,6 +181,18 @@ enum WireEvent {
     },
     Error {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meeting_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
+    SummaryReady {
+        meeting_id: String,
+        agent: String,
+        agent_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        summary: crate::meeting::data::MeetingSummary,
     },
 }
 
@@ -321,6 +341,7 @@ impl MeetingEventHub {
     pub fn publish_status(&self, status: &str) {
         self.publish(WireEvent::Status {
             status: status.to_string(),
+            meeting_id: None,
         });
     }
 
@@ -344,6 +365,35 @@ impl MeetingEventHub {
     pub fn publish_error(&self, message: &str) {
         self.publish(WireEvent::Error {
             message: message.to_string(),
+            meeting_id: None,
+            code: None,
+        });
+    }
+
+    /// Broadcast what the auto-summary of a finished meeting is doing.
+    pub fn publish_summary_event(&self, event: crate::meeting::assistant::summarize::SummaryEvent) {
+        use crate::meeting::assistant::summarize::SummaryEvent;
+        self.publish(match event {
+            SummaryEvent::Summarizing { meeting_id } => WireEvent::Status {
+                status: "summarizing".to_string(),
+                meeting_id: Some(meeting_id),
+            },
+            SummaryEvent::Ready(outcome) => WireEvent::SummaryReady {
+                meeting_id: outcome.meeting_id,
+                agent: outcome.agent,
+                agent_name: outcome.agent_name,
+                path: outcome.path,
+                summary: outcome.summary,
+            },
+            SummaryEvent::Failed {
+                meeting_id,
+                code,
+                message,
+            } => WireEvent::Error {
+                message,
+                meeting_id: Some(meeting_id),
+                code: Some(code.to_string()),
+            },
         });
     }
 
@@ -539,6 +589,73 @@ async fn run_broadcast_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn summary_events_reach_subscribers() {
+        use crate::meeting::assistant::summarize::{SummaryEvent, SummaryOutcome};
+        use tokio::io::AsyncBufReadExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let hub = MeetingEventHub::start(dir.path().join("meeting.sock"))
+            .await
+            .unwrap();
+        let stream = UnixStream::connect(hub.socket_path()).await.unwrap();
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        let hello = lines.next_line().await.unwrap().unwrap();
+        assert!(hello.contains(r#""event":"hello""#));
+
+        hub.publish_summary_event(SummaryEvent::Summarizing {
+            meeting_id: "m1".into(),
+        });
+        hub.publish_summary_event(SummaryEvent::Ready(Box::new(SummaryOutcome {
+            meeting_id: "m1".into(),
+            agent: "claude".into(),
+            agent_name: "Claude".into(),
+            path: Some(PathBuf::from("/x/summary.md")),
+            summary: crate::meeting::data::MeetingSummary {
+                summary: "ok".into(),
+                key_points: vec![],
+                action_items: vec![],
+                decisions: vec![],
+                chapters: vec![],
+                generated_at: Utc::now(),
+                model: Some("claude".into()),
+            },
+        })));
+        hub.publish_summary_event(SummaryEvent::Failed {
+            meeting_id: "m1".into(),
+            code: "agent_failed",
+            message: "Summary failed: x".into(),
+        });
+
+        async fn next(
+            lines: &mut tokio::io::Lines<tokio::io::BufReader<UnixStream>>,
+        ) -> serde_json::Value {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+        let v = next(&mut lines).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"event": "status", "status": "summarizing", "meeting_id": "m1"})
+        );
+        let v = next(&mut lines).await;
+        assert_eq!(v["event"], "summary_ready");
+        assert_eq!(v["agent_name"], "Claude");
+        assert_eq!(v["path"], "/x/summary.md");
+        assert_eq!(v["summary"]["summary"], "ok");
+        let v = next(&mut lines).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"event": "error", "message": "Summary failed: x",
+                               "meeting_id": "m1", "code": "agent_failed"})
+        );
+        hub.cleanup();
+    }
 
     #[test]
     fn hud_backlog_follows_a_speaker_rename() {

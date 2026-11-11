@@ -191,6 +191,29 @@ graphical frontend is installed, install a supported terminal or run
   availability, input devices, OSD styles) is left empty rather than showing old
   entries. Run the same command with `--json` in a terminal for the full error.
 
+## Meeting view
+
+The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says
+what is wrong instead of showing an empty pane:
+
+- **"Voxtype is not running"**: the daemon is down. Start it with
+  `systemctl --user start voxtype`. Past meetings still list and open.
+- **"Voxtype is running without its meeting socket"**: the daemon answers but
+  does not publish `$XDG_RUNTIME_DIR/voxtype/meeting.sock`, usually because it
+  is older than 1.3.0. Update voxtype and `systemctl --user restart voxtype`.
+- **"Could not run voxtype. Is voxtype installed and on PATH?"**: the shell
+  cannot start the voxtype command. In the Omarchy plugin, check `dev.json` as
+  for the Settings panel above.
+- **"This voxtype is too old for …"**: the command for notes, Ask, summaries or
+  moving lines does not exist in the installed voxtype. Update it, then reopen
+  the view (and restart the shell after an install, so it loads the new view).
+- **"No agent or local model was found"** on the Ask or Summary tab: questions
+  and summaries need Claude Code or Codex on `PATH`, or Ollama for a local
+  model. `voxtype meeting assistant status` shows what was found and why an
+  agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
+  agent menu shows it disabled, with the reason.
+- **"Copying needs wl-copy"**: install `wl-clipboard`.
+
 ## Table of Contents
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
@@ -210,6 +233,7 @@ graphical frontend is installed, install a supported terminal or run
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
+- [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1682,6 +1706,39 @@ journalctl --user -u voxtype | grep post_meeting_command
 The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
 `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
 terminal: anything that prompts for input fails.
+
+---
+
+## Meeting Assistant: Summaries Don't Appear
+
+Start with what the assistant sees:
+
+```bash
+voxtype meeting assistant status
+journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
+```
+
+**No summary after a meeting stops.** The summary at stop is off until an agent is allowed, unless `[meeting.summary] auto = true`. Allow one with `voxtype meeting assistant allow claude`, or summarize by hand with `voxtype meeting summarize latest`. A meeting with no transcript is never summarized. `auto = false` turns it off.
+
+**"Meeting transcripts have not been allowed to go to Claude".** Consent is asked once per agent and the daemon cannot ask. Run `voxtype meeting assistant allow <agent>`, or use `--local` / `local_only = true` to keep everything on the machine.
+
+**The CLI finds the agent but the daemon does not.** A systemd user service often has a shorter PATH than your shell (no `~/.local/bin`, no mise or asdf shims). `meeting assistant allow` records where the agent was found and the daemon falls back to that path, so allow it again after moving or reinstalling the agent. `[meeting.assistant] agent` only names the agent; it does not change where it is looked for.
+
+**"Claude failed: Not logged in" or similar.** The agent runs with your account, as you. Sign in once in a terminal (`claude`, then `/login`; `codex login`) and retry with `voxtype meeting summarize latest --regenerate`.
+
+**"did not answer within 180s".** Long meetings take a while to summarize. Raise `[meeting.assistant] timeout_secs`, or lower `max_transcript_chars` so less is sent verbatim.
+
+**"Could not read the summary the model wrote".** The model did not reply with the JSON the summary asks for. Small local models do this most; try a larger Ollama model or an agent, then `--regenerate`.
+
+**Codex is listed as not usable: "needs bubblewrap".** Codex keeps a command tool that cannot be turned off, so voxtype only runs it inside a bubblewrap jail that hides your home. Install `bubblewrap` (`pacman -S bubblewrap`, `apt install bubblewrap`). If bwrap is installed but fails with a namespace error, unprivileged user namespaces are disabled on the system; use Claude or the local model instead.
+
+**Codex worked, then fails with an authentication error.** In the jail codex can read `~/.codex/auth.json` but not rewrite it, so it cannot save a refreshed login token there. Run `codex` once in a terminal to refresh the login, then retry.
+
+**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude`, `codex` (jailed) and `pi` can be run without tools that reach your files or the network, so voxtype skips other agents and uses `claude` or `pi` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
+
+**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
+
+The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 
 ---
 

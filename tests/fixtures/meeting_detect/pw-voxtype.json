@@ -1,0 +1,224 @@
+[
+ {
+  "id": 105,
+  "type": "PipeWire:Interface:Node",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "max-input-ports": 129,
+   "max-output-ports": 0,
+   "n-input-ports": 1,
+   "n-output-ports": 1,
+   "state": "running",
+   "props": {
+    "application.name": "PipeWire ALSA [hex]",
+    "client.id": 120,
+    "media.category": "Capture",
+    "media.class": "Stream/Input/Audio",
+    "media.name": "ALSA Capture",
+    "media.type": "Audio",
+    "node.autoconnect": true,
+    "node.description": "ALSA Capture [hex]",
+    "node.name": "alsa_capture.hex",
+    "object.id": 105,
+    "object.serial": 463,
+    "stream.is-live": true
+   }
+  }
+ },
+ {
+  "id": 120,
+  "type": "PipeWire:Interface:Client",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "props": {
+    "application.name": "PipeWire ALSA [hex]",
+    "application.process.binary": "hex",
+    "application.process.id": 852492,
+    "client.api": "alsa",
+    "media.category": "Capture",
+    "media.name": "ALSA Capture",
+    "media.type": "Audio",
+    "node.description": "ALSA Capture [hex]",
+    "node.name": "alsa_capture.hex",
+    "object.id": 120,
+    "object.serial": 462
+   }
+  }
+ },
+ {
+  "id": 129,
+  "type": "PipeWire:Interface:Node",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "max-input-ports": 129,
+   "max-output-ports": 0,
+   "n-input-ports": 2,
+   "n-output-ports": 2,
+   "state": "running",
+   "props": {
+    "client.id": 110,
+    "media.category": "Capture",
+    "media.class": "Stream/Input/Audio",
+    "media.name": "Microphone Effects input",
+    "media.role": "Communication",
+    "media.type": "Audio",
+    "node.autoconnect": true,
+    "node.description": "Microphone Effects input",
+    "node.name": "camera-effects-mic-input",
+    "object.id": 129,
+    "object.serial": 24762,
+    "stream.is-live": true
+   }
+  }
+ },
+ {
+  "id": 110,
+  "type": "PipeWire:Interface:Client",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "props": {
+    "application.id": "alanfortlink.camera-effects",
+    "application.name": "Camera Effects",
+    "application.process.binary": "camera-effects-server",
+    "application.process.id": 3232318,
+    "object.id": 110,
+    "object.serial": 24743
+   }
+  }
+ },
+ {
+  "id": 62,
+  "type": "PipeWire:Interface:Node",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "max-input-ports": 0,
+   "max-output-ports": 129,
+   "n-input-ports": 0,
+   "n-output-ports": 2,
+   "state": "suspended",
+   "props": {
+    "client.id": 34,
+    "media.class": "Audio/Source",
+    "node.description": "USB Audio Line Input",
+    "node.name": "alsa_input.usb-Generic_USB_Audio-00.HiFi__Line__source",
+    "object.id": 62,
+    "object.serial": 67
+   }
+  }
+ },
+ {
+  "id": 250,
+  "type": "PipeWire:Interface:Client",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "props": {
+    "application.name": "PipeWire ALSA [voxtype-onnx-migraphx]",
+    "application.process.binary": "voxtype-onnx-migraphx",
+    "application.process.id": 46001,
+    "client.api": "alsa"
+   }
+  }
+ },
+ {
+  "id": 251,
+  "type": "PipeWire:Interface:Node",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "state": "running",
+   "props": {
+    "application.name": "PipeWire ALSA [voxtype-onnx-migraphx]",
+    "client.id": 250,
+    "media.class": "Stream/Input/Audio",
+    "media.name": "ALSA Capture",
+    "node.name": "alsa_capture.voxtype-onnx-migraphx"
+   }
+  }
+ },
+ {
+  "id": 252,
+  "type": "PipeWire:Interface:Client",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "props": {
+    "application.name": "voxtype-audio-bridge",
+    "application.process.binary": "voxtype-audio-bridge",
+    "application.process.id": 46002,
+    "client.api": "pipewire-pulse",
+    "object.id": 252
+   }
+  }
+ },
+ {
+  "id": 253,
+  "type": "PipeWire:Interface:Node",
+  "version": 3,
+  "permissions": [
+   "r",
+   "w",
+   "x",
+   "m"
+  ],
+  "info": {
+   "state": "running",
+   "props": {
+    "application.name": "voxtype-audio-bridge",
+    "application.process.binary": "voxtype-audio-bridge",
+    "application.process.id": "46002",
+    "client.id": 252,
+    "media.class": "Stream/Input/Audio",
+    "media.name": "loopback",
+    "node.name": "voxtype-audio-bridge",
+    "object.id": 253,
+    "stream.is-live": true
+   }
+  }
+ }
+]

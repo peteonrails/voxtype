@@ -19,13 +19,19 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
   - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
+  - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
+  - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
   - [Deleting Meetings](#deleting-meetings)
+- [Live Meeting View](#live-meeting-view)
+- [Meeting Detection](#meeting-detection)
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
   - [Diarization Settings](#diarization-settings)
   - [Summarization Settings](#summarization-settings)
+  - [Assistant Settings](#assistant-settings)
+- [Privacy: Where Transcripts Go](#privacy-where-transcripts-go)
 - [Storage](#storage)
 - [Tips for Best Results](#tips-for-best-results)
 
@@ -46,7 +52,7 @@ For short dictation (a sentence or two at a time), stick with the normal push-to
 
 ## Quick Start
 
-1. Enable meeting mode in your config:
+1. Enable meeting mode. A config written by `voxtype setup` for a new install already has it on. On an existing install, choose **Turn on meetings...** in the tray, or add to your config and restart the daemon:
 
 ```toml
 [meeting]
@@ -92,6 +98,35 @@ voxtype meeting start -t "1:1 with Alice"
 The `--title` flag is optional. If omitted, the meeting is named by its date and time (e.g., "Meeting 2026-02-16 14:30"). The daemon must be running, and meeting mode must be enabled in config.
 
 Only one meeting can run at a time. Starting a second meeting while one is active will fail.
+
+On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs.
+
+Recording starts as soon as the daemon reads the request, before any model loads, so nothing said in the first seconds is lost.
+
+#### Engine, model, language and link
+
+A meeting transcribes with the same engine and model as dictation unless you choose otherwise for that meeting:
+
+```bash
+voxtype meeting start --model large-v3-turbo --language de
+voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf
+voxtype meeting start --title "Planning" --url https://meet.example.com/abc-defg-hij
+```
+
+| Flag | Environment | Meaning |
+|------|-------------|---------|
+| `--engine` | `VOXTYPE_MEETING_ENGINE` | Engine for this meeting. Alone, it uses that engine's configured model. |
+| `--model` | `VOXTYPE_MEETING_MODEL` | Model for this meeting, as `voxtype info models` names it. Its engine is implied. |
+| `--language` | `VOXTYPE_MEETING_LANGUAGE` | Language hint, for checkpoints that take one (multilingual Whisper, Cohere). |
+| `--url` | | Link to the call. Stored with the meeting; `meeting show` and exports with `--metadata` print it. |
+
+A choice the meeting could not use is refused before anything starts, with the fix: an engine this binary was built without (with how to get a build that has it), a model that is not downloaded (with the download command), a model that belongs to a different engine than `--engine`, or a language the checkpoint does not take.
+
+#### Fast start
+
+When the meeting uses dictation's engine and model, and dictation keeps its model loaded (`on_demand_loading = false`, the default), the meeting transcribes with that loaded model instead of loading a second copy, so it is ready at once. This covers the GGUF worker and the in-process engines. Dictation keeps working during the meeting; the two take turns on the model, so a dictation that lands while a meeting chunk is being transcribed waits for it.
+
+A different engine, model or language loads a separate copy for the meeting, as does Whisper with `gpu_isolation = true` (which starts a worker per transcription either way) and Soniox (meetings use its async API). With `on_demand_loading = true` nothing is resident, and the meeting loads its model when it starts.
 
 ### Stopping a Meeting
 
@@ -315,9 +350,36 @@ The command runs through `sh -c` in the meeting folder, with these variables set
 
 It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
 
+### Asking About a Meeting
+
+Ask a question about a meeting while it is recording or after it ends. The answer streams to the terminal and cites the `[mm:ss]` of the lines it relies on:
+
+```bash
+voxtype meeting ask latest "What did Steve just say?" --last 2m
+voxtype meeting ask latest "Summarize the last few minutes" --last 5m
+voxtype meeting ask latest "What are the action items so far?"
+```
+
+The assistant gets the transcript as `meeting show` displays it (speaker names you gave, lines moved with `meeting reassign`, and your annotations next to their lines), your meeting notes, and the question. `--last` limits it to the end of the transcript: `5m`, `90s`, `1h`, `2m30s`, or a bare number of minutes. It is a time window, so "the last few minutes" means minutes, not a number of words.
+
+A meeting longer than `max_transcript_chars` is sent as a running summary of its earlier part plus as many recent lines as fit. The running summary is kept in the meeting folder (`assistant-context.json`), so asking again during a meeting only summarizes what was said since.
+
+Every question and answer is saved to `asks.jsonl` in the meeting folder, and `voxtype meeting show <id> --json` includes them as `asks`.
+
+Other options:
+
+| Option | Effect |
+|--------|--------|
+| `--json` | One JSON event per line: `start`, `delta` while the answer streams, then `answer` (the saved record) or `error` |
+| `--notify` | Also show the answer as a desktop notification. Its Open action raises the meeting view on the Ask tab (`[meeting.assistant] open_command` replaces that; `""` removes it) |
+| `--agent claude` | Use this agent for this question |
+| `--local` | Answer with the local model (Ollama) |
+
+`ask` does not need the daemon: it reads the same saved transcript `meeting show` does.
+
 ### AI Summarization
 
-Generate a summary with key points, action items, and decisions:
+Generate a summary with an overview, key points, decisions, action items with owners, and chapters with timestamps:
 
 ```bash
 # Markdown summary to stdout
@@ -328,15 +390,43 @@ voxtype meeting summarize latest --format json
 
 # Save to file
 voxtype meeting summarize latest --output summary.md
+
+# Write a new one after naming speakers or moving lines
+voxtype meeting summarize latest --regenerate
 ```
 
-Summarization requires a configured backend. See [Summarization Settings](#summarization-settings) below.
+The summary is saved with the meeting: `summary.md` in the meeting folder, `metadata.json`, and the meeting index, so it survives a restart. Running `summarize` again prints the saved summary; `--regenerate` writes a new one. Your notes go in as guidance, so the summary expands on what you wrote.
 
-The summary includes:
-- A brief overview of the meeting
-- Key discussion points
-- Action items (with assignees when mentioned)
-- Decisions made
+The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent) unless `[meeting.summary] backend` is `"local"` or `"remote"`, which keep the older Ollama and API summarizers.
+
+**Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
+
+### The Meeting Assistant and Consent
+
+`ask` and summaries go through your own coding agent, run headless with every tool switched off: it gets the transcript as text and returns text. It never gets a shell, file access or network tools in this path. Which agent:
+
+1. `[meeting.assistant] agent` in config.
+2. Otherwise the Omarchy default agent (`omarchy-default-agent`), when that command exists. Voxtype works the same without Omarchy.
+3. Otherwise a supported agent CLI found on PATH: Claude Code or Pi. With both found and neither allowed yet, the consent prompt asks which to use.
+
+| Agent | Support |
+|-------|---------|
+| Claude Code (`claude`) | Supported, no tools: `claude -p --tools "" --strict-mcp-config ...` |
+| Codex (`codex`) | Supported when named in config or as the Omarchy default, and only with bubblewrap (`bwrap`) installed: `codex exec` with its shell and app tools disabled and a read-only sandbox, run inside a bwrap jail. Its command tool cannot be switched off, so the jail is what keeps it away from your files: it sees `/usr`, the codex install, a few `/etc` files for DNS and TLS, and `~/.codex/auth.json` read-only, and nothing else from your home. It is never picked from PATH on its own |
+| Pi (`pi`) | Supported, no tools: `pi --print --no-tools --no-mcp --no-extensions --no-skills --no-context-files --no-session ...`, with the prompt attached as a file. Its answer arrives whole rather than streaming |
+| OpenCode (`opencode`) | Not supported: `opencode run` has no flag that turns its tools off, and its agents allow shell commands and web fetches, so even a filesystem jail could not keep a transcript from leaving the machine |
+| Hermes (`hermes`) | Not supported: its one-shot mode loads tools and auto-approves them, with no documented way to turn them all off |
+
+The first time transcripts would go to an agent, voxtype asks once ("Send to Claude / Use a local model / Not now") and remembers the answer per agent. Without a terminal to ask on, `ask` and `summarize` refuse with a message naming the command that allows it:
+
+```bash
+voxtype meeting assistant status          # which agent, what was found, consent
+voxtype meeting assistant allow claude    # allow transcripts to go to Claude
+voxtype meeting assistant revoke claude   # stop
+voxtype meeting assistant status --json   # for the meeting view and Settings panel
+```
+
+With no agent found, or with `local_only = true` or `--local`, answers and summaries come from the local Ollama model in `[meeting.summary]`.
 
 ### Deleting Meetings
 
@@ -345,6 +435,116 @@ voxtype meeting delete <meeting-id> --force
 ```
 
 Permanently deletes the meeting record, transcript, and any associated audio files. The `--force` flag is required to confirm deletion.
+
+---
+
+## Live Meeting View
+
+The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
+
+The header shows the meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. Below it are four tabs:
+
+- **Transcript**: one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up; **Jump to latest** takes you back.
+  - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
+  - Click the speaker name on a line to move just that line: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign`; if it is refused, the line goes back and the error is shown.
+  - Hover a line for **Add note** (`voxtype meeting annotate`): a note, a **Highlight**, or both. Lines with either get a marker in the margin.
+- **Notes**: your notes for the meeting. They save as you type and go into the summary as guidance.
+- **Ask**: ask about what has been said, or use a quick question: "Last 5 minutes", "What did *the last remote speaker* just say?", "Action items so far". Answers stream in, say which agent gave them, and cite times like [1:58] that jump to that line.
+- **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing…" while it is written, and **Regenerate** after you fix speakers or lines.
+
+Ask and Summary show the agent in use ("Claude", or "Local (llama3.2)"); click it to pick another agent, switch to **Local model only**, or (in Omarchy) open the settings. The first time an agent is needed the view asks whether to send meeting transcripts to it, with **Use a local model instead** and **Not now**.
+
+Between updates the view says "Listening…": lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word.
+
+When the meeting ends its transcript stays on screen marked **Ended**, with its length and end time, so you can still fix lines, name speakers, take notes and ask questions after the call. It stays until a new meeting starts (**Start meeting** is offered there too), you go **‹ Meetings** back to the list, or you close the view.
+
+With no meeting in progress the view lists your recent meetings, newest first: title, date and time, length, how many speakers, and a **Summary** badge on those that have one, under **Start meeting** and an optional title. Pick one to open it the same way as an ended meeting, with its transcript, speakers and summary, and fix it the same way. A meeting with no summary yet has **Summarize** on its Summary tab. The list shows 50 meetings at first; **Show older meetings** loads more. A meeting that starts while you are reading an old one takes over the view, and once it ends it is at the top of the list.
+
+Open it yourself, in whichever shell is running:
+
+```bash
+voxtype meeting view                      # the current or last meeting
+voxtype meeting view latest --tab summary
+voxtype meeting view --ask last-5m --no-open   # answer arrives as a notification
+```
+
+In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
+
+An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
+
+```toml
+[meeting.assistant]
+open_command = "voxtype meeting view"
+```
+
+To stop it opening on its own:
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
+The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#live-transcript-and-status-meetingsock). It does not open over an open Voxtype Settings panel.
+
+---
+
+## Meeting Detection
+
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?" with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
+
+Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
+
+```toml
+[meeting]
+enabled = true
+
+[meeting.detect]
+enabled = true          # unset: on for Omarchy, off elsewhere
+auto_record_apps = []   # e.g. ["Zoom"] to record Zoom calls without asking
+debounce_secs = 5
+```
+
+The setting is read when the daemon starts, so restart it after changing it.
+
+### How calls are recognized
+
+- **The microphone.** A call app opening a PipeWire capture stream is the main signal. Native clients (Zoom, `teams-for-linux`) count on that alone.
+- **The window title.** A browser opens the microphone for many things, so a browser's stream only counts when a window title confirms a call: "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web. Titles come from Hyprland; on other compositors browser calls are not detected.
+- **Voxtype's own capture never counts**, nor do other dictation apps or the camera-effects virtual microphone.
+
+### When it prompts
+
+- Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt.
+- Not while a meeting is already recording.
+- Not while you are dictating: the prompt waits until dictation ends.
+- When the call app releases the microphone while a meeting is recording, a second notification offers **Stop meeting**. Voxtype never stops a meeting on its own.
+
+Detection never records by itself, except for apps you list in `auto_record_apps`.
+
+### Checking what it sees
+
+```bash
+# Read the current state once and print what would be prompted and why
+voxtype meeting suggest --dry-run
+
+# Keep watching and print each decision as calls start and end
+voxtype meeting suggest --dry-run --watch
+```
+
+Neither shows a notification or starts anything. Example output during a Meet call in Chromium:
+
+```text
+Meeting detection in the daemon: on (default on Omarchy)
+windows: 4 from Hyprland
+mic streams: 3
+  ignored mic stream 105 (PipeWire ALSA [hex]): another dictation app
+  ignored mic stream 129 (Camera Effects): camera-effects virtual mic
+evidence: Chromium has the mic (stream 211) and window "Meet - abc-defg-hij - Chromium" matches
+would prompt: Record "Meet - abc-defg-hij"? (Google Meet)
+```
+
+Without `--dry-run`, `voxtype meeting suggest` runs the detector in the foreground with real prompts. It refuses while the daemon is already prompting.
+
+To add another call service, see `apps` under [`[meeting.detect]`](CONFIGURATION.md#meetingdetect).
 
 ---
 
@@ -381,6 +581,10 @@ post_meeting_timeout_secs = 300
 
 # Maximum meeting duration in minutes (default: 180, 0 = unlimited)
 max_duration_mins = 180
+
+# Open the live meeting view in the Omarchy shell when a meeting starts
+# (default: true; no effect on other desktops)
+show_view_on_start = true
 ```
 
 ### Audio Settings
@@ -463,6 +667,52 @@ timeout_secs = 120
 4. Run `voxtype meeting summarize latest`
 
 Ollama runs entirely on your machine. No transcript data leaves your computer. Any Ollama-compatible model works, but `llama3.2` is a good default for meeting summarization.
+
+`backend = "disabled"`, the default, does not turn summaries off for `meeting summarize`: it uses the meeting assistant. `auto` controls the summary at stop:
+
+```toml
+[meeting.summary]
+# Summarize each meeting when it stops. Unset: on once an agent is allowed,
+# off otherwise.
+# auto = true
+```
+
+### Assistant Settings
+
+```toml
+[meeting.assistant]
+# Agent for ask and summaries: "claude", "codex" or "pi".
+# Unset: the Omarchy default agent, then claude or pi found on PATH.
+# agent = "claude"
+
+# Never send transcripts to an agent; use the local Ollama model.
+local_only = false
+
+# Seconds to wait for an answer or a summary (default: 180)
+timeout_secs = 180
+
+# Transcript characters sent verbatim (default: 100000). Longer meetings send
+# a summary of the earlier part plus the most recent lines.
+max_transcript_chars = 100000
+
+# Command the Open action of an `ask --notify` notification runs, through
+# sh -c, with VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID set.
+# Unset: open the meeting view on its Ask tab. "": no Open action.
+# open_command = "..."
+```
+
+---
+
+## Privacy: Where Transcripts Go
+
+Recording and transcription stay on your machine. The assistant is the one part of meeting mode that can send a transcript elsewhere:
+
+- **An agent** (`claude`, `codex`) sends the prompt to whichever account that CLI is signed in to, usually the vendor's cloud service, under that account's terms. That prompt holds the meeting title, date, speaker names, the transcript (or the part of it that fits, plus a summary of the rest), your notes and annotations, and your question. Nothing goes to an agent until you allow it for that agent, and `voxtype meeting assistant revoke <agent>` stops it.
+- **The local model** (Ollama at `ollama_url`, `localhost` by default) keeps everything on your machine. `local_only = true` makes it the only option.
+- The agent runs in an empty temporary directory with its tools off, so it does not read your files or project instructions, and its session is not saved (`--no-session-persistence` for Claude, `--ephemeral` for Codex). The prompt reaches it through a file in a private temporary directory that is removed when the agent exits.
+- Codex keeps a command tool that cannot be turned off, and a transcript is untrusted text: anyone on the call can say something meant for the model. So codex runs in a bubblewrap jail where your home holds nothing but its `auth.json` (read-only), and without `bwrap` voxtype does not use codex at all.
+- Consent is stored in `$XDG_STATE_HOME/voxtype/assistant-consent.json` (default `~/.local/state/voxtype/`).
+- Answers are stored in the meeting folder (`asks.jsonl`, `summary.md`), next to the transcript, and deleted with it.
 
 ---
 

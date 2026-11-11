@@ -122,8 +122,22 @@ voxtype meeting status --json
 # {"active": true, "status": "recording", "meeting_id": "b6b2e5b2-..."}
 
 voxtype meeting show latest --json     # the full MeetingData (metadata + transcript)
-voxtype meeting list --json            # an array of MeetingMetadata
+voxtype meeting list --json            # an array of MeetingMetadata, plus two fields
 ```
+
+Each `meeting list --json` entry is the meeting's metadata with two more
+fields, read from the meeting index rather than each transcript, so a list
+of many meetings stays fast:
+
+- `has_summary` (bool): a summary is saved (`meeting summarize`, or the
+  summary at stop).
+- `speaker_count` (number): distinct speakers as the transcript displays
+  them, with labels and moved lines applied; speakers given the same name
+  count once, and a speaker whose only lines are empty does not count. It is
+  refreshed whenever the transcript is saved, so it follows labels and moves
+  made during or after the meeting. A meeting with no transcript yet has 0.
+
+A meeting started with `--url` has `"url"` in its metadata; the key is absent otherwise. Something that starts meetings for a calendar event (a detection prompt, a calendar plugin) can pass `--url` with `--title`, and read the link back from `metadata.url`.
 
 `show`/`list` JSON is the same serde shape written to `metadata.json` and
 `transcript.json` on disk (snake_case), not the camelCase `meeting export -f
@@ -205,8 +219,91 @@ state. It is sent whether or not a meeting is recording, and not at all
 while the daemon is down; poll `meeting play --status --json` if you need
 certainty.
 
-`speakers` (live speaker naming) and `summary` (auto-generated meeting
-summary) events are planned for a later release and are not emitted yet.
+#### Summary at stop: `summarizing` and `summary_ready`
+
+When a meeting stops and auto-summary is on, the daemon summarizes it in the
+background after the transcript is saved. These events name the meeting they
+are about, because by then the daemon is already `idle` and a new meeting may
+have started. They do not change the `hello` snapshot.
+
+```json
+{"event": "status", "status": "summarizing", "meeting_id": "..."}
+{"event": "summary_ready", "meeting_id": "...", "agent": "claude", "agent_name": "Claude", "path": "/home/me/.local/share/voxtype/meetings/2026-11-11-sync/summary.md", "summary": {"summary": "...", "key_points": [], "decisions": [], "action_items": [{"description": "...", "assignee": "Steve", "completed": false}], "chapters": [{"start_ms": 41000, "title": "..."}], "generated_at": "...", "model": "claude"}}
+{"event": "error", "message": "Summary failed: ...", "meeting_id": "...", "code": "consent_required"}
+```
+
+A summary that fails ends with the `error` event instead of `summary_ready`;
+`code` is one of `consent_required`, `agent_unavailable`, `agent_failed`,
+`timeout`, `local_failed`, `no_backend`, `empty_transcript`, `storage`,
+`parse`. A meeting with auto-summary off, or with no transcript, produces
+neither event. `agent` is `claude`, `codex`, `local:<model>`, or `ollama` /
+`remote` for the older summarizers. The saved summary is also in
+`voxtype meeting show <id> --json` under `metadata.summary`.
+
+`speakers` (live speaker naming) events are planned for a later release and
+are not emitted yet.
+
+### Asking a meeting: `meeting ask --json`
+
+`voxtype meeting ask <id|latest> "<question>" --json` prints one JSON object
+per line:
+
+```json
+{"event": "start", "meeting_id": "...", "agent": "claude", "agent_name": "Claude", "question": "...", "last_secs": 300}
+{"event": "delta", "text": "Steve said "}
+{"event": "delta", "text": "we ship Friday [00:41]."}
+{"event": "answer", "meeting_id": "...", "id": "...", "time": "...", "question": "...", "answer": "...", "agent": "claude", "agent_name": "Claude", "citations": [{"ts": "00:41", "ms": 41000}], "last_secs": 300}
+```
+
+or, on failure, `{"event": "error", "code": "...", "message": "..."}` with
+exit status 1 (`code` as above). `last_secs` is present only with `--last`.
+The `answer` object, without `event` and `meeting_id`, is the line saved to
+the meeting's `asks.jsonl` and listed under `asks` in `meeting show --json`.
+`--notify` additionally shows the answer as a notification whose Open action
+runs `voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask` through the same
+binary that answered (or `[meeting.assistant] open_command`, with
+`VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` set; an empty `open_command` drops
+the action). The command waits for the notification to be answered, up to 15
+minutes. A view host that wants to scroll to the answer reads
+`VOXTYPE_ASK_ID` through a custom `open_command`.
+
+### Assistant state: `meeting assistant status --json`
+
+What a UI needs for an agent chip and a consent dialog:
+
+```json
+{
+  "agent": "claude", "agent_name": "Claude", "agent_path": "/usr/bin/claude",
+  "source": "omarchy",
+  "consent": false,
+  "choice_required": false,
+  "problem": null,
+  "omarchy_default": "claude",
+  "local_only": false,
+  "local": {"model": "llama3.2", "url": "http://localhost:11434", "name": "Local (llama3.2)"},
+  "backend": "none", "backend_name": null, "blocked": "consent_required",
+  "auto_summary": false, "auto_summary_configured": null,
+  "consent_file": "/home/me/.local/state/voxtype/assistant-consent.json",
+  "candidates": [
+    {"id": "claude", "name": "Claude", "path": "/usr/bin/claude", "found": true, "supported": true, "tool_less": true, "consent": false, "sources": ["omarchy", "path"]},
+    {"id": "codex", "name": "Codex", "path": "/usr/bin/codex", "found": true, "supported": true, "tool_less": false, "sandbox": "bwrap", "consent": false, "note": "its command tool cannot be turned off, so it runs in a bwrap jail that sees no files from your home but its auth.json", "sources": ["path"]}
+  ]
+}
+```
+
+- `source` is `config`, `omarchy`, `path` or `none`.
+- `sandbox` is `"bwrap"` for codex, which runs in a filesystem jail because its
+  command tool cannot be turned off, and `null` for claude, which runs with no
+  tools. Without `bwrap`, codex is listed with `supported: false` and the
+  reason in `note`.
+- `backend` is what `ask` would use now: `agent`, `local`, or `none` with the
+  reason in `blocked`. `backend_name` is the chip label ("Claude",
+  "Local (llama3.2)").
+- `choice_required` is true when several agents could answer and none is
+  allowed yet: offer the `candidates` that are `supported` and `found`.
+- The consent dialog's three answers map to `voxtype meeting assistant allow
+  <id>`, `voxtype config set meeting.assistant.local_only true` (or `ask
+  --local` for one question), and doing nothing.
 
 ### Playing meeting audio: `meeting play`
 
@@ -308,11 +405,13 @@ This is a stable contract:
 
 The fields:
 
+- `url`: the call's link, from `voxtype meeting start --url`.
 - `status`: `active`, `paused`, `completed` or `cancelled`. A meeting left
   `active` by a crash becomes `completed` the next time the daemon starts.
 - `started_at`, `ended_at`: RFC 3339, UTC. `duration_secs` is wall-clock
   time from start to stop.
-- `engine`, `model`: the transcription engine and its model.
+- `engine`, `model`: the transcription engine and model the meeting used,
+  including a `meeting start --engine` or `--model` override.
   `voxtype_version` is the version that recorded the meeting.
 - `speakers`: each speaker in the transcript, sorted by `id`. `id` is the
   speaker as the diarizer named it (the `speaker_id` in `transcript.json`, or

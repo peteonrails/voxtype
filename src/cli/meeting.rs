@@ -9,10 +9,41 @@ use super::DIARIZATION_BACKENDS;
 #[derive(Subcommand)]
 pub enum MeetingAction {
     /// Start a new meeting transcription
+    ///
+    /// Without --engine or --model the meeting transcribes with dictation's
+    /// engine and model, reusing the model dictation already has loaded so
+    /// the meeting starts at once. A different engine, model or language
+    /// loads its own copy. An engine this binary lacks, or a model that is
+    /// not installed, is refused before the meeting starts.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting start --title Standup\n  \
+        voxtype meeting start --title 'Planning' --url https://meet.example.com/abc-defg-hij\n  \
+        voxtype meeting start --model large-v3-turbo --language de\n  \
+        voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf")]
     Start {
         /// Meeting title (optional)
         #[arg(long, short)]
         title: Option<String>,
+
+        /// Transcription engine for this meeting (default: the configured
+        /// engine). Without --model it uses that engine's configured model.
+        #[arg(long, env = "VOXTYPE_MEETING_ENGINE")]
+        engine: Option<String>,
+
+        /// Model for this meeting, as `voxtype info models` lists it. Its
+        /// engine is implied, so --engine is optional.
+        #[arg(long, env = "VOXTYPE_MEETING_MODEL")]
+        model: Option<String>,
+
+        /// Language hint for this meeting, for engines and checkpoints that
+        /// take one (multilingual Whisper, Cohere)
+        #[arg(long, env = "VOXTYPE_MEETING_LANGUAGE")]
+        language: Option<String>,
+
+        /// Link to the call, stored with the meeting and shown by
+        /// `meeting show` and exports
+        #[arg(long)]
+        url: Option<String>,
 
         /// Diarization backend override for this meeting only.
         ///
@@ -119,6 +150,31 @@ pub enum MeetingAction {
         /// Human-readable label to assign
         label: String,
     },
+    /// Check for a call and say whether voxtype would offer to record it
+    ///
+    /// Meeting detection watches for a call app (Zoom, Teams, or Google Meet
+    /// and Teams in a browser) opening the microphone and offers to record
+    /// it with a notification. The daemon does this when `[meeting.detect]`
+    /// is on; this command shows its reasoning.
+    ///
+    /// With --dry-run, reads the PipeWire and Hyprland state once and prints
+    /// what would be prompted and why. Add --watch to keep running and print
+    /// each decision as calls start and end. Without --dry-run, runs the
+    /// detector in the foreground with real prompts (refused while the
+    /// daemon is already prompting).
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting suggest --dry-run\n  \
+        voxtype meeting suggest --dry-run --watch")]
+    Suggest {
+        /// Print decisions only; never show a notification or start a meeting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Keep running and print each decision
+        #[arg(long)]
+        watch: bool,
+    },
+
     /// Move one transcript line to another speaker
     ///
     /// For a line the diarizer gave to the wrong person. SPEAKER matches an
@@ -257,10 +313,65 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Open the live meeting view
+    ///
+    /// Asks whichever meeting view is running to open: the Voxtype plugin in
+    /// the Omarchy shell, or voxtype's standalone Quickshell shell (`voxtype
+    /// setup quickshell`). Both read the request this writes to
+    /// $XDG_RUNTIME_DIR/voxtype/meeting-view.request, so this command does not
+    /// need to know which one you use. An Ask notification's Open action runs
+    /// it. Nothing opens if neither is running.
+    ///
+    /// With a meeting ID other than the current one, the view opens on that
+    /// meeting's saved transcript. --ask asks one of the view's quick
+    /// questions; with --no-open the answer arrives as a notification instead.
+    ///
+    /// As `[meeting.assistant] open_command`, plain `voxtype meeting view`
+    /// is enough: the notification sets VOXTYPE_MEETING_ID and
+    /// VOXTYPE_ASK_ID, and the view opens on that answer.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting view\n  \
+        voxtype meeting view latest --tab summary\n  \
+        voxtype meeting view --ask last-5m --no-open")]
+    View {
+        /// Meeting ID (or "latest"); default: the current or last meeting
+        #[arg(env = "VOXTYPE_MEETING_ID")]
+        meeting_id: Option<String>,
+
+        /// A saved answer to show on the Ask tab
+        #[arg(long, env = "VOXTYPE_ASK_ID")]
+        ask_id: Option<String>,
+
+        /// Tab to open on
+        #[arg(long, value_parser = ["transcript", "notes", "ask", "summary"])]
+        tab: Option<String>,
+
+        /// Ask a quick question: the last five minutes, what the last remote
+        /// speaker just said, or the action items so far
+        #[arg(long, value_parser = ["last-5m", "last-speaker", "actions"])]
+        ask: Option<String>,
+
+        /// Do not open the view (with --ask, the answer is a notification)
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
-    /// Uses Ollama or a remote API to generate a summary with
-    /// key points, action items, and decisions.
+    /// Writes an overview, key points, decisions, action items with owners
+    /// and chapters with timestamps, saves it with the meeting (summary.md,
+    /// metadata.json and the index) and prints it. A meeting that already
+    /// has a summary prints the saved one; --regenerate writes a new one,
+    /// for example after naming speakers or moving lines.
+    ///
+    /// The summary comes from the meeting assistant (your coding agent, run
+    /// with no tools, or the local Ollama model), unless
+    /// [meeting.summary] backend is "local" or "remote", which keep the
+    /// older Ollama and API summarizers.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting summarize latest\n  \
+        voxtype meeting summarize latest --regenerate\n  \
+        voxtype meeting summarize latest --local --format json")]
     Summarize {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,
@@ -272,6 +383,107 @@ pub enum MeetingAction {
         /// Output file path (default: stdout)
         #[arg(long, short)]
         output: Option<std::path::PathBuf>,
+
+        /// Write a new summary even if the meeting already has one
+        #[arg(long)]
+        regenerate: bool,
+
+        /// Agent to use for this summary (claude, codex or pi)
+        #[arg(long, value_name = "AGENT", env = "VOXTYPE_MEETING_AGENT")]
+        agent: Option<String>,
+
+        /// Use the local model (Ollama) instead of an agent
+        #[arg(long, conflicts_with = "agent")]
+        local: bool,
+    },
+    /// Ask a question about a meeting, during or after it
+    ///
+    /// Sends the transcript, with speaker names as you labelled them, your
+    /// notes and the question to the meeting assistant and streams the
+    /// answer. Answers cite the [mm:ss] of the lines they rely on. Each
+    /// question and answer is saved to the meeting's asks.jsonl.
+    ///
+    /// The assistant is your coding agent run headless with no tools:
+    /// [meeting.assistant] agent, else the Omarchy default agent, else
+    /// claude or pi found on PATH. Its first use asks once whether transcripts
+    /// may go to that agent (see `voxtype meeting assistant`). --local, or
+    /// [meeting.assistant] local_only = true, answers with the local Ollama
+    /// model instead.
+    ///
+    /// --json prints one JSON object per line: {"event":"start",...},
+    /// {"event":"delta","text":...} as the answer streams, then
+    /// {"event":"answer",...} with the saved record, or {"event":"error",...}.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting ask latest \"What did Steve just say?\" --last 2m\n  \
+        voxtype meeting ask latest \"Summarize the last few minutes\" --last 5m\n  \
+        voxtype meeting ask latest \"What are the action items so far?\"\n  \
+        voxtype meeting ask latest \"Who owns the release?\" --notify\n  \
+        voxtype meeting ask 3f2a \"What did we decide?\" --local --json")]
+    Ask {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// The question
+        question: String,
+
+        /// Only consider the end of the transcript: 5m, 90s, 1h, 2m30s,
+        /// or a number of minutes
+        #[arg(long, value_name = "DURATION")]
+        last: Option<String>,
+
+        /// Print JSON events (one per line) instead of plain text
+        #[arg(long)]
+        json: bool,
+
+        /// Also show the answer as a desktop notification. Its Open action
+        /// raises the meeting view on the Ask tab, or runs
+        /// [meeting.assistant] open_command when that is set
+        #[arg(long)]
+        notify: bool,
+
+        /// Agent to use for this question (claude, codex or pi)
+        #[arg(long, value_name = "AGENT", env = "VOXTYPE_MEETING_AGENT")]
+        agent: Option<String>,
+
+        /// Use the local model (Ollama) instead of an agent
+        #[arg(long, conflicts_with = "agent")]
+        local: bool,
+    },
+    /// Choose and allow the agent that answers questions and writes summaries
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting assistant status\n  \
+        voxtype meeting assistant status --json\n  \
+        voxtype meeting assistant allow claude\n  \
+        voxtype meeting assistant revoke claude")]
+    Assistant {
+        #[command(subcommand)]
+        action: AssistantAction,
+    },
+}
+
+/// `voxtype meeting assistant` actions
+#[derive(Subcommand)]
+pub enum AssistantAction {
+    /// Allow meeting transcripts to go to an agent
+    ///
+    /// The agent sends what it is given to the account it is signed in to,
+    /// usually a cloud service. voxtype asks once per agent; this records
+    /// the answer. It also turns on summaries at stop unless
+    /// [meeting.summary] auto = false.
+    Allow {
+        /// Agent: claude, codex or pi
+        agent: String,
+    },
+    /// Stop sending meeting transcripts to an agent
+    Revoke {
+        /// Agent: claude, codex or pi
+        agent: String,
+    },
+    /// Show which agent answers, what was found, and consent per agent
+    Status {
+        /// Output as JSON (for the meeting view and Settings panel)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -320,12 +532,66 @@ mod tests {
         ]);
         match cli.command {
             Some(Commands::Meeting {
-                action: MeetingAction::Start { diarization, title },
+                action:
+                    MeetingAction::Start {
+                        diarization, title, ..
+                    },
             }) => {
                 assert_eq!(diarization.as_deref(), Some("ml"));
                 assert_eq!(title.as_deref(), Some("standup"));
             }
             _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn meeting_start_takes_engine_model_language_and_url() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "meeting",
+            "start",
+            "--title",
+            "Planning",
+            "--engine",
+            "parakeet",
+            "--model",
+            "parakeet-ultra-Q8_0.gguf",
+            "--language",
+            "en",
+            "--url",
+            "https://meet.example.com/abc",
+        ]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action:
+                    MeetingAction::Start {
+                        title,
+                        engine,
+                        model,
+                        language,
+                        url,
+                        ..
+                    },
+            }) => {
+                assert_eq!(title.as_deref(), Some("Planning"));
+                assert_eq!(engine.as_deref(), Some("parakeet"));
+                assert_eq!(model.as_deref(), Some("parakeet-ultra-Q8_0.gguf"));
+                assert_eq!(language.as_deref(), Some("en"));
+                assert_eq!(url.as_deref(), Some("https://meet.example.com/abc"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    /// The detection prompt's Record runs `meeting start --title T`, and the
+    /// tray's Start Meeting runs it with no options: both still parse.
+    #[test]
+    fn meeting_start_still_takes_title_alone_and_nothing() {
+        for args in [
+            &["voxtype", "meeting", "start", "--title", "Standup"][..],
+            &["voxtype", "meeting", "start"][..],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }
     }
 
@@ -351,7 +617,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "meeting", "start"]);
         match cli.command {
             Some(Commands::Meeting {
-                action: MeetingAction::Start { diarization, title },
+                action:
+                    MeetingAction::Start {
+                        diarization, title, ..
+                    },
             }) => {
                 assert_eq!(diarization, None);
                 assert_eq!(title, None);

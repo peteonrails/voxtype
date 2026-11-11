@@ -3719,10 +3719,18 @@ Meeting mode configuration. Meeting mode provides continuous transcription with 
 ### enabled
 
 **Type:** Boolean
-**Default:** `false`
+**Default:** `false` for a config without the key; `true` in the config `voxtype setup` writes for a new install
 **Required:** No
 
-Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available.
+Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available. Changing it needs a daemon restart.
+
+### offer_enable
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+While meeting mode is off, the tray shows **Turn on meetings...**, and a notification offers Turn on, Not now, and "No, don't ask again" at most once a day on daemon start. "No, don't ask again" is remembered in `~/.local/state/voxtype/meeting_offer.json`. Set `offer_enable = false` to turn the offer off entirely. Nothing is ever turned on without your click.
 
 ### chunk_duration_secs
 
@@ -3783,6 +3791,18 @@ Seconds before `post_meeting_command` is killed, along with anything it started.
 **Required:** No
 
 Maximum meeting duration in minutes. Set to `0` for unlimited.
+
+### show_view_on_start
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view belongs to the Voxtype plugin for the Omarchy shell, so this does nothing on other desktops. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
 
 ---
 
@@ -3901,13 +3921,16 @@ AI summarization settings for meeting transcripts.
 
 ### backend
 
-**Type:** String (`"local"`, `"remote"`, `"disabled"`)
+**Type:** String (`"agent"`, `"local"`, `"remote"`, `"disabled"`)
 **Default:** `"disabled"`
 **Required:** No
 
-- `"local"` - Use Ollama for local summarization.
-- `"remote"` - Use a remote API.
-- `"disabled"` - No summarization.
+Which summarizer `voxtype meeting summarize` and the summary at stop use.
+
+- `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
+- `"local"` - The older Ollama summarizer (no chapters).
+- `"remote"` - A remote API.
+- `"disabled"` - The default. Behaves like `"agent"` for `meeting summarize`; summaries at stop follow `auto`.
 
 ### ollama_url
 
@@ -3927,7 +3950,152 @@ AI summarization settings for meeting transcripts.
 **Default:** `120`
 **Required:** No
 
-Timeout for summarization requests.
+Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant uses `[meeting.assistant] timeout_secs`.
+
+### auto
+
+**Type:** Boolean
+**Default:** unset
+**Required:** No
+
+Summarize each meeting when it stops, in the background, after the transcript is saved. Unset means on once an agent has been allowed (`voxtype meeting assistant allow <agent>`) and off otherwise, so nothing changes for anyone who has not set up the assistant. `true` also summarizes with the local model or the `"local"`/`"remote"` summarizers; `false` leaves summaries to `voxtype meeting summarize`.
+
+```toml
+[meeting.summary]
+auto = false
+```
+
+---
+
+## [meeting.assistant]
+
+The meeting assistant answers `voxtype meeting ask` and writes summaries, through your own coding agent run headless with every tool off, or the local Ollama model from `[meeting.summary]`. Transcripts go to an agent only after you allow it once per agent. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) and its privacy section.
+
+### agent
+
+**Type:** String (`"claude"`, `"codex"`, `"pi"`)
+**Default:** unset
+**Required:** No
+
+The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` or `pi` found on PATH. OpenCode and Hermes are not supported: neither can be run with its tools off. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
+
+**CLI override:** `--agent` on `meeting ask` and `meeting summarize`
+**Environment variable:** `VOXTYPE_MEETING_AGENT`
+
+### local_only
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Never send transcripts to an agent; answer and summarize with the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
+
+**CLI override:** `--local` on `meeting ask` and `meeting summarize`
+
+### timeout_secs
+
+**Type:** Integer
+**Default:** `180`
+**Required:** No
+
+Seconds to wait for an answer or a summary before giving up.
+
+### max_transcript_chars
+
+**Type:** Integer
+**Default:** `100000`
+**Required:** No
+
+Transcript characters sent verbatim. A longer meeting is sent as a running summary of its earlier part plus as many recent lines as fit in three quarters of this budget.
+
+### open_command
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Command run, through `sh -c`, when the Open action of a `meeting ask --notify` notification is clicked. `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` are set to the meeting and the answer's `id` in `asks.jsonl`.
+
+Unset, Open raises the meeting view on its Ask tab: `voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask`, run with the same voxtype binary that answered rather than whichever `voxtype` is first on PATH. A binary without the `meeting view` command shows no Open action. An empty string (`open_command = ""`, set in the config file) turns the Open action off.
+
+```toml
+[meeting.assistant]
+agent = "claude"
+local_only = false
+timeout_secs = 180
+max_transcript_chars = 100000
+```
+
+---
+
+## [meeting.detect]
+
+Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browser) and offers to record it with a notification. Detection only suggests: nothing is recorded until you press Record, except for apps in `auto_record_apps`. It runs inside the daemon and only while `[meeting] enabled = true`. See [Meeting detection](MEETING_MODE.md#meeting-detection) for how calls are recognized.
+
+```toml
+[meeting.detect]
+enabled = true
+auto_record_apps = []
+debounce_secs = 5
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** unset (on for Omarchy, off elsewhere)
+**Required:** No
+
+Turn call detection on or off. When unset, detection is on when Omarchy is detected and off on every other desktop, so upgrading changes nothing outside Omarchy. Changing it needs a daemon restart.
+
+### auto_record_apps
+
+**Type:** Array of strings, or one comma-separated string
+**Default:** `[]`
+**Required:** No
+
+Call apps, by the `name` in `apps` (for example `"Zoom"` or `"Google Meet"`), whose calls are recorded without asking. Matching ignores case.
+
+```toml
+auto_record_apps = ["Zoom"]
+```
+
+### debounce_secs
+
+**Type:** Integer
+**Default:** `5`
+**Required:** No
+
+How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+
+### apps
+
+**Type:** Array of tables
+**Default:** Zoom, Microsoft Teams, Google Meet, Microsoft Teams (web), Zoom (web)
+**Required:** No
+
+The call apps to watch for. Setting `apps` replaces the built-in list, so copy the entries you want to keep. Each entry has:
+
+- `name` - shown in the prompt and used by `auto_record_apps`
+- `streams` - case-insensitive substrings of a PipeWire capture stream's `application.name`, `application.process.binary` or `node.name`
+- `titles` - case-insensitive substrings of a window title that confirm a call. Leave empty for a native client whose mic use always means a call. Browsers need titles, because they open the mic for many things.
+
+```toml
+[[meeting.detect.apps]]
+name = "Zoom"
+streams = ["zoom"]
+
+[[meeting.detect.apps]]
+name = "Google Meet"
+streams = ["chromium", "chrome", "firefox", "brave"]
+titles = ["Meet - ", "Google Meet"]
+
+[[meeting.detect.apps]]
+name = "Jitsi"
+streams = ["chromium", "firefox"]
+titles = ["Jitsi Meet"]
+```
+
+Window titles come from Hyprland. On other compositors only apps with empty `titles` are detected.
 
 ---
 

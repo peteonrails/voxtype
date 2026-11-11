@@ -1,0 +1,217 @@
+[
+ {
+  "address": "0x55550001",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "chromium",
+  "title": "Pull requests \u00b7 example/project - Chromium",
+  "initialClass": "chromium",
+  "initialTitle": "Pull requests \u00b7 example/project - Chromium",
+  "pid": 42000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 1,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000001"
+ },
+ {
+  "address": "0x55550002",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "slack",
+  "title": "General - Example - Slack",
+  "initialClass": "slack",
+  "initialTitle": "General - Example - Slack",
+  "pid": 5000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 2,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000002"
+ },
+ {
+  "address": "0x55550003",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "foot",
+  "title": "~/src",
+  "initialClass": "foot",
+  "initialTitle": "~/src",
+  "pid": 6000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 3,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000003"
+ },
+ {
+  "address": "0x55550006",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "zoom",
+  "title": "Zoom Workplace",
+  "initialClass": "zoom",
+  "initialTitle": "Zoom Workplace",
+  "pid": 41000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 6,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000006"
+ },
+ {
+  "address": "0x55550007",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "zoom",
+  "title": "Zoom Meeting",
+  "initialClass": "zoom",
+  "initialTitle": "Zoom Meeting",
+  "pid": 41000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 7,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000007"
+ }
+]

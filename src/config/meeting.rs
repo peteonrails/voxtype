@@ -4,12 +4,34 @@ use serde::{Deserialize, Serialize};
 
 use super::default_true;
 
+/// Per-meeting choices given to `voxtype meeting start`. Unset fields keep
+/// the configuration's values. Travels from the CLI to the daemon as JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MeetingStartOptions {
+    /// Engine for this meeting's transcription (`whisper`, `parakeet`, ...)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Model for this meeting; its engine is implied when `engine` is unset
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Language hint for engines that take one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The call's link, stored with the meeting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// Meeting transcription configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingConfig {
     /// Enable meeting mode
     #[serde(default)]
     pub enabled: bool,
+
+    /// While meeting mode is off, offer to turn it on from the tray
+    #[serde(default = "default_true")]
+    pub offer_enable: bool,
 
     /// Duration of each audio chunk in seconds
     #[serde(default = "default_chunk_duration")]
@@ -39,6 +61,12 @@ pub struct MeetingConfig {
     #[serde(default = "default_max_duration")]
     pub max_duration_mins: u32,
 
+    /// Open the live meeting view when a meeting starts. Read by the Omarchy
+    /// plugin, which is the only frontend with such a view; elsewhere it does
+    /// nothing.
+    #[serde(default = "default_true")]
+    pub show_view_on_start: bool,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -50,6 +78,13 @@ pub struct MeetingConfig {
     /// Summarization configuration
     #[serde(default)]
     pub summary: MeetingSummaryConfig,
+
+    /// Call detection and the Record prompt
+    #[serde(default)]
+    pub detect: super::MeetingDetectConfig,
+    /// Meeting assistant: `meeting ask` and agent summaries
+    #[serde(default)]
+    pub assistant: MeetingAssistantConfig,
 }
 
 /// Meeting audio configuration for dual capture
@@ -240,6 +275,64 @@ pub struct MeetingSummaryConfig {
     /// Request timeout in seconds
     #[serde(default = "default_summary_timeout")]
     pub timeout_secs: u64,
+
+    /// Summarize each meeting when it stops. Unset means on once an agent
+    /// has been allowed (`voxtype meeting assistant allow <agent>`), off
+    /// otherwise.
+    #[serde(default)]
+    pub auto: Option<bool>,
+}
+
+/// Meeting assistant configuration: which coding agent answers `meeting ask`
+/// and writes summaries, run headless with no tools.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingAssistantConfig {
+    /// Agent to use: "claude", "codex" or "pi". Unset uses `omarchy-default-agent`
+    /// when that command exists, then a supported agent CLI found on PATH.
+    #[serde(default)]
+    pub agent: Option<String>,
+
+    /// Never send transcripts to an agent; answer and summarize with the
+    /// local model from `[meeting.summary]` (Ollama) instead.
+    #[serde(default)]
+    pub local_only: bool,
+
+    /// Seconds to wait for an answer or a summary.
+    #[serde(default = "default_assistant_timeout")]
+    pub timeout_secs: u64,
+
+    /// Transcript characters sent verbatim. A longer meeting sends a summary
+    /// of its earlier part plus as many recent lines as fit.
+    #[serde(default = "default_assistant_max_transcript_chars")]
+    pub max_transcript_chars: u64,
+
+    /// Command the "Open" action of an `ask --notify` notification runs,
+    /// through `sh -c`. VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID are set.
+    /// Unset opens the meeting view on its Ask tab
+    /// (`voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask`); an empty
+    /// string shows no Open action.
+    #[serde(default)]
+    pub open_command: Option<String>,
+}
+
+fn default_assistant_timeout() -> u64 {
+    180
+}
+
+fn default_assistant_max_transcript_chars() -> u64 {
+    100_000
+}
+
+impl Default for MeetingAssistantConfig {
+    fn default() -> Self {
+        Self {
+            agent: None,
+            local_only: false,
+            timeout_secs: default_assistant_timeout(),
+            max_transcript_chars: default_assistant_max_transcript_chars(),
+            open_command: None,
+        }
+    }
 }
 
 fn default_summary_backend() -> String {
@@ -267,6 +360,7 @@ impl Default for MeetingSummaryConfig {
             remote_endpoint: None,
             remote_api_key: None,
             timeout_secs: default_summary_timeout(),
+            auto: None,
         }
     }
 }
@@ -275,15 +369,19 @@ impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            offer_enable: true,
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,
             post_meeting_command: None,
             post_meeting_timeout_secs: default_post_meeting_timeout(),
             max_duration_mins: default_max_duration(),
+            show_view_on_start: true,
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
+            detect: super::MeetingDetectConfig::default(),
+            assistant: MeetingAssistantConfig::default(),
         }
     }
 }
@@ -303,6 +401,18 @@ mod tests {
         assert_eq!(config.max_duration_mins, 180);
         assert!(config.post_meeting_command.is_none());
         assert_eq!(config.post_meeting_timeout_secs, 300);
+        assert!(config.show_view_on_start);
+    }
+
+    #[test]
+    fn test_show_view_on_start_defaults_on_and_can_be_turned_off() {
+        // A config written before the key existed keeps the view opening.
+        let config: Config = toml::from_str("[meeting]\nenabled = true\n").unwrap();
+        assert!(config.meeting.show_view_on_start);
+
+        let config: Config =
+            toml::from_str("[meeting]\nenabled = true\nshow_view_on_start = false\n").unwrap();
+        assert!(!config.meeting.show_view_on_start);
     }
 
     #[test]
@@ -456,5 +566,35 @@ mod tests {
         assert_eq!(config.meeting.storage_path, "auto");
         assert_eq!(config.meeting.diarization.backend, "simple");
         assert_eq!(config.meeting.summary.backend, "disabled");
+        assert_eq!(config.meeting.summary.auto, None);
+        assert_eq!(config.meeting.assistant.agent, None);
+        assert!(!config.meeting.assistant.local_only);
+        assert_eq!(config.meeting.assistant.timeout_secs, 180);
+        assert_eq!(config.meeting.assistant.max_transcript_chars, 100_000);
+    }
+
+    #[test]
+    fn test_parse_meeting_assistant_config() {
+        let config: Config = toml::from_str(
+            r#"
+            [meeting.summary]
+            auto = false
+
+            [meeting.assistant]
+            agent = "codex"
+            local_only = true
+            timeout_secs = 30
+            max_transcript_chars = 5000
+            open_command = "true"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.meeting.summary.auto, Some(false));
+        let a = &config.meeting.assistant;
+        assert_eq!(a.agent.as_deref(), Some("codex"));
+        assert!(a.local_only);
+        assert_eq!(a.timeout_secs, 30);
+        assert_eq!(a.max_transcript_chars, 5000);
+        assert_eq!(a.open_command.as_deref(), Some("true"));
     }
 }

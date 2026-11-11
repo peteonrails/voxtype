@@ -234,11 +234,37 @@ impl MeetingStorage {
                 engine TEXT,
                 model TEXT,
                 diarization TEXT,
-                url TEXT,
                 voxtype_version TEXT
+            );
+
+            -- Figures `meeting list` shows without opening each transcript:
+            -- the number of speakers as displayed (labels and moves applied),
+            -- refreshed on every transcript save.
+            CREATE TABLE IF NOT EXISTS meeting_stats (
+                meeting_id TEXT PRIMARY KEY,
+                speaker_count INTEGER NOT NULL
+            );
+
+            -- The meeting's summary (MeetingSummary as JSON) and what wrote it.
+            CREATE TABLE IF NOT EXISTS meeting_summaries (
+                meeting_id TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL,
+                generated_by TEXT,
+                generated_at INTEGER NOT NULL
             );
             "#,
         )?;
+
+        // Columns added after the table first shipped. ALTER TABLE has no IF
+        // NOT EXISTS, so ask first; older binaries ignore the extra column.
+        let has_url = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('meetings') WHERE name = 'url'")?
+            .exists([])?;
+        if !has_url {
+            self.conn
+                .execute_batch("ALTER TABLE meetings ADD COLUMN url TEXT;")?;
+        }
         Ok(())
     }
 
@@ -251,8 +277,8 @@ impl MeetingStorage {
         // Insert into database
         self.conn.execute(
             r#"
-            INSERT INTO meetings (id, title, started_at, status, storage_path, audio_retained, model)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO meetings (id, title, started_at, status, storage_path, audio_retained, model, url)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
                 metadata.id.to_string(),
@@ -262,6 +288,7 @@ impl MeetingStorage {
                 meeting_dir.to_string_lossy().to_string(),
                 metadata.audio_retained as i32,
                 metadata.model,
+                metadata.url,
             ],
         )?;
 
@@ -285,7 +312,8 @@ impl MeetingStorage {
                 chunk_count = ?6,
                 audio_retained = ?7,
                 model = ?8,
-                synced_at = ?9
+                synced_at = ?9,
+                url = ?10
             WHERE id = ?1
             "#,
             params![
@@ -298,13 +326,23 @@ impl MeetingStorage {
                 metadata.audio_retained as i32,
                 metadata.model,
                 metadata.synced_at.map(|dt| dt.timestamp()),
+                metadata.url,
             ],
         )?;
 
         // Update metadata file if storage path exists
         if let Some(ref path) = metadata.storage_path {
             let metadata_path = path.join("metadata.json");
-            let json = serde_json::to_string_pretty(metadata)?;
+            // A caller holding metadata from before the summary was written
+            // must not drop it from the file.
+            let json = match metadata.summary {
+                None => {
+                    let mut with_summary = metadata.clone();
+                    with_summary.summary = self.get_summary(&metadata.id)?;
+                    serde_json::to_string_pretty(&with_summary)?
+                }
+                Some(_) => serde_json::to_string_pretty(metadata)?,
+            };
             std::fs::write(metadata_path, json)?;
             self.refresh_manifest(&metadata.id);
         }
@@ -346,7 +384,7 @@ impl MeetingStorage {
             .query_row(
                 r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -362,6 +400,7 @@ impl MeetingStorage {
                         storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                         audio_retained: row.get::<_, i32>(8)? != 0,
                         model: row.get(9)?,
+                        url: row.get(11)?,
                         summary: None,
                         synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
                     })
@@ -369,7 +408,53 @@ impl MeetingStorage {
             )
             .optional()?;
 
+        let mut result = result;
+        if let Some(ref mut metadata) = result {
+            metadata.summary = self.get_summary(id)?;
+        }
         Ok(result)
+    }
+
+    /// Store a meeting's summary in the index and in metadata.json.
+    pub fn save_summary(
+        &self,
+        meeting_id: &MeetingId,
+        summary: &crate::meeting::data::MeetingSummary,
+    ) -> Result<(), StorageError> {
+        let mut metadata = self
+            .get_meeting(meeting_id)?
+            .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO meeting_summaries
+                (meeting_id, summary_json, generated_by, generated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                meeting_id.to_string(),
+                serde_json::to_string(summary)?,
+                summary.model,
+                summary.generated_at.timestamp(),
+            ],
+        )?;
+        metadata.summary = Some(summary.clone());
+        self.update_meeting(&metadata)
+    }
+
+    /// The meeting's stored summary, if it has one.
+    pub fn get_summary(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<Option<crate::meeting::data::MeetingSummary>, StorageError> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT summary_json FROM meeting_summaries WHERE meeting_id = ?1",
+                params![meeting_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
     }
 
     /// List meetings with optional limit
@@ -377,7 +462,7 @@ impl MeetingStorage {
         let sql = if limit.is_some() {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings
                 ORDER BY started_at DESC
                 LIMIT ?1
@@ -385,7 +470,7 @@ impl MeetingStorage {
         } else {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings
                 ORDER BY started_at DESC
                 "#
@@ -404,6 +489,7 @@ impl MeetingStorage {
                 storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                 audio_retained: row.get::<_, i32>(8)? != 0,
                 model: row.get(9)?,
+                url: row.get(11)?,
                 summary: None,
                 synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
             })
@@ -418,6 +504,75 @@ impl MeetingStorage {
         };
 
         Ok(meetings)
+    }
+
+    /// Meetings for `meeting list --json`: each one's metadata plus whether
+    /// it has a summary and how many speakers it shows. Both come from the
+    /// index; a meeting saved before the speaker count was kept is counted
+    /// from its transcript once and remembered.
+    pub fn list_meeting_entries(
+        &self,
+        limit: Option<u32>,
+    ) -> Result<Vec<MeetingListEntry>, StorageError> {
+        let meetings = self.list_meetings(limit)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT m.id,
+                   EXISTS (SELECT 1 FROM meeting_summaries s WHERE s.meeting_id = m.id),
+                   st.speaker_count
+            FROM meetings m LEFT JOIN meeting_stats st ON st.meeting_id = m.id
+            "#,
+        )?;
+        let known: std::collections::HashMap<String, (bool, Option<u32>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, bool>(1)?, row.get::<_, Option<u32>>(2)?),
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut entries = Vec::with_capacity(meetings.len());
+        for metadata in meetings {
+            let (has_summary, count) = known
+                .get(&metadata.id.to_string())
+                .cloned()
+                .unwrap_or((false, None));
+            let speaker_count = match count {
+                Some(n) => n,
+                None => self.backfill_speaker_count(&metadata.id),
+            };
+            entries.push(MeetingListEntry {
+                metadata,
+                has_summary,
+                speaker_count,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Count a meeting's speakers from its transcript and remember it. A
+    /// meeting without a transcript yet has none and is not remembered.
+    fn backfill_speaker_count(&self, meeting_id: &MeetingId) -> u32 {
+        match self.load_transcript(meeting_id) {
+            Ok(transcript) => {
+                let _ = self.store_speaker_count(meeting_id, &transcript);
+                displayed_speaker_count(&transcript)
+            }
+            Err(_) => 0,
+        }
+    }
+
+    fn store_speaker_count(
+        &self,
+        meeting_id: &MeetingId,
+        transcript: &Transcript,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meeting_stats (meeting_id, speaker_count) VALUES (?1, ?2)",
+            params![meeting_id.to_string(), displayed_speaker_count(transcript)],
+        )?;
+        Ok(())
     }
 
     /// Get the most recent meeting
@@ -449,6 +604,7 @@ impl MeetingStorage {
         self.apply_edits(meeting_id, &mut edited)?;
         let transcript_path = storage_path.join("transcript.json");
         std::fs::write(transcript_path, serde_json::to_string_pretty(&edited)?)?;
+        self.store_speaker_count(meeting_id, &edited)?;
 
         // transcript.md beside it, so the folder reads without voxtype.
         let notes = self.load_notes(meeting_id)?.notes;
@@ -537,6 +693,14 @@ impl MeetingStorage {
         )?;
         self.conn.execute(
             "DELETE FROM meeting_context WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM meeting_summaries WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM meeting_stats WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
 
@@ -888,15 +1052,14 @@ impl MeetingStorage {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO meeting_context
-                (meeting_id, engine, model, diarization, url, voxtype_version)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                (meeting_id, engine, model, diarization, voxtype_version)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
             params![
                 meeting_id.to_string(),
                 context.engine,
                 context.model,
                 context.diarization,
-                context.url,
                 context.voxtype_version,
             ],
         )?;
@@ -911,7 +1074,7 @@ impl MeetingStorage {
             .conn
             .query_row(
                 r#"
-                SELECT engine, model, diarization, url, voxtype_version
+                SELECT engine, model, diarization, voxtype_version
                 FROM meeting_context WHERE meeting_id = ?1
                 "#,
                 params![meeting_id.to_string()],
@@ -920,8 +1083,7 @@ impl MeetingStorage {
                         engine: row.get(0)?,
                         model: row.get(1)?,
                         diarization: row.get(2)?,
-                        url: row.get(3)?,
-                        voxtype_version: row.get(4)?,
+                        voxtype_version: row.get(3)?,
                     })
                 },
             )
@@ -1085,6 +1247,31 @@ impl MeetingStorage {
     }
 }
 
+/// A meeting as `meeting list --json` lists it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MeetingListEntry {
+    #[serde(flatten)]
+    pub metadata: MeetingMetadata,
+    /// Whether a summary is saved for the meeting
+    pub has_summary: bool,
+    /// Distinct speakers as displayed, with labels and moved lines applied;
+    /// two speakers given the same name count once
+    pub speaker_count: u32,
+}
+
+/// Distinct displayed speakers among lines that say something.
+fn displayed_speaker_count(transcript: &Transcript) -> u32 {
+    let mut names: Vec<String> = transcript
+        .segments
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|s| s.speaker_display())
+        .collect();
+    names.sort();
+    names.dedup();
+    names.len() as u32
+}
+
 /// Speaker IDs in `transcript` that `speaker` names, most specific match first.
 fn resolve_speaker_keys(transcript: &Transcript, speaker: &str) -> Vec<String> {
     let speaker = speaker.trim();
@@ -1156,6 +1343,119 @@ mod tests {
         };
         let storage = MeetingStorage::open(config).unwrap();
         (storage, temp_dir)
+    }
+
+    /// A stored meeting with one line per (speaker id, text).
+    fn meeting_with_lines(storage: &MeetingStorage, lines: &[(&str, &str)]) -> MeetingId {
+        let mut metadata = MeetingMetadata::new(Some("Stats".into()));
+        metadata.storage_path = Some(storage.create_meeting(&metadata).unwrap());
+        let mut t = Transcript::new();
+        for (i, (speaker, text)) in lines.iter().enumerate() {
+            let mut seg = TranscriptSegment::new(
+                i as u32,
+                i as u64 * 1000,
+                i as u64 * 1000 + 900,
+                text.to_string(),
+                0,
+            );
+            seg.speaker_id = Some(speaker.to_string());
+            t.add_segment(seg);
+        }
+        storage.save_transcript(&metadata.id, &t).unwrap();
+        metadata.id
+    }
+
+    fn entry(storage: &MeetingStorage, id: &MeetingId) -> (bool, u32) {
+        let e = storage
+            .list_meeting_entries(None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.metadata.id == *id)
+            .unwrap();
+        (e.has_summary, e.speaker_count)
+    }
+
+    #[test]
+    fn list_entries_count_displayed_speakers_and_flag_summaries() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(
+            &storage,
+            &[
+                ("You", "hi"),
+                ("Remote 1", "hello"),
+                ("Remote 2", "hey"),
+                ("Remote 3", "   "),
+            ],
+        );
+        // A speaker with only an empty line does not count.
+        assert_eq!(entry(&storage, &id), (false, 3));
+
+        // Two speakers given one name display, and count, as one.
+        storage.set_speaker_label(&id, "Remote 1", "Dana").unwrap();
+        storage.set_speaker_label(&id, "Remote 2", "Dana").unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+
+        // Moving the only "You" line to Dana leaves one speaker.
+        storage.reassign_segment(&id, 0, "Dana", true).unwrap();
+        assert_eq!(entry(&storage, &id), (false, 1));
+
+        let summary = crate::meeting::data::MeetingSummary {
+            summary: "s".into(),
+            key_points: vec![],
+            action_items: vec![],
+            decisions: vec![],
+            chapters: vec![],
+            generated_at: Utc::now(),
+            model: None,
+        };
+        storage.save_summary(&id, &summary).unwrap();
+        assert_eq!(entry(&storage, &id), (true, 1));
+
+        let json = serde_json::to_value(storage.list_meeting_entries(None).unwrap()).unwrap();
+        assert_eq!(json[0]["has_summary"], true);
+        assert_eq!(json[0]["speaker_count"], 1);
+        assert_eq!(json[0]["id"], id.to_string());
+        assert!(
+            json[0].get("title").is_some(),
+            "metadata stays flat: {json}"
+        );
+    }
+
+    #[test]
+    fn list_entries_read_the_index_not_the_transcript() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(&storage, &[("You", "a"), ("Remote", "b")]);
+        let path = storage
+            .get_meeting_path(&id)
+            .unwrap()
+            .join("transcript.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+    }
+
+    #[test]
+    fn list_entries_backfill_meetings_saved_before_the_count() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(&storage, &[("You", "a"), ("Remote", "b")]);
+        storage
+            .conn
+            .execute("DELETE FROM meeting_stats", [])
+            .unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+        let stored: u32 = storage
+            .conn
+            .query_row(
+                "SELECT speaker_count FROM meeting_stats WHERE meeting_id = ?1",
+                params![id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 2);
+
+        // A meeting with no transcript yet has none, and nothing is stored.
+        let mut fresh = MeetingMetadata::new(None);
+        fresh.storage_path = Some(storage.create_meeting(&fresh).unwrap());
+        assert_eq!(entry(&storage, &fresh.id), (false, 0));
     }
 
     #[test]
@@ -2050,6 +2350,55 @@ mod tests {
         storage.annotate_segment(&id, 2, "x", false, true).unwrap();
         storage.delete_meeting(&id).unwrap();
         assert!(storage.get_annotations(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_meetings_link_round_trips() {
+        let (storage, _temp) = create_test_storage();
+        let mut metadata = MeetingMetadata::new(None);
+        metadata.url = Some("https://meet.example.com/x".to_string());
+        storage.create_meeting(&metadata).unwrap();
+        let loaded = storage.get_meeting(&metadata.id).unwrap().unwrap();
+        assert_eq!(loaded.url.as_deref(), Some("https://meet.example.com/x"));
+        assert_eq!(
+            storage.list_meetings(None).unwrap()[0].url.as_deref(),
+            Some("https://meet.example.com/x")
+        );
+    }
+
+    /// An index from before meeting links gains the column on open.
+    #[test]
+    fn an_index_without_the_url_column_is_upgraded() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = Connection::open(temp.path().join("index.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meetings (id TEXT PRIMARY KEY, title TEXT, started_at INTEGER NOT NULL, \
+                 ended_at INTEGER, duration_secs INTEGER, status TEXT NOT NULL DEFAULT 'active', \
+                 chunk_count INTEGER NOT NULL DEFAULT 0, storage_path TEXT, \
+                 audio_retained INTEGER NOT NULL DEFAULT 0, model TEXT, synced_at INTEGER, \
+                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')));\
+                 INSERT INTO meetings (id, started_at) VALUES ('6f1c2a5e-0000-4000-8000-000000000001', 0);",
+            )
+            .unwrap();
+        }
+        let storage = MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        })
+        .unwrap();
+        let old = storage.list_meetings(None).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].url, None);
+        // Opening again does not try to add it twice.
+        drop(storage);
+        MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        })
+        .unwrap();
     }
 
     #[test]

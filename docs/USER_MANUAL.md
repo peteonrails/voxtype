@@ -179,6 +179,23 @@ control, **Start Recording** / **Stop Recording**, and **Cancel** is available w
 recording or transcribing. Starting another recording is disabled during inference.
 The tray uses the existing daemon control protocol, not a second recording daemon.
 
+Below the dictation entries are the meeting controls. With `[meeting] enabled = true`
+the tray offers **Start Meeting**, which runs `voxtype meeting start` with the default
+title. While a meeting records, it offers **Stop Meeting** and **Pause Meeting**
+(**Resume Meeting** while paused), and shows a greyed **Finishing Meeting...** while the
+last chunks are transcribed. The entries follow meetings started anywhere, including
+`voxtype meeting start` and the detection prompt. Start Meeting is greyed out while you
+are dictating.
+
+While meeting mode is off, the tray shows **Turn on meetings...** instead. Choosing it
+runs `voxtype config set meeting.enabled true` and restarts the voxtype service so the
+setting takes effect. At most once a day on daemon start, a notification makes the same
+offer with **Turn on**, **Not now** and **No, don't ask again**; the last hides the offer
+for good and shows a greyed **Start Meeting (meeting mode is off)**. Set
+`[meeting] offer_enable = false` to turn the offer off.
+
+The **Voxtype Meetings** entry in the application launcher opens `voxtype meeting view`.
+
 The tray and desktop entry share `voxtype-configure-launcher`: it prefers the
 available integrated Quickshell frontend, then a separately installed graphical
 settings desktop entry, then the terminal TUI. The current source ships no GTK
@@ -561,8 +578,10 @@ different user-owned directory. Writing outside of `$HOME` is refused
 unless `--force` is also passed.
 
 The command prints Hyprland, Sway, and River keybinding examples that
-toggle the Wave 2 engine-picker and meeting-controls panels via flag
-files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
+toggle the engine picker and the meeting view via flag files under
+`$XDG_RUNTIME_DIR/voxtype/`. The meeting view is the same one the Omarchy
+plugin shows (see [Live Meeting View](MEETING_MODE.md#live-meeting-view));
+it also opens when a meeting starts and on `voxtype meeting view`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
@@ -695,6 +714,7 @@ Continuous meeting transcription with chunked processing and speaker diarization
 ```bash
 voxtype meeting start                  # Start a meeting
 voxtype meeting start --title "Title"  # Start with a title
+voxtype meeting start --model large-v3-turbo --language de --url https://meet.example.com/x
 voxtype meeting stop                   # Stop the meeting
 voxtype meeting pause                  # Pause recording
 voxtype meeting resume                 # Resume recording
@@ -702,6 +722,7 @@ voxtype meeting status                 # Show current meeting status
 voxtype meeting list                   # List past meetings
 voxtype meeting export latest          # Export transcript (markdown)
 voxtype meeting summarize latest       # Generate AI summary
+voxtype meeting ask latest "What did Steve say?" --last 5m  # Ask the transcript
 ```
 
 ---
@@ -2747,9 +2768,18 @@ voxtype meeting reassign latest 28 --reset
 voxtype meeting notes latest --append "Ask Dana about travel"
 voxtype meeting annotate latest 28 "Check this number" --highlight
 
-# AI summarization (requires Ollama or remote API)
+# AI summarization (your coding agent, or Ollama)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json
+voxtype meeting summarize latest --regenerate
+
+# Ask a question, during or after the meeting
+voxtype meeting ask latest "What are the action items so far?"
+voxtype meeting ask latest "Summarize the last few minutes" --last 5m
+
+# Which agent answers, and consent to send it transcripts
+voxtype meeting assistant status
+voxtype meeting assistant allow claude
 
 # Delete a meeting
 voxtype meeting delete <id>
@@ -2767,6 +2797,7 @@ chunk_duration_secs = 30         # Audio chunk size for processing
 storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
 retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the meeting folder
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
+show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)
@@ -2797,15 +2828,17 @@ voxtype meeting label latest 1 "Bob"  # Short form: just the number
 
 Labels persist in the meeting data and appear in exports. To move a single line to another speaker instead, use `voxtype meeting reassign`; see [Meeting Mode](MEETING_MODE.md#moving-a-line-to-another-speaker).
 
-### AI Summarization
+### AI Summarization and Questions
 
-Meeting summarization uses Ollama (local) or a remote API to generate a summary with key points, action items, and decisions.
+The meeting assistant summarizes meetings (overview, decisions, action items with owners, chapters) and answers questions about them, during the meeting or after. It runs your own coding agent (Claude Code with its tools off, or Codex inside a bubblewrap jail) headless, or the local Ollama model. Transcripts go to an agent only after you allow it once.
 
 ```bash
-# Requires [meeting.summary] backend set to "local" or "remote"
+voxtype meeting assistant allow claude
 voxtype meeting summarize latest
-voxtype meeting summarize latest --format markdown --output summary.md
+voxtype meeting ask latest "What did Steve just say?" --last 2m
 ```
+
+Once an agent is allowed, each meeting is also summarized when it stops (`summary.md` in the meeting folder). See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) for agent selection, consent and where transcripts go.
 
 ### Echo Cancellation
 

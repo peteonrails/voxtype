@@ -32,7 +32,14 @@ pub(crate) async fn run_meeting_command(
     };
 
     match action {
-        MeetingAction::Start { title, diarization } => {
+        MeetingAction::Start {
+            title,
+            diarization,
+            engine,
+            model,
+            language,
+            url,
+        } => {
             // Check if meeting mode is enabled
             if !config.meeting.enabled {
                 eprintln!("Error: Meeting mode is disabled in config.");
@@ -40,6 +47,19 @@ pub(crate) async fn run_meeting_command(
                 eprintln!("Enable it by adding to config.toml:");
                 eprintln!("  [meeting]");
                 eprintln!("  enabled = true");
+                std::process::exit(1);
+            }
+
+            // Refuse a meeting that could not transcribe before it starts,
+            // with the fix, rather than leave the daemon to log it.
+            let options = config::MeetingStartOptions {
+                engine,
+                model,
+                language,
+                url: url.filter(|u| !u.trim().is_empty()),
+            };
+            if let Err(e) = meeting::start::meeting_transcription_config(config, &options) {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
 
@@ -102,6 +122,13 @@ pub(crate) async fn run_meeting_command(
             } else {
                 // Clear any stale override left from a prior run.
                 let _ = std::fs::remove_file(&diarization_file);
+            }
+
+            let options_file = runtime_dir.join("meeting_start_options");
+            if options == config::MeetingStartOptions::default() {
+                let _ = std::fs::remove_file(&options_file);
+            } else {
+                std::fs::write(&options_file, serde_json::to_string(&options)?)?;
             }
 
             // Write start trigger file (with optional title). The claim is
@@ -243,13 +270,14 @@ pub(crate) async fn run_meeting_command(
         }
 
         MeetingAction::List { limit, json } => {
+            if json {
+                let entries = meeting::list_meeting_entries(&meeting_config, Some(limit))
+                    .map_err(|e| anyhow::anyhow!("Error listing meetings: {}", e))?;
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+                return Ok(());
+            }
             match meeting::list_meetings(&meeting_config, Some(limit)) {
                 Ok(meetings) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&meetings)?);
-                        return Ok(());
-                    }
-
                     if meetings.is_empty() {
                         println!("No meetings found.");
                         return Ok(());
@@ -345,7 +373,8 @@ pub(crate) async fn run_meeting_command(
         MeetingAction::Show { meeting_id, json } => {
             match meeting::get_meeting(&meeting_config, &meeting_id) {
                 Ok(meeting) if json => {
-                    println!("{}", serde_json::to_string_pretty(&meeting)?);
+                    let v = super::meeting_assistant::show_json(&meeting)?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
                 }
                 Ok(meeting) => {
                     println!("{}", meeting.metadata.display_title());
@@ -371,6 +400,9 @@ pub(crate) async fn run_meeting_command(
                     }
                     println!("Status:   {:?}", meeting.metadata.status);
                     println!("Chunks:   {}", meeting.metadata.chunk_count);
+                    if let Some(ref url) = meeting.metadata.url {
+                        println!("Link:     {}", url);
+                    }
                     println!();
                     println!("Transcript:");
                     println!("-----------");
@@ -435,6 +467,36 @@ pub(crate) async fn run_meeting_command(
             );
         }
 
+        MeetingAction::View {
+            meeting_id,
+            ask_id,
+            tab,
+            ask,
+            no_open,
+        } => {
+            let path = config::Config::runtime_dir().join("meeting-view.request");
+            let request = ViewRequest {
+                meeting_id: meeting_id.as_deref(),
+                ask_id: ask_id.as_deref(),
+                // An answer is shown on the Ask tab.
+                tab: tab.as_deref().or(ask_id.as_ref().map(|_| "ask")),
+                ask: ask.as_deref(),
+                open: !no_open,
+            };
+            write_view_request(&path, &request)?;
+            if no_open && ask.is_none() {
+                println!("Nothing to do: --no-open without --ask.");
+            } else {
+                println!(
+                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin or voxtype's Quickshell shell, whichever is running.",
+                    if no_open { "ask" } else { "open" }
+                );
+            }
+        }
+
+        MeetingAction::Suggest { dry_run, watch } => {
+            run_meeting_suggest(config, None, dry_run, watch).await?;
+        }
         MeetingAction::Reassign {
             meeting_id,
             segment_id,
@@ -660,100 +722,67 @@ pub(crate) async fn run_meeting_command(
             meeting_id,
             format,
             output,
+            regenerate,
+            agent,
+            local,
         } => {
-            // Load meeting
-            let meeting = meeting::get_meeting(&meeting_config, &meeting_id)
-                .map_err(|e| anyhow::anyhow!("Failed to load meeting: {}", e))?;
-
-            // Create summary config from meeting config
-            let summary_config = meeting::summary::SummaryConfig {
-                backend: config.meeting.summary.backend.clone(),
-                ollama_url: config.meeting.summary.ollama_url.clone(),
-                ollama_model: config.meeting.summary.ollama_model.clone(),
-                remote_endpoint: config.meeting.summary.remote_endpoint.clone(),
-                remote_api_key: config.meeting.summary.remote_api_key.clone(),
-                timeout_secs: config.meeting.summary.timeout_secs,
+            use super::meeting_assistant::{run_summarize, SummarizeArgs};
+            let args = SummarizeArgs {
+                meeting_id,
+                format,
+                output,
+                regenerate,
+                agent,
+                local,
             };
+            run_summarize(config, &meeting_config, args).await?;
+        }
 
-            // Create summarizer
-            let summarizer = meeting::summary::create_summarizer(&summary_config)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Summarization not configured. Set [meeting.summary] backend in config.toml:\n\n\
-                        [meeting.summary]\n\
-                        backend = \"local\"  # or \"remote\"\n\
-                        ollama_url = \"http://localhost:11434\"\n\
-                        ollama_model = \"llama3.2\""
-                    )
-                })?;
-
-            // Check availability
-            if !summarizer.is_available() {
-                return Err(anyhow::anyhow!(
-                    "Summarizer '{}' is not available. Check that Ollama is running.",
-                    summarizer.name()
-                ));
-            }
-
-            eprintln!("Generating summary using {}...", summarizer.name());
-
-            // Generate summary
-            let summary = summarizer
-                .summarize(&meeting)
-                .map_err(|e| anyhow::anyhow!("Summarization failed: {}", e))?;
-
-            // Format output
-            let content = match format.as_str() {
-                "json" => serde_json::to_string_pretty(&summary)
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize summary: {}", e))?,
-                "text" => {
-                    let mut text = String::new();
-                    text.push_str(&format!("Summary: {}\n\n", summary.summary));
-
-                    if !summary.key_points.is_empty() {
-                        text.push_str("Key Points:\n");
-                        for point in &summary.key_points {
-                            text.push_str(&format!("  - {}\n", point));
-                        }
-                        text.push('\n');
-                    }
-
-                    if !summary.action_items.is_empty() {
-                        text.push_str("Action Items:\n");
-                        for item in &summary.action_items {
-                            let assignee = item
-                                .assignee
-                                .as_ref()
-                                .map(|a| format!(" ({})", a))
-                                .unwrap_or_default();
-                            text.push_str(&format!("  - {}{}\n", item.description, assignee));
-                        }
-                        text.push('\n');
-                    }
-
-                    if !summary.decisions.is_empty() {
-                        text.push_str("Decisions:\n");
-                        for decision in &summary.decisions {
-                            text.push_str(&format!("  - {}\n", decision));
-                        }
-                    }
-
-                    text
-                }
-                _ => meeting::summary::summary_to_markdown(&summary),
+        MeetingAction::Ask {
+            meeting_id,
+            question,
+            last,
+            json,
+            notify,
+            agent,
+            local,
+        } => {
+            use super::meeting_assistant::{run_ask, AskArgs};
+            let args = AskArgs {
+                meeting_id,
+                question,
+                last,
+                json,
+                notify,
+                agent,
+                local,
             };
+            run_ask(config, &meeting_config, args).await?;
+        }
 
-            // Output
-            if let Some(path) = output {
-                std::fs::write(&path, &content)?;
-                eprintln!("Summary saved to {:?}", path);
-            } else {
-                println!("{}", content);
-            }
+        MeetingAction::Assistant { action } => {
+            super::meeting_assistant::run_assistant(config, action)?;
         }
     }
 
     Ok(())
+}
+
+/// `voxtype meeting suggest`; `config_path` is passed on to the
+/// `meeting start` a live prompt runs.
+pub(crate) async fn run_meeting_suggest(
+    config: &config::Config,
+    config_path: Option<PathBuf>,
+    dry_run: bool,
+    watch: bool,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return meeting::detect::runner::suggest(config, config_path, dry_run, watch).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, config_path, dry_run, watch);
+        anyhow::bail!("Meeting detection is only available on Linux.")
+    }
 }
 
 /// Where a meeting is, as the CLI sees it: the daemon's `meeting_state` file
@@ -849,6 +878,40 @@ fn meeting_phase(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<String>
 ///
 /// The content is written to a private file and hard-linked into place, so
 /// the daemon can never read the trigger before its title is in it.
+/// What `voxtype meeting view` asks the running meeting view to do.
+struct ViewRequest<'a> {
+    meeting_id: Option<&'a str>,
+    ask_id: Option<&'a str>,
+    tab: Option<&'a str>,
+    ask: Option<&'a str>,
+    open: bool,
+}
+
+/// Write the request every meeting view host watches (see
+/// quickshell/voxtype-meetings/Meetings.qml). Written whole and renamed into
+/// place, so a host never reads half of it. `requested_at` lets a host that
+/// starts later ignore a request that was not meant for it.
+fn write_view_request(path: &std::path::Path, req: &ViewRequest) -> std::io::Result<()> {
+    let requested_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let request = serde_json::json!({
+        "meeting_id": req.meeting_id,
+        "ask_id": req.ask_id,
+        "tab": req.tab,
+        "ask": req.ask,
+        "open": req.open,
+        "requested_at": requested_at,
+    });
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staged = path.with_extension(format!("request.{}.tmp", std::process::id()));
+    std::fs::write(&staged, request.to_string())?;
+    std::fs::rename(&staged, path)
+}
+
 fn claim_start_trigger(start_file: &std::path::Path, title: &str) -> std::io::Result<bool> {
     static STAGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let staged = start_file.with_extension(format!(
@@ -906,6 +969,45 @@ mod tests {
 
     fn touch(dir: &std::path::Path, name: &str, content: &str) {
         std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn view_request_is_the_json_the_hosts_read() {
+        let dir = runtime();
+        let path = dir.path().join("voxtype").join("meeting-view.request");
+        let req = ViewRequest {
+            meeting_id: Some("abc"),
+            ask_id: Some("q1"),
+            tab: Some("ask"),
+            ask: Some("last-5m"),
+            open: false,
+        };
+        write_view_request(&path, &req).unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(req["meeting_id"], "abc");
+        assert_eq!(req["tab"], "ask");
+        assert_eq!(req["ask"], "last-5m");
+        assert_eq!(req["ask_id"], "q1");
+        assert_eq!(req["open"], false);
+        assert!(req["requested_at"].as_u64().unwrap() > 0);
+
+        // Defaults: no meeting, no tab, open; and nothing left behind.
+        let req = ViewRequest {
+            meeting_id: None,
+            ask_id: None,
+            tab: None,
+            ask: None,
+            open: true,
+        };
+        write_view_request(&path, &req).unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(req["meeting_id"].is_null() && req["tab"].is_null() && req["ask"].is_null());
+        assert!(req["ask_id"].is_null());
+        assert_eq!(req["open"], true);
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[test]
