@@ -58,6 +58,13 @@ pub enum ConfigSetError {
     #[error("{0}")]
     IncompatibleModel(String),
 
+    /// An engine this binary was built without, with the fix for how this
+    /// copy of voxtype was installed (see `crate::setup::install_hint`).
+    #[error(
+        "engine '{engine}' is not compiled into this binary. To use it, {hint}. Config unchanged."
+    )]
+    EngineNotCompiled { engine: String, hint: String },
+
     #[error(
         "'{key}' belongs to the '{feature}' engine, which is not compiled into \
          this binary.\n  Install a variant that includes it (see \
@@ -83,6 +90,7 @@ impl ConfigSetError {
             | ConfigSetError::UnknownKey(_)
             | ConfigSetError::BadValue(_)
             | ConfigSetError::IncompatibleModel(_)
+            | ConfigSetError::EngineNotCompiled { .. }
             | ConfigSetError::KeyFeatureNotCompiled { .. } => 2,
             ConfigSetError::Editor(_) => 1,
         }
@@ -245,20 +253,57 @@ pub fn select_model(
     model: &str,
     language: Option<&str>,
 ) -> Result<PathBuf, ConfigSetError> {
-    // The generic GGUF catalog plus the two engines whose model field selects
-    // between ONNX and GGUF weights (the format-update path). Every other
-    // engine keeps `config set`.
-    if !matches!(engine, "gguf" | "parakeet" | "cohere") {
-        return Err(ConfigSetError::IncompatibleModel(
-            "select-model supports engines gguf, parakeet and cohere. Other engines retain config set. Config unchanged.".into(),
-        ));
+    select_model_in(
+        path,
+        engine,
+        model,
+        language,
+        &crate::config::Config::models_dir(),
+    )
+}
+
+/// `select_model` against an explicit models directory, so tests do not
+/// depend on which models the machine running them has installed.
+fn select_model_in(
+    path: PathBuf,
+    engine: &str,
+    model: &str,
+    language: Option<&str>,
+    models_dir: &std::path::Path,
+) -> Result<PathBuf, ConfigSetError> {
+    // Every engine `config set engine` offers has a downloadable model.
+    // Soniox is a cloud engine with no installed model to select.
+    let Some(parsed) = parse_engine(engine) else {
+        return Err(ConfigSetError::UnknownEngine(engine.to_string()));
+    };
+    if !ENGINE_NAMES.contains(&engine) {
+        return Err(ConfigSetError::IncompatibleModel(format!(
+            "select-model selects a downloaded model, and {engine} has none. Use `voxtype config set engine {engine}`. Config unchanged."
+        )));
     }
     if language.is_some() && engine != "gguf" {
         return Err(ConfigSetError::IncompatibleModel(
             "--language is only supported for a GGUF selection. Config unchanged.".into(),
         ));
     }
-    crate::model_selection::validate_ready(engine, model)
+    if !engine_feature_compiled(engine) {
+        let hint = crate::setup::install_hint::hint(crate::setup::install_hint::Need::Feature(
+            parsed.name(),
+        ));
+        return Err(ConfigSetError::EngineNotCompiled {
+            engine: engine.to_string(),
+            hint: hint.to_string(),
+        });
+    }
+    crate::model_selection::validate_ready_in(engine, model, models_dir)
+        .and_then(|()| {
+            if matches!(engine, "gguf" | "parakeet" | "cohere") {
+                Ok(())
+            } else {
+                crate::model_selection::validate_installed_in(engine, model, models_dir)
+            }
+        })
+        .and_then(|()| crate::model_selection::validate_worker(engine, model))
         .map_err(ConfigSetError::IncompatibleModel)?;
 
     let mut editor = ConfigEditor::load_from_path(path)?;
@@ -1106,9 +1151,13 @@ type_delay_ms = 5
     fn select_model_refusals_preserve_config_bytes() {
         let original = "# mine\nengine = \"parakeet\"\n\n[parakeet]\nmodel = \"parakeet-tdt-0.6b-v3\" # keep\n";
         let (_dir, path) = temp_config(original);
+        let models = tempfile::tempdir().unwrap();
         for (engine, model, language) in [
             ("whisper", "base.en", None),
+            ("whisper", "base.en", Some("en")),
             ("moonshine", "base", None),
+            ("soniox", "stt-rt-preview", None),
+            ("nonesuch", "base", None),
             ("parakeet", "parakeet-ultra-Q8_0.gguf", Some("en")),
             // Not installed under any models directory a test can see.
             ("parakeet", "/nonexistent/parakeet-ultra-Q8_0.gguf", None),
@@ -1118,7 +1167,8 @@ type_delay_ms = 5
                 None,
             ),
         ] {
-            let error = select_model(path.clone(), engine, model, language).unwrap_err();
+            let error =
+                select_model_in(path.clone(), engine, model, language, models.path()).unwrap_err();
             assert_eq!(error.exit_code(), 2, "{engine} {model}: {error}");
             assert_eq!(
                 fs::read_to_string(&path).unwrap(),
@@ -1126,7 +1176,157 @@ type_delay_ms = 5
                 "{engine} {model}"
             );
         }
-        let error = select_model(path.clone(), "whisper", "base.en", None).unwrap_err();
-        assert!(error.to_string().contains("gguf, parakeet and cohere"));
+    }
+
+    /// Engines outside the GGUF format-update path, each with its default
+    /// catalog model: what the Settings panel's Use offers for them.
+    const OTHER_ENGINES: &[&str] = &[
+        "whisper",
+        "moonshine",
+        "sensevoice",
+        "paraformer",
+        "dolphin",
+        "omnilingual",
+        "openvino",
+    ];
+
+    /// Lay down the files the cheap installed-model check looks for.
+    fn install_model(models: &std::path::Path, engine: &str, model: &str) {
+        if engine == "whisper" {
+            fs::write(
+                models.join(format!("ggml-{model}.bin")),
+                b"lmgg\x00\x01\x02\x03",
+            )
+            .unwrap();
+            return;
+        }
+        let dir_name = crate::model_catalog::model_dir_name(engine, model);
+        let dir = models.join(&dir_name);
+        fs::create_dir_all(&dir).unwrap();
+        let files: Vec<String> = if engine == "openvino" {
+            [
+                "openvino_encoder_model.xml",
+                "openvino_encoder_model.bin",
+                "openvino_decoder_model.xml",
+                "openvino_decoder_model.bin",
+                "tokenizer.json",
+                "preprocessor_config.json",
+            ]
+            .map(String::from)
+            .to_vec()
+        } else {
+            crate::setup::model::expected_file_names(engine, &dir_name)
+        };
+        assert!(!files.is_empty(), "{engine} {model} has no expected files");
+        for name in files {
+            let file = dir.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"x").unwrap();
+        }
+    }
+
+    const PARAKEET_CONFIG: &str =
+        "# mine\nengine = \"parakeet\" # keep\n\n[parakeet]\nmodel = \"parakeet-tdt-0.6b-v3\"\n";
+
+    /// Use on an installed model of any compiled engine switches to it in one
+    /// write: engine and model together, comments kept.
+    #[test]
+    fn select_model_switches_to_every_compiled_engine() {
+        for &engine in OTHER_ENGINES
+            .iter()
+            .filter(|engine| engine_feature_compiled(engine))
+        {
+            let model = crate::model_catalog::default_model(engine);
+            let (_dir, path) = temp_config(PARAKEET_CONFIG);
+            let models = tempfile::tempdir().unwrap();
+            install_model(models.path(), engine, model);
+
+            select_model_in(path.clone(), engine, model, None, models.path())
+                .unwrap_or_else(|e| panic!("{engine} {model}: {e}"));
+
+            let config = reload(&path);
+            assert_eq!(config.engine.name(), engine);
+            assert_eq!(config.model_name(), model, "{engine}");
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains("# mine"), "{engine}: {text}");
+            assert!(text.contains("parakeet-tdt-0.6b-v3"), "{engine}: {text}");
+        }
+    }
+
+    /// A compiled engine whose model is not on disk is refused before
+    /// anything is written, with the download command to fix it.
+    #[test]
+    fn select_model_refuses_a_missing_model_of_a_compiled_engine() {
+        for &engine in OTHER_ENGINES
+            .iter()
+            .filter(|engine| engine_feature_compiled(engine))
+        {
+            let model = crate::model_catalog::default_model(engine);
+            let (_dir, path) = temp_config(PARAKEET_CONFIG);
+            let models = tempfile::tempdir().unwrap();
+
+            let error = select_model_in(path.clone(), engine, model, None, models.path())
+                .expect_err(engine);
+            assert!(
+                matches!(error, ConfigSetError::IncompatibleModel(_)),
+                "{engine}: {error}"
+            );
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains("missing"), "{engine}: {error}");
+            assert!(
+                error.to_string().contains("voxtype setup --download"),
+                "{engine}: {error}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), PARAKEET_CONFIG);
+        }
+    }
+
+    /// An engine this binary lacks is refused with the install hint, even
+    /// when its model files are on disk.
+    #[test]
+    fn select_model_refuses_an_engine_not_compiled_in() {
+        for &engine in OTHER_ENGINES
+            .iter()
+            .filter(|engine| !engine_feature_compiled(engine))
+        {
+            let model = crate::model_catalog::default_model(engine);
+            let (_dir, path) = temp_config(PARAKEET_CONFIG);
+            let models = tempfile::tempdir().unwrap();
+            install_model(models.path(), engine, model);
+
+            let error = select_model_in(path.clone(), engine, model, None, models.path())
+                .expect_err(engine);
+            assert!(
+                matches!(error, ConfigSetError::EngineNotCompiled { .. }),
+                "{engine}: {error}"
+            );
+            assert_eq!(error.exit_code(), 2);
+            let message = error.to_string();
+            assert!(
+                message.contains("not compiled into this binary. To use it, "),
+                "{engine}: {message}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), PARAKEET_CONFIG);
+        }
+    }
+
+    /// A custom Whisper checkpoint is a path, as the transcriber resolves it.
+    #[test]
+    fn select_model_accepts_a_custom_whisper_file() {
+        let (_dir, path) = temp_config(PARAKEET_CONFIG);
+        let models = tempfile::tempdir().unwrap();
+        let custom = models.path().join("my-finetune.bin");
+        let custom = custom.to_str().unwrap();
+
+        let error = select_model_in(path.clone(), "whisper", custom, None, models.path())
+            .expect_err("missing file");
+        assert!(error.to_string().contains("missing"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), PARAKEET_CONFIG);
+
+        fs::write(custom, b"lmgg\x00\x01\x02\x03").unwrap();
+        select_model_in(path.clone(), "whisper", custom, None, models.path()).unwrap();
+        let config = reload(&path);
+        assert_eq!(config.engine.name(), "whisper");
+        assert_eq!(config.whisper.model, custom);
     }
 }

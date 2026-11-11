@@ -11,6 +11,10 @@ Scenarios:
                through `config set parakeet.model`, as before.
   parakeet-to-cohere  engine = "parakeet"; browse Cohere, Use on a Cohere
                model. Expect one `config select-model cohere <model>`.
+  parakeet-to-omnilingual  engine = "parakeet"; browse Omnilingual, Use on
+               its model. Expect one `config select-model omnilingual <model>`.
+  cohere-to-dolphin  engine = "cohere"; browse Dolphin, Use on its model.
+               Expect one `config select-model dolphin <model>`.
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -23,10 +27,13 @@ import sys
 
 import panel_harness as h
 
-SCENARIOS = ("from-gguf", "same-engine", "parakeet-to-cohere")
+SCENARIOS = ("from-gguf", "same-engine", "parakeet-to-cohere", "parakeet-to-omnilingual",
+             "cohere-to-dolphin")
 ULTRA = "parakeet-ultra-Q8_0.gguf"
 V3 = "parakeet-tdt-0.6b-v3-Q8_0.gguf"
 COHERE = "cohere-transcribe-03-2026-Q4_K_M.gguf"
+OMNILINGUAL = "omnilingual-300m"
+DOLPHIN = "dolphin-base"
 
 
 def run(scenario, shell, evidence):
@@ -39,6 +46,16 @@ def run(scenario, shell, evidence):
         state = h.base_state(model=ULTRA, installed=[ULTRA], cohere_models=[COHERE])
         start, expected = "parakeet", [["config", "select-model", "cohere", COHERE]]
         target, model = "cohere", COHERE
+    elif scenario == "parakeet-to-omnilingual":
+        state = h.base_state(model=ULTRA, installed=[ULTRA], extra_engines={"omnilingual": [OMNILINGUAL]},
+                             extra_models={"omnilingual": "omnilingual-1b"})
+        start, expected = "parakeet", [["config", "select-model", "omnilingual", OMNILINGUAL]]
+        target, model = "omnilingual", OMNILINGUAL
+    elif scenario == "cohere-to-dolphin":
+        state = h.base_state(model=ULTRA, installed=[ULTRA], engine="cohere", cohere_models=[COHERE],
+                             extra_engines={"dolphin": [DOLPHIN]}, extra_models={"dolphin": "dolphin-small"})
+        start, expected = "cohere", [["config", "select-model", "dolphin", DOLPHIN]]
+        target, model = "dolphin", DOLPHIN
     else:
         state = h.base_state(model=V3, installed=[V3, ULTRA])
         start, expected = "parakeet", [["config", "set", "parakeet.model", ULTRA]]

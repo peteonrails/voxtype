@@ -226,19 +226,15 @@ Item {
     return ""
   }
 
-  // Engines whose model `voxtype config select-model` commits together with
-  // the engine itself (config_set::select_model). Use on a model of one of
-  // these switches engines; without it, the panel had no way back to
-  // Parakeet once a generic GGUF model was in use.
-  readonly property var selectModelEngines: ["gguf", "parakeet", "cohere"]
-
   // The key the catalog card's Use writes, or "" when the browsed engine's
-  // models cannot be selected from here.
+  // models cannot be selected from here. Every engine whose model key the
+  // schema lists as a model picker can be switched to: `voxtype config
+  // select-model` commits that engine and its model together
+  // (config_set::select_model), and refuses an engine this binary lacks.
   readonly property string catalogModelKey: {
     if (root.catalogEngine === "gguf") return "gguf.model"
     if (root.catalogEngine === root.engine) return root.modelKey
-    if (root.selectModelEngines.indexOf(root.catalogEngine) !== -1) return modelKeyFor(root.catalogEngine)
-    return ""
+    return root.catalogEngine === "" ? "" : modelKeyFor(root.catalogEngine)
   }
 
   readonly property string modelValue: {

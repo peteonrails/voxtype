@@ -250,10 +250,13 @@ When the configured Parakeet model is a `.gguf` file, the panel and
 `voxtype configure` hide **Decoder type**, which only applies to ONNX models.
 
 The engine list at the top of the Engine section only browses another engine's
-models. **Use** on an installed model of the generic GGUF engine, Parakeet or
-Cohere switches the engine and the model together, so you can move between
-them from the panel, for example back to Parakeet Ultra after trying a GGUF
-model. To switch to any other engine, run `voxtype config set engine <name>`.
+models. **Use** on an installed model of any engine switches the engine and the
+model together, so you can move between engines from the panel, for example
+from Parakeet to an Omnilingual model, or back to Parakeet Ultra after trying a
+GGUF model. From a terminal, the same switch is
+`voxtype config select-model <engine> <model>`. An engine your build of
+voxtype was compiled without lists no models to use, and `select-model`
+refuses it with the command that gets you a build that includes it.
 
 ## Coding agent setup skill
 

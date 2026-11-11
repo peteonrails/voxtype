@@ -4746,13 +4746,21 @@ The following configuration options are deprecated but still supported for backw
 |-------------------|-------------|-------|
 | `wtype_delay_ms` | `pre_type_delay_ms` | Renamed for clarity (applies to all output drivers, not just wtype) |
 | `--wtype-delay` CLI flag | `--pre-type-delay` | CLI equivalent of the above |
-## Atomic generic GGUF selection
+## Atomic model selection
 
-`voxtype config select-model gguf MODEL [--language CODE]` selects an installed
-generic GGUF checkpoint without downloading or restarting. Catalog checkpoints
-set the canonical architecture; custom checkpoints require an existing explicit
+`voxtype config select-model ENGINE MODEL` sets `engine` and `ENGINE.model`
+together in one validated write, without downloading or restarting. It accepts
+every engine `config set engine` does (whisper, parakeet, moonshine,
+sensevoice, paraformer, dolphin, omnilingual, cohere, gguf and openvino). The
+model must already be installed, and the engine must be compiled into the
+running binary; otherwise the command exits 2 and the config file is left
+byte-identical. The Omarchy Settings panel's **Use** button runs it.
+
+For the generic `gguf` engine, `--language CODE` sets the language hint (it is
+refused for every other engine). Catalog checkpoints set the canonical
+architecture; custom checkpoints require an existing explicit
 `gguf.architecture`. Omitting `--language` preserves a compatible saved hint;
 incompatible hints fail without modifying the file. Model paths are preserved
 literally and resolved like the worker: an existing current-directory path wins,
-otherwise the models directory is searched. This additive command currently
-accepts only engine `gguf`; existing `config set` contracts are unchanged.
+otherwise the models directory is searched. Existing `config set` contracts are
+unchanged.
