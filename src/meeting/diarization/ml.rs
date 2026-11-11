@@ -323,12 +323,13 @@ impl Diarizer for MlDiarizer {
         &self,
         samples: &[f32],
         _source: AudioSource,
+        chunk_start_ms: u64,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {
         // If model is not loaded or feature is disabled, fall back to simple attribution
         #[cfg(not(feature = "ml-diarization"))]
         {
-            let _ = samples;
+            let _ = (samples, chunk_start_ms);
             transcript_segments
                 .iter()
                 .map(|seg| DiarizedSegment {
@@ -357,10 +358,6 @@ impl Diarizer for MlDiarizer {
                     .collect();
             }
 
-            // Segment timestamps are meeting-relative, but samples are chunk-relative.
-            // Subtract the chunk's base offset to get correct sample indices.
-            let chunk_offset_ms = transcript_segments.first().map(|s| s.start_ms).unwrap_or(0);
-
             let mut results = Vec::new();
 
             for seg in transcript_segments {
@@ -376,13 +373,16 @@ impl Diarizer for MlDiarizer {
                     continue;
                 }
 
-                // Extract audio window for this segment (adjust to chunk-relative)
-                let rel_start_ms = seg.start_ms.saturating_sub(chunk_offset_ms);
-                let rel_end_ms = seg.end_ms.saturating_sub(chunk_offset_ms);
-                let start_sample = (rel_start_ms as usize * self.sample_rate as usize) / 1000;
-                let end_sample = (rel_end_ms as usize * self.sample_rate as usize) / 1000;
-
-                if end_sample > samples.len() {
+                // Segment times are meeting-relative and the samples are this
+                // chunk's. The chunk start comes from the caller: deriving it
+                // from the first segment shifted every window by however long
+                // the chunk was silent before its first word.
+                let Some((start_sample, end_sample)) = super::segment_sample_range(
+                    seg,
+                    chunk_start_ms,
+                    self.sample_rate,
+                    samples.len(),
+                ) else {
                     results.push(DiarizedSegment {
                         speaker: SpeakerId::Unknown,
                         start_ms: seg.start_ms,
@@ -391,9 +391,9 @@ impl Diarizer for MlDiarizer {
                         confidence: 0.0,
                     });
                     continue;
-                }
+                };
 
-                let segment_samples = &samples[start_sample..end_sample.min(samples.len())];
+                let segment_samples = &samples[start_sample..end_sample];
 
                 // ECAPA-TDNN is trained on ~2-5s utterances. Feeding whole
                 // Soniox-style 30s mega-segments produces noisy averaged

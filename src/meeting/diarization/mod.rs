@@ -103,13 +103,33 @@ pub fn vad_subwindows(
     out
 }
 
+/// The sample range in a chunk that holds `segment`, or `None` when the
+/// segment lies outside the chunk's audio.
+pub fn segment_sample_range(
+    segment: &crate::meeting::TranscriptSegment,
+    chunk_start_ms: u64,
+    sample_rate: u32,
+    chunk_len: usize,
+) -> Option<(usize, usize)> {
+    let to_sample =
+        |ms: u64| (ms.saturating_sub(chunk_start_ms) * sample_rate as u64 / 1000) as usize;
+    let start = to_sample(segment.start_ms);
+    let end = to_sample(segment.end_ms).min(chunk_len);
+    (start < end).then_some((start, end))
+}
+
 /// Trait for diarization backends
 pub trait Diarizer: Send + Sync {
     /// Process audio samples and return diarized segments
+    ///
+    /// `samples` is one chunk of one track and `chunk_start_ms` is where it
+    /// starts on the meeting timeline. Segment times are meeting-relative,
+    /// so a backend subtracts `chunk_start_ms` to find a segment's audio.
     fn diarize(
         &self,
         samples: &[f32],
         source: AudioSource,
+        chunk_start_ms: u64,
         transcript_segments: &[crate::meeting::TranscriptSegment],
     ) -> Vec<DiarizedSegment>;
 
@@ -211,6 +231,39 @@ pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bug: the ML backend took the chunk's start from its first segment, so
+    /// when speech began after the chunk did, every embedding window was
+    /// cut from the wrong audio.
+    #[test]
+    fn segment_sample_range_is_relative_to_the_chunk_not_its_first_segment() {
+        use crate::meeting::TranscriptSegment;
+        let chunk_start_ms = 90_000;
+        let chunk_len = 30 * 16_000;
+        let first = TranscriptSegment::new(0, 91_800, 94_200, "hi".into(), 3);
+        let later = TranscriptSegment::new(1, 99_800, 102_700, "there".into(), 3);
+
+        assert_eq!(
+            segment_sample_range(&first, chunk_start_ms, 16_000, chunk_len),
+            Some((28_800, 67_200))
+        );
+        assert_eq!(
+            segment_sample_range(&later, chunk_start_ms, 16_000, chunk_len),
+            Some((156_800, 203_200))
+        );
+    }
+
+    #[test]
+    fn segment_sample_range_clamps_to_the_chunk() {
+        use crate::meeting::TranscriptSegment;
+        let past_end = TranscriptSegment::new(0, 29_500, 30_400, "x".into(), 0);
+        assert_eq!(
+            segment_sample_range(&past_end, 0, 16_000, 480_000),
+            Some((472_000, 480_000))
+        );
+        let outside = TranscriptSegment::new(1, 31_000, 32_000, "x".into(), 0);
+        assert_eq!(segment_sample_range(&outside, 0, 16_000, 480_000), None);
+    }
 
     #[test]
     fn test_speaker_id_display() {

@@ -392,7 +392,8 @@ impl MeetingDaemon {
         // Run diarization on the transcribed segments
         if let Some(ref diarizer) = self.diarizer {
             if !result.segments.is_empty() {
-                let diarized = diarizer.diarize(&samples, source, &result.segments);
+                let diarized =
+                    diarizer.diarize(&samples, source, start_offset_ms, &result.segments);
                 for (seg, diar) in result.segments.iter_mut().zip(diarized.iter()) {
                     seg.speaker_id = Some(diar.speaker.display_name());
                     seg.confidence = Some(diar.confidence);
