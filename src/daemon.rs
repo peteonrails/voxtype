@@ -5841,7 +5841,6 @@ mod tests {
     #[cfg(all(target_os = "linux", feature = "cohere-gguf"))]
     #[tokio::test]
     async fn tray_language_next_backend_receives_hint_resident_and_on_demand() {
-        use std::os::unix::fs::PermissionsExt;
         if std::env::var_os("VOXTYPE_LANGUAGE_BACKEND_CHILD").is_none() {
             let fixture = tempfile::tempdir().unwrap();
             let worker = fixture.path().join("worker.py");
@@ -5850,9 +5849,9 @@ mod tests {
                 .output()
                 .expect("python3 is required for the isolated protocol fixture");
             assert!(python.status.success());
-            std::fs::write(
+            crate::test_support::write_script(
                 &worker,
-                format!(
+                &format!(
                     "#!{}\n{}",
                     String::from_utf8(python.stdout).unwrap().trim(),
                     r#"import sys,json,struct
@@ -5867,9 +5866,8 @@ while True:
     print(json.dumps({'ok':True,'text':'CONFIG_HINT:'+config['language']}),flush=True)
 "#
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+            );
+
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "daemon::tests::tray_language_next_backend_receives_hint_resident_and_on_demand", "--nocapture"])
                 .env("VOXTYPE_LANGUAGE_BACKEND_CHILD", "1")

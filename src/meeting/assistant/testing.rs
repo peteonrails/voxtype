@@ -61,10 +61,7 @@ impl Sandbox {
     }
 
     fn script(&self, name: &str, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let p = self.bin().join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&self.bin().join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     /// A fake `claude` that records argv and stdin (one file per call,
