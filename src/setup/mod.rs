@@ -1429,7 +1429,10 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         }
     } else {
         println!("\nWhisper Model:");
-        print_info("Using Parakeet engine (Whisper model not required)");
+        print_info(&format!(
+            "Using {} engine (Whisper model not required)",
+            config.engine.name()
+        ));
     }
 
     // Check Parakeet models
