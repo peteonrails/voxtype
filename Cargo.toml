@@ -85,10 +85,14 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 whisper-rs = "0.16.0"
 
 # Parakeet speech-to-text (optional, ONNX-based)
-parakeet-rs = { version = "0.3.5", optional = true }
+# parakeet-rs's default features turn on ort's defaults, which fetch ONNX
+# Runtime at build time over native-tls (OpenSSL). openssl-sys does not build
+# against OpenSSL 4, which Arch now ships, so take parakeet-rs without its
+# defaults and ask ort for the same features with rustls instead.
+parakeet-rs = { version = "0.3.5", optional = true, default-features = false, features = ["cpu"] }
 
 # ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual)
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "api-24", "half"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "api-24", "half", "tracing", "download-binaries", "tls-rustls", "copy-dylibs"] }
 ndarray = { version = "0.16", optional = true }
 half = { version = "2", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
@@ -208,7 +212,7 @@ gpu-hipblas = ["whisper-rs/hipblas"]
 # ML-based speaker diarization (uses ONNX for embedding extraction)
 ml-diarization = ["dep:ort", "dep:ndarray"]
 # Parakeet backend (ONNX-based, alternative to Whisper)
-parakeet = ["dep:parakeet-rs"]
+parakeet = ["dep:parakeet-rs", "dep:ort"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
