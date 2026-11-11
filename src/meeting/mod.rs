@@ -126,6 +126,9 @@ pub struct MeetingDaemon {
     /// timelines stay anchored to real wall-clock elapsed time instead
     /// of being pushed forward by the other source's segments.
     source_offsets: HashMap<AudioSource, u64>,
+    /// ID for the meeting's next transcript segment, unique across chunks
+    /// and tracks so consumers (the HUD, edits) can address a segment.
+    next_segment_id: u32,
 }
 
 impl MeetingDaemon {
@@ -175,7 +178,33 @@ impl MeetingDaemon {
             post_processor,
             last_chunk_text: HashMap::new(),
             source_offsets: HashMap::new(),
+            next_segment_id: 0,
         })
+    }
+
+    /// A daemon around a given transcriber, for tests that drive chunks
+    /// without loading a model.
+    #[cfg(test)]
+    fn for_test(
+        config: MeetingConfig,
+        transcriber: Arc<dyn Transcriber>,
+        diarizer: Option<Box<dyn diarization::Diarizer>>,
+        event_tx: mpsc::Sender<MeetingEvent>,
+    ) -> Self {
+        Self {
+            storage: MeetingStorage::open(config.storage.clone()).unwrap(),
+            config,
+            state: MeetingState::Idle,
+            current_meeting: None,
+            transcriber: Some(transcriber),
+            diarizer,
+            engine_name: "test".to_string(),
+            event_tx,
+            post_processor: None,
+            last_chunk_text: HashMap::new(),
+            source_offsets: HashMap::new(),
+            next_segment_id: 0,
+        }
     }
 
     /// Start a new meeting
@@ -204,6 +233,7 @@ impl MeetingDaemon {
         };
         self.current_meeting = Some(meeting);
         self.state = MeetingState::start();
+        self.next_segment_id = 0;
 
         let _ = self
             .event_tx
@@ -364,13 +394,15 @@ impl MeetingDaemon {
             *offset += audio_duration_ms;
         }
 
-        let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone());
+        let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone())
+            .with_first_segment_id(self.next_segment_id);
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
         buffer.add_samples(&samples);
 
         let mut result = processor
             .process_chunk(buffer)
             .map_err(crate::error::VoxtypeError::Transcribe)?;
+        self.next_segment_id = processor.next_segment_id();
 
         // Post-process segment text if configured
         if let Some(ref post_processor) = self.post_processor {
@@ -490,6 +522,173 @@ pub fn export_meeting_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::TranscribeError;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Numbers each utterance it is given: "u0", "u1", ...
+    struct CountingTranscriber(AtomicU32);
+
+    impl Transcriber for CountingTranscriber {
+        fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
+            if samples.iter().all(|s| s.abs() < 0.05) {
+                return Ok(String::new());
+            }
+            Ok(format!("u{}", self.0.fetch_add(1, Ordering::SeqCst)))
+        }
+    }
+
+    /// `secs` of audio with a 440 Hz tone over each (start, end) span.
+    fn track(secs: f32, spans: &[(f32, f32)]) -> Vec<f32> {
+        let mut samples = vec![0.0; (secs * 16000.0) as usize];
+        for &(start, end) in spans {
+            let span = (start * 16000.0) as usize..(end * 16000.0) as usize;
+            for (i, s) in samples[span.clone()].iter_mut().enumerate() {
+                let t = (span.start + i) as f32 / 16000.0;
+                *s = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+            }
+        }
+        samples
+    }
+
+    struct Harness {
+        daemon: MeetingDaemon,
+        config: MeetingConfig,
+        events: mpsc::Receiver<MeetingEvent>,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn harness() -> Harness {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = MeetingConfig {
+            enabled: true,
+            chunk_duration_secs: 30,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+            },
+            ..Default::default()
+        };
+        let (tx, events) = mpsc::channel(64);
+        let mut daemon = MeetingDaemon::for_test(
+            config.clone(),
+            Arc::new(CountingTranscriber(AtomicU32::new(0))),
+            Some(Box::new(diarization::simple::SimpleDiarizer::new())),
+            tx,
+        );
+        daemon.start(Some("Test".to_string())).await.unwrap();
+        Harness {
+            daemon,
+            config,
+            events,
+            _dir: dir,
+        }
+    }
+
+    impl Harness {
+        /// One chunk of each track, the way the daemon feeds them.
+        async fn pair(&mut self, mic: &[(f32, f32)], loopback: &[(f32, f32)]) {
+            self.daemon
+                .process_chunk_with_source(track(30.0, mic), AudioSource::Microphone)
+                .await
+                .unwrap();
+            self.daemon
+                .process_chunk_with_source(track(30.0, loopback), AudioSource::Loopback)
+                .await
+                .unwrap();
+            self.daemon.sync_source_offsets();
+        }
+
+        fn saved(&self) -> MeetingData {
+            get_meeting(&self.config, "latest").unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_on_disk_grows_with_each_chunk() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(h.saved().transcript.segments.len(), 2);
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(h.saved().transcript.segments.len(), 4);
+
+        let mut chunk_events = 0;
+        while let Ok(event) = h.events.try_recv() {
+            if let MeetingEvent::ChunkProcessed { segments, .. } = event {
+                assert_eq!(segments.len(), 1);
+                chunk_events += 1;
+            }
+        }
+        assert_eq!(chunk_events, 4);
+    }
+
+    #[tokio::test]
+    async fn segments_interleave_and_ids_are_unique() {
+        let mut h = harness().await;
+        h.pair(&[(2.0, 4.0), (12.0, 14.0)], &[(6.0, 9.0), (20.0, 22.0)])
+            .await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+
+        let saved = h.saved();
+        let order: Vec<(String, u64)> = saved
+            .transcript
+            .segments
+            .iter()
+            .map(|s| (s.speaker_display(), s.start_ms / 1000))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("You".to_string(), 1),
+                ("Remote".to_string(), 5),
+                ("You".to_string(), 11),
+                ("Remote".to_string(), 19),
+                ("You".to_string(), 30),
+                ("Remote".to_string(), 34),
+            ]
+        );
+
+        let mut ids: Vec<u32> = saved.transcript.segments.iter().map(|s| s.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            6,
+            "segment IDs repeat: {:?}",
+            saved.transcript.segments
+        );
+    }
+
+    #[tokio::test]
+    async fn label_given_mid_meeting_survives_stop() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+
+        // What `voxtype meeting label latest Remote Dana` does, from its own process.
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Dana").unwrap();
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let mut live = Vec::new();
+        while let Ok(event) = h.events.try_recv() {
+            if let MeetingEvent::ChunkProcessed { segments, .. } = event {
+                live.extend(segments);
+            }
+        }
+        h.daemon.stop().await.unwrap();
+
+        let speakers: Vec<String> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(speakers, vec!["You", "Dana", "You", "Dana"]);
+        // Segments streamed after the label carry it too.
+        assert_eq!(live.last().unwrap().speaker_display(), "Dana");
+    }
 
     #[test]
     fn test_meeting_config_default() {

@@ -435,6 +435,18 @@ impl ChunkProcessor {
         })
     }
 
+    /// Number segments from `id` on. A meeting builds a processor per chunk,
+    /// and every one starting at 0 gave each chunk's segments the same IDs.
+    pub fn with_first_segment_id(mut self, id: u32) -> Self {
+        self.next_segment_id = id;
+        self
+    }
+
+    /// The ID the next segment will get.
+    pub fn next_segment_id(&self) -> u32 {
+        self.next_segment_id
+    }
+
     /// Check if a chunk buffer is ready for processing
     pub fn is_chunk_ready(&self, buffer: &ChunkBuffer) -> bool {
         buffer.duration_secs() >= self.config.chunk_duration_secs as f32
