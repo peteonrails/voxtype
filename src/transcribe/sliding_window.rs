@@ -93,6 +93,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 
+mod pause_commit;
+
 /// Whisper silence-hallucination phrases. When Whisper is fed silence or
 /// noise it frequently emits one of these; drop the result entirely.
 const HALLUCINATION_PATTERNS: &[&str] = &[
@@ -182,6 +184,10 @@ pub struct SlidingWindowConfig {
     /// Maximum buffered audio before the window starts sliding (drops old
     /// samples). Hard-coded to 29.0 s in nova (Whisper context limit).
     pub max_buffer_s: f32,
+    /// Close the sentence after a pause this long (seconds) and start the
+    /// next one from an empty buffer, so settled text is never revised
+    /// again. `0` (default) disables it. See `pause_commit`.
+    pub commit_on_pause_s: f32,
     /// Assumed sample rate (16 kHz mono for whisper).
     pub sample_rate: u32,
     /// Skip transcription while whole-buffer RMS is below this.
@@ -208,6 +214,7 @@ impl Default for SlidingWindowConfig {
         Self {
             interval_s: 0.8,
             max_buffer_s: 29.0,
+            commit_on_pause_s: 0.0,
             sample_rate: 16_000,
             min_speech_rms: MIN_SPEECH_RMS,
             min_audio_s: 1.0,
@@ -268,7 +275,8 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
 
         let task = tokio::task::spawn_blocking(move || -> Result<(), TranscribeError> {
             let runtime = tokio::runtime::Handle::current();
-            let mut session = Session::new(base, config);
+            let mut session = Session::new(Arc::clone(&base), config);
+            let mut join = pause_commit::SentenceJoin::default();
 
             // Skip the interval's immediate first tick so we don't
             // re-transcribe an empty buffer.
@@ -305,16 +313,25 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
                     Outcome::Eof => {
                         // Graceful end: one last flush so no audio is lost.
                         if let Some(tail) = session.final_flush() {
-                            let event = delta_to_event(tail, config.type_partials);
+                            let event = delta_to_event(join.apply(tail), config.type_partials);
                             let _ = runtime.block_on(events_tx.send(event));
                         }
                         let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
                         return Ok(());
                     }
+                    Outcome::Tick if pause_commit::sentence_end(&session).is_some() => {
+                        // Close the sentence with the same settling pass as
+                        // the end of a recording, then start the next one.
+                        if let Some(tail) = pause_commit::close_sentence(&mut session, &base) {
+                            let event = delta_to_event(join.apply(tail), config.type_partials);
+                            let _ = runtime.block_on(events_tx.send(event));
+                        }
+                        join.next_sentence();
+                    }
                     Outcome::Tick => match session.on_tick() {
                         Ok(deltas) => {
                             for delta in deltas {
-                                let event = delta_to_event(delta, config.type_partials);
+                                let event = delta_to_event(join.apply(delta), config.type_partials);
                                 let _ = runtime.block_on(events_tx.send(event));
                             }
                         }
@@ -1416,6 +1433,7 @@ mod tests {
         SlidingWindowConfig {
             interval_s: 0.02,
             max_buffer_s: 29.0,
+            commit_on_pause_s: 0.0,
             sample_rate: 16_000,
             min_speech_rms: 0.004,
             min_audio_s: 1.0,

@@ -1411,6 +1411,7 @@ This section is entirely optional. Omitting it (or omitting individual fields in
 |--------|------|---------|-------------|
 | `interval_secs` | Float | `0.8` | Seconds between re-transcriptions of the rolling buffer. Lower = more responsive partials, higher CPU/NPU cost |
 | `max_buffer_secs` | Float | `29.0` | Max buffered audio (seconds) before the window slides (drops old samples to respect the model's context limit) |
+| `commit_on_pause_secs` | Float | `0` | Close the sentence after a pause this long (seconds): it gets one last pass, is never revised again, and the next sentence starts from an empty buffer. Keeps long dictations out of sliding mode, where each pass starts mid-sentence and the tail keeps being retyped. `0` disables it; about `0.6` suits dictation |
 | `min_speech_rms` | Float | `0.005` | Skip transcription while whole-buffer RMS is below this |
 | `min_audio_secs` | Float | `1.0` | Min buffered audio (seconds) before the first partial is attempted |
 | `partial_min_words` | Integer | `1` | Min new stable words before a delta is committed/typed |

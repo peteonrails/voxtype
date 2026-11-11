@@ -439,6 +439,7 @@ fn sliding_window_config(
     SlidingWindowConfig {
         interval_s: resolved.interval_secs as f64,
         max_buffer_s: resolved.max_buffer_secs,
+        commit_on_pause_s: resolved.commit_on_pause_secs,
         // Streaming audio arrives at the configured [audio] sample rate.
         sample_rate: config.audio.sample_rate,
         min_speech_rms: resolved.min_speech_rms,
@@ -461,6 +462,7 @@ fn sliding_window_config_from_whisper(config: &Config) -> SlidingWindowConfig {
         partial_min_words: config.whisper.streaming_partial_min_words,
         type_partials: config.whisper.streaming_type_partials,
         revision_mode: config.whisper.streaming_revision_mode,
+        ..StreamingConfig::default()
     };
     sliding_window_config(config, legacy, "whisper")
 }
@@ -481,6 +483,7 @@ fn sliding_window_config_from_openvino(
         partial_min_words: openvino.streaming_partial_min_words,
         type_partials: openvino.streaming_type_partials,
         revision_mode: openvino.streaming_revision_mode,
+        ..StreamingConfig::default()
     };
     sliding_window_config(config, legacy, "openvino")
 }

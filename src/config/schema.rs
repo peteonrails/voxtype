@@ -2180,6 +2180,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Experimental: type the best guess at once and correct it later with backspace.",
     ),
     spec(
+        "streaming.commit_on_pause_secs",
+        "streaming",
+        "commit_on_pause_secs",
+        KeyType::Float { min: 0.0, max: 5.0 },
+        "Advanced",
+        "Commit on pause",
+        "Close the sentence after a pause this long (s) so its text is not revised again. 0 = off.",
+    ),
+    spec(
         "meeting.chunk_duration_secs",
         "meeting",
         "chunk_duration_secs",
@@ -2978,6 +2987,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }
         "streaming.type_partials" => json!(cfg.streaming.unwrap_or_default().type_partials),
         "streaming.revision_mode" => json!(cfg.streaming.unwrap_or_default().revision_mode),
+        "streaming.commit_on_pause_secs" => {
+            json!(cfg.streaming.unwrap_or_default().commit_on_pause_secs)
+        }
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),

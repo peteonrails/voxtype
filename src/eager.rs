@@ -78,7 +78,7 @@ const QUIET_SPAN_FRAMES: usize = 6;
 /// `QUIET_SPAN_FRAMES`-frame stretch (fewer if the window is shorter). Ties
 /// go to the latest stretch so chunks stay as close to nominal length as the
 /// audio allows. Falls back to `hi` when the window holds no full frame.
-fn quietest_cut(audio: &[f32], lo: usize, hi: usize) -> usize {
+pub(crate) fn quietest_cut(audio: &[f32], lo: usize, hi: usize) -> usize {
     let frames: Vec<(usize, f32)> = frame_energies(audio, lo, hi).collect();
     if frames.is_empty() {
         return hi;
