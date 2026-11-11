@@ -243,13 +243,14 @@ pub(crate) async fn run_meeting_command(
         }
 
         MeetingAction::List { limit, json } => {
+            if json {
+                let entries = meeting::list_meeting_entries(&meeting_config, Some(limit))
+                    .map_err(|e| anyhow::anyhow!("Error listing meetings: {}", e))?;
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+                return Ok(());
+            }
             match meeting::list_meetings(&meeting_config, Some(limit)) {
                 Ok(meetings) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&meetings)?);
-                        return Ok(());
-                    }
-
                     if meetings.is_empty() {
                         println!("No meetings found.");
                         return Ok(());

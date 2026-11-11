@@ -300,6 +300,16 @@ fn summarize_saves_and_regenerates() {
         ),
     )
     .unwrap();
+    let list = |w: &World| -> serde_json::Value {
+        let o = w.run(&["meeting", "list", "--json"]);
+        assert!(o.status.success(), "{}", text(&o.stderr));
+        serde_json::from_slice(&o.stdout).unwrap()
+    };
+    let listed = list(&w);
+    assert_eq!(listed[0]["has_summary"], false);
+    // "Steve" (the labelled Remote) and "You".
+    assert_eq!(listed[0]["speaker_count"], 2);
+
     let o = w.run(&["meeting", "summarize", "latest", "--format", "json"]);
     assert!(o.status.success(), "{}", text(&o.stderr));
     let s: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
@@ -321,6 +331,9 @@ fn summarize_saves_and_regenerates() {
     let o = w.run(&["meeting", "show", "latest", "--json"]);
     let shown: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(shown["metadata"]["summary"]["summary"], "Ship Friday.");
+    let listed = list(&w);
+    assert_eq!(listed[0]["has_summary"], true);
+    assert_eq!(listed[0]["speaker_count"], 2);
 }
 
 // --- --notify over a private bus -----------------------------------------

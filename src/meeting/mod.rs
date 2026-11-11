@@ -42,7 +42,7 @@ pub use data::{
 pub use events::{DiarizationInfo, MeetingEventHub, MeetingHudState};
 pub use export::{export_meeting, export_meeting_to_file, ExportFormat, ExportOptions};
 pub use state::{ChunkState, MeetingState};
-pub use storage::{MeetingStorage, StorageConfig, StorageError};
+pub use storage::{MeetingListEntry, MeetingStorage, StorageConfig, StorageError};
 
 use crate::error::{MeetingError, Result};
 use crate::output::post_process::PostProcessor;
@@ -696,6 +696,16 @@ pub fn list_meetings(
 ) -> std::result::Result<Vec<MeetingMetadata>, StorageError> {
     let storage = MeetingStorage::open(config.storage.clone())?;
     storage.list_meetings(limit)
+}
+
+/// List meetings with each one's summary flag and speaker count, from the
+/// index (see [`MeetingStorage::list_meeting_entries`])
+pub fn list_meeting_entries(
+    config: &MeetingConfig,
+    limit: Option<u32>,
+) -> std::result::Result<Vec<storage::MeetingListEntry>, StorageError> {
+    let storage = MeetingStorage::open(config.storage.clone())?;
+    storage.list_meeting_entries(limit)
 }
 
 /// Get a meeting by ID (or "latest")
