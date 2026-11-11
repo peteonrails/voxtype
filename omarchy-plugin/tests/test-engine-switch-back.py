@@ -9,6 +9,8 @@ Scenarios:
                `config select-model parakeet <ultra>` and Ultra configured.
   same-engine  engine = "parakeet" on another model; Use on Ultra still goes
                through `config set parakeet.model`, as before.
+  parakeet-to-cohere  engine = "parakeet"; browse Cohere, Use on a Cohere
+               model. Expect one `config select-model cohere <model>`.
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -21,9 +23,10 @@ import sys
 
 import panel_harness as h
 
-SCENARIOS = ("from-gguf", "same-engine")
+SCENARIOS = ("from-gguf", "same-engine", "parakeet-to-cohere")
 ULTRA = "parakeet-ultra-Q8_0.gguf"
 V3 = "parakeet-tdt-0.6b-v3-Q8_0.gguf"
+COHERE = "cohere-transcribe-03-2026-Q4_K_M.gguf"
 
 
 def run(scenario, shell, evidence):
@@ -31,13 +34,20 @@ def run(scenario, shell, evidence):
         state = h.base_state(model=ULTRA, engine="gguf", gguf_model="Qwen3-ASR-0.6B-Q8_0.gguf",
                              installed=[ULTRA])
         start, expected = "gguf", [["config", "select-model", "parakeet", ULTRA]]
+        target, model = "parakeet", ULTRA
+    elif scenario == "parakeet-to-cohere":
+        state = h.base_state(model=ULTRA, installed=[ULTRA], cohere_models=[COHERE])
+        start, expected = "parakeet", [["config", "select-model", "cohere", COHERE]]
+        target, model = "cohere", COHERE
     else:
         state = h.base_state(model=V3, installed=[V3, ULTRA])
         start, expected = "parakeet", [["config", "set", "parakeet.model", ULTRA]]
+        target, model = "parakeet", ULTRA
     with h.Run(shell, state) as r:
         r.dev_json(r.fake)
         output, code = r.run(h.HERE / "engine-switch-back.qml",
-                             {"__SCENARIO__": scenario, "__START__": start})
+                             {"__SCENARIO__": scenario, "__START__": start,
+                              "__TARGET__": target, "__MODEL__": model})
         calls = r.calls()
         if evidence:
             out = evidence / scenario

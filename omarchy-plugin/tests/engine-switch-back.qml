@@ -10,7 +10,8 @@ Item {
   id: host
   Plugin.Panel { id: panel; manifest: ({__sourceDir: __PLUGIN__}) }
 
-  readonly property string ultra: "parakeet-ultra-Q8_0.gguf"
+  readonly property string target: __TARGET__
+  readonly property string ultra: __MODEL__
 
   TestCase {
     id: tc
@@ -26,7 +27,7 @@ Item {
       repeat: true
       onTriggered: {
         if (!panel.opened || panel.engine !== __START__ || panel.activeSection !== "Engine") return
-        if (!panel.engines["parakeet"]) return
+        if (!panel.engines[host.target]) return
         tc.started = true
         try {
           tc.drive()
@@ -73,8 +74,8 @@ Item {
 
     function drive() {
       // The engine dropdown only browses another engine's catalog.
-      panel.formTest.engineChangeRequested("parakeet")
-      waitFor(function() { return panel.catalogEngine === "parakeet" }, "browsing Parakeet")
+      panel.formTest.engineChangeRequested(host.target)
+      waitFor(function() { return panel.catalogEngine === host.target }, "browsing " + host.target)
       var use = null
       waitFor(function() {
         use = find(panel.renderTest, "useModel:" + host.ultra)
@@ -83,8 +84,8 @@ Item {
       wait(100)
       check(shown(use) && use.enabled, "Use button settled")
       mouseClick(use, use.width / 2, use.height / 2)
-      waitFor(function() { return panel.engine === "parakeet" && panel.modelValue === host.ultra },
-              "Parakeet Ultra configured after Use (engine " + panel.engine + ", model " + panel.modelValue + ")")
+      waitFor(function() { return panel.engine === host.target && panel.modelValue === host.ultra },
+              host.ultra + " configured after Use (engine " + panel.engine + ", model " + panel.modelValue + ")")
       waitFor(function() { var b = find(panel.renderTest, "useModel:" + host.ultra); return b === null || !shown(b) },
               "Use hidden once Ultra is the configured model")
     }
