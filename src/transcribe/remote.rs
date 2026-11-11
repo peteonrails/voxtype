@@ -322,6 +322,86 @@ impl Transcriber for RemoteTranscriber {
 mod tests {
     use super::*;
 
+    fn configure_fixture_stream(stream: &std::net::TcpStream, timeout: Duration) {
+        // Accepted sockets can inherit the listener's nonblocking mode on BSD.
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(timeout)).unwrap();
+        stream.set_write_timeout(Some(timeout)).unwrap();
+    }
+
+    #[test]
+    fn fixture_stream_reads_delayed_fragments_after_nonblocking_accept() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        // Emulate BSD accepted-socket inheritance even on Linux.
+        stream.set_nonblocking(true).unwrap();
+        configure_fixture_stream(&stream, Duration::from_secs(2));
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte)?;
+                header.push(byte[0]);
+                assert!(header.len() < 16_384);
+            }
+            let mut body = [0; 4];
+            stream.read_exact(&mut body)?;
+            Ok::<_, std::io::Error>((header, body))
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let writer_result = (|| -> std::io::Result<()> {
+            for fragment in [
+                &b"POST / HTTP/1.1\r\nContent-Len"[..],
+                &b"gth: 4\r\n\r"[..],
+                &b"\n"[..],
+                &b"\0\xff"[..],
+                &b"\x01\x80"[..],
+            ] {
+                std::thread::sleep(Duration::from_millis(50));
+                client.write_all(fragment)?;
+            }
+            Ok(())
+        })();
+        let read_result = reader.join().unwrap();
+        let (header, body) = read_result.unwrap();
+        writer_result.unwrap();
+        assert_eq!(header, b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n");
+        assert_eq!(body, [0, 255, 1, 128]);
+    }
+
+    #[test]
+    fn fixture_stream_idle_read_is_bounded() {
+        use std::io::Read;
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let timeout = Duration::from_millis(100);
+        configure_fixture_stream(&stream, timeout);
+        assert_eq!(stream.read_timeout().unwrap(), Some(timeout));
+        assert_eq!(stream.write_timeout().unwrap(), Some(timeout));
+        let start = std::time::Instant::now();
+        let error = stream.read_exact(&mut [0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(start.elapsed() >= timeout);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
     // The listener is loopback-only; release verification runs these tests in
     // the private no-egress NAS container, never against a provider or desktop.
     fn capture_request(endpoint_suffix: &str, translate: bool) -> String {
@@ -343,12 +423,7 @@ mod tests {
                     Err(error) => panic!("fixture accept failed: {error}"),
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            configure_fixture_stream(&stream, Duration::from_secs(5));
             let mut request = Vec::new();
             let header_end = loop {
                 let mut byte = [0];
