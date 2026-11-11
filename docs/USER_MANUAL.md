@@ -695,6 +695,7 @@ Continuous meeting transcription with chunked processing and speaker diarization
 ```bash
 voxtype meeting start                  # Start a meeting
 voxtype meeting start --title "Title"  # Start with a title
+voxtype meeting start --model large-v3-turbo --language de --url https://meet.example.com/x
 voxtype meeting stop                   # Stop the meeting
 voxtype meeting pause                  # Pause recording
 voxtype meeting resume                 # Resume recording

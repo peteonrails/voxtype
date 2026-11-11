@@ -543,6 +543,9 @@ pub struct MeetingMetadata {
     /// Whisper model used
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The call's link, from `meeting start --url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Summary (Phase 5)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<MeetingSummary>,
@@ -565,6 +568,7 @@ impl MeetingMetadata {
             storage_path: None,
             audio_retained: false,
             model: None,
+            url: None,
             summary: None,
             synced_at: None,
         }

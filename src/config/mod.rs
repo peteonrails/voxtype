@@ -36,7 +36,8 @@ pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::{LanguageConfig, COHERE_LANGUAGES};
 pub use load::{load_config, save_config};
 pub use meeting::{
-    MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingSummaryConfig,
+    MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingStartOptions,
+    MeetingSummaryConfig,
 };
 pub use notification::NotificationConfig;
 pub use output::{

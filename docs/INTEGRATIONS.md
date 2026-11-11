@@ -125,6 +125,8 @@ voxtype meeting show latest --json     # the full MeetingData (metadata + transc
 voxtype meeting list --json            # an array of MeetingMetadata
 ```
 
+A meeting started with `--url` has `"url"` in its metadata; the key is absent otherwise. Something that starts meetings for a calendar event (a detection prompt, a calendar plugin) can pass `--url` with `--title`, and read the link back from `metadata.url`.
+
 `show`/`list` JSON is the same serde shape written to `metadata.json` and
 `transcript.json` on disk (snake_case), not the camelCase `meeting export -f
 json` emits — the export format predates this and is a separate, deliberately

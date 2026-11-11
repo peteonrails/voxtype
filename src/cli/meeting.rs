@@ -9,10 +9,41 @@ use super::DIARIZATION_BACKENDS;
 #[derive(Subcommand)]
 pub enum MeetingAction {
     /// Start a new meeting transcription
+    ///
+    /// Without --engine or --model the meeting transcribes with dictation's
+    /// engine and model, reusing the model dictation already has loaded so
+    /// the meeting starts at once. A different engine, model or language
+    /// loads its own copy. An engine this binary lacks, or a model that is
+    /// not installed, is refused before the meeting starts.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting start --title Standup\n  \
+        voxtype meeting start --title 'Planning' --url https://meet.example.com/abc-defg-hij\n  \
+        voxtype meeting start --model large-v3-turbo --language de\n  \
+        voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf")]
     Start {
         /// Meeting title (optional)
         #[arg(long, short)]
         title: Option<String>,
+
+        /// Transcription engine for this meeting (default: the configured
+        /// engine). Without --model it uses that engine's configured model.
+        #[arg(long, env = "VOXTYPE_MEETING_ENGINE")]
+        engine: Option<String>,
+
+        /// Model for this meeting, as `voxtype info models` lists it. Its
+        /// engine is implied, so --engine is optional.
+        #[arg(long, env = "VOXTYPE_MEETING_MODEL")]
+        model: Option<String>,
+
+        /// Language hint for this meeting, for engines and checkpoints that
+        /// take one (multilingual Whisper, Cohere)
+        #[arg(long, env = "VOXTYPE_MEETING_LANGUAGE")]
+        language: Option<String>,
+
+        /// Link to the call, stored with the meeting and shown by
+        /// `meeting show` and exports
+        #[arg(long)]
+        url: Option<String>,
 
         /// Diarization backend override for this meeting only.
         ///
@@ -277,12 +308,66 @@ mod tests {
         ]);
         match cli.command {
             Some(Commands::Meeting {
-                action: MeetingAction::Start { diarization, title },
+                action:
+                    MeetingAction::Start {
+                        diarization, title, ..
+                    },
             }) => {
                 assert_eq!(diarization.as_deref(), Some("ml"));
                 assert_eq!(title.as_deref(), Some("standup"));
             }
             _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn meeting_start_takes_engine_model_language_and_url() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "meeting",
+            "start",
+            "--title",
+            "Planning",
+            "--engine",
+            "parakeet",
+            "--model",
+            "parakeet-ultra-Q8_0.gguf",
+            "--language",
+            "en",
+            "--url",
+            "https://meet.example.com/abc",
+        ]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action:
+                    MeetingAction::Start {
+                        title,
+                        engine,
+                        model,
+                        language,
+                        url,
+                        ..
+                    },
+            }) => {
+                assert_eq!(title.as_deref(), Some("Planning"));
+                assert_eq!(engine.as_deref(), Some("parakeet"));
+                assert_eq!(model.as_deref(), Some("parakeet-ultra-Q8_0.gguf"));
+                assert_eq!(language.as_deref(), Some("en"));
+                assert_eq!(url.as_deref(), Some("https://meet.example.com/abc"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    /// The detection prompt's Record runs `meeting start --title T`, and the
+    /// tray's Start Meeting runs it with no options: both still parse.
+    #[test]
+    fn meeting_start_still_takes_title_alone_and_nothing() {
+        for args in [
+            &["voxtype", "meeting", "start", "--title", "Standup"][..],
+            &["voxtype", "meeting", "start"][..],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }
     }
 
@@ -308,7 +393,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "meeting", "start"]);
         match cli.command {
             Some(Commands::Meeting {
-                action: MeetingAction::Start { diarization, title },
+                action:
+                    MeetingAction::Start {
+                        diarization, title, ..
+                    },
             }) => {
                 assert_eq!(diarization, None);
                 assert_eq!(title, None);

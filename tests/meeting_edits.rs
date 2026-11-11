@@ -377,3 +377,108 @@ fn notes_and_annotations_during_a_meeting_poke_the_daemon() {
         "live annotation"
     );
 }
+
+impl Scratch {
+    fn enable_meetings(&self) {
+        std::fs::write(
+            self.path("config/voxtype/config.toml"),
+            "[meeting]\nenabled = true\n",
+        )
+        .unwrap();
+    }
+
+    fn start_error(&self, args: &[&str]) -> String {
+        let mut all = vec!["meeting", "start"];
+        all.extend_from_slice(args);
+        let output = self.voxtype(&all);
+        assert!(!output.status.success(), "start {args:?} should be refused");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+}
+
+/// A5: a meeting that could not transcribe is refused before it starts,
+/// with the fix, even before the daemon is consulted.
+#[test]
+fn meeting_start_refuses_engines_and_models_it_cannot_use() {
+    let s = Scratch::new();
+    s.enable_meetings();
+
+    let err = s.start_error(&["--engine", "nope"]);
+    assert!(
+        err.contains("Unknown engine 'nope'. Engines: whisper,"),
+        "{err}"
+    );
+
+    let err = s.start_error(&["--model", "no-such-model"]);
+    assert!(err.contains("Unknown model 'no-such-model'"), "{err}");
+
+    let err = s.start_error(&["--engine", "parakeet", "--model", "base.en"]);
+    assert!(
+        err.contains("Model 'base.en' is a whisper model, not a parakeet model"),
+        "{err}"
+    );
+
+    // Nothing is downloaded in the scratch data dir.
+    let err = s.start_error(&["--model", "large-v3-turbo"]);
+    assert!(
+        err.contains(
+            "not installed. Download it with: voxtype setup --download --model large-v3-turbo"
+        ),
+        "{err}"
+    );
+
+    // base.en is English-only.
+    let err = s.start_error(&["--language", "de"]);
+    assert!(err.contains("Language 'de' is not available"), "{err}");
+
+    // A default build has no Omnilingual engine; the hint says how to get it.
+    if !cfg!(feature = "omnilingual") {
+        let err = s.start_error(&["--engine", "omnilingual"]);
+        assert!(
+            err.contains(
+                "This voxtype binary was built without the omnilingual engine. To use it,"
+            ),
+            "{err}"
+        );
+    }
+
+    assert!(!s.path("runtime/voxtype/meeting_start").exists());
+    assert!(!s.path("runtime/voxtype/meeting_start_options").exists());
+}
+
+#[test]
+fn the_meeting_link_shows_in_show_and_the_export() {
+    let s = Scratch::new();
+    let storage = s.storage();
+    let mut metadata = MeetingMetadata::new(Some("Linked".to_string()));
+    metadata.url = Some("https://meet.example.com/abc-defg-hij".to_string());
+    storage.create_meeting(&metadata).unwrap();
+
+    let show: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "show", "latest", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        show["metadata"]["url"],
+        "https://meet.example.com/abc-defg-hij"
+    );
+    let text = stdout(&s.voxtype(&["meeting", "show", "latest"]));
+    assert!(
+        text.contains("Link:     https://meet.example.com/abc-defg-hij"),
+        "{text}"
+    );
+
+    let md = stdout(&s.voxtype(&["meeting", "export", "latest", "--metadata"]));
+    assert!(
+        md.contains("- **Link:** https://meet.example.com/abc-defg-hij"),
+        "{md}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "export", "latest", "--format", "json"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        json["metadata"]["url"],
+        "https://meet.example.com/abc-defg-hij"
+    );
+}

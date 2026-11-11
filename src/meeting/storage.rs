@@ -227,6 +227,17 @@ impl MeetingStorage {
             );
             "#,
         )?;
+
+        // Columns added after the table first shipped. ALTER TABLE has no IF
+        // NOT EXISTS, so ask first; older binaries ignore the extra column.
+        let has_url = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('meetings') WHERE name = 'url'")?
+            .exists([])?;
+        if !has_url {
+            self.conn
+                .execute_batch("ALTER TABLE meetings ADD COLUMN url TEXT;")?;
+        }
         Ok(())
     }
 
@@ -239,8 +250,8 @@ impl MeetingStorage {
         // Insert into database
         self.conn.execute(
             r#"
-            INSERT INTO meetings (id, title, started_at, status, storage_path, audio_retained, model)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO meetings (id, title, started_at, status, storage_path, audio_retained, model, url)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
                 metadata.id.to_string(),
@@ -250,6 +261,7 @@ impl MeetingStorage {
                 meeting_dir.to_string_lossy().to_string(),
                 metadata.audio_retained as i32,
                 metadata.model,
+                metadata.url,
             ],
         )?;
 
@@ -273,7 +285,8 @@ impl MeetingStorage {
                 chunk_count = ?6,
                 audio_retained = ?7,
                 model = ?8,
-                synced_at = ?9
+                synced_at = ?9,
+                url = ?10
             WHERE id = ?1
             "#,
             params![
@@ -286,6 +299,7 @@ impl MeetingStorage {
                 metadata.audio_retained as i32,
                 metadata.model,
                 metadata.synced_at.map(|dt| dt.timestamp()),
+                metadata.url,
             ],
         )?;
 
@@ -323,7 +337,7 @@ impl MeetingStorage {
             .query_row(
                 r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -339,6 +353,7 @@ impl MeetingStorage {
                         storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                         audio_retained: row.get::<_, i32>(8)? != 0,
                         model: row.get(9)?,
+                        url: row.get(11)?,
                         summary: None,
                         synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
                     })
@@ -354,7 +369,7 @@ impl MeetingStorage {
         let sql = if limit.is_some() {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings
                 ORDER BY started_at DESC
                 LIMIT ?1
@@ -362,7 +377,7 @@ impl MeetingStorage {
         } else {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings
                 ORDER BY started_at DESC
                 "#
@@ -381,6 +396,7 @@ impl MeetingStorage {
                 storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                 audio_retained: row.get::<_, i32>(8)? != 0,
                 model: row.get(9)?,
+                url: row.get(11)?,
                 summary: None,
                 synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
             })
@@ -1936,6 +1952,55 @@ mod tests {
         storage.annotate_segment(&id, 2, "x", false, true).unwrap();
         storage.delete_meeting(&id).unwrap();
         assert!(storage.get_annotations(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_meetings_link_round_trips() {
+        let (storage, _temp) = create_test_storage();
+        let mut metadata = MeetingMetadata::new(None);
+        metadata.url = Some("https://meet.example.com/x".to_string());
+        storage.create_meeting(&metadata).unwrap();
+        let loaded = storage.get_meeting(&metadata.id).unwrap().unwrap();
+        assert_eq!(loaded.url.as_deref(), Some("https://meet.example.com/x"));
+        assert_eq!(
+            storage.list_meetings(None).unwrap()[0].url.as_deref(),
+            Some("https://meet.example.com/x")
+        );
+    }
+
+    /// An index from before meeting links gains the column on open.
+    #[test]
+    fn an_index_without_the_url_column_is_upgraded() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = Connection::open(temp.path().join("index.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meetings (id TEXT PRIMARY KEY, title TEXT, started_at INTEGER NOT NULL, \
+                 ended_at INTEGER, duration_secs INTEGER, status TEXT NOT NULL DEFAULT 'active', \
+                 chunk_count INTEGER NOT NULL DEFAULT 0, storage_path TEXT, \
+                 audio_retained INTEGER NOT NULL DEFAULT 0, model TEXT, synced_at INTEGER, \
+                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')));\
+                 INSERT INTO meetings (id, started_at) VALUES ('6f1c2a5e-0000-4000-8000-000000000001', 0);",
+            )
+            .unwrap();
+        }
+        let storage = MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        })
+        .unwrap();
+        let old = storage.list_meetings(None).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].url, None);
+        // Opening again does not try to add it twice.
+        drop(storage);
+        MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        })
+        .unwrap();
     }
 
     #[test]

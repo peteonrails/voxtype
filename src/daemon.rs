@@ -609,10 +609,12 @@ fn read_bool_override(name: &str) -> Option<bool> {
 
 // === Meeting Mode IPC ===
 
-/// A pending meeting-start trigger with optional title and diarization override.
+/// A pending meeting-start trigger with optional title, diarization override
+/// and the engine, model, language and URL choices.
 struct MeetingStartTrigger {
     title: Option<String>,
     diarization: Option<String>,
+    options: crate::config::MeetingStartOptions,
 }
 
 /// Read a file and return its trimmed contents, or None if missing or empty.
@@ -681,11 +683,28 @@ fn check_meeting_start() -> Option<MeetingStartTrigger> {
         read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
     let _ = std::fs::remove_file(&diarization_file);
 
+    // `meeting start --engine/--model/--language/--url`, written the same way.
+    let options_file = runtime_dir.join("meeting_start_options");
+    let options = read_trimmed_nonempty(&options_file)
+        .and_then(|json| match serde_json::from_str(&json) {
+            Ok(options) => Some(options),
+            Err(e) => {
+                tracing::warn!("Ignoring unreadable meeting start options: {}", e);
+                None
+            }
+        })
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&options_file);
+
     // The start trigger stays on disk until `ack_meeting_start`, once the
     // meeting is recording or refused. While it exists a second
     // `voxtype meeting start` sees a start in flight and refuses, which it
     // cannot tell from the state file until the meeting is up.
-    Some(MeetingStartTrigger { title, diarization })
+    Some(MeetingStartTrigger {
+        title,
+        diarization,
+        options,
+    })
 }
 
 /// Acknowledge a meeting start trigger read by `check_meeting_start`.
@@ -754,6 +773,7 @@ fn cleanup_meeting_files() {
     for name in &[
         "meeting_start",
         "meeting_start_diarization",
+        "meeting_start_options",
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
@@ -2924,16 +2944,38 @@ impl Daemon {
         }
     }
 
+    /// Dictation's loaded transcriber, when a meeting configured as `meeting`
+    /// can use it instead of loading its own copy.
+    fn resident_transcriber_for(&mut self, meeting: &Config) -> Option<Arc<dyn Transcriber>> {
+        if !meeting::start::shares_dictation_transcriber(&self.config, meeting) {
+            return None;
+        }
+        if self.config.engine == crate::config::TranscriptionEngine::Whisper {
+            self.model_manager.as_mut()?.get_transcriber(None).ok()
+        } else {
+            self.transcriber_preloaded.clone()
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
         title: Option<String>,
         diarization_override: Option<String>,
+        options: crate::config::MeetingStartOptions,
     ) -> Result<()> {
         if self.meeting_daemon.is_some() {
             tracing::warn!("Meeting already in progress");
             return Ok(());
         }
+
+        // The CLI checked these before writing the trigger; check again, as
+        // anything can write the trigger file.
+        let meeting_app_config =
+            meeting::start::meeting_transcription_config(&self.config, &options).map_err(|e| {
+                tracing::error!("Refusing to start the meeting: {}", e);
+                crate::error::VoxtypeError::Config(e)
+            })?;
 
         // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
         let backend = diarization_override
@@ -3029,10 +3071,12 @@ impl Daemon {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         self.meeting_event_rx = Some(rx);
 
-        // Create meeting daemon
-        match MeetingDaemon::new(meeting_config, &self.config, tx) {
+        // Create meeting daemon, on dictation's loaded model when it is the
+        // same one (#808: loading a second copy took most of a slow start).
+        let resident = self.resident_transcriber_for(&meeting_app_config);
+        match MeetingDaemon::new(meeting_config, &meeting_app_config, tx, resident) {
             Ok(mut daemon) => {
-                match daemon.start(title).await {
+                match daemon.start(title, options.url).await {
                     Ok(meeting_id) => {
                         let id_str = meeting_id.to_string();
                         self.meeting_hud = meeting::MeetingHudState {
@@ -3258,7 +3302,10 @@ impl Daemon {
                 tracing::warn!("Meeting already in progress; ignoring start request");
             } else {
                 tracing::debug!("Meeting start requested via file trigger");
-                if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
+                if let Err(e) = self
+                    .start_meeting(trigger.title, trigger.diarization, trigger.options)
+                    .await
+                {
                     tracing::error!("Failed to start meeting: {}", e);
                 }
                 changed = true;

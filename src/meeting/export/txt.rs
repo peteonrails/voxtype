@@ -31,6 +31,9 @@ impl Exporter for TextExporter {
                 let secs = duration % 60;
                 output.push_str(&format!("Duration: {}:{:02}\n", mins, secs));
             }
+            if let Some(ref url) = meeting.metadata.url {
+                output.push_str(&format!("Link: {}\n", url));
+            }
             output.push_str(&format!("Words: {}\n", meeting.transcript.word_count()));
             output.push('\n');
             output.push_str(&"=".repeat(60));
