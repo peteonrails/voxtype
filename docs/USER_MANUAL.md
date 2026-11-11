@@ -249,6 +249,12 @@ configuration guide).
 When the configured Parakeet model is a `.gguf` file, the panel and
 `voxtype configure` hide **Decoder type**, which only applies to ONNX models.
 
+The engine list at the top of the Engine section only browses another engine's
+models. **Use** on an installed model of the generic GGUF engine, Parakeet or
+Cohere switches the engine and the model together, so you can move between
+them from the panel, for example back to Parakeet Ultra after trying a GGUF
+model. To switch to any other engine, run `voxtype config set engine <name>`.
+
 ## Table of Contents
 
 - [Getting Started](#getting-started)
@@ -2330,12 +2336,14 @@ I think we should ship it on Tuesday. Scratch that. We should ship it on Wednesd
 
 The recognised retractions are "scratch that", "strike that", "I'm sorry", "I mean", "I meant to say" and "or rather".
 
-**Sentence breaks** (`repair_sentence_breaks`). A period followed by a lower-case word is the engine contradicting itself, so the fragment is rejoined. A sentence that opens with a question word and inverts its subject gets its question mark back:
+**Sentence breaks** (`repair_sentence_breaks`). Some engines, mostly Whisper, sometimes end a sentence and then carry on in lower case. A period followed by a lower-case word is the engine contradicting itself, so voxtype rejoins the fragment. A sentence that opens with a question word and inverts its subject gets its question mark back:
 
 ```text
 what are the other phases? we have here.
   -> what are the other phases we have here?
 ```
+
+Parakeet and Cohere capitalize after every mark they write, and they only write one where your voice ended a sentence. A pause on its own does not do it: Parakeet keeps a sentence together across a pause of several seconds. If you drop your voice as if you were finishing a sentence, those engines write a full stop, and this setting leaves it alone.
 
 **Numbers, times and money** (`format_numbers`). Dictated quantities become written ones:
 
