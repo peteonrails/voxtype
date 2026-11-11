@@ -120,6 +120,8 @@ Item {
           else if (s === "past-summarize") tc.drivePastSummarize()
           else if (s === "past-reassign") tc.drivePastReassign()
           else if (s === "start-while-browsing") tc.driveStartWhileBrowsing()
+          else if (s === "ask-error") tc.driveAskError()
+          else if (s === "summary-error") tc.driveSummaryError()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -761,6 +763,20 @@ Item {
       waitFor(function() { return find(lineItem(1), "lineMarker").visible }, "highlight marker")
       check(!find(lineItem(1), "lineAnnotation").visible, "no note text for a highlight")
 
+      // A bare highlight from the editor: --highlight with no text.
+      mouseMove(lineItem(0), 30, 4)
+      note = find(lineItem(0), "lineNoteButton")
+      waitFor(function() { return note.visible }, "Add note on line 0")
+      mouseClick(note, note.width / 2, note.height / 2)
+      waitFor(function() { return editor.visible }, "editor for a highlight")
+      click(find(editor, "noteHighlightButton"), "Highlight")
+      click(find(editor, "noteSaveButton"), "Save")
+      check(find(lineItem(0), "lineMarker").visible && !find(lineItem(0), "lineAnnotation").visible, "highlighted, no note")
+      waitFor(idleCli, "highlight finished")
+      wait(300)
+      check(find(lineItem(0), "lineMarker").visible, "highlight kept after the daemon")
+      check(String(find(lineItem(0), "lineNoteButton").text) === "Edit note", "a highlighted line offers Edit")
+
       mouseMove(lineItem(2), 30, 4)
       note = find(lineItem(2), "lineNoteButton")
       waitFor(function() { return note.visible && String(note.text) === "Edit note" }, "Edit note")
@@ -788,14 +804,15 @@ Item {
       waitFor(function() { return answered(1) }, "answer finished", 8000)
       var full = thread().get(1).text
       check(partial.length < full.length, "streamed in pieces: " + partial.length + " < " + full.length)
-      check(full.indexOf("[0:35] The build went green") === 0, "answer: " + full)
+      check(full.indexOf("[00:35] The build went green") === 0, "answer: " + full)
       var row = find(view(), "askThread").itemAtIndex(1)
       check(String(find(row, "answerBy").text) === "Answered by Claude", "attribution: " + find(row, "answerBy").text)
       shot("ask")
 
       // The answer opens with its [0:35] citation: clicking it shows that line.
       var answerText = find(row, "answerText")
-      check(String(answerText.text).indexOf('<a href="#t=35000"') === 0, "citation linked: " + answerText.text)
+      check(String(answerText.text).indexOf('<a href="#t=35000"') === 0, "the answer's citation linked: " + answerText.text)
+      check(String(answerText.text).indexOf('<a href="#t=50000"') !== -1, "both citations: " + answerText.text)
       mouseClick(answerText, 6, 8)
       waitFor(function() { return view().currentTab === "transcript" }, "citation opened the transcript")
       waitFor(function() { return find(view(), "transcriptPane").flashSegId === 4 }, "the cited line flashes: " + find(view(), "transcriptPane").flashSegId)
@@ -825,12 +842,16 @@ Item {
       request({ ask: "last-5m", open: false })
       waitFor(function() { return thread().count === 2 && answered(1) }, "answered while closed", 8000)
       check(!host.viewOpen(), "still closed")
-      // The notification's Open action: `voxtype meeting view <id> --tab ask`.
-      request({ meeting_id: __MEETING_ID__, tab: "ask", open: true })
+      var askId = thread().get(1).askId
+      check(askId === "ask-1", "the answer's id from the stream: " + askId)
+      // The notification's Open action: open_command `voxtype meeting view`
+      // with VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID set writes this.
+      request({ meeting_id: __MEETING_ID__, ask_id: askId, tab: "ask", open: true })
       waitFor(function() { return host.viewOpen() && view() !== null }, "Open raised the view")
       tc.parent = view()
       waitFor(function() { return view().currentTab === "ask" }, "on the Ask tab: " + view().currentTab)
       check(find(view(), "askThread").count === 2, "the answer is in the thread")
+      waitFor(function() { return find(view(), "askPane").flashRow === 1 }, "that answer is shown")
       shot("opened-from-notification")
     }
 
@@ -886,13 +907,14 @@ Item {
       waitFor(function() { return menu.visible }, "menu open")
       check(find(menu, "agentOption_claude") !== null && find(menu, "agentOption_codex") !== null, "agents listed")
       check(shown(find(menu, "openSettings")) === host.omarchy, "Change in Settings only where the host can open them")
+      check(String(find(menu, "agentNote_codex").text).indexOf("bwrap jail") !== -1, "codex's jail explained: " + find(menu, "agentNote_codex").text)
       shot("agent-menu")
       click(find(menu, "localOnlyToggle"), "Local model only")
       check(!menu.visible, "menu closes")
       waitFor(function() { return chipLabel() === "Local (llama3.2)  ▾" }, "local: " + chipLabel())
       click(find(find(view(), "askPane"), "agentChip"), "agent chip")
       waitFor(function() { return menu.visible }, "menu again")
-      check(String(find(menu, "localOnlyToggle").text) === "✓ Local model only", "checked: " + find(menu, "localOnlyToggle").text)
+      check(String(find(menu, "localOnlyToggle").text) === "✓ Local model only (llama3.2)", "checked: " + find(menu, "localOnlyToggle").text)
       keyClick(Qt.Key_Escape)
       check(!menu.visible && host.viewOpen(), "Escape closes the menu, not the view")
       click(find(find(view(), "askPane"), "agentChip"), "agent chip")
@@ -914,7 +936,7 @@ Item {
     }
 
     function driveSummary() {
-      ctl({ cmd: "autosummary", markdown: null, summary: {
+      ctl({ cmd: "autosummary", summary: {
         summary: "A short standup about the release.", decisions: ["Ship today."],
         action_items: [{ description: "Cut the tag", assignee: "Pete", completed: false }], key_points: [],
         chapters: [{ start_ms: 4000, title: "Greetings" }, { start_ms: 35000, title: "Release status" }] } })
@@ -922,6 +944,9 @@ Item {
       waitFor(function() { return lines().length === 4 }, "hello rendered")
       check(find(view(), "tab_summary") === null || !find(view(), "tab_summary").visible, "no Summary tab while recording")
       click(find(view(), "stopButton"), "Stop")
+      // The daemon is idle before it summarizes: the meeting shows Ended
+      // first, then the summarizing event (naming it) takes over the tab.
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
       waitFor(function() { return view().currentTab === "summary" && shown(find(view(), "summarizing")) }, "summarizing", 5000)
       check(txt("meetingState") === "Summarizing", "state: " + txt("meetingState"))
       check(chipLabel() === "Claude  ▾", "agent chip in the Summary header: " + chipLabel())
@@ -953,7 +978,8 @@ Item {
       waitFor(function() { return txt("summaryText").indexOf("Release status") !== -1 }, "summary", 8000)
       check(String(button.text) === "Regenerate", "Regenerate now: " + button.text)
       sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__,
-          JSON.stringify({ summary_md: "## Overview\n\nRegenerated after fixing speakers [0:21]." })])
+          JSON.stringify({ summary_json: { summary: "Regenerated after fixing speakers [0:21].", key_points: [],
+                                           decisions: [], action_items: [], generated_at: "2026-11-11T17:00:00Z" } })])
       click(button, "Regenerate")
       waitFor(function() { return txt("summaryText").indexOf("Regenerated after fixing speakers") !== -1 }, "regenerated", 8000)
       shot("regenerated")
@@ -1131,6 +1157,30 @@ Item {
       click(find(view(), "backButton"), "Back")
       waitFor(function() { return shown(find(view(), "idleState")) && pastList().count === 3 && rowText(0, "meetingRowTitle") === "Live one" }, "the ended meeting tops the list: " + (pastList() ? rowText(0, "meetingRowTitle") : ""))
       shot("list-after-meeting")
+    }
+
+    function driveAskError() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      typeAsk("What did we decide?")
+      waitFor(function() { return answered(1) }, "the ask ended", 8000)
+      check(thread().get(1).error === "Claude failed: the agent exited with status 1.", "error message: " + thread().get(1).error)
+      var row = find(view(), "askThread").itemAtIndex(1)
+      check(shown(find(row, "answerError")) && !shown(find(row, "answerBy")), "error shown, no attribution")
+      shot("ask-error")
+    }
+
+    function driveSummaryError() {
+      ctl({ cmd: "autosummary", error: { code: "agent_failed", message: "Summary failed: Claude exited with status 1." } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing", 6000)
+      waitFor(function() { return shown(find(view(), "summaryError")) }, "the failure", 6000)
+      check(txt("summaryError") === "Summary failed: Claude exited with status 1.", "message: " + txt("summaryError"))
+      check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+      shot("summary-error")
     }
 
     function driveScroll() {

@@ -43,8 +43,8 @@ Item {
   // speaker key to show until it answers.
   signal reassignRequested(int segId, string speaker, string key)
   signal restoreRequested(int segId)
-  // A note on one line; an empty `text` removes it.
-  signal annotateRequested(int segId, string text)
+  // A note and/or a highlight on one line; neither removes the annotation.
+  signal annotateRequested(int segId, string text, bool highlight)
   signal settingsRequested()
   signal openMeetingRequested(string meetingId)
   signal moreMeetingsRequested()
@@ -111,16 +111,29 @@ Item {
       root.now = Date.now()
       // A new meeting opens on its transcript.
       if (to === "recording" && from !== "paused") root.tab = "transcript"
-      // Its summary is what a stopped meeting is for.
-      if (to === "summarizing") root.tab = "summary"
     }
+    // Its summary is what a stopped meeting is for.
+    function onSummarizing(meetingId) { if (meetingId === root.feed.meetingId) root.tab = "summary" }
   }
 
   Connections {
     target: root.assistant
     function onConsentNeeded() { consent.visible = true }
+    // A notification's Open: show that answer.
+    function onAskFocused(row) {
+      root.tab = "ask"
+      Qt.callLater(function() { askPane.focusRow(row) })
+    }
   }
-  onAssistantChanged: if (root.assistant && root.assistant.pending !== null) consent.visible = true
+  onAssistantChanged: {
+    if (!root.assistant) return
+    if (root.assistant.pending !== null) consent.visible = true
+    if (root.assistant.focusedRow >= 0 && Date.now() - root.assistant.focusedAt < 5000) {
+      var row = root.assistant.focusedRow
+      root.tab = "ask"
+      Qt.callLater(function() { askPane.focusRow(row) })
+    }
+  }
 
   // chrono writes nanoseconds; JavaScript dates take milliseconds at most.
   function parseTime(iso) {
@@ -159,7 +172,7 @@ Item {
     if (root.status === "recording") return "Recording"
     if (root.status === "paused") return "Paused"
     if (root.status === "finalizing") return "Finalizing"
-    if (root.status === "summarizing") return "Summarizing"
+    if (root.ended && root.assistant && root.assistant.summaryState === "summarizing") return "Summarizing"
     if (root.ended) return "Ended"
     return "Idle"
   }
@@ -213,6 +226,8 @@ Item {
   function openNoteEditor(line, anchor) {
     noteEditor.segId = line.segId
     noteEditor.existing = line.annotation
+    noteEditor.existingHighlight = line.highlight
+    noteEditor.highlight = line.highlight
     noteEditor.lineText = line.text
     noteField.text = line.annotation
     root.place(noteEditor, anchor)
@@ -518,6 +533,7 @@ Item {
         }
 
         AskPane {
+          id: askPane
           objectName: "askPane"
           theme: root.theme
           assistant: root.assistant
@@ -799,6 +815,8 @@ Item {
 
     property int segId: -1
     property string existing: ""
+    property bool existingHighlight: false
+    property bool highlight: false
     property string lineText: ""
     property real anchorTop: 0
     property real anchorBottom: 0
@@ -812,8 +830,8 @@ Item {
       var segId = noteEditor.segId
       var text = noteField.text.trim()
       noteEditor.close()
-      if (text === noteEditor.existing) return
-      root.annotateRequested(segId, text)
+      if (text === noteEditor.existing && noteEditor.highlight === noteEditor.existingHighlight) return
+      root.annotateRequested(segId, text, noteEditor.highlight)
     }
 
     MouseArea { anchors.fill: parent; onClicked: noteField.forceActiveFocus() }
@@ -855,13 +873,22 @@ Item {
           onClicked: noteEditor.save()
         }
         MeetingButton {
+          objectName: "noteHighlightButton"
+          theme: root.theme
+          text: noteEditor.highlight ? "✓ Highlight" : "Highlight"
+          bordered: true
+          active: noteEditor.highlight
+          onClicked: noteEditor.highlight = !noteEditor.highlight
+        }
+        MeetingButton {
           objectName: "noteRemoveButton"
           theme: root.theme
-          visible: noteEditor.existing !== ""
+          visible: noteEditor.existing !== "" || noteEditor.existingHighlight
           text: "Remove"
           bordered: true
           onClicked: {
             noteField.text = ""
+            noteEditor.highlight = false
             noteEditor.save()
           }
         }
@@ -912,19 +939,40 @@ Item {
         font.pixelSize: root.theme.caption
       }
 
+      // Every agent found, with why one cannot be used, or how it runs
+      // (codex's bwrap jail).
       Repeater {
         model: root.assistant ? root.assistant.candidates : []
-        MeetingButton {
+        Column {
           required property var modelData
-          objectName: "agentOption_" + modelData.id
-          theme: root.theme
           width: menuColumn.width
-          text: (modelData.label || modelData.id)
-          active: root.assistant && !root.assistant.localOnly && root.assistant.status
-            && root.assistant.status.agent === modelData.id
-          onClicked: {
-            root.assistant.chooseAgent(modelData.id)
-            agentMenu.close()
+          visible: modelData.found === true
+          spacing: 0
+          MeetingButton {
+            objectName: "agentOption_" + modelData.id
+            theme: root.theme
+            width: parent.width
+            text: (modelData.name || modelData.id)
+            enabled: modelData.supported === true
+            active: root.assistant && !root.assistant.localOnly && root.assistant.status
+              && root.assistant.status.agent === modelData.id
+            onClicked: {
+              root.assistant.chooseAgent(modelData.id)
+              agentMenu.close()
+            }
+          }
+          Text {
+            objectName: "agentNote_" + modelData.id
+            width: parent.width
+            visible: !!modelData.note
+            text: modelData.note ? String(modelData.note) : ""
+            leftPadding: root.theme.padX
+            rightPadding: root.theme.padX
+            bottomPadding: root.theme.xs
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.caption
+            wrapMode: Text.WordWrap
           }
         }
       }
@@ -934,6 +982,8 @@ Item {
         theme: root.theme
         width: menuColumn.width
         text: (root.assistant && root.assistant.localOnly ? "✓ " : "") + "Local model only"
+          + (root.assistant && root.assistant.status && root.assistant.status.local && root.assistant.status.local.model
+             ? " (" + root.assistant.status.local.model + ")" : "")
         active: root.assistant !== null && root.assistant.localOnly
         onClicked: {
           root.assistant.setLocalOnly(!root.assistant.localOnly)
@@ -970,14 +1020,14 @@ Item {
     readonly property bool choosing: root.assistant !== null && root.assistant.blocker === "choose"
     readonly property var agents: {
       if (!root.assistant || !root.assistant.status) return []
-      if (consent.choosing) return root.assistant.candidates
+      if (consent.choosing) return root.assistant.usableCandidates
       var s = root.assistant.status
-      return [{ id: s.agent, label: s.agent_label || s.agent }]
+      return s.agent ? [{ id: s.agent, name: s.agent_name || s.agent }] : []
     }
     readonly property string agentNames: {
       var names = []
-      for (var i = 0; i < consent.agents.length; i++) names.push(consent.agents[i].label || consent.agents[i].id)
-      return names.join(" or ")
+      for (var i = 0; i < consent.agents.length; i++) names.push(consent.agents[i].name || consent.agents[i].id)
+      return names.length > 0 ? names.join(" or ") : "an agent"
     }
 
     function dismiss() {
@@ -1026,7 +1076,7 @@ Item {
           required property var modelData
           objectName: "consentAllow_" + modelData.id
           theme: root.theme
-          text: "Send to " + (modelData.label || modelData.id)
+          text: "Send to " + (modelData.name || modelData.id)
           bordered: true
           active: true
           onClicked: {

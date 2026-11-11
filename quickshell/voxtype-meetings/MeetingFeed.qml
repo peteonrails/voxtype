@@ -72,6 +72,12 @@ Item {
   // MeetingSummary as `summary` (and summary.md's `path`); `markdown` is ""
   // unless an event carries text.
   signal summaryReady(string meetingId, string markdown, var summary)
+  // After a meeting stops, `{"event":"status","status":"summarizing",
+  // "meeting_id"}`. Not a change of the daemon's state, which is already
+  // idle by then (and may be a new meeting's): it names the meeting.
+  signal summarizing(string meetingId)
+  // An `error` event naming a meeting, such as a failed summary.
+  signal meetingError(string meetingId, string code, string message)
   // A meeting began while this feed was watching: an idle (or ended) meeting
   // gave way to a recording one. Never fired for a meeting already running
   // when the feed first connected.
@@ -389,12 +395,6 @@ Item {
     root.diarization = !!(ev.diarization && ev.diarization.enabled)
     var list = ev.segments && ev.segments.length !== undefined ? ev.segments : []
     for (var i = 0; i < list.length; i++) if (list[i]) root.insertSegment(list[i])
-    // Summarizing comes after the meeting: what the hello holds is a
-    // finished meeting.
-    if (next === "summarizing" && root.meetingId !== "") {
-      root.ended = true
-      root.endedAt = Date.now()
-    }
     root.setStatus(next)
     // A status event already announced this meeting and asked for this hello;
     // or the daemon restarted into a new one. Either way it is a start only if
@@ -428,9 +428,7 @@ Item {
       var next = String(ev.status || "")
       if (next === "") return
       if (next === "summarizing") {
-        // After finalizing: the meeting is over and being summarized.
-        if (root.active) root.endMeeting()
-        root.setStatus("summarizing")
+        root.summarizing(String(ev.meeting_id || root.meetingId))
         return
       }
       if (next === "idle") {
@@ -448,6 +446,10 @@ Item {
       root.setStatus(next)
       if (starting) root.reconnect()
     } else if (kind === "error") {
+      if (ev.meeting_id) {
+        root.meetingError(String(ev.meeting_id), String(ev.code || ""), String(ev.message || ""))
+        return
+      }
       root.lastError = String(ev.message || "")
     }
   }

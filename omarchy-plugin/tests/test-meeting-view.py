@@ -51,6 +51,8 @@ Scenarios:
   past-reassign   moving a line of a past meeting sticks
   start-while-browsing  a meeting that starts while a past one is open takes
               over; when it ends, Back shows it at the top of the list
+  ask-error   an ask that fails shows the error event's message
+  summary-error  a summary that fails after the meeting shows its error
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -80,7 +82,8 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
-             "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing")
+             "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
+             "ask-error", "summary-error")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 STANDALONE = h.PLUGIN.parent / "quickshell"
@@ -162,27 +165,28 @@ INITIAL = {
     "regenerate": lambda: [running_meeting()],
     "scroll-tabs": lambda: [scroll_meeting()],
     "view-request": lambda: [running_meeting()],
+    "ask-error": lambda: [running_meeting()],
+    "summary-error": lambda: [running_meeting()],
 }
 
-CLAUDE = {"id": "claude", "label": "Claude", "consented": True}
-CODEX = {"id": "codex", "label": "Codex", "consented": True}
-LONG_SUMMARY = "## Overview\n\n" + "\n\n".join("### Section %d\n\nA paragraph of summary text for section %d, long "
-                                                  "enough to take a couple of lines in the narrow view." % (i, i)
-                                                  for i in range(1, 41))
+CLAUDE = {"id": "claude", "name": "Claude", "found": True, "supported": True, "consent": True}
+CODEX = {"id": "codex", "name": "Codex", "found": True, "supported": True, "consent": True}
+LONG_SUMMARY = {"summary": "\n\n".join("### Section %d\n\nA paragraph of summary text for section %d, long "
+                                       "enough to take a couple of lines in the narrow view." % (i, i)
+                                       for i in range(1, 41)),
+                "key_points": [], "decisions": [], "action_items": [], "generated_at": "2026-11-11T16:00:00Z"}
 
 STATE = {
     "autoopen-off": {"show_view_on_start": False},
     "autoopen-oldcli": {"no_show_key": True},
     "idle": {"fail": {"start": "Error: Meeting mode is disabled in config."}},
     "reassign-fails": {"fail": {"reassign": "Error: segment 2 cannot be reassigned: the transcript is locked."}},
-    "consent": {"assistant": {"local_only": False, "local_model": "llama3.2", "agent": "claude", "agent_label": "Claude",
-                              "consented": False, "candidates": [dict(CLAUDE, consented=False)]}},
-    "consent-choose": {"assistant": {"local_only": False, "local_model": "llama3.2", "agent": None, "agent_label": None,
-                                     "consented": False, "candidates": [dict(CLAUDE, consented=False),
-                                                                         dict(CODEX, consented=False)]}},
-    "local-only": {"assistant": {"local_only": False, "local_model": "llama3.2", "agent": "claude", "agent_label": "Claude",
-                                 "consented": True, "candidates": [CLAUDE, CODEX]}},
-    "scroll-tabs": {"summary_md": LONG_SUMMARY},
+    "consent": {"assistant": {"agent": None, "local_only": False, "candidates": [dict(CLAUDE, consent=False)]}},
+    "consent-choose": {"assistant": {"agent": None, "local_only": False,
+                                     "candidates": [dict(CLAUDE, consent=False), dict(CODEX, consent=False)]}},
+    "local-only": {"assistant": {"agent": "claude", "local_only": False, "candidates": [CLAUDE, CODEX]}},
+    "ask-error": {"fail": {"ask": "Claude failed: the agent exited with status 1."}},
+    "scroll-tabs": {"summary_json": LONG_SUMMARY},
 }
 
 
@@ -333,11 +337,11 @@ def read_only(argv):
 
 
 def ask_call(question, *extra):
-    return ["meeting", "ask", MEETING_ID, question] + list(extra)
+    return ["meeting", "ask", MEETING_ID, question] + list(extra) + ["--json"]
 
 
-def summarize_call(meeting=MEETING_ID):
-    return ["meeting", "summarize", meeting]
+def summarize_call(meeting=MEETING_ID, regenerate=False):
+    return ["meeting", "summarize", meeting, "--format", "json"] + (["--regenerate"] if regenerate else [])
 
 
 def reassign(segment, speaker):
@@ -389,6 +393,7 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect([c for c in meeting if c[:2] != ["meeting", "notes"]], [], "other meeting commands")
     elif scenario == "annotate":
         expect(meeting, [["meeting", "annotate", MEETING_ID, "3", "check this number", "--json"],
+                         ["meeting", "annotate", MEETING_ID, "1", "--highlight", "--json"],
                          ["meeting", "annotate", MEETING_ID, "3", "--remove", "--json"]], "meeting commands")
     elif scenario == "ask":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
@@ -410,10 +415,12 @@ def check_calls(scenario, calls, runtime_notes=""):
                         ["config", "set", "meeting.assistant.agent", "codex"],
                         ["config", "set", "meeting.assistant.local_only", "false"]], "config writes")
         expect(meeting, [], "meeting commands")
-    elif scenario in ("summary", "view-request"):
+    elif scenario == "ask-error":
+        expect(meeting, [ask_call("What did we decide?")], "meeting commands")
+    elif scenario in ("summary", "view-request", "summary-error"):
         expect(meeting, [["meeting", "stop"]], "meeting commands")
     elif scenario == "regenerate":
-        expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call()], "meeting commands")
+        expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call(regenerate=True)], "meeting commands")
     elif scenario == "scroll-tabs":
         expect(meeting, [["meeting", "stop"], summarize_call()], "meeting commands")
     elif scenario in ("list", "past-view", "past-summary"):
