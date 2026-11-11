@@ -1310,6 +1310,14 @@ Item {
       waitFor(idleCli, "edit finished")
       wait(300)
       check(lines()[1][2] === "Yes, very loud and clear.", "kept after the daemon: " + lines()[1][2])
+      check(shown(find(lineItem(1), "lineEdited")), "marked edited (original_text)")
+      shot("edited")
+      // Restore original text: `edit --reset`.
+      lineAction(1, "lineRestoreTextButton")
+      check(lines()[1][2] === "Yes, loud and clear." && !shown(find(lineItem(1), "lineEdited")), "restored at once")
+      waitFor(idleCli, "reset finished")
+      wait(300)
+      check(lines()[1][2] === "Yes, loud and clear." && !shown(find(lineItem(1), "lineEdited")), "restored after the daemon")
 
       // Escape leaves it as it was.
       lineAction(2, "lineEditButton")
@@ -1368,6 +1376,10 @@ Item {
       ctl({ cmd: "delete", segment_id: 4, shape: flag ? "flag" : "event" })
       waitFor(function() { return lines().length === 2 }, "deleted elsewhere")
       check(lines()[1][2] === "Great, let's start with the release.", "the right line went: " + JSON.stringify(lines()))
+      // `delete-line --restore` elsewhere: the whole segment again, inserted
+      // by start time.
+      ctl({ cmd: "update", key: "event", segment: seg(2, 9, "Yes, loud and clear.", "loopback", "Remote", 0) })
+      waitFor(function() { return lines().length === 3 && lines()[1][2] === "Yes, loud and clear." }, "restored in its place: " + JSON.stringify(lines()))
     }
 
     function driveExport() {

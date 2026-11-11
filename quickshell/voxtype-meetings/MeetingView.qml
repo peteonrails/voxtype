@@ -141,6 +141,7 @@ Item {
   signal backRequested()
   signal copyRequested(string text, string key)
   signal editTextRequested(int segId, string text)
+  signal resetTextRequested(int segId)
   signal deleteLineRequested(int segId)
   signal undoDeleteRequested()
   // "markdown", "text", "json", "srt" or "vtt".
@@ -804,6 +805,7 @@ Item {
           onSpeakerClicked: function(line, anchor) { root.openReassign(line, anchor) }
           onNoteClicked: function(line, anchor) { root.openNoteEditor(line, anchor) }
           onEditRequested: function(segId, text) { root.editTextRequested(segId, text) }
+          onResetTextRequested: function(segId) { root.resetTextRequested(segId) }
           onDeleteRequested: function(segId) { root.deleteLineRequested(segId) }
         }
 

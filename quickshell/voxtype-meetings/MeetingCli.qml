@@ -95,6 +95,11 @@ Item {
     root.enqueue("edit", ["meeting", "edit", meeting || "latest", String(segId), String(text), "--json"], extra)
   }
 
+  // Back to the transcribed text.
+  function resetText(meeting, segId, extra) {
+    root.enqueue("edit", ["meeting", "edit", meeting || "latest", String(segId), "--reset", "--json"], extra)
+  }
+
   // A line removed for good (after the view's undo window).
   function deleteLine(meeting, segId, extra) {
     root.enqueue("delete-line", ["meeting", "delete-line", meeting || "latest", String(segId), "--json"], extra)

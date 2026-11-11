@@ -161,6 +161,8 @@ Item {
       source: String(segment.source || ""),
       chunkId: Number(segment.chunk_id) || 0,
       originalSpeaker: root.originalOf(segment),
+      // The text before a correction (`original_text`, only on an edited line).
+      originalText: segment.original_text ? String(segment.original_text) : "",
       annotation: root.annotationOf(segment).text,
       highlight: root.annotationOf(segment).highlight
     }
@@ -326,6 +328,7 @@ Item {
     model.setProperty(i, "speaker", key)
     if (segment.text !== undefined && String(segment.text).trim() !== "") model.setProperty(i, "text", String(segment.text).trim())
     model.setProperty(i, "originalSpeaker", original)
+    model.setProperty(i, "originalText", segment.original_text ? String(segment.original_text) : "")
     var note = root.annotationOf(segment)
     model.setProperty(i, "annotation", note.text)
     model.setProperty(i, "highlight", note.highlight)
@@ -359,6 +362,16 @@ Item {
   function setText(segId, text) {
     var i = root.rowIndex(segId)
     if (i !== -1) model.setProperty(i, "text", String(text))
+  }
+
+  function setOriginalText(segId, text) {
+    var i = root.rowIndex(segId)
+    if (i !== -1) model.setProperty(i, "originalText", String(text || ""))
+  }
+
+  function originalTextOf(segId) {
+    var i = root.rowIndex(segId)
+    return i === -1 ? null : model.get(i).originalText
   }
 
   function textOf(segId) {
@@ -461,7 +474,8 @@ Item {
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
     } else if (kind === "segment_deleted") {
-      // The other shape a deletion may take; the same either way.
+      // A deleted line: drop it. (A restored one comes back as a
+      // segment_updated for a line not in the list, which inserts it.)
       if (!ev.meeting_id || String(ev.meeting_id) === root.meetingId) root.removeRow(Number(ev.segment_id))
     } else if (kind === "speaker_renamed") {
       root.renameSpeaker(String(ev.from || ""), String(ev.to || ""))
