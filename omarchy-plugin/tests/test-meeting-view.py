@@ -59,6 +59,15 @@ Scenarios:
               unsupported agent shows its note in the menu
   old-voxtype a voxtype without the 1.3.0 commands: each feature says to update
   copy        Copy on an answer and on the summary (wl-copy), and wl-copy missing
+  line-edit   Edit a line's text inline: Enter saves, Escape cancels, a refusal
+              rolls back
+  line-delete Delete a line with Undo; it commits after the window, and the
+              daemon's segment_deleted (or one from elsewhere) removes lines
+  line-delete-flag  the same with deletion as segment_updated "deleted": true;
+              closing the view commits a pending delete
+  export      More > Export (markdown) into Documents/Voxtype, then Open folder;
+              Open meeting folder
+  export-past an SRT export of a past meeting, and its folder
   ask-error   an ask that fails shows the error event's message
   summary-error  a summary that fails after the meeting shows its error
   autoopen    a meeting started elsewhere opens the closed view
@@ -92,7 +101,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
              "ask-error", "summary-error", "list-old", "cli-missing", "daemon-old", "agent-missing",
-             "old-voxtype", "copy")
+             "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -180,6 +189,10 @@ INITIAL = {
     "agent-missing": lambda: [running_meeting()],
     "old-voxtype": lambda: [running_meeting()],
     "copy": lambda: [running_meeting()],
+    "line-edit": lambda: [running_meeting()],
+    "line-delete": lambda: [running_meeting()],
+    "line-delete-flag": lambda: [running_meeting()],
+    "export": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
 }
 
@@ -205,6 +218,7 @@ STATE = {
         dict(CLAUDE, found=False),
         dict(CODEX, supported=False, note="bwrap is not installed, so codex cannot run in its jail")]}},
     "old-voxtype": {"old": True},
+    "line-delete-flag": {"delete_shape": "flag"},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
 }
 
@@ -273,7 +287,7 @@ def past_meetings(data, scenario):
 
 
 PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-                  "list-old"}
+                  "list-old", "export-past"}
 
 
 def run(scenario, host, shell, evidence):
@@ -304,6 +318,10 @@ def run(scenario, host, shell, evidence):
         (bindir / "wl-copy").write_text("#!/bin/sh\ncat >> " + str(clipboard) + "\nprintf '\\n<<END>>\\n' >> "
                                         + str(clipboard) + "\n")
         (bindir / "wl-copy").chmod(0o755)
+        opened = r.root / "opened.txt"
+        (bindir / "xdg-open").write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + str(opened) + "\n")
+        (bindir / "xdg-open").chmod(0o755)
+        documents = r.root / "Documents"
 
         runtime = r.root / "run"
         (runtime / "voxtype").mkdir(parents=True)
@@ -340,10 +358,12 @@ def run(scenario, host, shell, evidence):
                 "__EVIDENCE__": shots, "__MEETING_ID__": MEETING_ID, "__HOST__": host,
                 "__FAKE_BIN__": str(fake), "__RUNTIME__": str(runtime / "voxtype"), "__DATA__": str(data),
                 "__PAST_DESIGN__": PAST["design"], "__PAST_ONE2ONE__": PAST["one2one"],
+                "__DOCUMENTS__": str(documents),
             }, env={"XDG_RUNTIME_DIR": str(runtime), "FAKE_MEETING_CTL": str(ctl),
                     "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot),
                     "FAKE_MEETING_DATA": str(data),
-                    "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", "")}, timeout=120)
+                    "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                    "XDG_DOCUMENTS_DIR": str(documents)}, timeout=120)
         finally:
             with open(ctl, "a") as f:
                 f.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -361,11 +381,27 @@ def run(scenario, host, shell, evidence):
         notes_file = data / ("notes-%s.md" % MEETING_ID)
         saved_notes = notes_file.read_text() if notes_file.exists() else None
         copied = clipboard.read_text() if clipboard.exists() else None
+        opened_paths = opened.read_text().splitlines() if opened.exists() else []
+        exports = sorted(str(p.relative_to(documents)) for p in documents.rglob("*") if p.is_file()) \
+            if documents.exists() else []
+        export_head = [(documents / e).read_text().splitlines()[0] for e in exports]
 
     problems = h.driver_problems(output, code, "MEETING_VIEW", scenario)
     problems += check_calls(scenario, calls, runtime_notes=str(runtime / "voxtype"))
     if scenario == "notes" and saved_notes != "Mine":
         problems.append("notes on disk: %r, expected 'Mine'" % saved_notes)
+    if scenario == "export":
+        name = "Voxtype/" + time.strftime("%Y-%m-%d", time.localtime()) + " Standup.md"
+        if exports != [name] or export_head != ["FAKE EXPORT %s markdown --timestamps --speakers --metadata" % MEETING_ID]:
+            problems.append("exports: %s %s, expected %s" % (exports, export_head, name))
+        if opened_paths != [str(documents / "Voxtype"), str(data / ("live-" + MEETING_ID))]:
+            problems.append("opened: %s" % opened_paths)
+    if scenario == "export-past":
+        name = "Voxtype/2026-11-10 Design review.srt"
+        if exports != [name] or export_head != ["FAKE EXPORT %s srt " % PAST["design"]]:
+            problems.append("exports: %s %s" % (exports, export_head))
+        if opened_paths != [str(data / "meetings" / PAST["design"])]:
+            problems.append("opened: %s" % opened_paths)
     # The answer, then the summary's markdown.
     if scenario == "copy":
         parts = (copied or "").split("\n<<END>>\n")
@@ -379,6 +415,11 @@ def read_only(argv):
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
+
+
+def documents_dir(runtime_notes):
+    # run/voxtype -> the scenario root's Documents.
+    return Path(runtime_notes).parent.parent / "Documents"
 
 
 def ask_call(question, *extra):
@@ -462,6 +503,18 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [], "meeting commands")
     elif scenario in ("cli-missing", "daemon-old", "old-voxtype"):
         pass
+    elif scenario == "line-edit":
+        expect(meeting, [["meeting", "edit", MEETING_ID, "2", "Yes, very loud and clear.", "--json"],
+                         ["meeting", "edit", MEETING_ID, "4", "It went red again.", "--json"]], "meeting commands")
+    elif scenario in ("line-delete", "line-delete-flag"):
+        expect(meeting, [["meeting", "delete-line", MEETING_ID, "2", "--json"]], "meeting commands")
+    elif scenario == "export":
+        expect(meeting, [["meeting", "export", MEETING_ID, "--format", "markdown", "--output",
+                          str(documents_dir(runtime_notes)) + "/Voxtype/" + time.strftime("%Y-%m-%d") + " Standup.md",
+                          "--timestamps", "--speakers", "--metadata"]], "meeting commands")
+    elif scenario == "export-past":
+        expect(meeting, [["meeting", "export", PAST["design"], "--format", "srt", "--output",
+                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.srt"]], "meeting commands")
     elif scenario == "agent-missing":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario == "copy":

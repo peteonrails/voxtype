@@ -35,6 +35,9 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    {"event":"status","status":"summarizing",
                                    meeting_id} and summary_ready (or, with
                                    `error`, an error event naming the meeting)
+  {"cmd": "delete", "segment_id": N, "shape": "event"|"flag", "meeting_id": M?}
+                                   remove a line; announce it as segment_deleted
+                                   or as segment_updated with "deleted": true
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -216,6 +219,17 @@ class Server:
                 target["segments"] = [seg if s["id"] == seg["id"] else s for s in target["segments"]]
                 if target is self.state:
                     self.broadcast({cmd.get("key", "event"): "segment_updated", "segment": seg})
+        elif kind == "delete":
+            mid = cmd.get("meeting_id") or self.state.get("meeting_id")
+            if mid == self.state.get("meeting_id"):
+                gone = [s for s in self.state["segments"] if s["id"] == cmd["segment_id"]]
+                self.state["segments"] = [s for s in self.state["segments"] if s["id"] != cmd["segment_id"]]
+                if cmd.get("shape") == "flag" and gone:
+                    self.broadcast({"event": "segment_updated", "segment": dict(gone[0], deleted=True)})
+                else:
+                    self.broadcast({"event": "segment_deleted", "meeting_id": mid, "segment_id": cmd["segment_id"]})
+            elif self.stored and mid == self.stored["meeting_id"]:
+                self.stored["segments"] = [s for s in self.stored["segments"] if s["id"] != cmd["segment_id"]]
         elif kind == "drop":
             self.drop()
         elif kind == "down":
