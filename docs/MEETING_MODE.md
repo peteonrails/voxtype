@@ -15,7 +15,9 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Viewing Meeting Details](#viewing-meeting-details)
   - [Exporting Transcripts](#exporting-transcripts)
   - [Labeling Speakers](#labeling-speakers)
+  - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
+  - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
   - [Deleting Meetings](#deleting-meetings)
 - [Live Meeting View (Omarchy)](#live-meeting-view-omarchy)
 - [Meeting Detection](#meeting-detection)
@@ -24,6 +26,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Audio Settings](#audio-settings)
   - [Diarization Settings](#diarization-settings)
   - [Summarization Settings](#summarization-settings)
+  - [Assistant Settings](#assistant-settings)
+- [Privacy: Where Transcripts Go](#privacy-where-transcripts-go)
 - [Storage](#storage)
 - [Tips for Best Results](#tips-for-best-results)
 
@@ -250,9 +254,36 @@ A line has at most one annotation; annotating it again replaces it. Annotations 
 
 Each meeting folder holds `metadata.json`, `transcript.json` (the segments, with speaker names, moves and annotations applied), `transcript.md` (the same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change), and `notes.md` once you write notes.
 
+### Asking About a Meeting
+
+Ask a question about a meeting while it is recording or after it ends. The answer streams to the terminal and cites the `[mm:ss]` of the lines it relies on:
+
+```bash
+voxtype meeting ask latest "What did Steve just say?" --last 2m
+voxtype meeting ask latest "Summarize the last few minutes" --last 5m
+voxtype meeting ask latest "What are the action items so far?"
+```
+
+The assistant gets the transcript as `meeting show` displays it (speaker names you gave, lines moved with `meeting reassign`, and your annotations next to their lines), your meeting notes, and the question. `--last` limits it to the end of the transcript: `5m`, `90s`, `1h`, `2m30s`, or a bare number of minutes. It is a time window, so "the last few minutes" means minutes, not a number of words.
+
+A meeting longer than `max_transcript_chars` is sent as a running summary of its earlier part plus as many recent lines as fit. The running summary is kept in the meeting folder (`assistant-context.json`), so asking again during a meeting only summarizes what was said since.
+
+Every question and answer is saved to `asks.jsonl` in the meeting folder, and `voxtype meeting show <id> --json` includes them as `asks`.
+
+Other options:
+
+| Option | Effect |
+|--------|--------|
+| `--json` | One JSON event per line: `start`, `delta` while the answer streams, then `answer` (the saved record) or `error` |
+| `--notify` | Also show the answer as a desktop notification. Its Open action runs `[meeting.assistant] open_command` |
+| `--agent claude` | Use this agent for this question |
+| `--local` | Answer with the local model (Ollama) |
+
+`ask` does not need the daemon: it reads the same saved transcript `meeting show` does.
+
 ### AI Summarization
 
-Generate a summary with key points, action items, and decisions:
+Generate a summary with an overview, key points, decisions, action items with owners, and chapters with timestamps:
 
 ```bash
 # Markdown summary to stdout
@@ -263,15 +294,41 @@ voxtype meeting summarize latest --format json
 
 # Save to file
 voxtype meeting summarize latest --output summary.md
+
+# Write a new one after naming speakers or moving lines
+voxtype meeting summarize latest --regenerate
 ```
 
-Summarization requires a configured backend. See [Summarization Settings](#summarization-settings) below.
+The summary is saved with the meeting: `summary.md` in the meeting folder, `metadata.json`, and the meeting index, so it survives a restart. Running `summarize` again prints the saved summary; `--regenerate` writes a new one. Your notes go in as guidance, so the summary expands on what you wrote.
 
-The summary includes:
-- A brief overview of the meeting
-- Key discussion points
-- Action items (with assignees when mentioned)
-- Decisions made
+The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent) unless `[meeting.summary] backend` is `"local"` or `"remote"`, which keep the older Ollama and API summarizers.
+
+**Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
+
+### The Meeting Assistant and Consent
+
+`ask` and summaries go through your own coding agent, run headless with every tool switched off: it gets the transcript as text and returns text. It never gets a shell, file access or network tools in this path. Which agent:
+
+1. `[meeting.assistant] agent` in config.
+2. Otherwise the Omarchy default agent (`omarchy-default-agent`), when that command exists. Voxtype works the same without Omarchy.
+3. Otherwise a supported agent CLI found on PATH.
+
+| Agent | Support |
+|-------|---------|
+| Claude Code (`claude`) | Supported, no tools: `claude -p --tools "" --strict-mcp-config ...` |
+| Codex (`codex`) | Supported when named in config or as the Omarchy default, and only with bubblewrap (`bwrap`) installed: `codex exec` with its shell and app tools disabled and a read-only sandbox, run inside a bwrap jail. Its command tool cannot be switched off, so the jail is what keeps it away from your files: it sees `/usr`, the codex install, a few `/etc` files for DNS and TLS, and `~/.codex/auth.json` read-only, and nothing else from your home. It is never picked from PATH on its own |
+| Hermes (`hermes`) | Not supported: its one-shot mode loads tools and auto-approves them, with no documented way to turn them all off |
+
+The first time transcripts would go to an agent, voxtype asks once ("Send to Claude / Use a local model / Not now") and remembers the answer per agent. Without a terminal to ask on, `ask` and `summarize` refuse with a message naming the command that allows it:
+
+```bash
+voxtype meeting assistant status          # which agent, what was found, consent
+voxtype meeting assistant allow claude    # allow transcripts to go to Claude
+voxtype meeting assistant revoke claude   # stop
+voxtype meeting assistant status --json   # for the meeting view and Settings panel
+```
+
+With no agent found, or with `local_only = true` or `--local`, answers and summaries come from the local Ollama model in `[meeting.summary]`.
 
 ### Deleting Meetings
 
@@ -487,6 +544,51 @@ timeout_secs = 120
 4. Run `voxtype meeting summarize latest`
 
 Ollama runs entirely on your machine. No transcript data leaves your computer. Any Ollama-compatible model works, but `llama3.2` is a good default for meeting summarization.
+
+`backend = "disabled"`, the default, does not turn summaries off for `meeting summarize`: it uses the meeting assistant. `auto` controls the summary at stop:
+
+```toml
+[meeting.summary]
+# Summarize each meeting when it stops. Unset: on once an agent is allowed,
+# off otherwise.
+# auto = true
+```
+
+### Assistant Settings
+
+```toml
+[meeting.assistant]
+# Agent for ask and summaries: "claude" or "codex".
+# Unset: the Omarchy default agent, then claude found on PATH.
+# agent = "claude"
+
+# Never send transcripts to an agent; use the local Ollama model.
+local_only = false
+
+# Seconds to wait for an answer or a summary (default: 180)
+timeout_secs = 180
+
+# Transcript characters sent verbatim (default: 100000). Longer meetings send
+# a summary of the earlier part plus the most recent lines.
+max_transcript_chars = 100000
+
+# Command the Open action of an `ask --notify` notification runs, through
+# sh -c, with VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID set. Unset: no Open action.
+# open_command = "..."
+```
+
+---
+
+## Privacy: Where Transcripts Go
+
+Recording and transcription stay on your machine. The assistant is the one part of meeting mode that can send a transcript elsewhere:
+
+- **An agent** (`claude`, `codex`) sends the prompt to whichever account that CLI is signed in to, usually the vendor's cloud service, under that account's terms. That prompt holds the meeting title, date, speaker names, the transcript (or the part of it that fits, plus a summary of the rest), your notes and annotations, and your question. Nothing goes to an agent until you allow it for that agent, and `voxtype meeting assistant revoke <agent>` stops it.
+- **The local model** (Ollama at `ollama_url`, `localhost` by default) keeps everything on your machine. `local_only = true` makes it the only option.
+- The agent runs in an empty temporary directory with its tools off, so it does not read your files or project instructions, and its session is not saved (`--no-session-persistence` for Claude, `--ephemeral` for Codex). The prompt reaches it through a file in a private temporary directory that is removed when the agent exits.
+- Codex keeps a command tool that cannot be turned off, and a transcript is untrusted text: anyone on the call can say something meant for the model. So codex runs in a bubblewrap jail where your home holds nothing but its `auth.json` (read-only), and without `bwrap` voxtype does not use codex at all.
+- Consent is stored in `$XDG_STATE_HOME/voxtype/assistant-consent.json` (default `~/.local/state/voxtype/`).
+- Answers are stored in the meeting folder (`asks.jsonl`, `summary.md`), next to the transcript, and deleted with it.
 
 ---
 

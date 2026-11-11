@@ -710,6 +710,7 @@ voxtype meeting status                 # Show current meeting status
 voxtype meeting list                   # List past meetings
 voxtype meeting export latest          # Export transcript (markdown)
 voxtype meeting summarize latest       # Generate AI summary
+voxtype meeting ask latest "What did Steve say?" --last 5m  # Ask the transcript
 ```
 
 ---
@@ -2755,9 +2756,18 @@ voxtype meeting reassign latest 28 --reset
 voxtype meeting notes latest --append "Ask Dana about travel"
 voxtype meeting annotate latest 28 "Check this number" --highlight
 
-# AI summarization (requires Ollama or remote API)
+# AI summarization (your coding agent, or Ollama)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json
+voxtype meeting summarize latest --regenerate
+
+# Ask a question, during or after the meeting
+voxtype meeting ask latest "What are the action items so far?"
+voxtype meeting ask latest "Summarize the last few minutes" --last 5m
+
+# Which agent answers, and consent to send it transcripts
+voxtype meeting assistant status
+voxtype meeting assistant allow claude
 
 # Delete a meeting
 voxtype meeting delete <id>
@@ -2806,15 +2816,17 @@ voxtype meeting label latest 1 "Bob"  # Short form: just the number
 
 Labels persist in the meeting data and appear in exports. To move a single line to another speaker instead, use `voxtype meeting reassign`; see [Meeting Mode](MEETING_MODE.md#moving-a-line-to-another-speaker).
 
-### AI Summarization
+### AI Summarization and Questions
 
-Meeting summarization uses Ollama (local) or a remote API to generate a summary with key points, action items, and decisions.
+The meeting assistant summarizes meetings (overview, decisions, action items with owners, chapters) and answers questions about them, during the meeting or after. It runs your own coding agent (Claude Code with its tools off, or Codex inside a bubblewrap jail) headless, or the local Ollama model. Transcripts go to an agent only after you allow it once.
 
 ```bash
-# Requires [meeting.summary] backend set to "local" or "remote"
+voxtype meeting assistant allow claude
 voxtype meeting summarize latest
-voxtype meeting summarize latest --format markdown --output summary.md
+voxtype meeting ask latest "What did Steve just say?" --last 2m
 ```
+
+Once an agent is allowed, each meeting is also summarized when it stops (`summary.md` in the meeting folder). See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) for agent selection, consent and where transcripts go.
 
 ### Echo Cancellation
 

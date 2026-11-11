@@ -3885,13 +3885,16 @@ AI summarization settings for meeting transcripts.
 
 ### backend
 
-**Type:** String (`"local"`, `"remote"`, `"disabled"`)
+**Type:** String (`"agent"`, `"local"`, `"remote"`, `"disabled"`)
 **Default:** `"disabled"`
 **Required:** No
 
-- `"local"` - Use Ollama for local summarization.
-- `"remote"` - Use a remote API.
-- `"disabled"` - No summarization.
+Which summarizer `voxtype meeting summarize` and the summary at stop use.
+
+- `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
+- `"local"` - The older Ollama summarizer (no chapters).
+- `"remote"` - A remote API.
+- `"disabled"` - The default. Behaves like `"agent"` for `meeting summarize`; summaries at stop follow `auto`.
 
 ### ollama_url
 
@@ -3911,7 +3914,79 @@ AI summarization settings for meeting transcripts.
 **Default:** `120`
 **Required:** No
 
-Timeout for summarization requests.
+Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant uses `[meeting.assistant] timeout_secs`.
+
+### auto
+
+**Type:** Boolean
+**Default:** unset
+**Required:** No
+
+Summarize each meeting when it stops, in the background, after the transcript is saved. Unset means on once an agent has been allowed (`voxtype meeting assistant allow <agent>`) and off otherwise, so nothing changes for anyone who has not set up the assistant. `true` also summarizes with the local model or the `"local"`/`"remote"` summarizers; `false` leaves summaries to `voxtype meeting summarize`.
+
+```toml
+[meeting.summary]
+auto = false
+```
+
+---
+
+## [meeting.assistant]
+
+The meeting assistant answers `voxtype meeting ask` and writes summaries, through your own coding agent run headless with every tool off, or the local Ollama model from `[meeting.summary]`. Transcripts go to an agent only after you allow it once per agent. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) and its privacy section.
+
+### agent
+
+**Type:** String (`"claude"`, `"codex"`)
+**Default:** unset
+**Required:** No
+
+The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` found on PATH. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
+
+**CLI override:** `--agent` on `meeting ask` and `meeting summarize`
+**Environment variable:** `VOXTYPE_MEETING_AGENT`
+
+### local_only
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Never send transcripts to an agent; answer and summarize with the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
+
+**CLI override:** `--local` on `meeting ask` and `meeting summarize`
+
+### timeout_secs
+
+**Type:** Integer
+**Default:** `180`
+**Required:** No
+
+Seconds to wait for an answer or a summary before giving up.
+
+### max_transcript_chars
+
+**Type:** Integer
+**Default:** `100000`
+**Required:** No
+
+Transcript characters sent verbatim. A longer meeting is sent as a running summary of its earlier part plus as many recent lines as fit in three quarters of this budget.
+
+### open_command
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Command run, through `sh -c`, when the Open action of a `meeting ask --notify` notification is clicked. `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` are set to the meeting and the answer's `id` in `asks.jsonl`. Unset shows the notification without an Open action.
+
+```toml
+[meeting.assistant]
+agent = "claude"
+local_only = false
+timeout_secs = 180
+max_transcript_chars = 100000
+```
 
 ---
 
