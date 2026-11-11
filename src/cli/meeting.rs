@@ -143,6 +143,39 @@ pub enum MeetingAction {
         #[arg(long)]
         watch: bool,
     },
+    /// Open the live meeting view
+    ///
+    /// Asks whichever meeting view is running to open: the Voxtype plugin in
+    /// the Omarchy shell, or voxtype's standalone Quickshell shell (`voxtype
+    /// setup quickshell`). Both read the request this writes to
+    /// $XDG_RUNTIME_DIR/voxtype/meeting-view.request, so this command does not
+    /// need to know which one you use. An Ask notification's Open action runs
+    /// it. Nothing opens if neither is running.
+    ///
+    /// With a meeting ID other than the current one, the view opens on that
+    /// meeting's saved transcript. --ask asks one of the view's quick
+    /// questions; with --no-open the answer arrives as a notification instead.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting view\n  \
+        voxtype meeting view latest --tab summary\n  \
+        voxtype meeting view --ask last-5m --no-open")]
+    View {
+        /// Meeting ID (or "latest"); default: the current or last meeting
+        meeting_id: Option<String>,
+
+        /// Tab to open on
+        #[arg(long, value_parser = ["transcript", "notes", "ask", "summary"])]
+        tab: Option<String>,
+
+        /// Ask a quick question: the last five minutes, what the last remote
+        /// speaker just said, or the action items so far
+        #[arg(long, value_parser = ["last-5m", "last-speaker", "actions"])]
+        ask: Option<String>,
+
+        /// Do not open the view (with --ask, the answer is a notification)
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
     /// Uses Ollama or a remote API to generate a summary with
