@@ -86,6 +86,11 @@ pub struct TranscriptSegment {
     /// Human-assigned speaker label (Phase 3)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker_label: Option<String>,
+    /// The speaker the diarizer assigned, when the line has been moved to
+    /// another speaker by hand (`meeting reassign`). `speaker_id` then holds
+    /// the chosen speaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reassigned_from: Option<String>,
     /// Confidence score (0.0 - 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -104,6 +109,7 @@ impl TranscriptSegment {
             source: AudioSource::Unknown,
             speaker_id: None,
             speaker_label: None,
+            reassigned_from: None,
             confidence: None,
             chunk_id,
         }
@@ -411,6 +417,44 @@ impl Transcript {
                 segment.speaker_label = Some(label.clone());
             }
         }
+    }
+
+    /// Move lines to the speakers chosen by hand: `overrides` maps a segment
+    /// ID to a speaker ID. A line without an override goes back to the
+    /// speaker the diarizer gave it. A line whose speaker changes loses its
+    /// old name, so apply labels after this.
+    pub fn apply_speaker_overrides(&mut self, overrides: &std::collections::HashMap<u32, String>) {
+        for segment in &mut self.segments {
+            let assigned = segment
+                .reassigned_from
+                .take()
+                .unwrap_or_else(|| segment.speaker_key());
+            let target = overrides.get(&segment.id).unwrap_or(&assigned);
+            if segment.speaker_key() != *target {
+                segment.speaker_id = Some(target.clone());
+                segment.speaker_label = None;
+            }
+            if *target != assigned {
+                segment.reassigned_from = Some(assigned);
+            }
+        }
+    }
+
+    /// Rename a speaker ID across the transcript, including lines moved to
+    /// or away from it by hand.
+    pub fn rename_speaker(&mut self, from: &str, to: &str) -> usize {
+        let mut renamed = 0;
+        for segment in &mut self.segments {
+            if segment.speaker_id.as_deref() == Some(from) {
+                segment.speaker_id = Some(to.to_string());
+                renamed += 1;
+            }
+            if segment.reassigned_from.as_deref() == Some(from) {
+                segment.reassigned_from = Some(to.to_string());
+                renamed += 1;
+            }
+        }
+        renamed
     }
 
     /// Unique speaker IDs, before any human labels.
@@ -1113,6 +1157,94 @@ mod tests {
         ));
         t.dedup_bleed_through();
         assert_eq!(lines(&t), vec!["Remote: Sounds good.", "You: Sounds good."]);
+    }
+
+    fn spoken_by(id: u32, speaker: &str) -> TranscriptSegment {
+        let mut seg =
+            TranscriptSegment::new(id, id as u64 * 1000, id as u64 * 1000 + 900, "x".into(), 0);
+        seg.speaker_id = Some(speaker.to_string());
+        seg
+    }
+
+    fn keys(t: &Transcript) -> Vec<(String, Option<String>)> {
+        t.segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.reassigned_from.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn overrides_move_a_line_and_remember_the_diarizers_choice() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "Remote 1"));
+        t.add_segment(spoken_by(1, "Remote 1"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(1, "Remote 2".to_string());
+
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(
+            keys(&t),
+            vec![
+                ("Remote 1".to_string(), None),
+                ("Remote 2".to_string(), Some("Remote 1".to_string())),
+            ]
+        );
+
+        // Applying again is a no-op; removing the override undoes it.
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(t.segments[1].reassigned_from.as_deref(), Some("Remote 1"));
+        t.apply_speaker_overrides(&std::collections::HashMap::new());
+        assert_eq!(
+            keys(&t),
+            vec![
+                ("Remote 1".to_string(), None),
+                ("Remote 1".to_string(), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_moved_line_drops_its_old_speakers_name() {
+        let mut t = Transcript::new();
+        let mut seg = spoken_by(0, "Remote 1");
+        seg.speaker_label = Some("Primagen".to_string());
+        t.add_segment(seg);
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(0, "Remote 2".to_string());
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(t.segments[0].speaker_display(), "Remote 2");
+    }
+
+    #[test]
+    fn an_override_to_the_diarizers_own_choice_is_no_move() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(0, "You".to_string());
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(keys(&t), vec![("You".to_string(), None)]);
+    }
+
+    #[test]
+    fn a_rename_reaches_moved_lines_on_both_sides() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "Remote"));
+        t.add_segment(spoken_by(1, "Remote"));
+        t.add_segment(spoken_by(2, "Remote 2"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(1, "Person 1".to_string()); // moved away from Remote
+        overrides.insert(2, "Remote".to_string()); // moved onto Remote
+        t.apply_speaker_overrides(&overrides);
+
+        t.rename_speaker("Remote", "Remote 1");
+        assert_eq!(
+            keys(&t),
+            vec![
+                ("Remote 1".to_string(), None),
+                ("Person 1".to_string(), Some("Remote 1".to_string())),
+                ("Remote 1".to_string(), Some("Remote 2".to_string())),
+            ]
+        );
     }
 
     #[test]

@@ -2747,6 +2747,10 @@ voxtype meeting export <id> --metadata                 # Include metadata header
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label <id> 0 "Bob"
 
+# Move one line the diarizer got wrong to another speaker (id from show --json)
+voxtype meeting reassign latest 28 "Remote 2"
+voxtype meeting reassign latest 28 --reset
+
 # AI summarization (requires Ollama or remote API)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json
@@ -2796,7 +2800,7 @@ voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label latest 1 "Bob"  # Short form: just the number
 ```
 
-Labels persist in the meeting data and appear in exports.
+Labels persist in the meeting data and appear in exports. To move a single line to another speaker instead, use `voxtype meeting reassign`; see [Meeting Mode](MEETING_MODE.md#moving-a-line-to-another-speaker).
 
 ### AI Summarization
 
