@@ -73,7 +73,7 @@ impl ParaformerTranscriber {
                 tokens_path.display()
             )));
         }
-        let tokens = ctc::load_tokens(&tokens_path)?;
+        let tokens = load_tokens(&tokens_path)?;
         tracing::debug!("Loaded {} tokens", tokens.len());
 
         // Create ONNX session.
@@ -314,6 +314,31 @@ fn is_cjk(c: char) -> bool {
         | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
         | '\u{FF00}'..='\u{FFEF}' // Fullwidth forms
     )
+}
+
+/// Load tokens.txt, undoing the YAML single-quoting paraformer-en's export
+/// kept on every token YAML would otherwise read as a boolean, number or
+/// symbol (`'on'`, `'yes'`, `'3'`, `'''s'`). Taken literally, every "on" in
+/// a transcript was typed as "'on'".
+fn load_tokens(path: &std::path::Path) -> Result<HashMap<u32, String>, TranscribeError> {
+    let mut tokens = ctc::load_tokens(path)?;
+    for token in tokens.values_mut() {
+        if let Some(plain) = unquote_yaml_scalar(token) {
+            *token = plain;
+        }
+    }
+    Ok(tokens)
+}
+
+/// The content of a YAML single-quoted scalar, where `''` stands for `'`.
+/// `None` for anything that is not one, such as a bare `'` token.
+fn unquote_yaml_scalar(token: &str) -> Option<String> {
+    let inner = token.strip_prefix('\'')?.strip_suffix('\'')?;
+    // Every quote inside must be a doubled pair, or this is not YAML quoting.
+    if inner.replace("''", "").contains('\'') {
+        return None;
+    }
+    Some(inner.replace("''", "'"))
 }
 
 /// Convert token IDs to text, handling BPE continuation markers
@@ -725,6 +750,33 @@ mod tests {
 
         let ids = vec![3, 27, 10];
         assert_eq!(tokens_to_text(&ids, &tokens), "andprice你");
+    }
+
+    /// paraformer-en's tokens.txt keeps YAML single-quoting on every token
+    /// YAML would read as a boolean, number or symbol (lines copied from the
+    /// shipped file). Taken literally, the demo dictation came out as
+    /// "before the meeting 'on' monday".
+    #[test]
+    fn test_load_tokens_unquotes_yaml_scalars() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.txt");
+        fs::write(
+            &path,
+            "<blank> 0\nthe 5\n'on' 21\n'no' 89\n'''s' 173\n'3' 666\n'30' 2978\n\
+             '''@@' 1268\n'''' 2221\nmeeting 900\nmon@@ 409\nday 410\nit 70\n",
+        )
+        .unwrap();
+        let tokens = load_tokens(&path).unwrap();
+
+        let ids = vec![5, 900, 21, 409, 410];
+        assert_eq!(tokens_to_text(&ids, &tokens), "the meeting on monday");
+        assert_eq!(tokens[&89], "no");
+        assert_eq!(tokens[&173], "'s");
+        assert_eq!(tokens[&666], "3");
+        assert_eq!(tokens[&2978], "30");
+        assert_eq!(tokens[&1268], "'@@");
+        assert_eq!(tokens[&2221], "'");
+        assert_eq!(tokens[&70], "it");
     }
 
     #[test]
