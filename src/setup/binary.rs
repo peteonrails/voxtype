@@ -1292,12 +1292,9 @@ mod tests {
     /// arguments, so it works under any `/bin/sh`, dash included.
     #[test]
     fn verify_binary_runs_accepts_a_working_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("voxtype-fake");
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&path, "#!/bin/sh\nexit 0\n");
 
         assert!(
             verify_binary_runs(&path).is_ok(),
