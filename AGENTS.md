@@ -463,9 +463,11 @@ Multiple co-authors are fine when several people contributed to the work.
 
 ## Version Bumping
 
-**When bumping the version in Cargo.toml, ALWAYS update Cargo.lock and `omarchy-plugin/manifest.json` before committing.**
+**When bumping the version in Cargo.toml, ALWAYS update Cargo.lock, `omarchy-plugin/manifest.json` and `packaging/rpm/voxtype.spec` before committing.**
 
 The plugin manifest's `version` names the directory packages install the Settings panel's QML into (`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings/<version>/`). Omarchy only reloads a panel whose entry path changed, so a stale manifest version ships new QML that users never see. Use the full version string, including any `-rcN` suffix. `cargo test` (`tests/omarchy_plugin_manifest.rs`) and `scripts/package.sh` both fail when it differs from Cargo.toml.
+
+The source RPM spec (`packaging/rpm/voxtype.spec`) is what from-source Fedora builds such as COPR use. Set its `Version:` to the release without the `-rcN` suffix (RPM versions cannot contain a hyphen) and add a `%changelog` entry. `scripts/package.sh` fails when it differs.
 
 The AUR source package (`voxtype`) uses `cargo fetch --locked` and `cargo build --frozen`, which require Cargo.lock to exactly match Cargo.toml. If the version in Cargo.lock doesn't match Cargo.toml, the build fails.
 
@@ -473,12 +475,13 @@ The AUR source package (`voxtype`) uses `cargo fetch --locked` and `cargo build 
 # Correct version bump process:
 # 1. Edit Cargo.toml to set new version
 # 2. Set "version" in omarchy-plugin/manifest.json to the same string
-# 3. Run cargo build to update Cargo.lock
+# 3. Set Version: in packaging/rpm/voxtype.spec (no -rcN) and add a %changelog entry
+# 4. Run cargo build to update Cargo.lock
 cargo build
-# 4. Verify Cargo.lock was updated
+# 5. Verify Cargo.lock was updated
 grep -A2 'name = "voxtype"' Cargo.lock  # Should show new version
-# 5. Commit all three files together
-git add Cargo.toml Cargo.lock omarchy-plugin/manifest.json
+# 6. Commit all four files together
+git add Cargo.toml Cargo.lock omarchy-plugin/manifest.json packaging/rpm/voxtype.spec
 git commit -S -m "Bump version to X.Y.Z"
 ```
 

@@ -642,6 +642,16 @@ if [[ "$PLUGIN_VERSION" != "$VERSION" ]]; then
     exit 1
 fi
 
+# The source RPM spec is what COPR and other from-source Fedora builds use.
+# Nothing exercised it, so it sat at 0.4.2 for a year without the OSD. RPM
+# versions cannot carry the -rcN suffix, so compare the release part.
+SPEC_VERSION=$(sed -n 's/^Version:[[:space:]]*//p' "$PROJECT_DIR/packaging/rpm/voxtype.spec")
+if [[ "$SPEC_VERSION" != "${VERSION%%-*}" ]]; then
+    echo "Error: packaging/rpm/voxtype.spec Version is '$SPEC_VERSION', expected '${VERSION%%-*}'."
+    echo "Bump it together with Cargo.toml, and add a %changelog entry."
+    exit 1
+fi
+
 # OSD style packages and recipes. The style resolver searches
 # /usr/share/voxtype/osd/<name> after the user paths, so shipping the
 # examples gives `[osd] style = "<name>"` something to resolve out of the
