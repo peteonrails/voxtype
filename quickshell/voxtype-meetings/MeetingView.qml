@@ -33,6 +33,17 @@ Item {
   property bool listLoading: false
   property string listError: ""
   property bool listHasMore: false
+  // The daemon answers `voxtype status` although meeting.sock cannot be
+  // reached: it is running without the socket.
+  property bool daemonRunning: false
+
+  // Which Copy just worked ("summary", "answer:<row>"), for its "Copied".
+  property string copiedKey: ""
+  function noteCopied(key) {
+    root.copiedKey = key
+    copiedTimer.restart()
+  }
+  Timer { id: copiedTimer; interval: 1500; onTriggered: root.copiedKey = "" }
 
   signal pauseRequested()
   signal resumeRequested()
@@ -50,6 +61,7 @@ Item {
   signal moreMeetingsRequested()
   // From an ended or past meeting back to the list.
   signal backRequested()
+  signal copyRequested(string text, string key)
   signal closeRequested()
   signal errorDismissed()
 
@@ -538,8 +550,10 @@ Item {
           theme: root.theme
           assistant: root.assistant
           feed: root.feed
+          copiedKey: root.copiedKey
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
+          onCopyRequested: function(text, key) { root.copyRequested(text, key) }
         }
 
         SummaryPane {
@@ -548,8 +562,10 @@ Item {
           theme: root.theme
           assistant: root.assistant
           feed: root.feed
+          copiedKey: root.copiedKey
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
+          onCopyRequested: function(text, key) { root.copyRequested(text, key) }
         }
       }
 
@@ -567,7 +583,9 @@ Item {
         Text {
           objectName: "idleTitle"
           Layout.fillWidth: true
-          text: root.connected ? "No meeting in progress" : "Voxtype is not running"
+          text: root.connected ? "No meeting in progress"
+            : root.daemonRunning ? "Voxtype is running without its meeting socket"
+            : "Voxtype is not running"
           color: root.theme.fg
           font.family: root.theme.fontFamily
           font.pixelSize: root.theme.title
@@ -577,7 +595,10 @@ Item {
           objectName: "idleDetail"
           Layout.fillWidth: true
           visible: !root.connected
-          text: "Waiting for the voxtype daemon to start a meeting. Past meetings are still here."
+          text: root.daemonRunning
+            ? "Live meetings need a daemon that publishes $XDG_RUNTIME_DIR/voxtype/meeting.sock (voxtype 1.3.0 or newer). "
+              + "After updating, restart it: systemctl --user restart voxtype. Past meetings are still here."
+            : "Start it with systemctl --user start voxtype (or voxtype daemon). This view connects as soon as it is running. Past meetings are still here."
           color: root.theme.dim
           font.family: root.theme.fontFamily
           font.pixelSize: root.theme.bodySmall

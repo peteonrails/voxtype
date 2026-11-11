@@ -122,6 +122,11 @@ Item {
           else if (s === "past-reassign") tc.drivePastReassign()
           else if (s === "start-while-browsing") tc.driveStartWhileBrowsing()
           else if (s === "ask-error") tc.driveAskError()
+          else if (s === "cli-missing") tc.driveCliMissing()
+          else if (s === "daemon-old") tc.driveDaemonOld()
+          else if (s === "agent-missing") tc.driveAgentMissing()
+          else if (s === "old-voxtype") tc.driveOldVoxtype()
+          else if (s === "copy") tc.driveCopy()
           else if (s === "summary-error") tc.driveSummaryError()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
@@ -1169,6 +1174,99 @@ Item {
       click(find(view(), "backButton"), "Back")
       waitFor(function() { return shown(find(view(), "idleState")) && pastList().count === 3 && rowText(0, "meetingRowTitle") === "Live one" }, "the ended meeting tops the list: " + (pastList() ? rowText(0, "meetingRowTitle") : ""))
       shot("list-after-meeting")
+    }
+
+    // ------------------------------------------------------------ failure paths
+
+    function driveCliMissing() {
+      openView()
+      waitFor(function() { return feed().connected && shown(find(view(), "idleState")) }, "idle")
+      var missing = __FAKE_BIN__
+      waitFor(function() { return shown(find(view(), "meetingListError")) }, "the list says why it is empty")
+      check(txt("meetingListError") === "Could not run " + missing + ". Is voxtype installed and on PATH?", "list: " + txt("meetingListError"))
+      click(find(view(), "startButton"), "Start")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "Start says why")
+      check(view().actionError === "Could not run " + missing + ". Is voxtype installed and on PATH?", "start: " + view().actionError)
+      shot("cli-missing")
+    }
+
+    function driveDaemonOld() {
+      openView()
+      waitFor(function() { return txt("idleTitle") === "Voxtype is running without its meeting socket" }, "old daemon named: " + txt("idleTitle"), 8000)
+      check(txt("idleDetail").indexOf("systemctl --user restart voxtype") !== -1, "says what to do: " + txt("idleDetail"))
+      check(!find(view(), "startButton").enabled, "no Start without the socket")
+      shot("daemon-old")
+    }
+
+    function driveAgentMissing() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      var problem = find(find(view(), "askPane"), "assistantProblem")
+      waitFor(function() { return shown(problem) }, "the Ask tab says why it cannot answer")
+      check(String(problem.text).indexOf("No agent or local model was found.") === 0, "problem: " + problem.text)
+      check(chipLabel() === "No agent  ▾", "chip: " + chipLabel())
+      var menu = find(view(), "agentMenu")
+      click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+      waitFor(function() { return menu.visible }, "menu")
+      check(!shown(find(menu, "agentOption_claude")), "an agent that was not found is not offered")
+      check(shown(find(menu, "agentOption_codex")) && !find(menu, "agentOption_codex").enabled, "an unsupported agent is shown, disabled")
+      check(String(find(menu, "agentNote_codex").text).indexOf("bwrap is not installed") === 0, "its note: " + find(menu, "agentNote_codex").text)
+      shot("agent-missing")
+      keyClick(Qt.Key_Escape)
+      // Asking anyway gets the CLI's own error, not a blank answer.
+      typeAsk("What did we decide?")
+      waitFor(function() { return answered(1) }, "the ask ended", 8000)
+      check(thread().get(1).error.indexOf("No agent or local model is available") === 0, "error: " + thread().get(1).error)
+    }
+
+    function driveOldVoxtype() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      var problem = find(find(view(), "askPane"), "assistantProblem")
+      waitFor(function() { return shown(problem) }, "the Ask tab says to update")
+      check(String(problem.text).indexOf("This voxtype is too old for the meeting assistant") === 0, "ask: " + problem.text)
+      tab("notes")
+      waitFor(function() { return shown(find(view(), "notesError")) }, "the Notes tab says to update")
+      check(txt("notesError").indexOf("This voxtype is too old for meeting notes") === 0, "notes: " + txt("notesError"))
+      tab("transcript")
+      openChooser(1)
+      pick("You")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "reassign says to update")
+      check(view().actionError.indexOf("This voxtype is too old for moving lines") === 0, "reassign: " + view().actionError)
+      check(lines()[1][1] === "Remote", "rolled back")
+      shot("old-voxtype")
+    }
+
+    function driveCopy() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      typeAsk("What did we decide?")
+      waitFor(function() { return answered(1) }, "answered", 8000)
+      var row = find(view(), "askThread").itemAtIndex(1)
+      var copy = find(row, "answerCopy")
+      check(shown(copy) && String(copy.text) === "Copy", "Copy on the answer")
+      mouseClick(copy, copy.width / 2, copy.height / 2)
+      waitFor(function() { return String(copy.text) === "Copied" }, "Copied")
+      shot("copied")
+
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      tab("summary")
+      click(find(view(), "regenerateButton"), "Summarize")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary", 8000)
+      var scopy = find(view(), "summaryCopy")
+      click(scopy, "Copy summary")
+      waitFor(function() { return String(scopy.text) === "Copied" }, "summary Copied")
+
+      // Without wl-copy, say what is missing.
+      host.ctrl().copyCommand = "/nonexistent/wl-copy"
+      waitFor(function() { return String(scopy.text) === "Copy" }, "label back")
+      click(scopy, "Copy without wl-copy")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "the reason")
+      check(view().actionError === "Copying needs /nonexistent/wl-copy (the wl-clipboard package), which is not installed.", "message: " + view().actionError)
     }
 
     function driveAskError() {

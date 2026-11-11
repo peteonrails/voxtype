@@ -21,6 +21,8 @@ Item {
   readonly property alias cli: meetings.cli
   readonly property alias assistant: meetings.assistant
   readonly property alias window: meetings.window
+  // wl-copy, for Copy; a test points it elsewhere.
+  property alias copyCommand: meetings.copyCommand
 
   function select(payload) { meetings.select(payload) }
 

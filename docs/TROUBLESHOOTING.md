@@ -191,6 +191,29 @@ graphical frontend is installed, install a supported terminal or run
   availability, input devices, OSD styles) is left empty rather than showing old
   entries. Run the same command with `--json` in a terminal for the full error.
 
+## Meeting view
+
+The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says
+what is wrong instead of showing an empty pane:
+
+- **"Voxtype is not running"**: the daemon is down. Start it with
+  `systemctl --user start voxtype`. Past meetings still list and open.
+- **"Voxtype is running without its meeting socket"**: the daemon answers but
+  does not publish `$XDG_RUNTIME_DIR/voxtype/meeting.sock`, usually because it
+  is older than 1.3.0. Update voxtype and `systemctl --user restart voxtype`.
+- **"Could not run voxtype. Is voxtype installed and on PATH?"**: the shell
+  cannot start the voxtype command. In the Omarchy plugin, check `dev.json` as
+  for the Settings panel above.
+- **"This voxtype is too old for …"**: the command for notes, Ask, summaries or
+  moving lines does not exist in the installed voxtype. Update it, then reopen
+  the view (and restart the shell after an install, so it loads the new view).
+- **"No agent or local model was found"** on the Ask or Summary tab: questions
+  and summaries need Claude Code or Codex on `PATH`, or Ollama for a local
+  model. `voxtype meeting assistant status` shows what was found and why an
+  agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
+  agent menu shows it disabled, with the reason.
+- **"Copying needs wl-copy"**: install `wl-clipboard`.
+
 ## Table of Contents
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
