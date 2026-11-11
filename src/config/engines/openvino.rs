@@ -25,7 +25,7 @@ pub struct OpenVinoConfig {
     #[serde(default)]
     pub threads: Option<usize>,
 
-    /// Whisper language code.
+    /// Whisper language code, or "auto" to let multilingual models detect it.
     #[serde(default = "default_openvino_language")]
     pub language: String,
 
