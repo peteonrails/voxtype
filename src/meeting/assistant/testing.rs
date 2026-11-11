@@ -35,8 +35,19 @@ pub fn claude_result(text: &str) -> String {
 impl Sandbox {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        for d in ["bin", "out", "meetings"] {
-            std::fs::create_dir(dir.path().join(d)).unwrap();
+        for d in ["bin", "out", "meetings", "home/.ssh", "home/.codex"] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        // What the codex jail must hide: a key under the real HOME. And
+        // what it must let through: codex's auth.json.
+        std::fs::write(dir.path().join("home/.ssh/id_sentinel"), "SENTINEL-KEY\n").unwrap();
+        std::fs::write(
+            dir.path().join("home/.codex/auth.json"),
+            "{\"fake\":\"auth\"}",
+        )
+        .unwrap();
+        if let Ok(bwrap) = which::which("bwrap") {
+            std::os::unix::fs::symlink(bwrap, dir.path().join("bin/bwrap")).unwrap();
         }
         Self { dir }
     }
@@ -84,20 +95,42 @@ cat "$out/claude.reply""#,
         std::fs::write(self.out().join("claude.reply"), lines.join("\n") + "\n").unwrap();
     }
 
-    /// A fake `codex` that writes `out/codex.reply` to its `-o` file.
+    /// The fake home that stands in for the real HOME.
+    pub fn home(&self) -> PathBuf {
+        self.dir.path().join("home")
+    }
+
+    /// Is bwrap available here? The codex tests need it.
+    pub fn has_bwrap(&self) -> bool {
+        self.bin().join("bwrap").exists()
+    }
+
+    /// A fake `codex` that, from inside the jail, reports what it can see:
+    /// its argv, HOME, cwd, whether the HOME sentinel, the meetings folder,
+    /// the sandbox's output folder and auth.json are readable, whether
+    /// auth.json is writable, and its stdin. The report is its answer, so
+    /// it comes back out through the jail's one writable mount.
     pub fn fake_codex(&self) {
-        let out = self.out();
+        let sentinel = self.home().join(".ssh/id_sentinel");
         self.script(
             "codex",
             &format!(
-                r#"out='{out}'
-printf '%s\n' "$@" > "$out/codex.argv"
-cat > "$out/codex.stdin"
-last=''
-while [ $# -gt 0 ]; do [ "$1" = -o ] && last="$2"; shift; done
-echo 'codex progress noise'
-cp "$out/codex.reply" "$last""#,
-                out = out.display()
+                r#"last=''; prev=''
+for a in "$@"; do [ "$prev" = -o ] && last="$a"; prev="$a"; done
+{{
+printf 'ARGV:'; printf ' %s' "$@"; echo
+echo "HOME=$HOME CODEX_HOME=$CODEX_HOME PWD=$(pwd)"
+echo "CWD_LIST=[$(ls -A)]"
+if cat '{sentinel}' 2>/dev/null; then echo SENTINEL_VISIBLE; else echo SENTINEL_HIDDEN; fi
+if ls '{meetings}' >/dev/null 2>&1; then echo MEETINGS_VISIBLE; else echo MEETINGS_HIDDEN; fi
+if ls '{out}' >/dev/null 2>&1; then echo OUT_VISIBLE; else echo OUT_HIDDEN; fi
+echo "AUTH=$(cat "$CODEX_HOME/auth.json" 2>/dev/null)"
+if (echo x > "$CODEX_HOME/auth.json") 2>/dev/null; then echo AUTH_WRITABLE; else echo AUTH_READONLY; fi
+echo 'STDIN<<'; cat; echo '>>'
+}} > "$last""#,
+                sentinel = sentinel.display(),
+                meetings = self.dir.path().join("meetings").display(),
+                out = self.out().display(),
             ),
         );
     }
@@ -165,6 +198,7 @@ cp "$out/codex.reply" "$last""#,
                 path: Some(OsString::from(self.bin())),
                 consent_file: self.dir.path().join("state").join("assistant-consent.json"),
                 omarchy_command: "omarchy-default-agent".into(),
+                codex_home: self.home().join(".codex"),
             },
         }
     }

@@ -2809,7 +2809,7 @@ Labels persist in the meeting data and appear in exports. To move a single line 
 
 ### AI Summarization and Questions
 
-The meeting assistant summarizes meetings (overview, decisions, action items with owners, chapters) and answers questions about them, during the meeting or after. It runs your own coding agent (Claude Code, or Codex in a read-only sandbox) headless with its tools off, or the local Ollama model. Transcripts go to an agent only after you allow it once.
+The meeting assistant summarizes meetings (overview, decisions, action items with owners, chapters) and answers questions about them, during the meeting or after. It runs your own coding agent (Claude Code with its tools off, or Codex inside a bubblewrap jail) headless, or the local Ollama model. Transcripts go to an agent only after you allow it once.
 
 ```bash
 voxtype meeting assistant allow claude

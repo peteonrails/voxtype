@@ -225,10 +225,11 @@ fn ask_refuses_until_allowed_then_streams_and_records() {
         "{prompt}"
     );
 
+    // A unique ID prefix works, as for every other meeting command.
     let o = w.run(&[
         "meeting",
         "ask",
-        &id,
+        &id[..8],
         "What did Steve say?",
         "--last",
         "1m",

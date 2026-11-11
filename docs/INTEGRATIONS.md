@@ -260,12 +260,16 @@ What a UI needs for an agent chip and a consent dialog:
   "consent_file": "/home/me/.local/state/voxtype/assistant-consent.json",
   "candidates": [
     {"id": "claude", "name": "Claude", "path": "/usr/bin/claude", "found": true, "supported": true, "tool_less": true, "consent": false, "sources": ["omarchy", "path"]},
-    {"id": "codex", "name": "Codex", "path": "/usr/bin/codex", "found": true, "supported": true, "tool_less": false, "consent": false, "note": "runs in a read-only sandbox; its command tool cannot be turned off", "sources": ["path"]}
+    {"id": "codex", "name": "Codex", "path": "/usr/bin/codex", "found": true, "supported": true, "tool_less": false, "sandbox": "bwrap", "consent": false, "note": "its command tool cannot be turned off, so it runs in a bwrap jail that sees no files from your home but its auth.json", "sources": ["path"]}
   ]
 }
 ```
 
 - `source` is `config`, `omarchy`, `path` or `none`.
+- `sandbox` is `"bwrap"` for codex, which runs in a filesystem jail because its
+  command tool cannot be turned off, and `null` for claude, which runs with no
+  tools. Without `bwrap`, codex is listed with `supported: false` and the
+  reason in `note`.
 - `backend` is what `ask` would use now: `agent`, `local`, or `none` with the
   reason in `blocked`. `backend_name` is the chip label ("Claude",
   "Local (llama3.2)").

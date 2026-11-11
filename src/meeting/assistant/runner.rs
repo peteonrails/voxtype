@@ -21,11 +21,14 @@
 //! - `--disable <FEATURE>` for each tool feature `codex features list`
 //!   reports (shell_tool, apps, plugins, browser_use, computer_use,
 //!   multi_agent, view_image, code_mode_host). `unified_exec` stays on even
-//!   when disabled, which is why codex is read-only-sandboxed rather than
-//!   tool-less (see `agent::Support`).
+//!   when disabled, which is why codex is jailed rather than tool-less (see
+//!   `agent::Support`).
 //! - `--ignore-user-config` (no MCP servers from config.toml),
 //!   `--ignore-rules`, `--ephemeral`, `--skip-git-repo-check`, `-C <empty dir>`.
 //! - `-o, --output-last-message <FILE>`: the answer, read after exit.
+//!
+//! Since a command tool remains, codex also runs inside a bubblewrap jail
+//! that sees nothing from the real HOME but its `auth.json` ([`super::jail`]).
 //!
 //! The agent always runs in a fresh empty directory, so no project
 //! instructions (CLAUDE.md, AGENTS.md) are picked up from the cwd.
@@ -33,7 +36,7 @@
 use super::agent::ResolvedAgent;
 use super::AssistantError;
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -127,6 +130,7 @@ pub fn run_agent(
                 .map_err(|e| agent_err(agent, format!("cannot create a working directory: {e}")))?;
             let out = spawn_and_collect(
                 agent,
+                &agent.path,
                 &args,
                 &run_dir,
                 prompt,
@@ -137,23 +141,36 @@ pub fn run_agent(
             Ok(out)
         }
         "codex" => {
-            let last = workdir.path().join("last-message.txt");
+            let jail = agent
+                .jail
+                .as_ref()
+                .ok_or_else(|| AssistantError::UnsupportedAgent("codex".into()))?;
+            // The jail's only writable mount; the answer lands here.
+            let out_dir = workdir.path().join("out");
             let run_dir = workdir.path().join("cwd");
-            std::fs::create_dir_all(&run_dir)
-                .map_err(|e| agent_err(agent, format!("cannot create a working directory: {e}")))?;
-            let args = codex_args(&run_dir, &last);
+            for d in [&out_dir, &run_dir] {
+                std::fs::create_dir_all(d).map_err(|e| {
+                    agent_err(agent, format!("cannot create a working directory: {e}"))
+                })?;
+            }
+            let args = codex_args(
+                Path::new(super::jail::JAIL_CWD),
+                &Path::new(super::jail::JAIL_OUT).join("last-message.txt"),
+            );
+            let bwrap_args = jail.args(&args, &out_dir);
             // codex prints progress on stdout/stderr; the answer is the
             // last-message file. Nothing streams.
             spawn_and_collect(
                 agent,
-                &args,
+                &jail.bwrap,
+                &bwrap_args,
                 &run_dir,
                 prompt,
                 timeout,
                 |_| Line::Ignore,
                 &mut |_| {},
             )?;
-            let answer = std::fs::read_to_string(&last)
+            let answer = std::fs::read_to_string(out_dir.join("last-message.txt"))
                 .map_err(|_| agent_err(agent, "finished without writing an answer".into()))?;
             let answer = answer.trim().to_string();
             on_text(&answer);
@@ -220,8 +237,10 @@ pub fn claude_line(line: &str) -> Line {
 
 /// Spawn the agent, feed `prompt` on stdin, read stdout line by line until
 /// it exits or `timeout` passes.
+#[allow(clippy::too_many_arguments)]
 fn spawn_and_collect(
     agent: &ResolvedAgent,
+    program: &Path,
     args: &[String],
     cwd: &Path,
     prompt: &str,
@@ -229,7 +248,7 @@ fn spawn_and_collect(
     parse: impl Fn(&str) -> Line,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<String, AssistantError> {
-    tracing::debug!(agent = %agent.id, program = ?agent.path, ?args, "Running assistant agent");
+    tracing::debug!(agent = %agent.id, ?program, ?args, "Running assistant agent");
     // The prompt goes in through a file, not a pipe: voxtype runs with
     // SIGPIPE at its default action, so writing into a pipe the agent has
     // already closed (it failed before reading) would kill the daemon. The
@@ -239,7 +258,7 @@ fn spawn_and_collect(
         .map_err(|e| agent_err(agent, format!("cannot write the prompt: {e}")))?;
     let stdin = std::fs::File::open(&prompt_file)
         .map_err(|e| agent_err(agent, format!("cannot read the prompt back: {e}")))?;
-    let mut child = Command::new(&agent.path)
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
@@ -247,7 +266,7 @@ fn spawn_and_collect(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| agent_err(agent, format!("cannot start {}: {e}", agent.path.display())))?;
+        .map_err(|e| agent_err(agent, format!("cannot start {}: {e}", program.display())))?;
 
     let stdout = child.stdout.take().expect("piped");
     let (tx, rx) = mpsc::channel::<String>();
@@ -354,15 +373,6 @@ fn first_line_or(a: &str, b: &str) -> String {
     pick(a)
         .or_else(|| pick(b))
         .unwrap_or_else(|| "no output".to_string())
-}
-
-/// Path of the program a run would use, for `assistant status`.
-pub fn describe_command(agent: &ResolvedAgent) -> (PathBuf, Vec<String>) {
-    let args = match agent.id.as_str() {
-        "codex" => codex_args(Path::new("<empty dir>"), Path::new("<answer file>")),
-        _ => claude_args(),
-    };
-    (agent.path.clone(), args)
 }
 
 #[cfg(test)]

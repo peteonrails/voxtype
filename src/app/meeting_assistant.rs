@@ -40,7 +40,7 @@ fn prompt_consent(settings: &AssistantSettings, wanted: &str) -> Decision {
             let how = if c.tool_less {
                 String::new()
             } else {
-                " (read-only sandbox)".to_string()
+                " (in a bwrap jail)".to_string()
             };
             (c.id.clone(), format!("Send to {}{}", c.name, how))
         })
@@ -311,11 +311,19 @@ pub(crate) fn run_assistant(
                 "Meeting transcripts may now go to {}. Revoke with: voxtype meeting assistant revoke {}",
                 spec.name, spec.id
             );
-            if spec.support == agent::Support::ReadOnlySandbox {
+            if spec.support == agent::Support::Jailed {
                 println!(
-                    "Note: {} runs in a read-only sandbox; its command tool cannot be turned off.",
+                    "Note: {}'s command tool cannot be turned off, so it runs in a bwrap jail \
+                     that sees no files from your home except its auth.json.",
                     spec.name
                 );
+                if let Some(Err(why)) = consent
+                    .get(spec.id)
+                    .and_then(|e| e.path.clone())
+                    .map(|p| agent::codex_jail(&settings.env, &p))
+                {
+                    eprintln!("Warning: {} cannot be used yet: {why}", spec.name);
+                }
             }
         }
         AssistantAction::Revoke { agent: id } => {
@@ -401,7 +409,7 @@ fn print_status(settings: &AssistantSettings) {
             } else if c.tool_less {
                 "no tools"
             } else {
-                "read-only sandbox"
+                "bwrap jail"
             };
             let allowed = if c.consent { "allowed" } else { "not allowed" };
             println!(

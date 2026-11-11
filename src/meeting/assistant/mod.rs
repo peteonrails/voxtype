@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod asks;
 pub mod consent;
+pub mod jail;
 pub mod local;
 #[cfg(target_os = "linux")]
 pub mod notify;
@@ -34,9 +35,6 @@ use thiserror::Error;
 
 /// Agent ids the assistant can run headless.
 pub const SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
-
-/// Free-text notes the user keeps for a meeting, read into every prompt.
-pub const NOTES_FILE: &str = "notes.md";
 
 /// Running summary of a long meeting's earlier part, so repeated asks
 /// during a meeting only summarize what is new.
@@ -111,6 +109,8 @@ pub struct AssistantEnv {
     pub path: Option<OsString>,
     pub consent_file: PathBuf,
     pub omarchy_command: String,
+    /// codex's CODEX_HOME, where its `auth.json` is.
+    pub codex_home: PathBuf,
 }
 
 impl AssistantEnv {
@@ -119,6 +119,10 @@ impl AssistantEnv {
             path: std::env::var_os("PATH"),
             consent_file: crate::config::Config::state_dir().join(consent::CONSENT_FILE),
             omarchy_command: "omarchy-default-agent".to_string(),
+            codex_home: std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+                .unwrap_or_else(|| PathBuf::from(".codex")),
         }
     }
 }
@@ -291,17 +295,30 @@ pub fn meeting_folder(meeting: &MeetingData) -> Option<&Path> {
     meeting.metadata.storage_path.as_deref()
 }
 
-/// The user's notes for the meeting (`notes.md`), if any.
+/// The user's notes for the meeting, as storage loaded them (`notes.md`).
 pub fn read_notes(meeting: &MeetingData) -> Option<String> {
-    let text = std::fs::read_to_string(meeting_folder(meeting)?.join(NOTES_FILE)).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    meeting
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(String::from)
 }
 
-/// Annotations on transcript lines. The annotation store is not built yet;
-/// this is the hook it fills, and the prompt already carries them.
-pub fn read_annotations(_meeting: &MeetingData) -> Vec<prompt::Annotation> {
-    Vec::new()
+/// The annotations on transcript lines from `from_ms` on, in transcript order.
+pub fn read_annotations(meeting: &MeetingData, from_ms: u64) -> Vec<prompt::Annotation> {
+    meeting
+        .transcript
+        .segments
+        .iter()
+        .filter(|s| s.start_ms >= from_ms)
+        .filter_map(|s| {
+            s.annotation.as_ref().map(|a| prompt::Annotation {
+                start_ms: s.start_ms,
+                text: crate::meeting::export::annotation_line(a),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,7 +343,7 @@ pub fn build_context(
     let mut ctx = prompt::Context {
         header,
         notes: read_notes(meeting),
-        annotations: read_annotations(meeting),
+        annotations: read_annotations(meeting, 0),
         ..Default::default()
     };
     let budget = settings.max_transcript_chars;
@@ -345,6 +362,7 @@ pub fn build_context(
             prompt::Fit::Whole(l) => l,
             prompt::Fit::Split { recent, .. } => recent,
         };
+        ctx.annotations = read_annotations(meeting, from);
         return Ok(ctx);
     }
 
@@ -542,6 +560,7 @@ pub fn status_json(settings: &AssistantSettings) -> serde_json::Value {
 mod tests {
     use super::testing::Sandbox;
     use super::*;
+    use crate::meeting::MeetingStorage;
 
     fn steve_meeting(sb: &Sandbox) -> MeetingData {
         // "Remote 2" on the third line stands in for a line moved there with
@@ -647,12 +666,14 @@ mod tests {
             "Steve said we ship on Friday [00:41].",
         );
         let m = steve_meeting(&sb);
-        std::fs::write(
-            sb.folder(&m).join(NOTES_FILE),
-            "Ask about the budget
-",
-        )
-        .unwrap();
+        let storage = MeetingStorage::open(sb.storage_config()).unwrap();
+        storage
+            .set_notes(&m.metadata.id, "Ask about the budget\n")
+            .unwrap();
+        storage
+            .annotate_segment(&m.metadata.id, 2, "check this number", true, true)
+            .unwrap();
+        let m = sb.reload(&m);
 
         let (record, streamed) = collect(&sb.settings(), &m, "What did Steve just say?", None);
         let record = record.unwrap();
@@ -675,20 +696,15 @@ mod tests {
             "{p}"
         );
         assert!(p.contains(
-            "[00:41] Steve: We ship on Friday.
-[00:52] Pete: Agreed.
-[01:00] Dana: The budget is 40k.
-"
+            "[00:41] Steve: We ship on Friday.\n[00:52] Pete: Agreed.\n[01:00] Dana: The budget is 40k.\n"
         ));
-        assert!(p.contains(
-            "User notes:
-Ask about the budget
-"
-        ));
+        assert!(p.contains("User notes:\nAsk about the budget\n"), "{p}");
+        assert!(
+            p.contains("Annotations:\n[01:00] Highlight: check this number\n"),
+            "{p}"
+        );
         assert!(p.ends_with(
-            "Question: What did Steve just say?
-Answer briefly. Cite the [mm:ss] of the lines you rely on.
-"
+            "Question: What did Steve just say?\nAnswer briefly. Cite the [mm:ss] of the lines you rely on.\n"
         ));
 
         let argv = sb.claude_argv(0);
@@ -715,6 +731,14 @@ Answer briefly. Cite the [mm:ss] of the lines you rely on.
                 (590, "You", "closing"),
             ],
         );
+        let storage = MeetingStorage::open(sb.storage_config()).unwrap();
+        storage
+            .annotate_segment(&m.metadata.id, 0, "early note", false, true)
+            .unwrap();
+        storage
+            .annotate_segment(&m.metadata.id, 2, "late note", false, true)
+            .unwrap();
+        let m = sb.reload(&m);
         let (record, streamed) = collect(
             &sb.settings(),
             &m,
@@ -733,6 +757,8 @@ Answer briefly. Cite the [mm:ss] of the lines you rely on.
             "{p}"
         );
         assert!(p.contains("recent topic") && p.contains("closing"));
+        assert!(p.contains("Annotations:\n[06:40] Note: late note\n"), "{p}");
+        assert!(!p.contains("early note"));
         assert!(!p.contains("opening remarks") && !p.contains("early topic"));
     }
 
@@ -776,40 +802,64 @@ Answer briefly. Cite the [mm:ss] of the lines you rely on.
     }
 
     #[test]
-    fn codex_answers_from_its_last_message_file() {
+    fn codex_runs_in_a_jail_that_hides_home() {
         let sb = Sandbox::new();
+        if !sb.has_bwrap() {
+            eprintln!("skipping: bwrap is not installed");
+            return;
+        }
         sb.fake_codex();
         sb.allow("codex");
-        std::fs::write(
-            sb.out().join("codex.reply"),
-            "Codex says Friday [00:41]
-",
-        )
-        .unwrap();
         let m = steve_meeting(&sb);
         let mut s = sb.settings();
         s.agent = Some("codex".into());
         let (record, streamed) = collect(&s, &m, "When do we ship?", None);
-        let record = record.unwrap();
-        assert_eq!(record.answer, "Codex says Friday [00:41]");
-        assert_eq!(streamed, "Codex says Friday [00:41]");
-        let argv = std::fs::read_to_string(sb.out().join("codex.argv")).unwrap();
+        let report = record.unwrap().answer;
+        assert_eq!(streamed, report);
+
+        // Nothing from the real home, the meetings or the caller's files.
+        assert!(report.contains("SENTINEL_HIDDEN"), "{report}");
+        assert!(!report.contains("SENTINEL-KEY"), "{report}");
+        assert!(report.contains("MEETINGS_HIDDEN"), "{report}");
+        assert!(report.contains("OUT_HIDDEN"), "{report}");
+        // Its own auth, read-only, in a fresh home and an empty cwd.
+        assert!(report.contains(r#"AUTH={"fake":"auth"}"#), "{report}");
+        assert!(report.contains("AUTH_READONLY"), "{report}");
         assert!(
-            argv.starts_with(
-                "exec
---sandbox
-read-only
-"
+            report.contains(
+                "HOME=/home/voxtype-jail CODEX_HOME=/home/voxtype-jail/.codex PWD=/tmp/work"
             ),
-            "{argv}"
+            "{report}"
         );
-        assert!(argv.ends_with(
-            "
--
-"
-        ));
-        let stdin = std::fs::read_to_string(sb.out().join("codex.stdin")).unwrap();
-        assert!(stdin.contains("Question: When do we ship?"));
+        assert!(report.contains("CWD_LIST=[]"), "{report}");
+        // The flags still apply inside the jail, and the prompt arrives.
+        assert!(
+            report.contains("ARGV: exec --sandbox read-only --skip-git-repo-check"),
+            "{report}"
+        );
+        assert!(
+            report.contains("-C /tmp/work -o /tmp/out/last-message.txt -\n"),
+            "{report}"
+        );
+        assert!(report.contains("Question: When do we ship?"), "{report}");
+        // The real auth.json is untouched.
+        assert_eq!(
+            std::fs::read_to_string(sb.home().join(".codex/auth.json")).unwrap(),
+            r#"{"fake":"auth"}"#
+        );
+    }
+
+    #[test]
+    fn codex_is_refused_without_bwrap() {
+        let sb = Sandbox::new();
+        sb.fake_codex();
+        sb.allow("codex");
+        let _ = std::fs::remove_file(sb.bin().join("bwrap"));
+        let mut s = sb.settings();
+        s.agent = Some("codex".into());
+        let err = choose_backend(&s, &Overrides::default()).unwrap_err();
+        assert_eq!(err.code(), "agent_unavailable");
+        assert!(err.to_string().contains("bubblewrap"), "{err}");
     }
 
     #[test]
@@ -862,6 +912,8 @@ read-only
         assert_eq!(c[0]["tool_less"], true);
         assert_eq!(c[1]["id"], "codex");
         assert_eq!(c[1]["tool_less"], false);
+        assert_eq!(c[1]["sandbox"], "bwrap");
+        assert_eq!(c[0]["sandbox"], serde_json::Value::Null);
 
         sb.allow("claude");
         let v = status_json(&sb.settings());

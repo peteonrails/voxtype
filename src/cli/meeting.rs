@@ -276,7 +276,7 @@ pub enum MeetingAction {
         voxtype meeting ask latest \"Summarize the last few minutes\" --last 5m\n  \
         voxtype meeting ask latest \"What are the action items so far?\"\n  \
         voxtype meeting ask latest \"Who owns the release?\" --notify\n  \
-        voxtype meeting ask latest \"What did we decide?\" --local --json")]
+        voxtype meeting ask 3f2a \"What did we decide?\" --local --json")]
     Ask {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,

@@ -5,21 +5,22 @@
 //! [00:41] Steve: ...
 //! [00:52] Pete: ...
 //! User notes: ...
-//! Annotations: [01:58] "check this number"
+//! Annotations:
+//! [01:58] Note: check this number
 //! Question: what did Steve just say?
 //! Answer briefly. Cite the [mm:ss] of the lines you rely on.
 //! ```
 //!
-//! Speaker names are what the transcript shows on screen: labels and
-//! per-line reassignments are applied by the storage layer when the
-//! transcript is loaded, before it gets here.
+//! Speaker names are what the transcript shows on screen: labels,
+//! per-line reassignments and annotations are applied by the storage layer
+//! when the transcript is loaded, before it gets here.
 
 use crate::meeting::data::{MeetingData, TranscriptSegment};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// A note attached to one transcript line.
+/// A note or highlight on one transcript line, as the prompt shows it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Annotation {
     pub start_ms: u64,
@@ -307,11 +308,10 @@ impl Context {
             p.push('\n');
         }
         if !self.annotations.is_empty() {
-            p.push_str("Annotations:");
+            p.push_str("Annotations:\n");
             for a in &self.annotations {
-                p.push_str(&format!(" [{}] \"{}\"", ts(a.start_ms), a.text.trim()));
+                p.push_str(&format!("[{}] {}\n", ts(a.start_ms), a.text.trim()));
             }
-            p.push('\n');
         }
         p
     }
@@ -479,14 +479,14 @@ mod tests {
             notes: Some("check budget".into()),
             annotations: vec![Annotation {
                 start_ms: 118_000,
-                text: "check this number".into(),
+                text: "Note: check this number".into(),
             }],
         };
         let p = ctx.ask("what did Steve say?");
         assert!(p.contains("Summary of the meeting up to [01:00]:\nThey planned."));
         assert!(p.contains("[01:01] Steve: ship it\n"));
         assert!(p.contains("User notes:\ncheck budget\n"));
-        assert!(p.contains("Annotations: [01:58] \"check this number\""));
+        assert!(p.contains("Annotations:\n[01:58] Note: check this number\n"));
         assert!(p.ends_with(
             "Question: what did Steve say?\nAnswer briefly. Cite the [mm:ss] of the lines you rely on.\n"
         ));

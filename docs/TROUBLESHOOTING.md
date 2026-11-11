@@ -1633,7 +1633,11 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 
 **"Could not read the summary the model wrote".** The model did not reply with the JSON the summary asks for. Small local models do this most; try a larger Ollama model or an agent, then `--regenerate`.
 
-**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude` and `codex` can be run with their tools off, so voxtype skips other agents and uses `claude` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
+**Codex is listed as not usable: "needs bubblewrap".** Codex keeps a command tool that cannot be turned off, so voxtype only runs it inside a bubblewrap jail that hides your home. Install `bubblewrap` (`pacman -S bubblewrap`, `apt install bubblewrap`). If bwrap is installed but fails with a namespace error, unprivileged user namespaces are disabled on the system; use Claude or the local model instead.
+
+**Codex worked, then fails with an authentication error.** In the jail codex can read `~/.codex/auth.json` but not rewrite it, so it cannot save a refreshed login token there. Run `codex` once in a terminal to refresh the login, then retry.
+
+**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude` and `codex` can be run without tools that reach your files, so voxtype skips other agents and uses `claude` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
 
 **Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code or Codex, or start Ollama and `ollama pull llama3.2`.
 

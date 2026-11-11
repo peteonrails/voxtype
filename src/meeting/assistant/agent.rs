@@ -19,10 +19,11 @@ use std::time::Duration;
 pub enum Support {
     /// Every tool is off: text in, text out.
     ToolLess,
-    /// The documented flags leave a sandboxed, read-only command tool that
-    /// cannot be switched off. Used only when named explicitly (config or
-    /// the Omarchy default), never picked from PATH on its own.
-    ReadOnlySandbox,
+    /// The documented flags leave a command tool that cannot be switched
+    /// off, so it only runs inside a bubblewrap filesystem jail (see
+    /// [`super::jail`]). Used only when named explicitly (config or the
+    /// Omarchy default), never picked from PATH on its own.
+    Jailed,
     /// No documented way to run it without tools.
     Unsupported(&'static str),
 }
@@ -58,7 +59,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "codex",
         name: "Codex",
         binary: "codex",
-        support: Support::ReadOnlySandbox,
+        support: Support::Jailed,
     },
     AgentSpec {
         id: "hermes",
@@ -88,6 +89,9 @@ pub struct ResolvedAgent {
     pub path: PathBuf,
     /// `config`, `omarchy` or `path`.
     pub source: &'static str,
+    /// How a jailed agent (codex) is run.
+    #[serde(skip)]
+    pub jail: Option<super::jail::CodexJail>,
 }
 
 /// One agent the UI can offer.
@@ -99,15 +103,19 @@ pub struct Candidate {
     pub path: Option<PathBuf>,
     pub found: bool,
     pub supported: bool,
-    /// Runs with every tool off. `false` for codex, which keeps a
-    /// read-only sandboxed command tool.
+    /// Runs with every tool off. `false` for codex, which keeps a command
+    /// tool and so runs jailed (`sandbox`).
     pub tool_less: bool,
     pub consent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consented_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Why it cannot be used, when it cannot.
+    /// Why it cannot be used, or how it is confined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The filesystem jail it runs in: `bwrap` for codex, otherwise null.
+    pub sandbox: Option<&'static str>,
+    #[serde(skip)]
+    pub jail: Option<super::jail::CodexJail>,
     /// How it was found: `config`, `omarchy`, `path`.
     pub sources: Vec<&'static str>,
 }
@@ -169,16 +177,32 @@ fn is_executable(path: &Path) -> bool {
 pub fn omarchy_default_agent(env: &AssistantEnv) -> Option<String> {
     let path = env.path.as_ref()?;
     let exe = which::which_in(&env.omarchy_command, Some(path), std::env::temp_dir()).ok()?;
+    let out = run_quick(&exe, &[])?;
+    let id = out.lines().next().unwrap_or("").trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Run `exe args` with no input for at most three seconds; its stdout when
+/// it exits successfully.
+pub fn run_quick(exe: &Path, args: &[&str]) -> Option<String> {
     let mut child = std::process::Command::new(exe)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        use std::io::Read;
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20))
             }
@@ -188,12 +212,20 @@ pub fn omarchy_default_agent(env: &AssistantEnv) -> Option<String> {
                 return None;
             }
         }
-    }
-    let mut out = String::new();
-    use std::io::Read;
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let id = out.lines().next().unwrap_or("").trim().to_string();
-    (!id.is_empty()).then_some(id)
+    };
+    let out = reader.join().ok()?;
+    status.success().then_some(out)
+}
+
+/// The jail for codex found at `path`, or why it cannot be jailed.
+pub fn codex_jail(env: &AssistantEnv, path: &Path) -> Result<super::jail::CodexJail, String> {
+    let bwrap = env
+        .path
+        .as_ref()
+        .and_then(|p| which::which_in("bwrap", Some(p), std::env::temp_dir()).ok());
+    super::jail::locate(bwrap, path, &env.codex_home, &|exe, args| {
+        run_quick(exe, args)
+    })
 }
 
 /// Resolve the agent: config, then the Omarchy default, then PATH.
@@ -210,6 +242,10 @@ pub fn resolve(configured: Option<&str>, env: &AssistantEnv, consent: &ConsentSt
         let known = spec(id);
         let path = known.and_then(|s| find_binary(env, s.binary, consent, s.id));
         let entry = consent.get(known.map(|s| s.id).unwrap_or(id));
+        let jail = match (known.map(|s| s.support), &path) {
+            (Some(Support::Jailed), Some(p)) => Some(codex_jail(env, p)),
+            _ => None,
+        };
         let note = match known {
             None => Some(format!(
                 "not supported (supported: {})",
@@ -218,9 +254,14 @@ pub fn resolve(configured: Option<&str>, env: &AssistantEnv, consent: &ConsentSt
             Some(s) => match s.support {
                 Support::Unsupported(why) => Some(format!("not supported: {why}")),
                 _ if path.is_none() => Some(format!("{} was not found on PATH", s.binary)),
-                Support::ReadOnlySandbox => Some(
-                    "runs in a read-only sandbox; its command tool cannot be turned off".into(),
-                ),
+                Support::Jailed => match &jail {
+                    Some(Err(why)) => Some(format!("not usable: {why}")),
+                    _ => Some(
+                        "its command tool cannot be turned off, so it runs in a bwrap jail \
+                         that sees no files from your home but its auth.json"
+                            .into(),
+                    ),
+                },
                 Support::ToolLess => None,
             },
         };
@@ -231,11 +272,15 @@ pub fn resolve(configured: Option<&str>, env: &AssistantEnv, consent: &ConsentSt
                 .unwrap_or_else(|| id.to_string()),
             found: path.is_some(),
             path,
-            supported: known.is_some_and(|s| s.supported()),
+            supported: known.is_some_and(|s| s.supported()) && !matches!(jail, Some(Err(_))),
             tool_less: known.is_some_and(|s| s.tool_less()),
             consent: entry.is_some(),
             consented_at: entry.map(|e| e.allowed_at),
             note,
+            sandbox: known
+                .filter(|s| s.support == Support::Jailed)
+                .map(|_| "bwrap"),
+            jail: jail.and_then(Result::ok),
             sources: vec![source],
         });
     };
@@ -246,6 +291,7 @@ pub fn resolve(configured: Option<&str>, env: &AssistantEnv, consent: &ConsentSt
         name: c.name.clone(),
         path: c.path.clone().unwrap_or_default(),
         source,
+        jail: c.jail.clone(),
     };
 
     // 1. Config.
@@ -331,6 +377,9 @@ mod tests {
             for b in bins {
                 script(&dir.path().join("bin"), b, "exit 0");
             }
+            if let Ok(bwrap) = which::which("bwrap") {
+                std::os::unix::fs::symlink(bwrap, dir.path().join("bin/bwrap")).unwrap();
+            }
             Self { dir }
         }
 
@@ -347,6 +396,7 @@ mod tests {
                 path: Some(OsString::from(self.dir.path().join("bin"))),
                 consent_file: self.dir.path().join("consent.json"),
                 omarchy_command: "omarchy-default-agent".into(),
+                codex_home: self.dir.path().join("codex-home"),
             }
         }
 
@@ -465,6 +515,32 @@ mod tests {
         // The fixture script exits 9 (printing nothing) if given arguments.
         f.omarchy("claude");
         assert_eq!(f.resolve(None).omarchy_default.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn codex_without_bwrap_is_listed_but_unsupported() {
+        let f = Fixture::new(&["codex"]);
+        let _ = std::fs::remove_file(f.dir.path().join("bin/bwrap"));
+        let r = f.resolve(Some("codex"));
+        assert!(r.agent.is_none());
+        let c = &r.candidates[0];
+        assert!(c.found && !c.supported);
+        assert_eq!(c.sandbox, Some("bwrap"));
+        assert!(c.note.as_deref().unwrap().contains("bubblewrap"), "{c:?}");
+        assert!(r.problem.unwrap().contains("bubblewrap"));
+    }
+
+    #[test]
+    fn codex_with_bwrap_resolves_to_a_jail() {
+        let f = Fixture::new(&["codex"]);
+        if !f.dir.path().join("bin/bwrap").exists() {
+            eprintln!("skipping: bwrap is not installed");
+            return;
+        }
+        let a = f.resolve(Some("codex")).agent.unwrap();
+        let jail = a.jail.unwrap();
+        assert!(jail.program.ends_with("bin/codex"));
+        assert_eq!(jail.auth, None);
     }
 
     #[test]
