@@ -255,6 +255,30 @@ Cohere switches the engine and the model together, so you can move between
 them from the panel, for example back to Parakeet Ultra after trying a GGUF
 model. To switch to any other engine, run `voxtype config set engine <name>`.
 
+## Coding agent setup skill
+
+If you use a coding agent such as Claude Code, Codex, Gemini CLI, OpenCode,
+Cursor, GitHub Copilot or Goose, Voxtype can install a skill that teaches it to
+configure Voxtype for your machine:
+
+```bash
+voxtype setup skill
+```
+
+Then ask your agent to "set up voxtype for this machine". It inspects your
+hardware, asks which languages you dictate and whether battery life matters,
+and suggests an engine, model, GPU acceleration, thread count, memory settings
+and output mode. On an older install it also points out settings your config
+is missing that new installs get. It shows you the plan and asks before
+changing your config or running anything with `sudo`.
+
+The command installs the skill for every agent it finds: Claude Code in
+`~/.claude/skills`, and the others in `~/.agents/skills`. Use `--target claude`,
+`--target agents` or `--target all` to choose. The skill is built into the
+voxtype binary, so run `voxtype setup skill` again after upgrading.
+`voxtype setup skill --status` and `voxtype setup check` tell you when the
+installed copy is out of date, and `voxtype setup skill --remove` uninstalls it.
+
 ## Table of Contents
 
 - [Getting Started](#getting-started)

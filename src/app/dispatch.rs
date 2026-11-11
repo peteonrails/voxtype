@@ -414,6 +414,22 @@ pub(crate) async fn dispatch(
                         },
                     )?;
                 }
+                Some(SetupAction::Skill {
+                    status,
+                    json,
+                    remove,
+                    target,
+                }) => {
+                    if !json {
+                        warn_if_root("skill");
+                    }
+                    setup::skill::run(setup::skill::CliArgs {
+                        status,
+                        json,
+                        remove,
+                        target,
+                    })?;
+                }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");
                     if status {

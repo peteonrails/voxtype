@@ -161,7 +161,7 @@ Config file location: `~/.config/voxtype/config.toml`
 
 See [`config/default.toml`](config/default.toml) for the full annotated default configuration.
 
-If you use a coding agent such as Claude Code, the [`voxtype-setup`](skills/README.md) skill will inspect your hardware and tune the engine, model, GPU acceleration and memory settings for you, asking before it changes anything.
+If you use a coding agent such as Claude Code or Codex, run `voxtype setup skill` to install the [`voxtype-setup`](skills/README.md) skill, then ask the agent to set up voxtype for your machine. It inspects your hardware and tunes the engine, model, GPU acceleration, memory and output settings, asking before it changes anything.
 
 ```toml
 # State file for Waybar/polybar integration (enabled by default)

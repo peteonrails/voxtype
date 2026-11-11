@@ -8,13 +8,23 @@ These are [Agent Skills](https://docs.claude.com/en/docs/claude-code/skills): in
 
 ## Installing
 
-For Claude Code, copy the skill's directory into your personal skills folder:
+Voxtype installs the skill for the coding agents it finds on your machine:
 
 ```bash
-mkdir -p ~/.claude/skills
-cp -r skills/voxtype-setup ~/.claude/skills/
+voxtype setup skill
 ```
 
-Then ask your agent something like "set up voxtype for this machine". Other agents that read `SKILL.md` files load them from their own skills directory, so check your agent's documentation for the path.
+That covers Claude Code (`~/.claude/skills`) and the agents that read
+`~/.agents/skills`: Codex, Gemini CLI, OpenCode, Cursor, GitHub Copilot and
+Goose. `voxtype setup skill --help` lists the options.
 
-The skill shows you its plan and asks before it changes your config or runs anything with `sudo`.
+The skill is built into the voxtype binary, so the installed copy matches your
+version. Run the command again after upgrading voxtype. `voxtype setup skill
+--status` shows whether each copy is current.
+
+Then ask your agent something like "set up voxtype for this machine". The
+skill shows you its plan and asks before it changes your config or runs
+anything with `sudo`.
+
+To install it by hand instead, copy `skills/voxtype-setup/` into
+`~/.claude/skills/` or `~/.agents/skills/`.

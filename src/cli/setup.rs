@@ -342,6 +342,52 @@ pub enum SetupAction {
         progress_format: Option<String>,
     },
 
+    /// Install the voxtype-setup skill for your coding agents
+    #[command(long_about = "\
+        Install the voxtype-setup skill for your coding agents\n\n\
+        The skill teaches a coding agent to configure Voxtype for this \
+        machine: it inspects the hardware, asks what you dictate, and tunes \
+        the engine, model, GPU acceleration, memory use and output settings, \
+        asking before it changes anything.\n\n\
+        With no options, installs the skill for every agent found: Claude Code \
+        (~/.claude/skills) and the agents that read ~/.agents/skills (Codex, \
+        Gemini CLI, OpenCode, Cursor, GitHub Copilot, Goose). An agent counts \
+        as found when its config directory exists or its command is on PATH. \
+        Use --target to install for one that was not found.\n\n\
+        The skill is built into this voxtype binary, so the copy it writes \
+        matches this version. Run the command again after upgrading voxtype: \
+        --status and `voxtype setup check` report a copy that is out of date. \
+        Run it as your own user, not with sudo.\n\n\
+        --remove deletes only the SKILL.md voxtype wrote, and keeps any other \
+        files in that directory.\n\n\
+        Examples:\n  \
+        voxtype setup skill\n  \
+        voxtype setup skill --target claude\n  \
+        voxtype setup skill --status\n  \
+        voxtype setup skill --status --json\n  \
+        voxtype setup skill --remove")]
+    Skill {
+        /// Show where the skill is installed and whether it is current
+        #[arg(long, conflicts_with = "remove")]
+        status: bool,
+
+        /// With --status, print the state as JSON
+        #[arg(long, requires = "status")]
+        json: bool,
+
+        /// Remove the skill voxtype installed
+        #[arg(long)]
+        remove: bool,
+
+        /// Install for (or remove from) these agents instead of the ones found
+        #[arg(
+            long,
+            value_name = "TARGET",
+            value_parser = clap::builder::PossibleValuesParser::new(["claude", "agents", "all"]),
+        )]
+        target: Option<String>,
+    },
+
     /// Download the Silero VAD model for speech detection
     Vad {
         /// Show VAD model status
