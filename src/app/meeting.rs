@@ -52,13 +52,18 @@ pub(crate) async fn run_meeting_command(
                 refuse_start();
             }
 
-            // --diarization ml requires the ml-diarization feature at build
+            // --diarization ml and hybrid require the ml-diarization feature at build
             // time. Without it the daemon's diarizer factory silently falls
             // back, leaving the CLI's "(diarization backend: ml)" exit
             // message a lie. Reject the request up front with a pointer to
             // the binaries that DO carry ml-diarization.
-            if diarization.as_deref() == Some("ml") && !cfg!(feature = "ml-diarization") {
-                eprintln!("Error: --diarization ml requested but this binary was not built with");
+            let needs_ml = diarization
+                .as_deref()
+                .filter(|b| matches!(*b, "ml" | "hybrid"));
+            if let (Some(backend), false) = (needs_ml, cfg!(feature = "ml-diarization")) {
+                eprintln!(
+                    "Error: --diarization {backend} requested but this binary was not built with"
+                );
                 eprintln!(
                     "  the `ml-diarization` feature. ECAPA-TDNN diarization is shipped in the"
                 );

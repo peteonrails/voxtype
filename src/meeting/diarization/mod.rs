@@ -6,8 +6,11 @@
 //!
 //! - **Simple**: Source-based attribution using mic vs loopback (Phase 2)
 //! - **ML**: ONNX-based speaker embeddings with clustering (Phase 3)
+//! - **Hybrid**: the track splits you from them, ML clustering splits the
+//!   remote side into Remote 1, Remote 2, ...
 //! - **Subprocess**: Memory-isolated ML diarization for resource-constrained systems
 
+pub mod hybrid;
 pub mod ml;
 pub mod simple;
 pub mod subprocess;
@@ -133,6 +136,14 @@ pub trait Diarizer: Send + Sync {
         transcript_segments: &[crate::meeting::TranscriptSegment],
     ) -> Vec<DiarizedSegment>;
 
+    /// Speaker IDs to rename in segments already diarized, as
+    /// `(from, to)` pairs, collected once. A backend whose names depend on
+    /// how many speakers it has seen (hybrid's "Remote" becoming "Remote 1")
+    /// reports the change here so earlier chunks stay consistent.
+    fn take_speaker_renames(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Get the backend name
     fn name(&self) -> &'static str;
 }
@@ -142,7 +153,7 @@ pub trait Diarizer: Send + Sync {
 pub struct DiarizationConfig {
     /// Enable diarization
     pub enabled: bool,
-    /// Backend to use: "simple", "ml", or "remote"
+    /// Backend to use: "simple", "ml", "hybrid" or "subprocess"
     pub backend: String,
     /// Maximum number of speakers to detect
     pub max_speakers: u32,
@@ -183,37 +194,28 @@ impl Default for DiarizationConfig {
 pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
     match config.backend.as_str() {
         "simple" => Box::new(simple::SimpleDiarizer::new()),
-        "ml" => {
-            #[cfg(feature = "ml-diarization")]
-            {
-                // Auto-download model if missing
-                if !ml::MlDiarizer::default_model_path().exists() {
-                    tracing::info!("Speaker embedding model not found, attempting download...");
-                    crate::setup::model::ensure_ecapa_model();
-                }
-
-                let mut diarizer = ml::MlDiarizer::new(config);
-                if diarizer.model_exists() {
-                    if let Err(e) = diarizer.load_model() {
-                        tracing::warn!("Failed to load ML diarization model: {}", e);
-                        tracing::info!("Falling back to simple diarization");
-                        return Box::new(simple::SimpleDiarizer::new());
-                    }
-                    tracing::info!("Using ML diarization with ONNX");
-                    Box::new(diarizer)
-                } else {
-                    tracing::warn!("ML diarization model not found, falling back to simple");
-                    Box::new(simple::SimpleDiarizer::new())
-                }
+        "ml" => match load_ml_diarizer(config) {
+            Some(diarizer) => {
+                tracing::info!("Using ML diarization with ONNX");
+                diarizer
             }
-            #[cfg(not(feature = "ml-diarization"))]
-            {
+            None => Box::new(simple::SimpleDiarizer::new()),
+        },
+        "hybrid" => match load_ml_diarizer(config) {
+            Some(remote) => {
+                tracing::info!(
+                    "Using hybrid diarization: mic is You, ONNX clustering splits the loopback"
+                );
+                Box::new(hybrid::HybridDiarizer::new(remote))
+            }
+            None => {
                 tracing::warn!(
-                    "ML diarization requires the 'ml-diarization' feature, falling back to simple"
+                    "Hybrid diarization needs ML speaker clustering, which is unavailable; \
+                     labelling speakers You and Remote (simple backend)"
                 );
                 Box::new(simple::SimpleDiarizer::new())
             }
-        }
+        },
         "subprocess" => {
             // Subprocess diarizer for memory-isolated ML diarization
             Box::new(subprocess::SubprocessDiarizer::new(config.clone()))
@@ -228,9 +230,56 @@ pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
     }
 }
 
+/// The ECAPA-TDNN clusterer, or `None` (with the reason logged) when this
+/// binary lacks the `ml-diarization` feature or the model cannot be loaded.
+fn load_ml_diarizer(config: &DiarizationConfig) -> Option<Box<dyn Diarizer>> {
+    #[cfg(feature = "ml-diarization")]
+    {
+        // Auto-download model if missing
+        if !ml::MlDiarizer::default_model_path().exists() {
+            tracing::info!("Speaker embedding model not found, attempting download...");
+            crate::setup::model::ensure_ecapa_model();
+        }
+
+        let mut diarizer = ml::MlDiarizer::new(config);
+        if !diarizer.model_exists() {
+            tracing::warn!("ML diarization model not found, falling back to simple");
+            return None;
+        }
+        if let Err(e) = diarizer.load_model() {
+            tracing::warn!("Failed to load ML diarization model: {}", e);
+            tracing::info!("Falling back to simple diarization");
+            return None;
+        }
+        Some(Box::new(diarizer))
+    }
+    #[cfg(not(feature = "ml-diarization"))]
+    {
+        let _ = config;
+        tracing::warn!(
+            "ML diarization requires the 'ml-diarization' feature, falling back to simple"
+        );
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without the ml-diarization feature both clustering backends fall
+    /// back to source-based labels rather than failing the meeting.
+    #[test]
+    #[cfg(not(feature = "ml-diarization"))]
+    fn hybrid_and_ml_fall_back_to_simple_without_the_feature() {
+        for backend in ["ml", "hybrid"] {
+            let config = DiarizationConfig {
+                backend: backend.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(create_diarizer(&config).name(), "simple", "{backend}");
+        }
+    }
 
     /// Bug: the ML backend took the chunk's start from its first segment, so
     /// when speech began after the chunk did, every embedding window was

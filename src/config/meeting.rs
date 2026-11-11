@@ -101,7 +101,7 @@ pub struct MeetingDiarizationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Diarization backend: "simple" or "ml".
+    /// Diarization backend: "simple", "ml" or "hybrid".
     /// The match arms in `src/meeting/diarization/mod.rs` are the source of
     /// truth for what the daemon actually dispatches on; the CLI's
     /// `--diarization` value parser is pinned to the same set via
@@ -121,8 +121,8 @@ pub struct MeetingDiarizationConfig {
     #[serde(default = "default_min_segment_ms")]
     pub min_segment_ms: u64,
 
-    // The four fields below apply only to backend = "ml"; the "simple" and
-    // "remote" backends ignore them.
+    // The four fields below apply to the clustering backends, "ml" and
+    // "hybrid"; "simple" ignores them.
     /// Cosine similarity threshold for the ML backend (0.20-0.30 typical for ECAPA on 4s windows)
     #[serde(default = "default_similarity_threshold")]
     pub similarity_threshold: f32,
