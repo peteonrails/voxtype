@@ -4,17 +4,18 @@
 //! to a [`Palette`] used by the renderer. The active theme usually lives at
 //! `~/.local/state/omarchy/current/theme/colors.toml`, with older installs
 //! using `~/.config/omarchy/current/theme/colors.toml`. The colors file has a
-//! flat structure: `background`, `foreground`, `accent`, plus the ANSI palette
-//! `color0`..=`color15`.
+//! flat structure: `background`, `foreground`, `accent`, plus the ANSI palette,
+//! either numbered (`color0`..=`color15`) or, in current Omarchy themes,
+//! named (`red`, `green`, `yellow`, ...).
 //!
 //! Mapping:
 //!
 //! - `accent` → waveform fill
 //! - `background` → window background (alpha kept from fallback)
 //! - `foreground` → held-peak tick
-//! - `color2` (ANSI green) → meter low zone
-//! - `color3` (ANSI yellow) → meter mid zone
-//! - `color1` (ANSI red) → meter high zone
+//! - `color2` or `green` (ANSI green) → meter low zone
+//! - `color3` or `yellow` (ANSI yellow) → meter mid zone
+//! - `color1` or `red` (ANSI red) → meter high zone
 //!
 //! Themes whose ANSI red/green/yellow are off-spec (e.g. the "aether" theme
 //! maps red to a tan) inherit the theme designer's choice — that's the
@@ -65,6 +66,9 @@ struct OmarchyColors {
     color1: Option<String>,
     color2: Option<String>,
     color3: Option<String>,
+    red: Option<String>,
+    green: Option<String>,
+    yellow: Option<String>,
 }
 
 /// Parse a `#RRGGBB` hex color into a [`Color`] with full alpha.
@@ -114,27 +118,24 @@ fn palette_from(c: OmarchyColors) -> Palette {
             .map(|c| c.with_alpha(bg_alpha))
             .unwrap_or(fb.background),
         accent: c.accent.as_deref().and_then(parse_hex).unwrap_or(fb.accent),
-        meter_low: c
-            .color2
-            .as_deref()
-            .and_then(parse_hex)
-            .unwrap_or(fb.meter_low),
-        meter_mid: c
-            .color3
-            .as_deref()
-            .and_then(parse_hex)
-            .unwrap_or(fb.meter_mid),
-        meter_high: c
-            .color1
-            .as_deref()
-            .and_then(parse_hex)
-            .unwrap_or(fb.meter_high),
+        meter_low: ansi(&c.color2, &c.green).unwrap_or(fb.meter_low),
+        meter_mid: ansi(&c.color3, &c.yellow).unwrap_or(fb.meter_mid),
+        meter_high: ansi(&c.color1, &c.red).unwrap_or(fb.meter_high),
         foreground: c
             .foreground
             .as_deref()
             .and_then(parse_hex)
             .unwrap_or(fb.foreground),
     }
+}
+
+/// An ANSI color from its numbered key (older themes) or, when that is
+/// absent or invalid, its named key (current Omarchy `colors.toml`).
+fn ansi(numbered: &Option<String>, named: &Option<String>) -> Option<Color> {
+    numbered
+        .as_deref()
+        .and_then(parse_hex)
+        .or_else(|| named.as_deref().and_then(parse_hex))
 }
 
 /// Theme snapshot: captures the palette at construction.
@@ -372,6 +373,35 @@ mod tests {
         assert_eq!(p.meter_high, parse_hex("#A48364").unwrap());
         assert_eq!(p.meter_low, parse_hex("#F8E7AE").unwrap());
         assert_eq!(p.meter_mid, parse_hex("#FEE88B").unwrap());
+    }
+
+    #[test]
+    fn palette_from_named_ansi_keys() {
+        // Current Omarchy themes name the ANSI colors instead of numbering
+        // them (catppuccin's colors.toml).
+        let toml_src = r##"
+            accent = "#89b4fa"
+            background = "#1e1e2e"
+            foreground = "#cdd6f4"
+            red = "#f38ba8"
+            yellow = "#f9e2af"
+            green = "#a6e3a1"
+        "##;
+        let c: OmarchyColors = toml::from_str(toml_src).unwrap();
+        let p = palette_from(c);
+        assert_eq!(p.meter_high, parse_hex("#f38ba8").unwrap());
+        assert_eq!(p.meter_mid, parse_hex("#f9e2af").unwrap());
+        assert_eq!(p.meter_low, parse_hex("#a6e3a1").unwrap());
+    }
+
+    #[test]
+    fn numbered_ansi_keys_win_over_named() {
+        let toml_src = r##"
+            color1 = "#A48364"
+            red = "#f38ba8"
+        "##;
+        let c: OmarchyColors = toml::from_str(toml_src).unwrap();
+        assert_eq!(palette_from(c).meter_high, parse_hex("#A48364").unwrap());
     }
 
     #[test]

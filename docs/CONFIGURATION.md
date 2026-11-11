@@ -4503,10 +4503,18 @@ Decorative package roles follow the same palette: `grid` and `glow` are
 translucent accent, `core` is translucent foreground, and `amber` follows
 `warning` (which need not be yellow in the selected theme).
 
-With the Quickshell frontend, Omarchy theme switches apply live: the launcher
-watches the active theme and rewrites the resolved style, and the OSD picks up
-the new colors immediately without a restart. The GTK4 frontend reads the
-theme at startup, so it picks up a new theme the next time the OSD starts.
+With the Quickshell and native frontends, Omarchy theme switches apply live:
+Quickshell's launcher watches the active theme and rewrites the resolved
+style, and the native OSD reloads its palette, so the new colors show up
+without a restart. The GTK4 frontend reads the theme at startup, so it picks
+up a new theme the next time the OSD starts. The meter's green, yellow and
+red zones come from the theme's ANSI colors, read from `color2`, `color3` and
+`color1` or, in current Omarchy themes, from `green`, `yellow` and `red`.
+
+The native frontend renders at the output's exact scale through
+`wp_fractional_scale_v1` and `wp_viewporter`, so it stays sharp on outputs
+scaled by 1.25, 1.333 or 1.6. On compositors without those protocols it falls
+back to the nearest integer scale.
 
 Recipe layer `type` can be `shadow`, `background`, `waveform`, `line`,
 `bars`, `dots`, `pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,

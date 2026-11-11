@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context as _};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
+use smithay_client_toolkit::reexports::client::{delegate_noop, Dispatch};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry,
@@ -38,6 +39,13 @@ use smithay_client_toolkit::{
         WaylandSurface,
     },
 };
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
+};
 
 use voxtype::audio::levels::AudioFrame;
 use voxtype::osd::config::{OsdConfig, OsdPosition};
@@ -54,8 +62,19 @@ pub struct SharedState {
     /// Wall-clock timestamp of the most recent frame. Used to drive idle
     /// teardown when no frames have arrived for a while.
     pub last_frame_at: Arc<Mutex<Option<Instant>>>,
-    pub palette: Palette,
+    /// Current theme palette; swapped in place when the Omarchy theme
+    /// changes.
+    pub palette: Arc<Mutex<Palette>>,
     pub config: OsdConfig,
+}
+
+impl SharedState {
+    fn palette(&self) -> Palette {
+        self.palette
+            .lock()
+            .map(|p| *p)
+            .unwrap_or_else(|_| Palette::fallback())
+    }
 }
 
 /// How long to keep the surface alive after the last frame arrived, before
@@ -78,6 +97,11 @@ pub struct App {
     output_state: OutputState,
     compositor_state: CompositorState,
     layer_shell: LayerShell,
+    /// `wp_fractional_scale_v1` and `wp_viewporter`. With both, the surface
+    /// renders at the output's exact fractional scale; without them it falls
+    /// back to integer `wl_surface.set_buffer_scale`.
+    fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    viewporter: Option<WpViewporter>,
 
     qh: QueueHandle<App>,
     conn: Connection,
@@ -92,10 +116,16 @@ struct RenderSurface {
     layer: LayerSurface,
     wl_surface: WlSurface,
 
-    /// Last accepted size from the compositor's configure. We use this to
-    /// configure the wgpu surface.
+    /// Last accepted size from the compositor's configure, in logical
+    /// pixels (egui points).
     width: u32,
     height: u32,
+    /// Physical pixels per logical pixel on the output the surface is on.
+    /// The wgpu surface is `width x height` times this, so nothing is
+    /// upscaled by the compositor.
+    scale: f64,
+    fractional_scale: Option<WpFractionalScaleV1>,
+    viewport: Option<WpViewport>,
     /// Whether we've received the first configure (and thus may render).
     configured: bool,
     frame_pending: bool,
@@ -110,6 +140,33 @@ struct RenderSurface {
     // egui plumbing.
     egui_ctx: egui::Context,
     egui_renderer: egui_wgpu::Renderer,
+}
+
+impl RenderSurface {
+    /// Size of the wgpu buffer in physical pixels.
+    fn buffer_size(&self) -> [u32; 2] {
+        [
+            buffer_extent(self.width, self.scale),
+            buffer_extent(self.height, self.scale),
+        ]
+    }
+
+    /// Apply a new output scale; returns whether it changed.
+    fn set_scale(&mut self, scale: f64) -> bool {
+        if scale <= 0.0 || (scale - self.scale).abs() < f64::EPSILON {
+            return false;
+        }
+        tracing::debug!(scale, "OSD surface scale changed");
+        self.scale = scale;
+        true
+    }
+}
+
+/// Physical buffer extent for a logical extent at `scale`, rounded half away
+/// from zero as the fractional-scale protocol specifies. The viewport maps
+/// it back onto the logical size, so the compositor samples it 1:1.
+fn buffer_extent(logical: u32, scale: f64) -> u32 {
+    ((f64::from(logical) * scale).round() as u32).max(1)
 }
 
 /// Run the event loop. Returns when the user closes the surface or the
@@ -133,6 +190,13 @@ pub fn run(
         LayerShell::bind(&globals, &qh).context("wlr-layer-shell protocol unavailable")?;
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
+    let fractional_scale_manager = globals.bind(&qh, 1..=1, ()).ok();
+    let viewporter = globals.bind(&qh, 1..=1, ()).ok();
+    if fractional_scale_manager.is_none() || viewporter.is_none() {
+        tracing::info!(
+            "Compositor lacks wp_fractional_scale_v1 or wp_viewporter; rendering at integer scale"
+        );
+    }
 
     WaylandSource::new(conn.clone(), event_queue)
         .insert(loop_handle.clone())
@@ -143,6 +207,8 @@ pub fn run(
         output_state,
         compositor_state,
         layer_shell,
+        fractional_scale_manager,
+        viewporter,
         qh: qh.clone(),
         conn: conn.clone(),
         shared,
@@ -236,6 +302,17 @@ impl App {
             .map_err(|e| anyhow!("create input region: {}", e))?;
         wl_surface.set_input_region(Some(region.wl_region()));
 
+        // Ask for the output's exact scale before the first commit, so the
+        // compositor can send it along with the first configure.
+        let (fractional_scale, viewport) = match (&self.fractional_scale_manager, &self.viewporter)
+        {
+            (Some(manager), Some(viewporter)) => (
+                Some(manager.get_fractional_scale(&wl_surface, &self.qh, ())),
+                Some(viewporter.get_viewport(&wl_surface, &self.qh, ())),
+            ),
+            _ => (None, None),
+        };
+
         layer.commit();
         drop(region);
 
@@ -279,7 +356,10 @@ impl App {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("voxtype-osd-device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            // The buffer is in physical pixels now; the downlevel 2048px
+            // texture cap is too small for a surface spanning a scaled
+            // 4K output, so allow whatever the adapter supports.
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
@@ -287,13 +367,12 @@ impl App {
         .context("request wgpu device")?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| matches!(f, wgpu::TextureFormat::Bgra8UnormSrgb))
-            .or_else(|| surface_caps.formats.first().copied())
-            .ok_or_else(|| anyhow!("no surface formats available"))?;
+        // A non-sRGB target, as egui expects. Theme colors are sRGB values:
+        // written to an *Srgb surface they were encoded a second time (the
+        // clear color came out as a washed-out grey) and alpha blended in
+        // linear light, unlike the GTK4 and Quickshell frontends.
+        let surface_format = egui_wgpu::preferred_framebuffer_format(&surface_caps.formats)
+            .map_err(|e| anyhow!("no usable surface format: {}", e))?;
 
         let egui_ctx = egui::Context::default();
         let egui_renderer = egui_wgpu::Renderer::new(
@@ -312,6 +391,9 @@ impl App {
             wl_surface,
             width: cfg.width_px,
             height: cfg.height_px,
+            scale: 1.0,
+            fractional_scale,
+            viewport,
             configured: false,
             frame_pending: false,
             _instance: instance,
@@ -336,6 +418,8 @@ impl App {
                 queue,
                 egui_renderer,
                 _instance,
+                fractional_scale,
+                viewport,
                 ..
             } = rs;
             // Drop wgpu state first, then the wl_surface. LayerSurface drops
@@ -345,8 +429,29 @@ impl App {
             drop(device);
             drop(surface);
             drop(_instance);
+            if let Some(viewport) = viewport {
+                viewport.destroy();
+            }
+            if let Some(fractional_scale) = fractional_scale {
+                fractional_scale.destroy();
+            }
             drop(layer);
             wl_surface.destroy();
+        }
+    }
+
+    /// Re-render at a new output scale (first preferred scale, or the
+    /// surface moving to an output with a different one).
+    fn apply_scale(&mut self, scale: f64) {
+        let Some(rs) = self.surface.as_mut() else {
+            return;
+        };
+        if !rs.set_scale(scale) || !rs.configured {
+            return;
+        }
+        reconfigure_surface(rs);
+        if let Err(e) = self.render_frame() {
+            tracing::warn!("render after scale change failed: {:#}", e);
         }
     }
 
@@ -379,10 +484,18 @@ impl App {
                 egui::Pos2::ZERO,
                 egui::vec2(rs.width as f32, rs.height as f32),
             )),
+            viewports: std::iter::once((
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    native_pixels_per_point: Some(rs.scale as f32),
+                    ..Default::default()
+                },
+            ))
+            .collect(),
             ..Default::default()
         };
 
-        let palette = self.shared.palette;
+        let palette = self.shared.palette();
         let cfg = &self.shared.config;
         let waveform_window_secs = cfg.waveform_window_secs;
         let meter_w = ((rs.width as f32) * 0.05).max(8.0);
@@ -433,7 +546,7 @@ impl App {
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [rs.width, rs.height],
+            size_in_pixels: rs.buffer_size(),
             pixels_per_point: full_output.pixels_per_point,
         };
 
@@ -499,11 +612,20 @@ impl App {
 }
 
 fn reconfigure_surface(rs: &mut RenderSurface) {
+    // Map the physical-size buffer back onto the logical surface size. The
+    // new state applies with the next commit, which the next present does.
+    match rs.viewport.as_ref() {
+        Some(viewport) => viewport.set_destination(rs.width as i32, rs.height as i32),
+        None => rs
+            .wl_surface
+            .set_buffer_scale(rs.scale.round().max(1.0) as i32),
+    }
+    let [width, height] = rs.buffer_size();
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: rs.surface_format,
-        width: rs.width.max(1),
-        height: rs.height.max(1),
+        width,
+        height,
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
         view_formats: vec![],
@@ -668,9 +790,17 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _new_factor: i32,
+        surface: &WlSurface,
+        new_factor: i32,
     ) {
+        // Integer fallback only; wp_fractional_scale_v1 is exact when bound.
+        let integer_fallback = self
+            .surface
+            .as_ref()
+            .is_some_and(|rs| rs.wl_surface == *surface && rs.fractional_scale.is_none());
+        if integer_fallback {
+            self.apply_scale(f64::from(new_factor));
+        }
     }
 
     fn transform_changed(
@@ -793,6 +923,33 @@ delegate_compositor!(App);
 delegate_output!(App);
 delegate_layer!(App);
 
+delegate_noop!(App: ignore WpFractionalScaleManagerV1);
+delegate_noop!(App: ignore WpViewporter);
+delegate_noop!(App: ignore WpViewport);
+
+impl Dispatch<WpFractionalScaleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        proxy: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let wp_fractional_scale_v1::Event::PreferredScale { scale } = event else {
+            return;
+        };
+        let ours = app
+            .surface
+            .as_ref()
+            .is_some_and(|rs| rs.fractional_scale.as_ref() == Some(proxy));
+        if ours {
+            // The protocol sends the scale as a fraction of 120.
+            app.apply_scale(f64::from(scale) / 120.0);
+        }
+    }
+}
+
 impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
@@ -801,3 +958,23 @@ impl ProvidesRegistryState for App {
 }
 
 delegate_registry!(App);
+
+#[cfg(test)]
+mod tests {
+    use super::buffer_extent;
+
+    #[test]
+    fn buffer_matches_fractional_output_scales() {
+        // wp_fractional_scale_v1 reports scale * 120.
+        let dp2 = 160.0 / 120.0; // 1.333, a 3840x2160 output at 4K/1.333
+        let dp1 = 192.0 / 120.0; // 1.6
+        assert_eq!([buffer_extent(400, dp2), buffer_extent(48, dp2)], [533, 64]);
+        assert_eq!([buffer_extent(400, dp1), buffer_extent(48, dp1)], [640, 77]);
+        assert_eq!([buffer_extent(400, 2.0), buffer_extent(48, 1.0)], [800, 48]);
+    }
+
+    #[test]
+    fn buffer_is_never_empty() {
+        assert_eq!(buffer_extent(0, 1.6), 1);
+    }
+}
