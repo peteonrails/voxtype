@@ -43,15 +43,7 @@ const RAPID_FAIL_THRESHOLD: u32 = 3;
 const RAPID_FAIL_WINDOW: Duration = Duration::from_secs(5);
 
 fn resolve_osd_binary() -> PathBuf {
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join(OSD_BINARY);
-            if sibling.is_file() {
-                return sibling;
-            }
-        }
-    }
-    PathBuf::from(OSD_BINARY)
+    super::frontend::packaged_binary(OSD_BINARY).unwrap_or_else(|| PathBuf::from(OSD_BINARY))
 }
 
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's

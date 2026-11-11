@@ -43,6 +43,34 @@ pub trait OsdProbe {
     fn missing_libraries(&self, binary: &Path) -> Vec<String>;
 }
 
+/// Places to look for a packaged voxtype helper binary (`voxtype-osd`,
+/// `voxtype-osd-quickshell`, ...) before falling back to `$PATH`, given the
+/// daemon's resolved executable.
+///
+/// `current_exe()` resolves symlinks, so a daemon started as
+/// `/usr/bin/voxtype` reports the variant it points at. The CUDA and
+/// MIGraphX variants live in their own subdirectory
+/// (`/usr/lib/voxtype/migraphx/voxtype-onnx-migraphx`) next to their
+/// provider libraries, one level below the packaged helpers, so the parent
+/// directory is searched too. Without it those installs fell back to `$PATH`,
+/// which has no `voxtype-osd-quickshell`, or found a stale dev build first.
+pub fn binary_candidates(exe: &Path, name: &str) -> Vec<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .take(2)
+        .map(|dir| dir.join(name))
+        .collect()
+}
+
+/// The first packaged copy of `name` next to (or one level above) the
+/// running executable.
+pub fn packaged_binary(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    binary_candidates(&exe, name)
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
 /// Libraries the GTK4 OSD needs that some distros don't package (Ubuntu
 /// 24.04 has no gtk4-layer-shell), so the binary exists but exits 127.
 const GTK4_LIBRARIES: [&str; 2] = ["libgtk4-layer-shell.so.0", "libgtk-4.so.1"];
@@ -52,16 +80,7 @@ pub struct SystemProbe;
 
 impl OsdProbe for SystemProbe {
     fn find_voxtype_binary(&self, name: &str) -> Option<PathBuf> {
-        if let Some(dir) = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        {
-            let sibling = dir.join(name);
-            if sibling.is_file() {
-                return Some(sibling);
-            }
-        }
-        which::which(name).ok()
+        packaged_binary(name).or_else(|| which::which(name).ok())
     }
 
     fn on_path(&self, name: &str) -> bool {
@@ -406,6 +425,29 @@ impl OsdStatus {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn binary_candidates_cover_variant_subdirectories() {
+        let candidates = binary_candidates(
+            Path::new("/usr/lib/voxtype/migraphx/voxtype-onnx-migraphx"),
+            "voxtype-osd-quickshell",
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/usr/lib/voxtype/migraphx/voxtype-osd-quickshell"),
+                PathBuf::from("/usr/lib/voxtype/voxtype-osd-quickshell"),
+            ]
+        );
+    }
+
+    #[test]
+    fn binary_candidates_prefer_the_sibling() {
+        let candidates =
+            binary_candidates(Path::new("/usr/lib/voxtype/voxtype-avx2"), "voxtype-osd");
+        assert_eq!(candidates[0], PathBuf::from("/usr/lib/voxtype/voxtype-osd"));
+    }
+
     use super::*;
     use std::collections::HashSet;
 
