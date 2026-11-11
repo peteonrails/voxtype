@@ -201,6 +201,7 @@ Item {
                 }
 
                 Button {
+                  objectName: "useModel:" + entry.modelName
                   anchors.verticalCenter: parent.verticalCenter
                   visible: entry.modelData.installed && !modelRow.inUse
                     && root.modelKey !== "" && !entry.downloading

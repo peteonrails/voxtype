@@ -98,6 +98,9 @@ Item {
   // the card at the top of it, so their form rows would be duplicates. Both are
   // resolved by the panel, which needs them for the runtime facts line too.
   property string modelKey: ""
+  // What the catalog card's Use writes for the engine being browsed; the
+  // panel decides which engines can be switched to from here.
+  property string catalogModelKey: ""
   property string modelValue: ""
 
   // Download state, owned by VoxtypeCli and handed straight through to the
@@ -408,7 +411,7 @@ Item {
           visible: root.showEngineCard
           engine: root.catalogEngine
           engines: root.engines
-          modelKey: root.catalogEngine === "gguf" ? "gguf.model" : (root.catalogEngine === root.engine ? root.modelKey : "")
+          modelKey: root.catalogModelKey
           modelValue: root.catalogEngine === root.engine ? root.modelValue : ""
           language: root.catalogLanguage
           downloadingModel: root.downloadingModel

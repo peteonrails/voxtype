@@ -212,15 +212,32 @@ Item {
   // Resolved here rather than in the form because the runtime facts line needs
   // the same answer, and two copies of this loop would be two chances to
   // disagree about what is loaded.
-  readonly property string modelKey: {
+  readonly property string modelKey: modelKeyFor(root.engine)
+
+  function modelKeyFor(engine) {
     for (var i = 0; i < root.keys.length; i++) {
       var spec = root.keys[i]
       if (!spec || String(spec.type) !== "dynamic_enum") continue
       if (String(spec.source || "") !== "models") continue
       if (spec.engine !== undefined && spec.engine !== null && spec.engine !== ""
-          && String(spec.engine) !== root.engine) continue
+          && String(spec.engine) !== engine) continue
       return String(spec.key)
     }
+    return ""
+  }
+
+  // Engines whose model `voxtype config select-model` commits together with
+  // the engine itself (config_set::select_model). Use on a model of one of
+  // these switches engines; without it, the panel had no way back to
+  // Parakeet once a generic GGUF model was in use.
+  readonly property var selectModelEngines: ["gguf", "parakeet", "cohere"]
+
+  // The key the catalog card's Use writes, or "" when the browsed engine's
+  // models cannot be selected from here.
+  readonly property string catalogModelKey: {
+    if (root.catalogEngine === "gguf") return "gguf.model"
+    if (root.catalogEngine === root.engine) return root.modelKey
+    if (root.selectModelEngines.indexOf(root.catalogEngine) !== -1) return modelKeyFor(root.catalogEngine)
     return ""
   }
 
@@ -1193,6 +1210,7 @@ Item {
             deviceOptions: root.deviceOptions
             styleOptions: root.styleOptions
             modelKey: root.modelKey
+            catalogModelKey: root.catalogModelKey
             modelValue: root.modelValue
             downloadingModel: cli.downloadEngine === root.catalogEngine ? cli.downloadModel : ""
             downloadPct: cli.downloadPct
@@ -1215,6 +1233,8 @@ Item {
             onModelSelectionRequested: function(name, language) {
               if (root.catalogEngine === "gguf") cli.selectModel("gguf", name, language)
               else if (root.catalogEngine === root.engine) cli.setKey(root.modelKey, name)
+              // A language hint is GGUF-only in select-model.
+              else if (root.catalogModelKey !== "") cli.selectModel(root.catalogEngine, name, "")
             }
             onDownloadRequested: function(name) {
               root.startModelDownload(name)

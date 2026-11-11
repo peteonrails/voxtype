@@ -18,6 +18,11 @@ build without the subcommand, which exits 2 like an unknown subcommand does.
 as an older CLI omits it. `setup omarchy --dismiss-copy` sets it, or with
 state["dismiss_fail"] exits 1 and changes nothing.
 
+state["gguf_model"] adds the generic GGUF engine with that model installed, and
+state["engine"] names the configured engine ("parakeet" when absent).
+state["installed"] lists the Parakeet models on disk (default: the configured
+one). `config select-model` and `config set parakeet.model` update the state.
+
 state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
 the stderr it should fail with (exit 1).
 
@@ -117,15 +122,22 @@ def schema(state):
     # Older CLIs never emitted the flag; state["legacy_schema"] reproduces them.
     if not state.get("legacy_schema"):
         model_type["onnx_model_only"] = True
+    engine = state.get("engine", "parakeet")
+    choices = ["whisper", "parakeet"] + (["gguf"] if "gguf_model" in state else [])
     keys = [
-        {"key": "engine", "type": "enum", "choices": ["whisper", "parakeet"], "section": "Engine",
-         "label": "Transcription engine", "description": "", "value": "parakeet",
-         "file_value": "parakeet", "engine": None, "compiled": True, "restart_required": True},
+        {"key": "engine", "type": "enum", "choices": choices, "section": "Engine",
+         "label": "Transcription engine", "description": "", "value": engine,
+         "file_value": engine, "engine": None, "compiled": True, "restart_required": True},
         {"key": "parakeet.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
          "label": "Model", "description": "", "value": state["model"], "file_value": state["model"],
          "engine": "parakeet", "compiled": True, "restart_required": True},
         model_type,
     ]
+    if "gguf_model" in state:
+        keys.append({"key": "gguf.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+                     "label": "Model", "description": "", "value": state["gguf_model"],
+                     "file_value": state["gguf_model"], "engine": "gguf", "compiled": True,
+                     "restart_required": True})
     if state.get("threads_key"):
         # Like the real schema: an unset Option<u32> is null in both fields.
         threads = value_of(state, "parakeet.threads")
@@ -149,14 +161,15 @@ def schema(state):
         ]
     return {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
-        "engine": "parakeet", "replacements": {}, "keys": keys,
+        "engine": engine, "replacements": {}, "keys": keys,
     }
 
 
 def models(state):
     names = ["parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-Q8_0.gguf", "parakeet-ultra-Q8_0.gguf",
              "parakeet-tdt-0.6b-v2"]
-    rows = [{"name": n, "installed": n == state["model"], "languages": []} for n in names]
+    installed = state.get("installed", [state["model"]])
+    rows = [{"name": n, "installed": n in installed, "languages": []} for n in names]
     # Legacy ONNX rows: listed only while configured (one-way door).
     rows[0]["legacy"] = True
     rows[3]["legacy"] = True
@@ -164,7 +177,10 @@ def models(state):
     # URL (no link), one like an older build (neither field).
     rows[0].update(license="CC-BY-4.0", license_url="https://creativecommons.org/licenses/by/4.0/")
     rows[1].update(license="CC-BY-4.0", license_url="")
-    return {"engines": {"parakeet": {"models": rows}}}
+    engines = {"parakeet": {"models": rows}}
+    if "gguf_model" in state:
+        engines["gguf"] = {"models": [{"name": state["gguf_model"], "installed": True, "languages": ["auto"]}]}
+    return {"engines": engines}
 
 
 def accept(state, args):
@@ -235,7 +251,10 @@ def main():
     elif args[:3] == ["info", "models", "--json"]:
         print(json.dumps(models(state)))
     elif args[:3] == ["info", "engines", "--json"]:
-        print(json.dumps([{"name": "whisper", "compiled": True}, {"name": "parakeet", "compiled": True}]))
+        engines = [{"name": "whisper", "compiled": True}, {"name": "parakeet", "compiled": True}]
+        if "gguf_model" in state:
+            engines.append({"name": "gguf", "compiled": True})
+        print(json.dumps(engines))
     elif args[:3] == ["info", "devices", "--json"]:
         print(json.dumps([{"name": "Built-in Microphone", "default": True}]))
     elif args[:3] == ["info", "styles", "--json"]:
@@ -283,6 +302,17 @@ def main():
             return 2
     elif args[:3] == ["status", "--format", "json"]:
         print(json.dumps({"class": "idle"}))
+    elif args[:2] == ["config", "select-model"] and len(args) >= 4:
+        engine, model = args[2], args[3]
+        if engine not in ("gguf", "parakeet", "cohere") or ("--language" in args and engine != "gguf"):
+            print("error: select-model rejected " + " ".join(args[2:]), file=sys.stderr)
+            return 2
+        state["engine"] = engine
+        state["gguf_model" if engine == "gguf" else "model"] = model
+        save(state)
+    elif args[:3] == ["config", "set", "parakeet.model"] and len(args) == 4:
+        state["model"] = args[3]
+        save(state)
     elif args[:2] == ["setup", "omarchy"]:
         if state.get("omarchy") is None:
             print("error: unrecognized subcommand 'omarchy'", file=sys.stderr)
