@@ -214,6 +214,49 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Play a meeting's kept audio from a line or a time
+    ///
+    /// Plays the audio kept with `[meeting] retain_audio = true` in the
+    /// background, through ffmpeg and pw-play (or paplay, or aplay), and
+    /// returns at once. Only one playback runs at a time: starting another
+    /// stops the one before. Segment IDs are the `id` of each segment in
+    /// `meeting show --json`.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting play latest\n  \
+        voxtype meeting play latest --segment 28\n  \
+        voxtype meeting play latest --at 12:40 --track loopback\n  \
+        voxtype meeting play latest --segment 28 --json\n  \
+        voxtype meeting play --status --json\n  \
+        voxtype meeting play --stop")]
+    Play {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        #[arg(required_unless_present_any = ["stop", "status"])]
+        meeting_id: Option<String>,
+
+        /// Start at this transcript segment (its `id` in `meeting show --json`)
+        #[arg(long, value_name = "ID", conflicts_with = "at")]
+        segment: Option<u32>,
+
+        /// Start this far into the meeting: seconds (95), mm:ss (1:35) or hh:mm:ss
+        #[arg(long, value_name = "TIME")]
+        at: Option<String>,
+
+        /// Track to play: mixed (both sides), mic (you) or loopback (the others)
+        #[arg(long, default_value = "mixed", value_parser = ["mixed", "mic", "loopback"])]
+        track: String,
+
+        /// Stop the playback that is running
+        #[arg(long, conflicts_with_all = ["status", "meeting_id", "segment", "at"])]
+        stop: bool,
+
+        /// Report the playback that is running, or the last one
+        #[arg(long, conflicts_with_all = ["meeting_id", "segment", "at"])]
+        status: bool,
+
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
     /// Uses Ollama or a remote API to generate a summary with
@@ -328,5 +371,52 @@ mod tests {
             }
             _ => panic!("Expected Meeting Start command"),
         }
+    }
+
+    fn play(args: &[&str]) -> Result<MeetingAction, clap::Error> {
+        let argv = ["voxtype", "meeting", "play"].iter().chain(args).copied();
+        match Cli::try_parse_from(argv)?.command {
+            Some(Commands::Meeting { action }) => Ok(action),
+            _ => panic!("Expected a meeting command"),
+        }
+    }
+
+    #[test]
+    fn meeting_play_parses_its_start_points() {
+        match play(&["latest", "--segment", "28", "--json"]).unwrap() {
+            MeetingAction::Play {
+                meeting_id,
+                segment,
+                at,
+                track,
+                stop,
+                status,
+                json,
+            } => {
+                assert_eq!(meeting_id.as_deref(), Some("latest"));
+                assert_eq!((segment, at), (Some(28), None));
+                assert_eq!(track, "mixed");
+                assert!(!stop && !status && json);
+            }
+            _ => panic!("Expected Meeting Play"),
+        }
+        match play(&["abc1", "--at", "12:40", "--track", "loopback"]).unwrap() {
+            MeetingAction::Play { at, track, .. } => {
+                assert_eq!(at.as_deref(), Some("12:40"));
+                assert_eq!(track, "loopback");
+            }
+            _ => panic!("Expected Meeting Play"),
+        }
+    }
+
+    #[test]
+    fn meeting_play_rejects_conflicting_flags() {
+        assert!(play(&[]).is_err(), "a meeting is required to play");
+        assert!(play(&["--stop"]).is_ok());
+        assert!(play(&["--status", "--json"]).is_ok());
+        assert!(play(&["latest", "--segment", "1", "--at", "5"]).is_err());
+        assert!(play(&["latest", "--stop"]).is_err());
+        assert!(play(&["--stop", "--status"]).is_err());
+        assert!(play(&["latest", "--track", "speakers"]).is_err());
     }
 }

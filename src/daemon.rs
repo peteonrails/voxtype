@@ -3304,6 +3304,13 @@ impl Daemon {
             }
         }
 
+        // `meeting play` started or stopped, or a playback ran to its end.
+        if take_trigger(meeting::playback::TRIGGER) {
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.publish_playback(&meeting::playback::status(&Config::runtime_dir()));
+            }
+        }
+
         if check_meeting_resume()
             && self
                 .meeting_daemon

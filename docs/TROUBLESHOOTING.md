@@ -1646,6 +1646,21 @@ done
 
 `meeting.json` lists whichever files are there the next time it is rewritten.
 
+### `meeting play` fails or plays nothing
+
+- **"needs ffmpeg and one of pw-play (PipeWire), paplay (PulseAudio) or
+  aplay (ALSA)"**: install what the message names as missing. `pw-play`
+  comes with PipeWire (`pipewire` or `pipewire-bin`), `paplay` with
+  `pulseaudio-utils` or `libpulse`, `aplay` with `alsa-utils`.
+- **"This meeting was recorded without keeping audio"**: the meeting was
+  recorded with `retain_audio` off. Turn it on for future meetings; there is
+  nothing to play for this one.
+- **It says it is playing but you hear nothing**: playback goes to your
+  default output. Check it with `wpctl status` (PipeWire) or
+  `pactl get-default-sink`, and look at
+  `$XDG_RUNTIME_DIR/voxtype/meeting_playback.log` for errors from ffmpeg or
+  the player.
+
 ### The post-meeting command did not run, or did not finish
 
 `post_meeting_command` runs in the background once the meeting's folder is

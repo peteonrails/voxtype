@@ -30,6 +30,7 @@ pub mod export;
 pub mod hook;
 pub mod manifest;
 pub mod notes;
+pub mod playback;
 pub mod retained_audio;
 pub mod state;
 pub mod storage;

@@ -165,6 +165,12 @@ enum WireEvent {
     Status {
         status: String,
     },
+    Playback {
+        meeting_id: String,
+        track: String,
+        state: String,
+        from_ms: u64,
+    },
     Error {
         message: String,
     },
@@ -315,6 +321,22 @@ impl MeetingEventHub {
     pub fn publish_status(&self, status: &str) {
         self.publish(WireEvent::Status {
             status: status.to_string(),
+        });
+    }
+
+    /// Broadcast a `playback` event: `meeting play` started or stopped
+    /// playing a meeting's audio. Nothing is sent before the first playback.
+    pub fn publish_playback(&self, playback: &crate::meeting::playback::PlaybackStatus) {
+        let (Some(meeting_id), Some(track), Some(from_ms)) =
+            (&playback.meeting_id, playback.track, playback.from_ms)
+        else {
+            return;
+        };
+        self.publish(WireEvent::Playback {
+            meeting_id: meeting_id.clone(),
+            track: track.to_string(),
+            state: playback.state.clone(),
+            from_ms,
         });
     }
 
@@ -646,6 +668,45 @@ mod tests {
         let value = read_line(&mut client).await;
         assert_eq!(value["event"], "status");
         assert_eq!(value["status"], "paused");
+
+        hub.cleanup();
+    }
+
+    #[tokio::test]
+    async fn playback_changes_reach_subscribers() {
+        use crate::meeting::playback::{PlaybackStatus, Track};
+        let (_tmp, path) = temp_socket_dir();
+        let hub = MeetingEventHub::start(path.clone())
+            .await
+            .expect("start hub");
+
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        let _hello = read_line(&mut client).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut playback = PlaybackStatus {
+            state: "stopped".to_string(),
+            meeting_id: None,
+            track: None,
+            from_ms: None,
+            pid: None,
+            started_at: None,
+            position_ms: None,
+        };
+        // Nothing has played yet: nothing to say.
+        hub.publish_playback(&playback);
+        playback.state = "playing".to_string();
+        playback.meeting_id = Some("abc-123".to_string());
+        playback.track = Some(Track::Mixed);
+        playback.from_ms = Some(61_250);
+        hub.publish_playback(&playback);
+
+        let value = read_line(&mut client).await;
+        assert_eq!(
+            value,
+            serde_json::json!({"event": "playback", "meeting_id": "abc-123",
+                "track": "mixed", "state": "playing", "from_ms": 61_250})
+        );
 
         hub.cleanup();
     }

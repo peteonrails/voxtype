@@ -149,6 +149,7 @@ needed:
 {"event": "segment_updated", "segment": { /* one TranscriptSegment, same shape as in segments */ }}
 {"event": "notes_updated", "meeting_id": "...", "updated_at": "2026-11-11T20:00:00Z"}
 {"event": "status", "status": "paused"}
+{"event": "playback", "meeting_id": "...", "track": "mixed", "state": "playing", "from_ms": 61250}
 {"event": "error", "message": "..."}
 ```
 
@@ -196,8 +197,62 @@ word — meeting mode transcribes in chunks, it does not stream. A UI built on
 this socket should show a "listening…" affordance between updates, not
 imitate word-by-word streaming it cannot actually deliver.
 
+`playback` follows `voxtype meeting play` (below): `state` is `playing`
+when a playback starts and `stopped` when it is stopped or reaches the end
+of the track. It describes the current playback when the daemon sends it, so
+changes made in quick succession can arrive as one event with the latest
+state. It is sent whether or not a meeting is recording, and not at all
+while the daemon is down; poll `meeting play --status --json` if you need
+certainty.
+
 `speakers` (live speaker naming) and `summary` (auto-generated meeting
 summary) events are planned for a later release and are not emitted yet.
+
+### Playing meeting audio: `meeting play`
+
+A meeting kept with `retain_audio = true` can be played from any point. The
+command starts the playback in the background (`ffmpeg` seeking and decoding
+into `pw-play`, `paplay` or `aplay`, whichever is found first) and returns at
+once. One playback runs at a time; starting another stops the one before.
+
+```sh
+voxtype meeting play <meeting> [--segment <id> | --at <time>] [--track mixed|mic|loopback] [--json]
+voxtype meeting play --status [--json]
+voxtype meeting play --stop [--json]
+```
+
+- `<meeting>` is a meeting ID, a unique start of one, or `latest`.
+- `--segment` starts at that segment's `start_ms` (`id` from `transcript.json`
+  or `meeting show --json`). `--at` takes seconds (`95`, `95.5`), `mm:ss` or
+  `hh:mm:ss`, from the start of the meeting. Neither starts at 0.
+- `--track` defaults to `mixed`.
+
+Starting prints, with `--json`, one line:
+
+```json
+{"meeting_id": "b6b2e5b2-...", "track": "mixed", "from_ms": 61250, "pid": 48211}
+```
+
+`pid` is the playback's process group. `--status --json` and `--stop --json`
+print the current or last playback (`--stop` prints what it stopped, with
+`state` already `stopped`):
+
+```json
+{"state": "playing", "meeting_id": "b6b2e5b2-...", "track": "mixed", "from_ms": 61250, "pid": 48211, "started_at": "2026-11-11T22:58:38.164Z", "position_ms": 64105}
+```
+
+- `state` is `playing` or `stopped`. Before anything has played, every other
+  field is `null`.
+- `position_ms` estimates where playback is now (`from_ms` plus the time
+  since `started_at`), for highlighting the line being heard. It is `null`
+  unless playing.
+
+A failure exits 1 with the reason on stderr: the meeting has no kept audio
+("This meeting was recorded without keeping audio. Turn on
+meeting.retain_audio for future meetings."), the track is missing (a
+meeting recorded without loopback has no `loopback` track), the segment is
+unknown, or `ffmpeg` or a player is not installed (the message names what is
+missing).
 
 ### The meeting folder and `meeting.json`
 

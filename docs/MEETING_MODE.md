@@ -17,6 +17,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Labeling Speakers](#labeling-speakers)
   - [The Meeting Folder](#the-meeting-folder)
   - [Keeping the Audio](#keeping-the-audio)
+  - [Playing a Meeting Back](#playing-a-meeting-back)
   - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
   - [AI Summarization](#ai-summarization)
   - [Deleting Meetings](#deleting-meetings)
@@ -276,6 +277,23 @@ Audio goes to disk chunk by chunk as the meeting records (every `chunk_duration_
 Opus takes about 10 MB per hour per file for speech, so a one-hour meeting with all three files uses about 30 MB (less where a side is silent).
 
 Encoding needs `ffmpeg` with libopus, which most distributions' `ffmpeg` package includes. Without it voxtype logs a warning and keeps the audio as `mic.wav`, `loopback.wav` and `mixed.wav` instead, at about 115 MB per hour per file. See [Troubleshooting](TROUBLESHOOTING.md#meeting-audio-is-saved-as-wav-instead-of-opus).
+
+### Playing a Meeting Back
+
+`voxtype meeting play` plays a meeting's kept audio from the start, from a transcript line, or from a time, and returns straight away while it plays in the background:
+
+```bash
+voxtype meeting play latest                       # from the start
+voxtype meeting play latest --segment 28          # from line 28 (its id in meeting show --json)
+voxtype meeting play latest --at 12:40            # 12 minutes 40 seconds in (also 760 or 1:12:40)
+voxtype meeting play latest --track loopback      # only the other side (mixed, mic or loopback)
+voxtype meeting play --status                     # what is playing
+voxtype meeting play --stop
+```
+
+Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
+
+Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
 
 ### Running a Command After a Meeting
 
