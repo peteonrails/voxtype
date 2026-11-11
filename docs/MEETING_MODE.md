@@ -184,7 +184,7 @@ voxtype meeting export latest --format vtt --output meeting.vtt
 | `--speakers` | Include speaker labels |
 | `--metadata` | Include a metadata header (title, date, duration) |
 
-Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did.
+Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did. Whisper, where a short clip costs as much as a whole chunk, transcribes the chunk in one call and uses the segments Whisper times itself, one per sentence or phrase. Each segment's start and end are then fitted to the speech inside it, since Whisper counts a pause before a sentence as part of it, and a segment over pure silence (a hallucinated "Thank you.") is dropped. This covers local Whisper with or without `gpu_isolation`; remote and CLI Whisper still give one line per chunk.
 
 ### Labeling Speakers
 

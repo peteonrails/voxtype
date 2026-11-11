@@ -7,7 +7,7 @@
 //! - Auto-detect: Let Whisper detect from all ~99 supported languages
 //! - Constrained auto-detect: Detect from a user-specified subset of languages
 
-use super::Transcriber;
+use super::{TimedSegment, Transcriber};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
@@ -112,6 +112,7 @@ impl WhisperTranscriber {
         selected_language: Option<&'a str>,
         duration_secs: f32,
         retry: bool,
+        timed: bool,
         prompt: Option<&'a str>,
     ) -> FullParams<'a, 'b> {
         let mut params = if retry {
@@ -151,8 +152,9 @@ impl WhisperTranscriber {
         }
 
         // Single-segment mode is faster for normal short dictation, but when
-        // retrying a degenerate decode, let Whisper segment normally.
-        if duration_secs < 30.0 && !retry {
+        // retrying a degenerate decode, let Whisper segment normally. A timed
+        // decode wants Whisper's own segments, so it never merges them.
+        if duration_secs < 30.0 && !retry && !timed {
             params.set_single_segment(true);
         }
 
@@ -180,6 +182,23 @@ impl WhisperTranscriber {
         duration_secs: f32,
         retry: bool,
     ) -> Result<String, TranscribeError> {
+        let segments =
+            self.run_full_segments(samples, selected_language, duration_secs, retry, false)?;
+        let text: String = segments.iter().map(|s| s.text.as_str()).collect();
+        Ok(text.trim().to_string())
+    }
+
+    /// One decode, returning Whisper's segments with their timestamps.
+    /// `timed` keeps Whisper's own segmentation instead of asking for one
+    /// merged segment.
+    fn run_full_segments(
+        &self,
+        samples: &[f32],
+        selected_language: Option<&str>,
+        duration_secs: f32,
+        retry: bool,
+        timed: bool,
+    ) -> Result<Vec<RawSegment>, TranscribeError> {
         let mut state = self
             .ctx
             .create_state()
@@ -190,22 +209,68 @@ impl WhisperTranscriber {
             .map(|terms| terms.clone())
             .unwrap_or_default();
         let prompt = super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary);
-        let params = self.build_params(selected_language, duration_secs, retry, prompt.as_deref());
+        let params = self.build_params(
+            selected_language,
+            duration_secs,
+            retry,
+            timed,
+            prompt.as_deref(),
+        );
 
         state
             .full(params, samples)
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
 
-        let mut text = String::new();
+        let mut segments = Vec::new();
         for segment in state.as_iter() {
-            text.push_str(
-                segment
+            segments.push(RawSegment {
+                start_cs: segment.start_timestamp(),
+                end_cs: segment.end_timestamp(),
+                text: segment
                     .to_str()
-                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
-            );
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
+                    .to_string(),
+            });
         }
+        Ok(segments)
+    }
 
-        Ok(text.trim().to_string())
+    /// The language to decode in, per the configured mode, recorded for
+    /// [`Transcriber::last_detected_language`].
+    fn select_language(&self, samples: &[f32]) -> Result<Option<String>, TranscribeError> {
+        let selected_language: Option<String> = if self.language.is_auto() {
+            // Unconstrained auto-detection: let Whisper detect from all languages
+            tracing::debug!("Using unconstrained language auto-detection");
+            None
+        } else if self.language.is_multiple() {
+            // Constrained auto-detection: detect from allowed set only.
+            // The detection state is scoped to this branch so it is freed
+            // before run_full() allocates its own. Each state carries its own
+            // GPU compute buffers, so creating one up front for every request
+            // doubled per-request GPU allocations for no use (#814).
+            let allowed = self.language.as_vec();
+            tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            let mut state = self
+                .ctx
+                .create_state()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+        } else {
+            // Single language: use it directly
+            let lang = self.language.primary().to_string();
+            tracing::debug!("Using specified language: {}", lang);
+            Some(lang)
+        };
+
+        // Record the language for output methods that benefit from a layout
+        // hint (e.g. eitype --layout, dotool DOTOOL_XKB_LAYOUT). See
+        // `Transcriber::last_detected_language`. Unconstrained auto-detect
+        // leaves this as `None`; whisper-rs does not expose the language
+        // chosen inside `full()` so we cannot recover it after the fact.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = selected_language.clone();
+        }
+        Ok(selected_language)
     }
 
     /// Select the best language from allowed languages using Whisper's language detection.
@@ -293,39 +358,7 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Determine language based on configuration mode
-        let selected_language: Option<String> = if self.language.is_auto() {
-            // Unconstrained auto-detection: let Whisper detect from all languages
-            tracing::debug!("Using unconstrained language auto-detection");
-            None
-        } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only.
-            // The detection state is scoped to this branch so it is freed
-            // before run_full() allocates its own. Each state carries its own
-            // GPU compute buffers, so creating one up front for every request
-            // doubled per-request GPU allocations for no use (#814).
-            let allowed = self.language.as_vec();
-            tracing::debug!("Using constrained language detection from: {:?}", allowed);
-            let mut state = self
-                .ctx
-                .create_state()
-                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
-        } else {
-            // Single language: use it directly
-            let lang = self.language.primary().to_string();
-            tracing::debug!("Using specified language: {}", lang);
-            Some(lang)
-        };
-
-        // Record the language for output methods that benefit from a layout
-        // hint (e.g. eitype --layout, dotool DOTOOL_XKB_LAYOUT). See
-        // `Transcriber::last_detected_language`. Unconstrained auto-detect
-        // leaves this as `None`; whisper-rs does not expose the language
-        // chosen inside `full()` so we cannot recover it after the fact.
-        if let Ok(mut guard) = self.last_language.lock() {
-            *guard = selected_language.clone();
-        }
+        let selected_language = self.select_language(samples)?;
 
         let mut result =
             self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
@@ -363,9 +396,73 @@ impl Transcriber for WhisperTranscriber {
         Ok(result)
     }
 
+    /// Whisper times its own segments, so one decode of a whole meeting
+    /// chunk yields one line per utterance (roughly a sentence or a
+    /// pause-delimited phrase) with real start and end times. Meeting mode
+    /// relies on this to keep a single call per chunk for Whisper.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
+        }
+        let duration_secs = samples.len() as f32 / 16000.0;
+        let start = std::time::Instant::now();
+        let language = self.select_language(samples)?;
+
+        let raw =
+            self.run_full_segments(samples, language.as_deref(), duration_secs, false, true)?;
+        let mut segments = timed_segments(&raw, duration_secs);
+        if segments.is_empty() && duration_secs >= 1.0 && !raw.is_empty() {
+            tracing::warn!(
+                "Whisper returned only degenerate segments for {:.2}s audio; retrying with beam search",
+                duration_secs
+            );
+            let raw =
+                self.run_full_segments(samples, language.as_deref(), duration_secs, true, true)?;
+            segments = timed_segments(&raw, duration_secs);
+        }
+
+        tracing::info!(
+            "Timed transcription of {:.2}s completed in {:.2}s: {} segment(s)",
+            duration_secs,
+            start.elapsed().as_secs_f32(),
+            segments.len()
+        );
+        Ok(segments)
+    }
+
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
     }
+}
+
+/// One segment as whisper.cpp reports it: times in centiseconds.
+#[derive(Debug, Clone, PartialEq)]
+struct RawSegment {
+    start_cs: i64,
+    end_cs: i64,
+    text: String,
+}
+
+/// Whisper's segments as [`TimedSegment`]s: text trimmed, times clamped to
+/// the audio, and segments with no words (degenerate decodes) dropped.
+fn timed_segments(raw: &[RawSegment], duration_secs: f32) -> Vec<TimedSegment> {
+    raw.iter()
+        .filter_map(|r| {
+            let text = r.text.trim();
+            if is_degenerate_transcript(text) {
+                return None;
+            }
+            let start = (r.start_cs.max(0) as f32 / 100.0).min(duration_secs);
+            let end = (r.end_cs.max(0) as f32 / 100.0).clamp(start, duration_secs);
+            Some(TimedSegment {
+                text: text.to_string(),
+                start_secs: start,
+                end_secs: end,
+            })
+        })
+        .collect()
 }
 
 fn is_degenerate_transcript(text: &str) -> bool {
@@ -495,6 +592,47 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw(start_cs: i64, end_cs: i64, text: &str) -> RawSegment {
+        RawSegment {
+            start_cs,
+            end_cs,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn whisper_segments_become_timed_segments() {
+        let got = timed_segments(
+            &[
+                raw(0, 250, " We ship on Friday."),
+                raw(250, 400, " ..."),
+                raw(420, 980, " Agreed, Friday it is."),
+                // Whisper can run a timestamp past the end of the audio.
+                raw(2950, 3100, " Bye."),
+            ],
+            30.0,
+        );
+        let got: Vec<(String, f32, f32)> = got
+            .into_iter()
+            .map(|s| (s.text, s.start_secs, s.end_secs))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("We ship on Friday.".to_string(), 0.0, 2.5),
+                ("Agreed, Friday it is.".to_string(), 4.2, 9.8),
+                ("Bye.".to_string(), 29.5, 30.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn segment_times_never_run_backwards_or_negative() {
+        let got = timed_segments(&[raw(-5, 100, "a"), raw(500, 300, "b")], 10.0);
+        assert_eq!((got[0].start_secs, got[0].end_secs), (0.0, 1.0));
+        assert_eq!((got[1].start_secs, got[1].end_secs), (5.0, 5.0));
+    }
 
     #[test]
     fn test_model_url() {
