@@ -357,7 +357,7 @@ Runtime support entirely.** Phase 3 risk (does every ONNX engine have a ggml/GGU
 resolved for the important ones; the rest (exact list TBD) get evaluated for porting or
 retirement closer to 2.0, not before.
 
-**Shipped:** 1.0.1, 1.1.0 and 1.1.1. The planned 1.1.2 (output drivers) and 1.1.3 (macOS) releases were folded into 1.2.0 instead of shipping on their own; their fixes are on `rc/1.2.0`. 1.1.5 was retired and its one item (#603) moved to 1.2.1.
+**Shipped:** 1.0.1, 1.1.0, 1.1.1, 1.2.0 and 1.2.1. 1.2.0 shipped the native StatusNotifierItem tray (`src/tray.rs`), which covers [#267](https://github.com/peteonrails/voxtype/issues/267). The planned 1.1.2 (output drivers) and 1.1.3 (macOS) releases were folded into 1.2.0 instead of shipping on their own; their fixes are on `rc/1.2.0`. 1.1.5 was retired and its one item (#603) moved to 1.2.1.
 
 **1.2.0 (GGUF Cohere and text cleanup):** **Resident Vulkan Cohere GGUF transcription** ([#792](https://github.com/peteonrails/voxtype/pull/792), Jacob Mink) - runs Cohere `.gguf` through the official `transcribe.cpp` Rust binding, model/session resident in-process (no subprocess worker) when `on_demand_loading = false`, with the weights served from R2 like every other model. It does not implement an end-to-end GPU-probe/fallback policy, which overlaps #611/#577. Long audio is windowed for Cohere (#551) and Parakeet (#288). Also carries the output-driver fixes (#530, #538, #507, #543), the macOS fixes (#522, #576, #452), and mouse-button hotkeys (#546). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 
@@ -414,7 +414,6 @@ Prerequisite: profiles have to reach `TextProcessor`, which they do not today - 
 - **Consolidated release binaries** - Superseded by the 2.0 ONNX removal above: once no engine depends on ONNX Runtime, the 5 onnx-* build targets disappear outright rather than needing a combined-binary redesign. What's left to decide is only the ggml-side split (cpu/vulkan/cuda/rocm vs today's avx2/avx512/vulkan), with the same AVX-512-vs-binary-count trade-off as today.
 - **Vibe Voice backend** ([#285](https://github.com/peteonrails/voxtype/issues/285)) - Microsoft's speech model
 - **Parakeet sortformer for meeting diarization** - Evaluate parakeet-rs's sortformer feature as alternative to the current ml-diarization ECAPA-TDNN pipeline
-- **Native StatusNotifierItem tray** ([#267](https://github.com/peteonrails/voxtype/issues/267)) - Awaiting a contributor rebase; two PRs (#291, #438) predate the `src/cli` and `src/main` refactors and no longer apply
 
 **Engine policy:** Ten engines ship today. New ones are accepted when they cover something the existing set doesn't, or when the ecosystem value is worth the surface on its own terms. Declined on packaging grounds: anything requiring a Python runtime, since voxtype ships as a single static binary ([#481](https://github.com/peteonrails/voxtype/issues/481), [#524](https://github.com/peteonrails/voxtype/issues/524)).
 
