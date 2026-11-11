@@ -95,6 +95,8 @@ pub mod output;
 pub mod setup;
 pub mod state;
 pub mod status_json;
+#[cfg(all(test, unix))]
+pub(crate) mod test_support;
 pub mod text;
 pub mod transcribe;
 #[cfg(target_os = "linux")]

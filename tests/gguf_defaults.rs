@@ -1,6 +1,8 @@
 //! Exercise the same CLI/schema boundary used by graphical settings clients.
 #![cfg(all(feature = "cohere-gguf", feature = "parakeet-gguf"))]
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -18,10 +20,8 @@ const CASES: [(&str, &str, &str); 2] = [
 ];
 
 fn invoke(dir: &Path, args: &[&str]) -> std::process::Output {
-    use std::os::unix::fs::PermissionsExt;
     let worker = dir.join("worker-fixture");
-    std::fs::write(&worker, "#!/bin/sh\nexit 99\n").unwrap();
-    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(&worker, "#!/bin/sh\nexit 99\n");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_voxtype"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("VOXTYPE_") {

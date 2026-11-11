@@ -360,10 +360,7 @@ mod tests {
     use std::ffi::OsString;
 
     fn script(dir: &Path, name: &str, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&dir.join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     struct Fixture {

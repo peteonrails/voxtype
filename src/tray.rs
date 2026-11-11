@@ -939,14 +939,11 @@ mod tests {
 
     /// A fake `omarchy-shell` that logs its arguments and prints `answer`.
     fn fake_shell(dir: &std::path::Path, answer: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("omarchy-shell");
-        std::fs::write(
+        crate::test_support::write_script(
             &path,
-            format!("#!/bin/sh\necho \"$*\" >> \"$0.log\"\necho {answer}\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho \"$*\" >> \"$0.log\"\necho {answer}\n"),
+        );
         path
     }
 

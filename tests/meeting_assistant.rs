@@ -9,6 +9,8 @@
 
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -27,9 +29,7 @@ struct World {
 }
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(path, &format!("#!/bin/sh\n{body}\n"));
 }
 
 fn claude_stream(deltas: &[&str], result: &str) -> String {
