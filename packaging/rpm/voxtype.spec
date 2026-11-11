@@ -18,6 +18,10 @@ Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 # Release profile strips the binaries, so there is no debuginfo to extract.
 %global debug_package %{nil}
 
+# GGUF engines (Parakeet and Cohere .gguf models) run in voxtype-gguf-worker,
+# which links transcribe.cpp; the daemon only carries the client.
+%global vt_gguf gguf,cohere-gguf,parakeet-gguf
+
 # Same AVX-512/GFNI floor for every build except the AVX-512 variant.
 # CMAKE_*_FLAGS replace the flags the cmake crate would pass to whisper.cpp,
 # -fPIC included. Ubuntu's and Arch's GCC build PIE by default so the loss
@@ -37,6 +41,8 @@ BuildRequires:  pkgconfig
 BuildRequires:  vulkan-headers
 BuildRequires:  vulkan-loader-devel
 BuildRequires:  glslc
+# voxtype-gguf-worker-vulkan (ggml-vulkan's find_package(SPIRV-Headers))
+BuildRequires:  spirv-headers-devel
 # voxtype-osd-gtk4
 BuildRequires:  gtk4-devel
 BuildRequires:  gtk4-layer-shell-devel
@@ -57,7 +63,8 @@ Hold a hotkey while speaking, release to transcribe and output text at
 your cursor position.
 
 Features:
-- Fully offline transcription using whisper.cpp
+- Fully offline transcription using whisper.cpp, plus Parakeet and Cohere
+  GGUF models through transcribe.cpp
 - Native compositor keybinding support (Hyprland, Sway, River)
 - Fallback chain: wtype (Wayland, CJK support), ydotool (X11), clipboard
 - Configurable hotkeys, models, and output modes
@@ -101,18 +108,28 @@ export CARGO_HOME=%{_builddir}/cargo
 # CMAKE_*_FLAGS disable them in whisper.cpp
 # GGML_AVX512=OFF disables whisper.cpp's auto-detection of AVX-512 on build machine
 # GFNI (Galois Field New Instructions) is separate from AVX-512 and unsupported on Zen 3
-%{vt_haswell_env} cargo build --release --locked
+%{vt_haswell_env} cargo build --release --locked --features %{vt_gguf}
 install -D -m 755 target/release/voxtype variants/voxtype-avx2
+
+# CPU GGUF worker, shared by the AVX2 and AVX-512 binaries. .cargo/config.toml
+# holds its transcribe.cpp ISA floor (TRANSCRIBE_CMAKE_ARGS).
+%{vt_haswell_env} cargo build --release --locked -p voxtype-gguf-worker
+install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker
 
 # Build AVX-512 optimized binary (for Zen 4+, some Intel)
 cargo clean
-cargo build --release --locked
+cargo build --release --locked --features %{vt_gguf}
 install -D -m 755 target/release/voxtype variants/voxtype-avx512
 
 # Build Vulkan GPU binary (for GPU acceleration)
 cargo clean
 %{vt_haswell_env} cargo build --release --locked --features gpu-vulkan
 install -D -m 755 target/release/voxtype variants/voxtype-vulkan
+
+# Vulkan GGUF worker. voxtype-vulkan looks beside itself for
+# voxtype-gguf-worker-vulkan before the generic CPU worker.
+%{vt_haswell_env} cargo build --release --locked -p voxtype-gguf-worker --features vulkan
+install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker-vulkan
 
 # OSD launcher, its GTK4 and Quickshell frontends, and the audio bridge the
 # Quickshell OSD reads levels from. Same invocation as Dockerfile.onnx, so
@@ -129,6 +146,8 @@ cargo xtask man target/man
 install -D -m 755 variants/voxtype-avx2 %{buildroot}%{vt_libdir}/voxtype-avx2
 install -D -m 755 variants/voxtype-avx512 %{buildroot}%{vt_libdir}/voxtype-avx512
 install -D -m 755 variants/voxtype-vulkan %{buildroot}%{vt_libdir}/voxtype-vulkan
+install -D -m 755 variants/voxtype-gguf-worker %{buildroot}%{vt_libdir}/voxtype-gguf-worker
+install -D -m 755 variants/voxtype-gguf-worker-vulkan %{buildroot}%{vt_libdir}/voxtype-gguf-worker-vulkan
 
 # OSD. The launcher finds its frontends in its own directory, so only it
 # gets a /usr/bin link. The Quickshell launcher execs the audio bridge by
@@ -284,6 +303,8 @@ fi
 %{vt_libdir}/voxtype-avx2
 %{vt_libdir}/voxtype-avx512
 %{vt_libdir}/voxtype-vulkan
+%{vt_libdir}/voxtype-gguf-worker
+%{vt_libdir}/voxtype-gguf-worker-vulkan
 %{vt_libdir}/voxtype-osd
 %{vt_libdir}/voxtype-osd-quickshell
 # The symlink is created by %%posttrans, mark as ghost so rpm -V doesn't complain
@@ -314,6 +335,8 @@ fi
   instead of /usr/lib64/voxtype
 - Keep the /usr/bin/voxtype link (and a setup gpu choice) across upgrades
 - Add the Vulkan build dependencies voxtype-vulkan needs
+- Build the GGUF client into every variant and ship the CPU and Vulkan
+  GGUF workers, so Parakeet and Cohere .gguf models work
 
 * Sat Dec 20 2025 Peter Jackson <pete@peteonrails.com> - 0.4.1-1
 - Replace reqwest/rustls with curl for model downloads
