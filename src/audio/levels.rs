@@ -556,7 +556,12 @@ pub struct SpeechTracker {
 }
 
 struct SpeechTrackerInner {
-    last_speech_at: Instant,
+    /// `None` until the first frame arrives, so the silence clock starts
+    /// with the audio rather than with the session. Opening a suspended
+    /// source can take seconds (PipeWire wakes the device first), and
+    /// counting that wait as silence auto-stopped the session before the
+    /// mic had captured anything.
+    last_speech_at: Option<Instant>,
     consecutive_loud: u32,
 }
 
@@ -571,7 +576,7 @@ impl SpeechTracker {
     pub fn new(threshold_dbfs: f32) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SpeechTrackerInner {
-                last_speech_at: Instant::now(),
+                last_speech_at: None,
                 consecutive_loud: 0,
             })),
             threshold_dbfs,
@@ -585,20 +590,27 @@ impl SpeechTracker {
     /// from ever accumulating.
     pub async fn observe(&self, peak_dbfs: f32) {
         let mut inner = self.inner.lock().await;
+        if inner.last_speech_at.is_none() {
+            inner.last_speech_at = Some(Instant::now());
+        }
         if peak_dbfs >= self.threshold_dbfs {
             inner.consecutive_loud += 1;
             if inner.consecutive_loud >= SPEECH_BURST_FRAMES {
-                inner.last_speech_at = Instant::now();
+                inner.last_speech_at = Some(Instant::now());
             }
         } else {
             inner.consecutive_loud = 0;
         }
     }
 
-    /// Time elapsed since the last speech burst (or since construction, if
-    /// none has arrived yet).
+    /// Time elapsed since the last speech burst, or since the first frame
+    /// if none has arrived yet. Zero while no audio has been captured.
     pub async fn silence_elapsed(&self) -> Duration {
-        self.inner.lock().await.last_speech_at.elapsed()
+        self.inner
+            .lock()
+            .await
+            .last_speech_at
+            .map_or(Duration::ZERO, |at| at.elapsed())
     }
 }
 
@@ -979,5 +991,29 @@ mod tests {
         });
 
         hub.cleanup();
+    }
+
+    #[tokio::test]
+    async fn speech_tracker_silence_clock_waits_for_first_frame() {
+        let tracker = SpeechTracker::new(-20.0);
+        // Device still opening: no frame yet, so no silence is counted.
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(tracker.silence_elapsed().await, Duration::ZERO);
+
+        // First (quiet) frame starts the clock.
+        tracker.observe(-60.0).await;
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(tracker.silence_elapsed().await >= Duration::from_millis(30));
+    }
+
+    #[tokio::test]
+    async fn speech_tracker_burst_resets_silence_clock() {
+        let tracker = SpeechTracker::new(-20.0);
+        tracker.observe(-60.0).await;
+        std::thread::sleep(Duration::from_millis(40));
+        for _ in 0..SPEECH_BURST_FRAMES {
+            tracker.observe(-6.0).await;
+        }
+        assert!(tracker.silence_elapsed().await < Duration::from_millis(40));
     }
 }
