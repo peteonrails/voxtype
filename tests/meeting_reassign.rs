@@ -104,7 +104,7 @@ fn reassign_after_stop_shows_in_the_export() {
     assert_eq!(segment["id"], 2);
     assert_eq!(segment["speaker_id"], "Person 1");
     assert_eq!(segment["speaker_label"], "Casey");
-    assert_eq!(segment["reassigned_from"], "Remote 1");
+    assert_eq!(segment["original_speaker"], "Remote 1");
     assert_eq!(segment["text"], "I disagree with that.");
 
     let export = stdout(&s.voxtype(&[

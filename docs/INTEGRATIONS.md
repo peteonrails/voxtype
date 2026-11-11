@@ -174,10 +174,10 @@ moves to the new one, and the next `hello` already carries the new ID.
 `segment_updated` replaces one segment already received, matched by `id`,
 with the copy it carries. It follows `voxtype meeting reassign` (or
 `--reset`): the segment's `speaker_id` and `speaker_label` are the speaker
-the user chose, and `reassigned_from` holds the speaker the diarizer had
+the user chose, and `original_speaker` holds the speaker the diarizer had
 given it (absent after a reset). A moved line is never moved back by a later
 chunk, and a `speaker_renamed` applies to it like any other: rename by
-`speaker_id`, and rename `reassigned_from` too if you keep it. The next
+`speaker_id`, and rename `original_speaker` too if you keep it. The next
 `hello` already carries the change.
 
 Events fire roughly once per `chunk_duration_secs` (default 30s), not per

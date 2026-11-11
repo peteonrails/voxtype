@@ -90,7 +90,7 @@ pub struct TranscriptSegment {
     /// another speaker by hand (`meeting reassign`). `speaker_id` then holds
     /// the chosen speaker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reassigned_from: Option<String>,
+    pub original_speaker: Option<String>,
     /// Confidence score (0.0 - 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -109,7 +109,7 @@ impl TranscriptSegment {
             source: AudioSource::Unknown,
             speaker_id: None,
             speaker_label: None,
-            reassigned_from: None,
+            original_speaker: None,
             confidence: None,
             chunk_id,
         }
@@ -426,7 +426,7 @@ impl Transcript {
     pub fn apply_speaker_overrides(&mut self, overrides: &std::collections::HashMap<u32, String>) {
         for segment in &mut self.segments {
             let assigned = segment
-                .reassigned_from
+                .original_speaker
                 .take()
                 .unwrap_or_else(|| segment.speaker_key());
             let target = overrides.get(&segment.id).unwrap_or(&assigned);
@@ -435,7 +435,7 @@ impl Transcript {
                 segment.speaker_label = None;
             }
             if *target != assigned {
-                segment.reassigned_from = Some(assigned);
+                segment.original_speaker = Some(assigned);
             }
         }
     }
@@ -449,8 +449,8 @@ impl Transcript {
                 segment.speaker_id = Some(to.to_string());
                 renamed += 1;
             }
-            if segment.reassigned_from.as_deref() == Some(from) {
-                segment.reassigned_from = Some(to.to_string());
+            if segment.original_speaker.as_deref() == Some(from) {
+                segment.original_speaker = Some(to.to_string());
                 renamed += 1;
             }
         }
@@ -1169,7 +1169,7 @@ mod tests {
     fn keys(t: &Transcript) -> Vec<(String, Option<String>)> {
         t.segments
             .iter()
-            .map(|s| (s.speaker_key(), s.reassigned_from.clone()))
+            .map(|s| (s.speaker_key(), s.original_speaker.clone()))
             .collect()
     }
 
@@ -1192,7 +1192,7 @@ mod tests {
 
         // Applying again is a no-op; removing the override undoes it.
         t.apply_speaker_overrides(&overrides);
-        assert_eq!(t.segments[1].reassigned_from.as_deref(), Some("Remote 1"));
+        assert_eq!(t.segments[1].original_speaker.as_deref(), Some("Remote 1"));
         t.apply_speaker_overrides(&std::collections::HashMap::new());
         assert_eq!(
             keys(&t),

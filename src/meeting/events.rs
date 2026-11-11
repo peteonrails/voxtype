@@ -115,8 +115,8 @@ impl MeetingHudState {
             if segment.speaker_id.as_deref() == Some(from) {
                 segment.speaker_id = Some(to.to_string());
             }
-            if segment.reassigned_from.as_deref() == Some(from) {
-                segment.reassigned_from = Some(to.to_string());
+            if segment.original_speaker.as_deref() == Some(from) {
+                segment.original_speaker = Some(to.to_string());
             }
         }
     }

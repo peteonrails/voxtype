@@ -744,7 +744,7 @@ impl MeetingStorage {
             transcript
                 .segments
                 .iter()
-                .filter_map(|s| s.reassigned_from.clone()),
+                .filter_map(|s| s.original_speaker.clone()),
         );
         used.extend(self.get_speaker_labels(meeting_id)?.into_keys());
         used.extend(self.get_speaker_overrides(meeting_id)?.into_values());
@@ -1438,7 +1438,7 @@ mod tests {
         let seg = storage.reassign_segment(&id, 2, "remote 2", true).unwrap();
         assert_eq!(seg.id, 2);
         assert_eq!(seg.speaker_key(), "Remote 2");
-        assert_eq!(seg.reassigned_from.as_deref(), Some("Remote 1"));
+        assert_eq!(seg.original_speaker.as_deref(), Some("Remote 1"));
         assert_eq!(
             speakers(&storage, &id),
             vec!["You", "Primagen", "Remote 2", "Remote 2"]
@@ -1499,7 +1499,7 @@ mod tests {
 
         let seg = storage.reset_segment_speaker(&id, 2, true).unwrap();
         assert_eq!(seg.speaker_key(), "Remote 1");
-        assert_eq!(seg.reassigned_from, None);
+        assert_eq!(seg.original_speaker, None);
         assert_eq!(
             speakers(&storage, &id),
             vec!["You", "Primagen", "Primagen", "Remote 2"]
@@ -1548,7 +1548,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(on_disk.segments[2].speaker_key(), "Person 1");
         assert_eq!(
-            on_disk.segments[2].reassigned_from.as_deref(),
+            on_disk.segments[2].original_speaker.as_deref(),
             Some("Remote 1")
         );
         assert_eq!(on_disk.segments[2].speaker_label.as_deref(), Some("Casey"));

@@ -502,7 +502,7 @@ impl MeetingDaemon {
             .iter()
             .zip(&before)
             .filter(|(now, was)| {
-                now.speaker_id != was.speaker_id || now.reassigned_from != was.reassigned_from
+                now.speaker_id != was.speaker_id || now.original_speaker != was.original_speaker
             })
             .map(|(now, _)| {
                 let mut segment = now.clone();
@@ -1043,7 +1043,7 @@ mod tests {
         let line = &saved.transcript.segments[1];
         assert_eq!(line.id, 1);
         assert_eq!(line.speaker_display(), "Casey");
-        assert_eq!(line.reassigned_from.as_deref(), Some("Remote 1"));
+        assert_eq!(line.original_speaker.as_deref(), Some("Remote 1"));
 
         // --reset after stop gives it back to the renamed diarizer speaker.
         let back = cli.reset_segment_speaker(&id, 1, true).unwrap();
