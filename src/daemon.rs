@@ -2852,6 +2852,10 @@ impl Daemon {
         if let Some(ref path) = self.meeting_state_file_path {
             write_meeting_state_file(path, state_name, meeting_id);
         }
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update_meeting(crate::tray::MeetingTrayState::from_state_name(state_name));
+        }
 
         // Mirror into the meeting HUD snapshot. "idle" always means the
         // meeting fully ended (or none is running): reset everything so a

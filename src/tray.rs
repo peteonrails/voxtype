@@ -56,6 +56,37 @@ impl TrayState {
     }
 }
 
+/// Where a meeting is, as the daemon's `meeting_state` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeetingTrayState {
+    #[default]
+    Idle,
+    Recording,
+    Paused,
+    /// Stopped and writing out the last chunks; nothing can be done until
+    /// it is idle again.
+    Finalizing,
+}
+
+impl MeetingTrayState {
+    pub fn from_state_name(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "recording" => Self::Recording,
+            "paused" => Self::Paused,
+            "finalizing" => Self::Finalizing,
+            _ => Self::Idle,
+        }
+    }
+}
+
+/// What the meeting entries need: whether meeting mode is on at all, and
+/// where the current meeting is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MeetingMenu {
+    pub enabled: bool,
+    pub state: MeetingTrayState,
+}
+
 /// Closed set of actions. No user-controlled command strings or shell evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
@@ -69,6 +100,30 @@ pub enum TrayAction {
     /// `voxtype setup migrate --cleanup`: delete the files of the model an
     /// accepted upgrade replaced.
     CleanupOldModels,
+    /// `voxtype meeting start`, with the daemon's default title.
+    StartMeeting,
+    /// `voxtype meeting stop`.
+    StopMeeting,
+    /// `voxtype meeting pause`.
+    PauseMeeting,
+    /// `voxtype meeting resume`.
+    ResumeMeeting,
+}
+
+impl TrayAction {
+    /// The `voxtype` arguments an action runs, for the actions that are
+    /// plain CLI commands.
+    pub fn cli_args(self) -> Option<&'static [&'static str]> {
+        Some(match self {
+            Self::ToggleRecording => &["record", "toggle"],
+            Self::Cancel => &["record", "cancel"],
+            Self::StartMeeting => &["meeting", "start"],
+            Self::StopMeeting => &["meeting", "stop"],
+            Self::PauseMeeting => &["meeting", "pause"],
+            Self::ResumeMeeting => &["meeting", "resume"],
+            _ => return None,
+        })
+    }
 }
 
 /// The tray's reading of the model upgrade status object, the one
@@ -128,9 +183,87 @@ struct VoxtypeTray {
     actions: Actions,
     language: Option<Arc<Mutex<crate::language_selection::LanguageMenu>>>,
     upgrade: UpgradeMenu,
+    meeting: MeetingMenu,
 }
 
 impl VoxtypeTray {
+    /// Dictation holds the mic or the daemon is gone: a meeting can't start.
+    fn dictation_busy(&self) -> bool {
+        matches!(
+            self.state,
+            TrayState::Recording | TrayState::Transcribing | TrayState::Stopped
+        )
+    }
+
+    /// The meeting entries, next to the dictation ones.
+    fn meeting_items(&self) -> Vec<ksni::MenuItem<Self>> {
+        fn entry(
+            label: &str,
+            enabled: bool,
+            action: TrayAction,
+            when: fn(&VoxtypeTray) -> bool,
+        ) -> ksni::MenuItem<VoxtypeTray> {
+            StandardItem {
+                label: label.into(),
+                enabled,
+                activate: Box::new(move |this: &mut VoxtypeTray| {
+                    // Re-check: the menu may be stale by the time it is clicked.
+                    if when(this) {
+                        (this.actions)(action);
+                    }
+                }),
+                ..Default::default()
+            }
+            .into()
+        }
+        fn can_start(t: &VoxtypeTray) -> bool {
+            t.meeting.enabled && t.meeting.state == MeetingTrayState::Idle && !t.dictation_busy()
+        }
+        fn active(t: &VoxtypeTray) -> bool {
+            matches!(
+                t.meeting.state,
+                MeetingTrayState::Recording | MeetingTrayState::Paused
+            )
+        }
+        fn recording(t: &VoxtypeTray) -> bool {
+            t.meeting.state == MeetingTrayState::Recording
+        }
+        fn paused(t: &VoxtypeTray) -> bool {
+            t.meeting.state == MeetingTrayState::Paused
+        }
+
+        if !self.meeting.enabled {
+            return vec![entry(
+                "Start Meeting (meeting mode is off)",
+                false,
+                TrayAction::StartMeeting,
+                can_start,
+            )];
+        }
+        match self.meeting.state {
+            MeetingTrayState::Idle => vec![entry(
+                "Start Meeting",
+                can_start(self),
+                TrayAction::StartMeeting,
+                can_start,
+            )],
+            MeetingTrayState::Recording => vec![
+                entry("Stop Meeting", true, TrayAction::StopMeeting, active),
+                entry("Pause Meeting", true, TrayAction::PauseMeeting, recording),
+            ],
+            MeetingTrayState::Paused => vec![
+                entry("Stop Meeting", true, TrayAction::StopMeeting, active),
+                entry("Resume Meeting", true, TrayAction::ResumeMeeting, paused),
+            ],
+            MeetingTrayState::Finalizing => vec![entry(
+                "Finishing Meeting...",
+                false,
+                TrayAction::StopMeeting,
+                |_| false,
+            )],
+        }
+    }
+
     fn language_menu(&self) -> ksni::MenuItem<Self> {
         let menu = self
             .language
@@ -337,7 +470,9 @@ impl Tray for VoxtypeTray {
                 ..Default::default()
             }
             .into(),
+            MenuItem::Separator,
         ]);
+        menu.extend(self.meeting_items());
         menu
     }
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
@@ -442,6 +577,7 @@ fn spawn_inner(
     actions: Actions,
     language: Option<Arc<Mutex<crate::language_selection::LanguageMenu>>>,
     mut upgrade_rx: mpsc::UnboundedReceiver<UpgradeMenu>,
+    mut meeting_rx: watch::Receiver<MeetingMenu>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let initial = *rx.borrow_and_update();
@@ -450,6 +586,7 @@ fn spawn_inner(
             actions,
             language,
             upgrade: UpgradeMenu::default(),
+            meeting: *meeting_rx.borrow_and_update(),
         };
         let start = tray.assume_sni_available(true).spawn();
         // Bounded, cancellable startup. D-Bus must never hold dictation startup hostage.
@@ -463,10 +600,19 @@ fn spawn_inner(
         };
         // Reflect a state that arrived during registration.
         let state = *rx.borrow_and_update();
-        handle.0.update(|tray| tray.state = state).await;
+        let meeting = *meeting_rx.borrow_and_update();
+        handle
+            .0
+            .update(|tray| {
+                tray.state = state;
+                tray.meeting = meeting;
+            })
+            .await;
         // The state channel alone decides the tray's lifetime; upgrade senders
-        // held by background refreshes must never keep it alive.
+        // held by background refreshes must never keep it alive, and neither
+        // does the meeting channel.
         let mut upgrades_open = true;
+        let mut meeting_open = true;
         loop {
             tokio::select! {
                 changed = rx.changed() => {
@@ -486,6 +632,16 @@ fn spawn_inner(
                     }
                     None => upgrades_open = false,
                 },
+                changed = meeting_rx.changed(), if meeting_open => {
+                    if changed.is_err() {
+                        meeting_open = false;
+                        continue;
+                    }
+                    let meeting = *meeting_rx.borrow_and_update();
+                    if handle.0.update(|tray| tray.meeting = meeting).await.is_none() {
+                        break;
+                    }
+                }
             }
         }
         handle.0.shutdown().await;
@@ -504,6 +660,7 @@ pub fn spawn_with_actions(
         }),
         None,
         mpsc::unbounded_channel().1,
+        watch::channel(MeetingMenu::default()).1,
     )
 }
 
@@ -514,6 +671,7 @@ pub fn spawn(rx: watch::Receiver<TrayState>) -> tokio::task::JoinHandle<()> {
         Arc::new(dispatch_action),
         None,
         mpsc::unbounded_channel().1,
+        watch::channel(MeetingMenu::default()).1,
     )
 }
 
@@ -554,16 +712,7 @@ fn dispatch_action(action: TrayAction) {
                     std::path::PathBuf::from("voxtype-configure-launcher")
                 })
             } else {
-                let mut command = Command::new(bin);
-                command.args([
-                    "record",
-                    if action == TrayAction::Cancel {
-                        "cancel"
-                    } else {
-                        "toggle"
-                    },
-                ]);
-                command
+                cli_command(&bin, action)
             };
             command.stdin(std::process::Stdio::null()).status().await
         }
@@ -576,6 +725,14 @@ fn dispatch_action(action: TrayAction) {
             error => tracing::warn!(?action, ?error, "Tray action failed"),
         }
     });
+}
+
+/// The `voxtype` command an action runs: the same subcommand a user or a
+/// compositor binding would, so the daemon applies the same rules either way.
+fn cli_command(bin: &std::path::Path, action: TrayAction) -> Command {
+    let mut command = Command::new(bin);
+    command.args(action.cli_args().unwrap_or_default());
+    command
 }
 
 // ------------------------------------------------------------ model upgrades
@@ -796,6 +953,7 @@ pub struct TrayRuntime {
     language_rx: mpsc::UnboundedReceiver<&'static str>,
     upgrade_tx: mpsc::UnboundedSender<UpgradeMenu>,
     upgrade_refresh: Option<tokio::task::JoinHandle<()>>,
+    meeting_tx: watch::Sender<MeetingMenu>,
 }
 impl TrayRuntime {
     pub fn start(enabled: bool) -> Option<Self> {
@@ -804,13 +962,15 @@ impl TrayRuntime {
         }
         let (tx, rx) = watch::channel(TrayState::Idle);
         let (upgrade_tx, upgrade_rx) = mpsc::unbounded_channel();
+        let (meeting_tx, meeting_rx) = watch::channel(MeetingMenu::default());
         Some(Self {
             tx: Some(tx),
-            task: spawn_inner(rx, Arc::new(dispatch_action), None, upgrade_rx),
+            task: spawn_inner(rx, Arc::new(dispatch_action), None, upgrade_rx, meeting_rx),
             language: None,
             language_rx: mpsc::unbounded_channel().1,
             upgrade_tx,
             upgrade_refresh: None,
+            meeting_tx,
         })
     }
     /// The daemon's tray. Reads the model upgrade offer once startup has
@@ -872,7 +1032,11 @@ impl TrayRuntime {
             }
             action => other_actions(action),
         });
-        let task = spawn_inner(rx, actions, Some(language.clone()), upgrade_rx);
+        let (meeting_tx, meeting_rx) = watch::channel(MeetingMenu {
+            enabled: config.meeting.enabled,
+            state: MeetingTrayState::Idle,
+        });
+        let task = spawn_inner(rx, actions, Some(language.clone()), upgrade_rx, meeting_rx);
         Some(Self {
             tx: Some(tx),
             task,
@@ -880,6 +1044,7 @@ impl TrayRuntime {
             language_rx,
             upgrade_tx,
             upgrade_refresh: None,
+            meeting_tx,
         })
     }
     /// Replace the upgrade entries with what the status object now says, for
@@ -909,6 +1074,16 @@ impl TrayRuntime {
                 }
             });
         }
+    }
+    /// Follow the meeting: the daemon calls this wherever it writes
+    /// `meeting_state`, so meetings started from the CLI or a detection
+    /// prompt show here too, with no file watching.
+    pub fn update_meeting(&self, state: MeetingTrayState) {
+        self.meeting_tx.send_if_modified(|menu| {
+            let changed = menu.state != state;
+            menu.state = state;
+            changed
+        });
     }
     pub async fn shutdown(mut self) {
         if let Some(refresh) = self.upgrade_refresh.take() {
@@ -982,6 +1157,7 @@ mod tests {
                 crate::language_selection::LanguageMenu::for_config(&config),
             ))),
             upgrade: UpgradeMenu::default(),
+            meeting: MeetingMenu::default(),
         };
         let ksni::MenuItem::SubMenu(menu) = tray.language_menu() else {
             panic!("submenu missing")
@@ -1003,6 +1179,7 @@ mod tests {
             state: TrayState::Idle,
             actions: Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
+            meeting: MeetingMenu::default(),
         };
         assert!(tray.menu().iter().any(|item| matches!(item,
             ksni::MenuItem::SubMenu(menu) if menu.label.starts_with("Language"))));
@@ -1015,6 +1192,7 @@ mod tests {
             state: TrayState::Transcribing,
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
+            meeting: MeetingMenu::default(),
         };
         let menu = tray.menu();
         let items: Vec<_> = menu
@@ -1056,6 +1234,7 @@ mod tests {
             state: TrayState::Idle,
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
+            meeting: MeetingMenu::default(),
         };
         let idle = tray.icon_pixmap();
         tray.state = TrayState::Recording;
@@ -1097,6 +1276,7 @@ mod tests {
             state: TrayState::Idle,
             actions: Arc::new(move |action| log.lock().unwrap().push(action)),
             upgrade,
+            meeting: MeetingMenu::default(),
         }
     }
 
@@ -1368,6 +1548,7 @@ mod tests {
             state: TrayState::Idle,
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
+            meeting: MeetingMenu::default(),
         };
         assert!(t.icon_name().is_empty());
     }
@@ -1380,6 +1561,7 @@ mod tests {
             state: TrayState::Idle,
             actions: std::sync::Arc::new(|_| {}),
             upgrade: UpgradeMenu::default(),
+            meeting: MeetingMenu::default(),
         };
         assert!(t.attention_icon_name().is_empty());
     }
@@ -1424,5 +1606,236 @@ mod tests {
                 state
             );
         }
+    }
+
+    // ── meeting entries ───────────────────────────────────────────────────────
+
+    fn meeting_tray(
+        state: TrayState,
+        meeting: MeetingMenu,
+        log: Arc<Mutex<Vec<TrayAction>>>,
+    ) -> VoxtypeTray {
+        VoxtypeTray {
+            language: None,
+            state,
+            actions: Arc::new(move |action| log.lock().unwrap().push(action)),
+            upgrade: UpgradeMenu::default(),
+            meeting,
+        }
+    }
+
+    fn on(state: MeetingTrayState) -> MeetingMenu {
+        MeetingMenu {
+            enabled: true,
+            state,
+        }
+    }
+
+    /// The meeting entries as `(label, enabled)`.
+    fn meeting_entries(tray: &VoxtypeTray) -> Vec<(String, bool)> {
+        standard_items(tray)
+            .into_iter()
+            .filter(|i| i.label.contains("Meeting"))
+            .map(|i| (i.label, i.enabled))
+            .collect()
+    }
+
+    fn click(tray: &mut VoxtypeTray, label: &str) {
+        let item = standard_items(tray)
+            .into_iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("no menu item {label}"));
+        (item.activate)(tray);
+    }
+
+    fn entries(list: &[(&str, bool)]) -> Vec<(String, bool)> {
+        list.iter().map(|(l, e)| (l.to_string(), *e)).collect()
+    }
+
+    #[test]
+    fn meeting_entries_follow_the_meeting_state() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let cases = [
+            (MeetingTrayState::Idle, vec![("Start Meeting", true)]),
+            (
+                MeetingTrayState::Recording,
+                vec![("Stop Meeting", true), ("Pause Meeting", true)],
+            ),
+            (
+                MeetingTrayState::Paused,
+                vec![("Stop Meeting", true), ("Resume Meeting", true)],
+            ),
+            (
+                MeetingTrayState::Finalizing,
+                vec![("Finishing Meeting...", false)],
+            ),
+        ];
+        for (state, expected) in cases {
+            let tray = meeting_tray(TrayState::Idle, on(state), log.clone());
+            assert_eq!(meeting_entries(&tray), entries(&expected), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn meeting_mode_off_shows_a_greyed_start_with_a_hint() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(TrayState::Idle, MeetingMenu::default(), log.clone());
+        assert_eq!(
+            meeting_entries(&tray),
+            entries(&[("Start Meeting (meeting mode is off)", false)])
+        );
+        click(&mut tray, "Start Meeting (meeting mode is off)");
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn meeting_entries_sit_after_the_dictation_entries() {
+        let tray = meeting_tray(
+            TrayState::Idle,
+            on(MeetingTrayState::Idle),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let labels: Vec<String> = standard_items(&tray).into_iter().map(|i| i.label).collect();
+        let pos = |l: &str| labels.iter().position(|x| x == l).unwrap();
+        assert_eq!(pos("Start Meeting"), pos("Cancel") + 1);
+    }
+
+    #[test]
+    fn dictation_in_progress_greys_out_start_meeting_only() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        for state in [
+            TrayState::Recording,
+            TrayState::Transcribing,
+            TrayState::Stopped,
+        ] {
+            let mut tray = meeting_tray(state, on(MeetingTrayState::Idle), log.clone());
+            assert_eq!(
+                meeting_entries(&tray),
+                entries(&[("Start Meeting", false)]),
+                "{state:?}"
+            );
+            click(&mut tray, "Start Meeting");
+        }
+        assert!(log.lock().unwrap().is_empty());
+        // A meeting already running can always be stopped.
+        let tray = meeting_tray(
+            TrayState::Recording,
+            on(MeetingTrayState::Recording),
+            log.clone(),
+        );
+        assert_eq!(
+            meeting_entries(&tray),
+            entries(&[("Stop Meeting", true), ("Pause Meeting", true)])
+        );
+        // The dictation entry is untouched by a meeting.
+        let tray = meeting_tray(TrayState::Idle, on(MeetingTrayState::Recording), log);
+        assert!(standard_items(&tray)
+            .iter()
+            .any(|i| i.label == "Start Recording" && i.enabled));
+    }
+
+    #[test]
+    fn meeting_clicks_send_the_matching_action() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(TrayState::Idle, on(MeetingTrayState::Idle), log.clone());
+        click(&mut tray, "Start Meeting");
+        tray.meeting = on(MeetingTrayState::Recording);
+        click(&mut tray, "Pause Meeting");
+        tray.meeting = on(MeetingTrayState::Paused);
+        click(&mut tray, "Resume Meeting");
+        click(&mut tray, "Stop Meeting");
+        tray.meeting = on(MeetingTrayState::Finalizing);
+        click(&mut tray, "Finishing Meeting...");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                TrayAction::StartMeeting,
+                TrayAction::PauseMeeting,
+                TrayAction::ResumeMeeting,
+                TrayAction::StopMeeting,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stale_menu_click_is_dropped() {
+        // The menu was built while recording; the meeting stopped before the click.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = meeting_tray(
+            TrayState::Idle,
+            on(MeetingTrayState::Recording),
+            log.clone(),
+        );
+        let stop = standard_items(&tray)
+            .into_iter()
+            .find(|i| i.label == "Pause Meeting")
+            .unwrap();
+        tray.meeting = on(MeetingTrayState::Finalizing);
+        (stop.activate)(&mut tray);
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn meeting_state_names_match_the_daemon_file() {
+        for (name, state) in [
+            ("idle", MeetingTrayState::Idle),
+            ("recording", MeetingTrayState::Recording),
+            ("paused", MeetingTrayState::Paused),
+            ("finalizing\n", MeetingTrayState::Finalizing),
+            ("", MeetingTrayState::Idle),
+            ("bogus", MeetingTrayState::Idle),
+        ] {
+            assert_eq!(MeetingTrayState::from_state_name(name), state, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn meeting_actions_run_the_meeting_subcommands() {
+        assert_eq!(
+            TrayAction::StartMeeting.cli_args(),
+            Some(&["meeting", "start"][..])
+        );
+        assert_eq!(
+            TrayAction::StopMeeting.cli_args(),
+            Some(&["meeting", "stop"][..])
+        );
+        assert_eq!(
+            TrayAction::PauseMeeting.cli_args(),
+            Some(&["meeting", "pause"][..])
+        );
+        assert_eq!(
+            TrayAction::ResumeMeeting.cli_args(),
+            Some(&["meeting", "resume"][..])
+        );
+        assert_eq!(
+            TrayAction::ToggleRecording.cli_args(),
+            Some(&["record", "toggle"][..])
+        );
+        assert_eq!(
+            TrayAction::Cancel.cli_args(),
+            Some(&["record", "cancel"][..])
+        );
+        assert_eq!(TrayAction::OpenSettings.cli_args(), None);
+    }
+
+    #[tokio::test]
+    async fn meeting_actions_reach_the_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("calls");
+        let bin = dir.path().join("voxtype");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for action in [TrayAction::StartMeeting, TrayAction::StopMeeting] {
+            assert!(cli_command(&bin, action).status().await.unwrap().success());
+        }
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "meeting start\nmeeting stop\n"
+        );
     }
 }
