@@ -64,6 +64,7 @@ impl ParecLoopback {
                 "--format=float32le",
                 "--channels=1",
                 "--rate=16000",
+                "--latency-msec=100",
                 "--raw",
             ])
             .stdout(Stdio::piped())
