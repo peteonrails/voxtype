@@ -185,7 +185,16 @@ title. While a meeting records, it offers **Stop Meeting** and **Pause Meeting**
 (**Resume Meeting** while paused), and shows a greyed **Finishing Meeting...** while the
 last chunks are transcribed. The entries follow meetings started anywhere, including
 `voxtype meeting start` and the detection prompt. Start Meeting is greyed out while you
-are dictating, and when meeting mode is off it reads **Start Meeting (meeting mode is off)**.
+are dictating.
+
+While meeting mode is off, the tray shows **Turn on meetings...** instead. Choosing it
+runs `voxtype config set meeting.enabled true` and restarts the voxtype service so the
+setting takes effect. At most once a day on daemon start, a notification makes the same
+offer with **Turn on**, **Not now** and **No, don't ask again**; the last hides the offer
+for good and shows a greyed **Start Meeting (meeting mode is off)**. Set
+`[meeting] offer_enable = false` to turn the offer off.
+
+The **Voxtype Meetings** entry in the application launcher opens `voxtype meeting view`.
 
 The tray and desktop entry share `voxtype-configure-launcher`: it prefers the
 available integrated Quickshell frontend, then a separately installed graphical

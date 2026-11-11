@@ -42,7 +42,7 @@ For short dictation (a sentence or two at a time), stick with the normal push-to
 
 ## Quick Start
 
-1. Enable meeting mode in your config:
+1. Enable meeting mode. A config written by `voxtype setup` for a new install already has it on. On an existing install, choose **Turn on meetings...** in the tray, or add to your config and restart the daemon:
 
 ```toml
 [meeting]
