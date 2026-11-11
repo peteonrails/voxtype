@@ -95,13 +95,20 @@ pub enum MeetingAction {
     },
     /// Label a speaker in a meeting transcript
     ///
-    /// Assigns a human-readable name to an auto-generated speaker ID.
-    /// Use with ML diarization to replace "SPEAKER_00" with "Alice".
+    /// Assigns a human-readable name to a speaker the transcript contains:
+    /// "You" and "Remote" with simple diarization, "SPEAKER_00" and so on
+    /// with ML diarization. Works while the meeting is still recording.
+    /// Giving two speakers the same name merges them in exports.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting label latest You Pete\n  \
+        voxtype meeting label latest SPEAKER_01 Dana\n  \
+        voxtype meeting label latest Dana 'Dana Smith'")]
     Label {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,
 
-        /// Speaker ID to label (e.g., "SPEAKER_00" or just "0")
+        /// Speaker to label: an ID from the transcript (You, Remote,
+        /// SPEAKER_00 or just 0), or a name already assigned
         speaker_id: String,
 
         /// Human-readable label to assign

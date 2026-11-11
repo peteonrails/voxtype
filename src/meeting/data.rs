@@ -114,15 +114,20 @@ impl TranscriptSegment {
         self.end_ms.saturating_sub(self.start_ms)
     }
 
+    /// The speaker as the diarizer named it: the diarization ID when there
+    /// is one, otherwise the track (`You` or `Remote`). This is what
+    /// `meeting label` keys a human name on.
+    pub fn speaker_key(&self) -> String {
+        self.speaker_id
+            .clone()
+            .unwrap_or_else(|| self.source.to_string())
+    }
+
     /// Get the display name for the speaker
     pub fn speaker_display(&self) -> String {
-        if let Some(ref label) = self.speaker_label {
-            label.clone()
-        } else if let Some(ref id) = self.speaker_id {
-            id.clone()
-        } else {
-            self.source.to_string()
-        }
+        self.speaker_label
+            .clone()
+            .unwrap_or_else(|| self.speaker_key())
     }
 
     /// Format timestamp as HH:MM:SS
@@ -333,6 +338,27 @@ impl Transcript {
             .iter()
             .filter(|s| s.speaker_display() == speaker)
             .collect()
+    }
+
+    /// Name speakers: `labels` maps a speaker ID ([`TranscriptSegment::speaker_key`])
+    /// to a human name. Speakers given the same name display as one.
+    pub fn apply_speaker_labels(&mut self, labels: &std::collections::HashMap<String, String>) {
+        if labels.is_empty() {
+            return;
+        }
+        for segment in &mut self.segments {
+            if let Some(label) = labels.get(&segment.speaker_key()) {
+                segment.speaker_label = Some(label.clone());
+            }
+        }
+    }
+
+    /// Unique speaker IDs, before any human labels.
+    pub fn speaker_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.segments.iter().map(|s| s.speaker_key()).collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// Get unique speakers

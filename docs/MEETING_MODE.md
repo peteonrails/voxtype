@@ -182,14 +182,18 @@ voxtype meeting export latest --format vtt --output meeting.vtt
 
 ### Labeling Speakers
 
-When diarization detects multiple speakers, they are assigned auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc. You can replace these with real names:
+Every transcript names its speakers. With simple diarization they are `You` (your microphone) and `Remote` (system audio); with ML diarization they are auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc. You can replace any of them with real names:
 
 ```bash
+voxtype meeting label latest You "Pete"
+voxtype meeting label latest Remote "Dana"
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label latest 1 "Bob"
 ```
 
-The speaker ID can be the full form (`SPEAKER_00`) or just the number (`0`). Labels are saved to the database and applied to the transcript, so subsequent exports will use the names you assigned.
+The speaker can be the ID as the transcript shows it (matched without regard to case), just the number for an ML speaker (`0` for `SPEAKER_00`), or a name you already assigned, which renames every speaker carrying it. A speaker the meeting does not contain is an error that lists the speakers it does contain, so a typo never reports success.
+
+Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
 
 ### AI Summarization
 

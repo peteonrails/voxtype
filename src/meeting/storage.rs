@@ -26,6 +26,26 @@ pub enum StorageError {
 
     #[error("Storage path not configured")]
     PathNotConfigured,
+
+    #[error(
+        "Speaker '{speaker}' is not in this meeting. Speakers in the transcript: {}",
+        speaker_list(.available)
+    )]
+    UnknownSpeaker {
+        speaker: String,
+        available: Vec<String>,
+    },
+
+    #[error("A speaker label cannot be empty")]
+    EmptyLabel,
+}
+
+fn speaker_list(speakers: &[String]) -> String {
+    if speakers.is_empty() {
+        "none yet".to_string()
+    } else {
+        speakers.join(", ")
+    }
 }
 
 /// Meeting storage configuration
@@ -114,6 +134,22 @@ impl MeetingStorage {
                 PRIMARY KEY (meeting_id, speaker_num),
                 FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             );
+
+            -- Speaker labels keyed by the speaker as the transcript names it
+            -- (You, Remote, SPEAKER_00, ...). Supersedes speaker_labels, whose
+            -- integer key could not name the simple-diarization speakers; its
+            -- rows are carried over once and the old table is left for
+            -- downgrades.
+            CREATE TABLE IF NOT EXISTS speaker_name_labels (
+                meeting_id TEXT NOT NULL,
+                speaker_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, speaker_key)
+            );
+            INSERT OR IGNORE INTO speaker_name_labels (meeting_id, speaker_key, label)
+                SELECT meeting_id, printf('SPEAKER_%02d', speaker_num), label
+                FROM speaker_labels;
             "#,
         )?;
         Ok(())
@@ -306,8 +342,19 @@ impl MeetingStorage {
             .storage_path
             .ok_or(StorageError::PathNotConfigured)?;
 
+        // Labels live in the index, not in the caller's transcript: the
+        // daemon rewrites transcript.json after every chunk from its own
+        // in-memory copy, which knows nothing of a `meeting label` run
+        // mid-meeting. Applying them here keeps every write labelled.
+        let labels = self.get_speaker_labels(meeting_id)?;
+        let json = if labels.is_empty() {
+            serde_json::to_string_pretty(transcript)?
+        } else {
+            let mut labelled = transcript.clone();
+            labelled.apply_speaker_labels(&labels);
+            serde_json::to_string_pretty(&labelled)?
+        };
         let transcript_path = storage_path.join("transcript.json");
-        let json = serde_json::to_string_pretty(transcript)?;
         std::fs::write(transcript_path, json)?;
 
         Ok(())
@@ -325,7 +372,8 @@ impl MeetingStorage {
 
         let transcript_path = storage_path.join("transcript.json");
         let json = std::fs::read_to_string(transcript_path)?;
-        let transcript: Transcript = serde_json::from_str(&json)?;
+        let mut transcript: Transcript = serde_json::from_str(&json)?;
+        transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
 
         Ok(transcript)
     }
@@ -352,6 +400,10 @@ impl MeetingStorage {
         // Delete from database
         self.conn.execute(
             "DELETE FROM meetings WHERE id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM speaker_name_labels WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
 
@@ -389,88 +441,111 @@ impl MeetingStorage {
         }
     }
 
-    /// Set a speaker label for ML diarization
+    /// Name a speaker in a meeting.
+    ///
+    /// `speaker` is matched against the speakers the transcript actually
+    /// contains: the diarizer's ID (`You`, `Remote`, `SPEAKER_00`), the
+    /// numeric shorthand `0` for `SPEAKER_00`, any of those ignoring case,
+    /// or a name already assigned, which renames every speaker carrying it.
+    /// Anything else is [`StorageError::UnknownSpeaker`], so a typo never
+    /// reports success while changing nothing. Returns the speaker IDs that
+    /// were labelled.
     pub fn set_speaker_label(
         &self,
         meeting_id: &MeetingId,
-        speaker_num: u32,
+        speaker: &str,
         label: &str,
-    ) -> Result<(), StorageError> {
-        // Verify meeting exists
+    ) -> Result<Vec<String>, StorageError> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(StorageError::EmptyLabel);
+        }
         self.get_meeting(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
 
-        // Insert or update speaker label
-        self.conn.execute(
-            r#"
-            INSERT OR REPLACE INTO speaker_labels (meeting_id, speaker_num, label)
-            VALUES (?1, ?2, ?3)
-            "#,
-            params![meeting_id.to_string(), speaker_num as i32, label],
-        )?;
+        // A meeting that has not finished its first chunk has no file yet.
+        let transcript = match self.load_transcript(meeting_id) {
+            Ok(t) => t,
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                Transcript::new()
+            }
+            Err(e) => return Err(e),
+        };
 
-        // Also update the transcript file to apply labels
-        self.apply_speaker_labels_to_transcript(meeting_id)?;
+        let keys = resolve_speaker_keys(&transcript, speaker);
+        if keys.is_empty() {
+            return Err(StorageError::UnknownSpeaker {
+                speaker: speaker.to_string(),
+                available: transcript.speaker_keys(),
+            });
+        }
 
-        Ok(())
+        for key in &keys {
+            self.conn.execute(
+                r#"
+                INSERT OR REPLACE INTO speaker_name_labels (meeting_id, speaker_key, label)
+                VALUES (?1, ?2, ?3)
+                "#,
+                params![meeting_id.to_string(), key, label],
+            )?;
+        }
+
+        // Rewrite the file so readers of transcript.json see the name too.
+        self.save_transcript(meeting_id, &transcript)?;
+
+        Ok(keys)
     }
 
-    /// Get all speaker labels for a meeting
+    /// All speaker labels for a meeting, keyed by speaker ID.
     pub fn get_speaker_labels(
         &self,
         meeting_id: &MeetingId,
-    ) -> Result<std::collections::HashMap<u32, String>, StorageError> {
+    ) -> Result<std::collections::HashMap<String, String>, StorageError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT speaker_num, label FROM speaker_labels WHERE meeting_id = ?1")?;
+            .prepare("SELECT speaker_key, label FROM speaker_name_labels WHERE meeting_id = ?1")?;
 
         let labels = stmt
             .query_map(params![meeting_id.to_string()], |row| {
-                Ok((row.get::<_, i32>(0)? as u32, row.get::<_, String>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
 
         Ok(labels)
     }
+}
 
-    /// Apply speaker labels to transcript segments
-    fn apply_speaker_labels_to_transcript(
-        &self,
-        meeting_id: &MeetingId,
-    ) -> Result<(), StorageError> {
-        let labels = self.get_speaker_labels(meeting_id)?;
-        if labels.is_empty() {
-            return Ok(());
-        }
+/// Speaker IDs in `transcript` that `speaker` names, most specific match first.
+fn resolve_speaker_keys(transcript: &Transcript, speaker: &str) -> Vec<String> {
+    let speaker = speaker.trim();
+    let keys = transcript.speaker_keys();
 
-        // Load and update transcript
-        let mut transcript = match self.load_transcript(meeting_id) {
-            Ok(t) => t,
-            Err(_) => return Ok(()), // No transcript yet
-        };
-
-        for segment in &mut transcript.segments {
-            if let Some(ref speaker_id) = segment.speaker_id {
-                // Parse speaker ID - supports "SPEAKER_00" or just "0"
-                let speaker_num: Option<u32> = if speaker_id.starts_with("SPEAKER_") {
-                    speaker_id.trim_start_matches("SPEAKER_").parse().ok()
-                } else {
-                    speaker_id.parse().ok()
-                };
-
-                if let Some(num) = speaker_num {
-                    if let Some(label) = labels.get(&num) {
-                        segment.speaker_label = Some(label.clone());
-                    }
-                }
-            }
-        }
-
-        // Save updated transcript
-        self.save_transcript(meeting_id, &transcript)?;
-
-        Ok(())
+    if let Some(key) = keys.iter().find(|k| k.as_str() == speaker) {
+        return vec![key.clone()];
     }
+    if let Ok(num) = speaker.trim_start_matches("SPEAKER_").parse::<u32>() {
+        let key = format!("SPEAKER_{:02}", num);
+        if keys.contains(&key) {
+            return vec![key];
+        }
+    }
+    if let Some(key) = keys.iter().find(|k| k.eq_ignore_ascii_case(speaker)) {
+        return vec![key.clone()];
+    }
+
+    let mut by_name: Vec<String> = transcript
+        .segments
+        .iter()
+        .filter(|s| {
+            s.speaker_label
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case(speaker))
+        })
+        .map(|s| s.speaker_key())
+        .collect();
+    by_name.sort();
+    by_name.dedup();
+    by_name
 }
 
 // Helper functions for status serialization
@@ -838,50 +913,249 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_speaker_labels() {
-        let (storage, _temp) = create_test_storage();
-        let mut metadata = MeetingMetadata::new(Some("Label Test".to_string()));
+    /// A stored meeting whose transcript has the given (speaker_id, source) segments.
+    fn meeting_with_speakers(
+        storage: &MeetingStorage,
+        speakers: &[(Option<&str>, crate::meeting::data::AudioSource)],
+    ) -> (MeetingId, Transcript) {
+        let metadata = MeetingMetadata::new(Some("Labels".to_string()));
         let id = metadata.id;
+        storage.create_meeting(&metadata).unwrap();
+        let mut transcript = Transcript::new();
+        for (i, (speaker_id, source)) in speakers.iter().enumerate() {
+            let mut seg = crate::meeting::data::TranscriptSegment::new(
+                i as u32,
+                i as u64 * 1000,
+                i as u64 * 1000 + 900,
+                format!("line {}", i),
+                0,
+            );
+            seg.source = *source;
+            seg.speaker_id = speaker_id.map(str::to_string);
+            transcript.add_segment(seg);
+        }
+        storage.save_transcript(&id, &transcript).unwrap();
+        (id, transcript)
+    }
 
-        let path = storage.create_meeting(&metadata).unwrap();
-        metadata.storage_path = Some(path);
-        storage.update_meeting(&metadata).unwrap();
-
-        // Set labels
-        storage.set_speaker_label(&id, 0, "Alice").unwrap();
-        storage.set_speaker_label(&id, 1, "Bob").unwrap();
-
-        // Get labels
-        let labels = storage.get_speaker_labels(&id).unwrap();
-        assert_eq!(labels.len(), 2);
-        assert_eq!(labels.get(&0), Some(&"Alice".to_string()));
-        assert_eq!(labels.get(&1), Some(&"Bob".to_string()));
+    fn displayed(storage: &MeetingStorage, id: &MeetingId) -> Vec<String> {
+        storage
+            .load_transcript(id)
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect()
     }
 
     #[test]
-    fn test_speaker_labels_overwrite() {
+    fn simple_diarization_speakers_can_be_labelled() {
+        use crate::meeting::data::AudioSource::{Loopback, Microphone};
         let (storage, _temp) = create_test_storage();
-        let mut metadata = MeetingMetadata::new(Some("Overwrite Test".to_string()));
-        let id = metadata.id;
+        let (id, _) = meeting_with_speakers(
+            &storage,
+            &[(Some("You"), Microphone), (Some("Remote"), Loopback)],
+        );
 
-        let path = storage.create_meeting(&metadata).unwrap();
-        metadata.storage_path = Some(path);
-        storage.update_meeting(&metadata).unwrap();
+        let keys = storage.set_speaker_label(&id, "Remote", "Dana").unwrap();
+        assert_eq!(keys, vec!["Remote".to_string()]);
+        storage.set_speaker_label(&id, "You", "Pete").unwrap();
 
-        storage.set_speaker_label(&id, 0, "Alice").unwrap();
-        storage.set_speaker_label(&id, 0, "Carol").unwrap();
+        assert_eq!(displayed(&storage, &id), vec!["Pete", "Dana"]);
+    }
 
-        let labels = storage.get_speaker_labels(&id).unwrap();
-        assert_eq!(labels.get(&0), Some(&"Carol".to_string()));
+    #[test]
+    fn undiarized_tracks_are_labelled_by_source() {
+        use crate::meeting::data::AudioSource::{Loopback, Microphone};
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = meeting_with_speakers(&storage, &[(None, Microphone), (None, Loopback)]);
+
+        storage.set_speaker_label(&id, "remote", "Dana").unwrap();
+        assert_eq!(displayed(&storage, &id), vec!["You", "Dana"]);
+    }
+
+    #[test]
+    fn labelling_a_speaker_not_in_the_meeting_is_an_error() {
+        use crate::meeting::data::AudioSource::{Loopback, Microphone};
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = meeting_with_speakers(
+            &storage,
+            &[(Some("You"), Microphone), (Some("Remote"), Loopback)],
+        );
+
+        let err = storage
+            .set_speaker_label(&id, "SPEAKER_01", "Dana")
+            .unwrap_err();
+        match err {
+            StorageError::UnknownSpeaker { speaker, available } => {
+                assert_eq!(speaker, "SPEAKER_01");
+                assert_eq!(available, vec!["Remote".to_string(), "You".to_string()]);
+            }
+            other => panic!("expected UnknownSpeaker, got {:?}", other),
+        }
+        assert!(storage.get_speaker_labels(&id).unwrap().is_empty());
+        assert_eq!(displayed(&storage, &id), vec!["You", "Remote"]);
+    }
+
+    #[test]
+    fn labelling_before_the_first_chunk_is_an_error() {
+        let (storage, _temp) = create_test_storage();
+        let metadata = MeetingMetadata::new(None);
+        storage.create_meeting(&metadata).unwrap();
+        assert!(matches!(
+            storage.set_speaker_label(&metadata.id, "You", "Pete"),
+            Err(StorageError::UnknownSpeaker { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_label_is_rejected() {
+        use crate::meeting::data::AudioSource::Microphone;
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = meeting_with_speakers(&storage, &[(Some("You"), Microphone)]);
+        assert!(matches!(
+            storage.set_speaker_label(&id, "You", "  "),
+            Err(StorageError::EmptyLabel)
+        ));
+    }
+
+    #[test]
+    fn ml_speaker_ids_accept_numeric_shorthand() {
+        use crate::meeting::data::AudioSource::Microphone;
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = meeting_with_speakers(
+            &storage,
+            &[
+                (Some("SPEAKER_00"), Microphone),
+                (Some("SPEAKER_01"), Microphone),
+            ],
+        );
+
+        storage.set_speaker_label(&id, "1", "Dana").unwrap();
+        storage
+            .set_speaker_label(&id, "SPEAKER_00", "Alice")
+            .unwrap();
+        storage
+            .set_speaker_label(&id, "SPEAKER_00", "Carol")
+            .unwrap();
+
+        assert_eq!(displayed(&storage, &id), vec!["Carol", "Dana"]);
+    }
+
+    /// The daemon rewrites transcript.json from its in-memory transcript after
+    /// every chunk and again on stop. A label set in between must survive.
+    #[test]
+    fn label_set_mid_meeting_survives_later_saves() {
+        use crate::meeting::data::AudioSource::{Loopback, Microphone};
+        let (storage, _temp) = create_test_storage();
+        let (id, mut in_memory) = meeting_with_speakers(
+            &storage,
+            &[(Some("You"), Microphone), (Some("Remote"), Loopback)],
+        );
+
+        storage.set_speaker_label(&id, "Remote", "Dana").unwrap();
+
+        // Next chunk, then stop: both saves come from the unlabelled copy.
+        let mut seg =
+            crate::meeting::data::TranscriptSegment::new(2, 3000, 3900, "more".to_string(), 1);
+        seg.source = Loopback;
+        seg.speaker_id = Some("Remote".to_string());
+        in_memory.add_segment(seg);
+        storage.save_transcript(&id, &in_memory).unwrap();
+        storage.save_transcript(&id, &in_memory).unwrap();
+
+        assert_eq!(displayed(&storage, &id), vec!["You", "Dana", "Dana"]);
+
+        // And the file itself carries the name for readers that skip the index.
+        let path = storage
+            .get_meeting_path(&id)
+            .unwrap()
+            .join("transcript.json");
+        let on_disk: Transcript =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(on_disk.segments[2].speaker_label.as_deref(), Some("Dana"));
+    }
+
+    #[test]
+    fn speakers_given_the_same_name_render_as_one() {
+        use crate::meeting::data::AudioSource::Microphone;
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = meeting_with_speakers(
+            &storage,
+            &[
+                (Some("SPEAKER_00"), Microphone),
+                (Some("SPEAKER_02"), Microphone),
+                (Some("SPEAKER_01"), Microphone),
+            ],
+        );
+
+        storage
+            .set_speaker_label(&id, "SPEAKER_00", "Dana")
+            .unwrap();
+        storage
+            .set_speaker_label(&id, "SPEAKER_02", "Dana")
+            .unwrap();
+
+        let meeting = storage.load_meeting_data(&id).unwrap();
+        assert_eq!(meeting.transcript.speakers(), vec!["Dana", "SPEAKER_01"]);
+
+        let md = crate::meeting::export::export_meeting(
+            &meeting,
+            crate::meeting::export::ExportFormat::Markdown,
+            &crate::meeting::export::ExportOptions {
+                include_speakers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(md.matches("### Dana").count(), 1, "{}", md);
+
+        // Renaming by the shared name renames both speakers.
+        let keys = storage
+            .set_speaker_label(&id, "Dana", "Dana Smith")
+            .unwrap();
+        assert_eq!(
+            keys,
+            vec!["SPEAKER_00".to_string(), "SPEAKER_02".to_string()]
+        );
+        assert_eq!(
+            displayed(&storage, &id),
+            vec!["Dana Smith", "Dana Smith", "SPEAKER_01"]
+        );
+    }
+
+    #[test]
+    fn labels_from_the_numeric_table_carry_over() {
+        use crate::meeting::data::AudioSource::Microphone;
+        let temp = TempDir::new().unwrap();
+        let config = StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        };
+        let id = {
+            let storage = MeetingStorage::open(config.clone()).unwrap();
+            let (id, _) = meeting_with_speakers(&storage, &[(Some("SPEAKER_03"), Microphone)]);
+            storage
+                .conn
+                .execute(
+                    "INSERT INTO speaker_labels (meeting_id, speaker_num, label) VALUES (?1, 3, 'Old')",
+                    params![id.to_string()],
+                )
+                .unwrap();
+            id
+        };
+
+        let storage = MeetingStorage::open(config).unwrap();
+        assert_eq!(displayed(&storage, &id), vec!["Old"]);
     }
 
     #[test]
     fn test_speaker_labels_nonexistent_meeting() {
         let (storage, _temp) = create_test_storage();
         let id = MeetingId::new();
-        let result = storage.set_speaker_label(&id, 0, "Alice");
-        assert!(result.is_err());
+        let result = storage.set_speaker_label(&id, "You", "Alice");
+        assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
 
     #[test]

@@ -400,6 +400,18 @@ impl MeetingDaemon {
             }
         }
 
+        // Names given with `meeting label` mid-meeting, so the live feed
+        // shows them too. A failed lookup only costs the names.
+        if let Some(ref meeting) = self.current_meeting {
+            if let Ok(labels) = self.storage.get_speaker_labels(&meeting.metadata.id) {
+                for segment in &mut result.segments {
+                    if let Some(label) = labels.get(&segment.speaker_key()) {
+                        segment.speaker_label = Some(label.clone());
+                    }
+                }
+            }
+        }
+
         // Add segments to transcript
         if let Some(ref mut meeting) = self.current_meeting {
             for segment in &result.segments {

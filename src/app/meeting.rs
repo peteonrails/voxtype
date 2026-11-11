@@ -418,28 +418,15 @@ pub(crate) async fn run_meeting_command(
                 .resolve_meeting_id(&meeting_id)
                 .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
 
-            // Parse speaker_id - accept "SPEAKER_00", "0", "00", etc.
-            let speaker_num: u32 = if speaker_id.starts_with("SPEAKER_") {
-                speaker_id
-                    .trim_start_matches("SPEAKER_")
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid speaker ID format: {}", speaker_id))?
-            } else {
-                speaker_id.parse().map_err(|_| {
-                    anyhow::anyhow!(
-                        "Invalid speaker ID: {}. Use SPEAKER_XX or a number.",
-                        speaker_id
-                    )
-                })?
-            };
-
-            storage
-                .set_speaker_label(&id, speaker_num, &label)
-                .map_err(|e| anyhow::anyhow!("Failed to set speaker label: {}", e))?;
+            let keys = storage
+                .set_speaker_label(&id, &speaker_id, &label)
+                .map_err(|e| anyhow::anyhow!("Failed to label speaker: {}", e))?;
 
             println!(
-                "Labeled SPEAKER_{:02} as '{}' in meeting {}",
-                speaker_num, label, meeting_id
+                "Labeled {} as '{}' in meeting {}",
+                keys.join(", "),
+                label.trim(),
+                meeting_id
             );
         }
 
