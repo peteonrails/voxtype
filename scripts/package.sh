@@ -853,6 +853,12 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     RPM_VULKAN_DEPENDS=(--depends vulkan-loader)
 fi
 
+# voxtype-osd-gtk4 links libgtk-4 and libgtk4-layer-shell; without them the
+# loader exits 127 and the OSD never starts (#857). Recommends on deb keeps
+# headless installs lean; fpm has no weak-dependency flag for rpm.
+# Ubuntu 24.04 does not package libgtk4-layer-shell0 (25.04+ and Debian
+# trixie+ do), so apt skips that Recommends there.
+
 # Build deb
 DEB_FILE="${RELEASE_DIR}/voxtype_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 if [[ "$BUILD_DEB" == "true" ]]; then
@@ -868,6 +874,8 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-recommends pipewire-alsa \
         --deb-recommends wtype \
         --deb-recommends wl-clipboard \
+        --deb-recommends "libgtk-4-1" \
+        --deb-recommends libgtk4-layer-shell0 \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
         --package "$DEB_FILE" \
@@ -899,6 +907,8 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         --depends "glibc" \
         --depends "curl" \
         --depends "pipewire-alsa" \
+        --depends "gtk4" \
+        --depends "gtk4-layer-shell" \
         "${RPM_VULKAN_DEPENDS[@]}" \
         --rpm-summary "$DESCRIPTION" \
         --package "$RPM_FILE" \
