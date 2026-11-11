@@ -329,6 +329,10 @@ Item {
 
   // ------------------------------------------------------------ notes
 
+  // The meeting's folder (metadata.storage_path from `show --json`), for
+  // Open folder; "" until read.
+  property string meetingFolder: ""
+
   property string notes: ""
   property string notesMeeting: ""
   // Typed but not yet saved; a reload never overwrites it.
@@ -430,6 +434,7 @@ Item {
     if (id === root.notesMeeting) return
     if (root.notesDirty) root.saveNotes()
     root.notesMeeting = id
+    root.meetingFolder = ""
     root.notes = ""
     root.notesDirty = false
     root.notesError = ""
@@ -620,7 +625,10 @@ Item {
       if (code !== 0) return
       var data = null
       try { data = JSON.parse(asksProc.out) } catch (e) {}
-      if (data) root.applyAsks(asksProc.meeting, data.asks)
+      if (!data) return
+      if (asksProc.meeting === root.feed.meetingId && data.metadata && data.metadata.storage_path)
+        root.meetingFolder = String(data.metadata.storage_path)
+      root.applyAsks(asksProc.meeting, data.asks)
     }
   }
 

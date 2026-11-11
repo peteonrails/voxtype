@@ -149,6 +149,8 @@ Item {
   }
 
   function insertSegment(segment) {
+    // A deleted line (a backlog may still carry one, flagged) is not shown.
+    if (segment.deleted === true) return
     var key = root.speakerKey(segment)
     var row = {
       segId: Number(segment.id),
@@ -309,6 +311,10 @@ Item {
   // It is the daemon's word on the line, override and all.
   function updateSegment(segment) {
     if (!segment || segment.id === undefined) return
+    if (segment.deleted === true) {
+      root.removeRow(Number(segment.id))
+      return
+    }
     var i = root.rowIndex(Number(segment.id))
     if (i === -1) {
       root.insertSegment(segment)
@@ -326,6 +332,38 @@ Item {
     root.noteSpeaker(key)
     root.noteLabel(key, segment)
     root.pruneSpeakers()
+  }
+
+  // Take a line out, returning everything needed to put it back (an undone
+  // or refused delete). null if the line is not here.
+  function removeRow(segId) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return null
+    var r = model.get(i)
+    var copy = ({})
+    for (var k in r) copy[k] = r[k]
+    model.remove(i)
+    root.pruneSpeakers()
+    return copy
+  }
+
+  // A removed line back in its place by start time.
+  function restoreRow(row) {
+    if (!row || root.rowIndex(row.segId) !== -1) return
+    var at = model.count
+    while (at > 0 && model.get(at - 1).startMs > row.startMs) at--
+    model.insert(at, row)
+    root.noteSpeaker(row.speaker)
+  }
+
+  function setText(segId, text) {
+    var i = root.rowIndex(segId)
+    if (i !== -1) model.setProperty(i, "text", String(text))
+  }
+
+  function textOf(segId) {
+    var i = root.rowIndex(segId)
+    return i === -1 ? null : model.get(i).text
   }
 
   // Chips are the speakers the transcript has lines for; one emptied by a
@@ -422,6 +460,9 @@ Item {
                         ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
+    } else if (kind === "segment_deleted") {
+      // The other shape a deletion may take; the same either way.
+      if (!ev.meeting_id || String(ev.meeting_id) === root.meetingId) root.removeRow(Number(ev.segment_id))
     } else if (kind === "speaker_renamed") {
       root.renameSpeaker(String(ev.from || ""), String(ev.to || ""))
     } else if (kind === "status") {

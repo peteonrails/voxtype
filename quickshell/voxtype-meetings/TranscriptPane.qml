@@ -1,10 +1,12 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls.Basic as C
 
 // The Transcript tab: speaker chips (click to rename), then one row per
 // utterance with its time, speaker and text. A line's speaker opens the
-// reassign chooser; hovering a line offers "Add note"; a note or highlight
-// shows as a marker in the margin and the note under the text.
+// reassign chooser; hovering a line offers Edit (its text, inline: Enter
+// saves, Escape cancels), Add note and Delete; a note or highlight shows as a
+// marker in the margin and the note under the text.
 Item {
   id: root
 
@@ -15,6 +17,27 @@ Item {
   signal renameRequested(var keys, string name)
   signal speakerClicked(var line, var anchor)
   signal noteClicked(var line, var anchor)
+  signal editRequested(int segId, string text)
+  signal deleteRequested(int segId)
+
+  // A small text action that shows on a line's hover.
+  component LineAction: Text {
+    id: act
+    signal activated()
+    readonly property bool hovered: actMouse.containsMouse
+    color: act.hovered ? root.theme.fg : root.theme.dim
+    font.family: root.theme.fontFamily
+    font.pixelSize: root.theme.caption
+    font.underline: act.hovered
+    MouseArea {
+      id: actMouse
+      anchors.fill: parent
+      anchors.margins: -root.theme.sm
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: act.activated()
+    }
+  }
 
   readonly property alias list: transcript
 
@@ -205,6 +228,26 @@ Item {
           readonly property string speakerName: root.feed.displayName(line.speaker)
           readonly property int chipIndex: root.feed.chipIndexFor(line.speaker)
           readonly property bool marked: line.annotation !== "" || line.highlight
+          property bool editing: false
+
+          function beginEdit() {
+            line.editing = true
+            editField.text = line.text
+            editField.forceActiveFocus()
+            editField.cursorPosition = editField.length
+          }
+
+          function cancelEdit() {
+            line.editing = false
+            root.forceActiveFocus()
+          }
+
+          function commitEdit() {
+            var next = editField.text.trim()
+            line.editing = false
+            root.forceActiveFocus()
+            if (next !== "" && next !== line.text) root.editRequested(line.segId, next)
+          }
 
           Rectangle {
             anchors.fill: parent
@@ -292,32 +335,76 @@ Item {
                 }
               }
 
-              Text {
-                id: noteAction
-                objectName: "lineNoteButton"
+              Row {
+                objectName: "lineActions"
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                visible: lineHover.containsMouse || noteMouse.containsMouse
-                text: line.marked ? "Edit note" : "Add note"
-                color: noteMouse.containsMouse ? root.theme.fg : root.theme.dim
-                font.family: root.theme.fontFamily
-                font.pixelSize: root.theme.caption
-                font.underline: noteMouse.containsMouse
+                spacing: root.theme.lg
+                visible: !line.editing
+                  && (lineHover.containsMouse || editAction.hovered || noteAction.hovered || deleteAction.hovered)
 
-                MouseArea {
-                  id: noteMouse
-                  anchors.fill: parent
-                  anchors.margins: -root.theme.sm
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.noteClicked(line, noteAction)
+                LineAction {
+                  id: editAction
+                  objectName: "lineEditButton"
+                  text: "Edit"
+                  onActivated: line.beginEdit()
+                }
+                LineAction {
+                  id: noteAction
+                  objectName: "lineNoteButton"
+                  text: line.marked ? "Edit note" : "Add note"
+                  onActivated: root.noteClicked(line, noteAction)
+                }
+                LineAction {
+                  id: deleteAction
+                  objectName: "lineDeleteButton"
+                  text: "Delete"
+                  onActivated: root.deleteRequested(line.segId)
                 }
               }
+            }
+
+            C.TextArea {
+              id: editField
+              objectName: "lineEditField"
+              width: parent.width
+              visible: line.editing
+              wrapMode: TextEdit.Wrap
+              color: root.theme.fg
+              selectionColor: root.theme.accent
+              selectedTextColor: root.theme.bg
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.body
+              padding: root.theme.sm
+              background: Rectangle {
+                radius: Math.min(root.theme.radius, 4)
+                color: root.theme.alpha(root.theme.fg, 0.05)
+                border.width: 1
+                border.color: root.theme.accent
+              }
+              // Enter saves; Shift+Enter is a new line; Escape cancels.
+              Keys.onReturnPressed: function(event) {
+                if (event.modifiers & Qt.ShiftModifier) event.accepted = false
+                else line.commitEdit()
+              }
+              Keys.onEnterPressed: function(event) { line.commitEdit() }
+              Keys.onEscapePressed: line.cancelEdit()
+              onActiveFocusChanged: if (!activeFocus && line.editing) line.cancelEdit()
+            }
+
+            Text {
+              objectName: "lineEditHint"
+              visible: line.editing
+              text: "Enter saves · Escape cancels"
+              color: root.theme.dim
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.caption
             }
 
             Text {
               objectName: "lineText"
               width: parent.width
+              visible: !line.editing
               text: line.text
               color: root.theme.fg
               font.family: root.theme.fontFamily

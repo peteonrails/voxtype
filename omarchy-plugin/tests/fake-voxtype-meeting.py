@@ -57,6 +57,15 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
                                     `annotation` {text, highlight} on the segment;
                                     --json prints the segment
 
+  meeting edit M SEG TEXT [--json] a line's new text; prints the segment
+  meeting delete-line M SEG [--json]
+                                    removes the line; the socket announces it as
+                                    {"event":"segment_deleted"} or, with
+                                    state["delete_shape"] == "flag", as
+                                    segment_updated with "deleted": true
+  meeting export M --format F --output PATH [--timestamps --speakers --metadata]
+                                    writes a small stand-in file at PATH
+
 A meeting ID may be a unique prefix, as with the real CLI. Edits to a past
 meeting rewrite its transcript.json; edits to the socket's meetings go through
 the socket, which announces live ones as segment_updated.
@@ -461,6 +470,64 @@ def annotate(state, args):
     return 0
 
 
+def edit_text(state, args):
+    want_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 3:
+        return 2
+    meeting, _, seg = find_segment(state, rest[0], rest[1])
+    if seg is None:
+        return 1
+    seg["text"] = rest[2]
+    if not put_segment(state, meeting, seg):
+        print("error: the fake socket did not apply the change", file=sys.stderr)
+        return 1
+    print(json.dumps(seg, indent=2) if want_json else "Edited segment %s" % rest[1])
+    return 0
+
+
+def delete_line(state, args):
+    want_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 2:
+        return 2
+    meeting, _, seg = find_segment(state, rest[0], rest[1])
+    if seg is None:
+        return 1
+    path = os.path.join(past_dir(meeting), "transcript.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            t = json.load(f)
+        t["segments"] = [s for s in t["segments"] if s["id"] != seg["id"]]
+        with open(path, "w") as f:
+            json.dump(t, f)
+    else:
+        nonce = "delete-%f" % time.time()
+        control({"cmd": "delete", "meeting_id": meeting, "segment_id": seg["id"],
+                 "shape": state.get("delete_shape", "event"), "nonce": nonce})
+        if not wait_applied(nonce):
+            print("error: the fake socket did not apply the change", file=sys.stderr)
+            return 1
+    print(json.dumps(dict(seg, deleted=True), indent=2) if want_json else "Deleted segment %s" % rest[1])
+    return 0
+
+
+def export(state, args):
+    meeting = resolve(state, args[0])
+    if meeting is None:
+        print("error: Meeting not found: " + args[0], file=sys.stderr)
+        return 1
+    fmt = args[args.index("--format") + 1]
+    out = args[args.index("--output") + 1]
+    flags = [a for a in args if a in ("--timestamps", "--speakers", "--metadata")]
+    with open(out, "w") as f:
+        f.write("FAKE EXPORT %s %s %s\n" % (meeting, fmt, " ".join(flags)))
+        for s in segments_of(state, meeting) or []:
+            f.write(s["text"] + "\n")
+    print("Exported to %s" % out, file=sys.stderr)
+    return 0
+
+
 def list_meetings(state, args):
     """meeting list --json [--limit N]: the socket's last meeting, then the past ones."""
     limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 10
@@ -496,7 +563,8 @@ def show(state, args_meeting):
     snap = snapshot()
     target = next(m for m in (snap.get("live"), snap.get("stored")) if m and m.get("meeting_id") == meeting)
     meta = {"id": meeting, "title": target.get("title"), "started_at": target.get("started_at"),
-            "status": "completed", "chunk_count": 3, "audio_retained": False}
+            "status": "completed", "chunk_count": 3, "audio_retained": False,
+            "storage_path": os.path.join(os.environ["FAKE_MEETING_DATA"], "live-" + meeting)}
     if snap.get("summary"):
         meta["summary"] = snap["summary"]
     saved = os.path.join(os.environ["FAKE_MEETING_DATA"], "summary-%s.json" % meeting)
@@ -531,7 +599,7 @@ def main():
         return 1
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
-            "assistant", "ask", "summarize", "notes", "annotate", "reassign"):
+            "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -571,6 +639,12 @@ def main():
         return notes(state, args[2:])
     elif action == "annotate":
         return annotate(state, args[2:])
+    elif action == "edit":
+        return edit_text(state, args[2:])
+    elif action == "delete-line":
+        return delete_line(state, args[2:])
+    elif action == "export":
+        return export(state, args[2:])
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))
