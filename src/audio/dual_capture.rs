@@ -187,41 +187,23 @@ impl DualCapture {
         })
     }
 
-    /// Find a PipeWire/PulseAudio monitor source via pactl
+    /// Find a PipeWire/PulseAudio monitor source via pactl.
     fn find_monitor_source() -> Option<String> {
-        // pactl list short sources output format:
-        // ID\tNAME\tDRIVER\tFORMAT\tSTATUS
-        let output = std::process::Command::new("pactl")
+        let sources = std::process::Command::new("pactl")
             .args(["list", "short", "sources"])
             .output()
             .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // First pass: prefer RUNNING monitor sources (active audio output)
-        for line in stdout.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() >= 5 {
-                let name = fields[1];
-                let status = fields[4];
-                if name.contains(".monitor") && status == "RUNNING" {
-                    tracing::debug!("Found running monitor source: {}", name);
-                    return Some(name.to_string());
-                }
-            }
-        }
-        // Fall back to any monitor source
-        for line in stdout.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() >= 2 {
-                let name = fields[1];
-                if name.contains(".monitor") {
-                    tracing::debug!("Found monitor source: {}", name);
-                    return Some(name.to_string());
-                }
-            }
-        }
-        None
+        let default_sink = std::process::Command::new("pactl")
+            .arg("get-default-sink")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        pick_monitor_source(
+            default_sink.as_deref(),
+            &String::from_utf8_lossy(&sources.stdout),
+        )
     }
 
     /// Check if loopback capture is active
@@ -346,8 +328,101 @@ impl DualSamples {
     }
 }
 
+/// Choose the monitor to record the far side of a call from.
+///
+/// The default sink's monitor comes first, because that is where call audio
+/// plays. Taking the first RUNNING monitor instead picked whichever output
+/// happened to be active (an idle S/PDIF sink on a USB card) and recorded
+/// silence while the call played on the speakers. A running monitor, then
+/// any monitor, are fallbacks for servers without a default sink.
+///
+/// `sources` is `pactl list short sources` output: ID, NAME, DRIVER, FORMAT,
+/// STATUS separated by tabs.
+fn pick_monitor_source(default_sink: Option<&str>, sources: &str) -> Option<String> {
+    let monitors: Vec<(&str, &str)> = sources
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let name = *fields.get(1)?;
+            name.ends_with(".monitor")
+                .then(|| (name, fields.get(4).copied().unwrap_or("")))
+        })
+        .collect();
+
+    if let Some(sink) = default_sink {
+        let wanted = format!("{sink}.monitor");
+        if let Some((name, _)) = monitors.iter().find(|(name, _)| *name == wanted) {
+            tracing::debug!("Using the default sink's monitor: {}", name);
+            return Some(name.to_string());
+        }
+    }
+    if let Some((name, _)) = monitors.iter().find(|(_, status)| *status == "RUNNING") {
+        tracing::debug!("Found running monitor source: {}", name);
+        return Some(name.to_string());
+    }
+    monitors.first().map(|(name, _)| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    const SOURCES: &str = "64\talsa_output.usb-Generic_USB_Audio-00.HiFi__SPDIF__sink.monitor\tPipeWire\ts16le 2ch 48000Hz\tIDLE
+65\talsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED
+66\talsa_output.usb-Generic_USB_Audio-00.HiFi__Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED
+70\talsa_input.usb-Generic_USB_Audio-00.HiFi__Mic1__source\tPipeWire\ts32le 2ch 48000Hz\tRUNNING
+";
+
+    #[test]
+    fn default_sink_monitor_wins_over_the_first_listed_monitor() {
+        // Pete's machine on 2026-11-11: calls played on Speaker, auto picked
+        // the S/PDIF monitor listed first, and the remote track was silent.
+        assert_eq!(
+            pick_monitor_source(
+                Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink"),
+                SOURCES
+            )
+            .as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor")
+        );
+    }
+
+    #[test]
+    fn default_sink_monitor_wins_over_a_running_one() {
+        let sources = SOURCES.replace(
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED",
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tRUNNING",
+        );
+        assert_eq!(
+            pick_monitor_source(
+                Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink"),
+                &sources
+            )
+            .as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor")
+        );
+    }
+
+    #[test]
+    fn without_a_default_sink_a_running_monitor_then_any_monitor() {
+        let running = SOURCES.replace(
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED",
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tRUNNING",
+        );
+        assert_eq!(
+            pick_monitor_source(None, &running).as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Headphones__sink.monitor")
+        );
+        assert_eq!(
+            pick_monitor_source(Some("gone_sink"), SOURCES).as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__SPDIF__sink.monitor")
+        );
+    }
+
+    #[test]
+    fn input_sources_are_never_picked() {
+        let only_mic = "70\talsa_input.usb-Mic__source\tPipeWire\ts32le 2ch 48000Hz\tRUNNING\n";
+        assert_eq!(pick_monitor_source(None, only_mic), None);
+    }
+
     use super::*;
 
     #[test]
