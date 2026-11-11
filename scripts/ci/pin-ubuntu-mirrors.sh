@@ -4,7 +4,8 @@
 # On 2026-11-11 Canonical's DNS went down for hours. Public resolvers kept
 # serving cached answers, but the Azure resolver behind GitHub-hosted runners
 # did not, so every apt fetch from archive/security/azure.archive.ubuntu.com
-# failed on the runner and inside Docker builds alike.
+# failed on the runner and inside Docker builds alike. The arm64 runners
+# use ports.ubuntu.com, which needs the same treatment.
 #
 # When the runner cannot resolve the Ubuntu mirrors, this resolves them over
 # DNS-over-HTTPS (falling back to known addresses), pins them in the runner's
@@ -16,13 +17,14 @@ if [ "$(uname -s)" != Linux ]; then
   exit 0
 fi
 
-HOSTS=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com)
+HOSTS=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com)
 
 # Last-known addresses, used only if DNS-over-HTTPS is unreachable too.
 declare -A KNOWN=(
   [archive.ubuntu.com]=91.189.90.13
   [security.ubuntu.com]=91.189.90.12
   [azure.archive.ubuntu.com]=52.147.219.192
+  [ports.ubuntu.com]=91.189.91.104
 )
 
 export_env() {
