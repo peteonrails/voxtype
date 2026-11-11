@@ -2198,6 +2198,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Minutes before a meeting stops on its own. 0 is unlimited.",
     ),
     spec(
+        "meeting.show_view_on_start",
+        "meeting",
+        "show_view_on_start",
+        KeyType::Bool,
+        "Meeting",
+        "Show meeting view on start",
+        "Open the live meeting view in the Omarchy shell when a meeting starts.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
@@ -3008,6 +3017,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
+        "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
