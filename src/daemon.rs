@@ -3044,6 +3044,7 @@ impl Daemon {
             max_duration_mins: self.config.meeting.max_duration_mins,
             vad_threshold: self.config.meeting.audio.vad_threshold,
             diarization: diarization_config,
+            echo_rules: (&self.config.meeting.audio).into(),
         };
 
         // Start capturing before anything loads. Building the meeting daemon

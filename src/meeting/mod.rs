@@ -27,6 +27,7 @@ pub mod chunk;
 pub mod data;
 pub mod detect;
 pub mod diarization;
+pub mod echo;
 pub mod events;
 pub mod export;
 pub mod hook;
@@ -75,6 +76,8 @@ pub struct MeetingConfig {
     pub vad_threshold: f32,
     /// Diarization configuration (None = disabled)
     pub diarization: Option<diarization::DiarizationConfig>,
+    /// The short-line echo rules (`[meeting.audio] echo_fuzzy`)
+    pub echo_rules: echo::EchoRules,
 }
 
 impl Default for MeetingConfig {
@@ -87,6 +90,7 @@ impl Default for MeetingConfig {
             max_duration_mins: 180,
             vad_threshold: 0.01,
             diarization: None,
+            echo_rules: echo::EchoRules::default(),
         }
     }
 }
@@ -154,6 +158,10 @@ pub struct MeetingDaemon {
     audio: Option<retained_audio::AudioRetainer>,
     /// `post_meeting_command`, run once a stopped meeting's folder is final
     post_meeting: hook::PostMeetingSettings,
+    /// Microphone lines the audio showed to be your own voice. They are
+    /// judged once, with their chunk's audio, and kept out of the short-echo
+    /// rules on every later dedup pass, which has no audio for them.
+    own_voice_ids: std::collections::HashSet<u32>,
     /// Assistant settings for the summary written when a meeting stops
     assistant: Option<assistant::AssistantSettings>,
 }
@@ -231,6 +239,7 @@ impl MeetingDaemon {
             model_name,
             audio: None,
             post_meeting: hook::PostMeetingSettings::from_config(app_config),
+            own_voice_ids: Default::default(),
             assistant: Some(assistant::AssistantSettings::from_config(app_config)),
         })
     }
@@ -260,6 +269,7 @@ impl MeetingDaemon {
             model_name: Some("test-model".to_string()),
             audio: None,
             post_meeting: hook::PostMeetingSettings::default(),
+            own_voice_ids: Default::default(),
             assistant: None,
         }
     }
@@ -319,6 +329,7 @@ impl MeetingDaemon {
         self.current_meeting = Some(meeting);
         self.state = MeetingState::start();
         self.next_segment_id = 0;
+        self.own_voice_ids.clear();
 
         let _ = self
             .event_tx
@@ -510,6 +521,19 @@ impl MeetingDaemon {
             }
         }
 
+        // Measure both tracks before they are handed off, so the short-echo
+        // rules can tell your voice from the remote's echo by level.
+        let probe = (!mic.is_empty() && !loopback.is_empty()).then(|| {
+            let offset = |s| self.source_offsets.get(&s).copied().unwrap_or(0);
+            echo::EchoProbe::new(
+                &mic,
+                offset(AudioSource::Microphone),
+                &loopback,
+                offset(AudioSource::Loopback),
+                ChunkConfig::default().sample_rate,
+                self.config.vad_threshold,
+            )
+        });
         let mut done = Vec::new();
         for (samples, source) in [
             (mic, AudioSource::Microphone),
@@ -533,9 +557,22 @@ impl MeetingDaemon {
             .iter()
             .flat_map(|(_, segments)| segments)
             .any(|s| s.source == AudioSource::Loopback);
+        if let Some(probe) = &probe {
+            for seg in done.iter().flat_map(|(_, segments)| segments) {
+                if seg.source == AudioSource::Microphone
+                    && probe.own_voice(seg.start_ms, seg.end_ms)
+                {
+                    self.own_voice_ids.insert(seg.id);
+                }
+            }
+        }
         if had_loopback {
+            let own = &self.own_voice_ids;
+            let rules = self.config.echo_rules;
             if let Some(ref mut meeting) = self.current_meeting {
-                let removed = meeting.transcript.dedup_bleed_through();
+                let removed = meeting
+                    .transcript
+                    .dedup_bleed_through_with(&rules, &|s| own.contains(&s.id));
                 if removed > 0 {
                     tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
                 }
@@ -1441,6 +1478,301 @@ mod tests {
         live_said.sort();
         assert_eq!(live_said, expected);
         assert_eq!(said(&h.saved().transcript.segments), expected);
+    }
+
+    /// One line of the demo meeting: the carrier tone that stands for it in
+    /// the rebuilt audio, and what the fake engine hears when it finds it.
+    struct DemoLine {
+        freq: f32,
+        text: Option<String>,
+    }
+
+    /// The 1.2.1 demo's release sync, rebuilt at 16 kHz from the per-frame
+    /// levels in tests/fixtures/meeting_echo/release-sync.json. Every line
+    /// gets a carrier of its own, and so does the echo of each remote line
+    /// on the microphone, standing in for the engine mishearing it.
+    struct ReleaseSync {
+        mic: Vec<f32>,
+        loopback: Vec<f32>,
+        lines: Vec<DemoLine>,
+        echoes: Vec<String>,
+    }
+
+    impl ReleaseSync {
+        const FRAME: usize = 480;
+
+        /// `replies` are short lines of yours added on top: (start in
+        /// seconds, text), voiced with the level of the demo's "Good.".
+        fn load(replies: &[(f32, &str)]) -> Self {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/meeting_echo/release-sync.json");
+            let fixture: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let rms = |key: &str| -> Vec<f32> {
+                fixture[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_f64().unwrap() as f32)
+                    .collect()
+            };
+            let (own_rms, remote_rms) = (rms("own_rms"), rms("remote_rms"));
+            let frames = own_rms.len();
+            let gain = fixture["bleed_gain"].as_f64().unwrap() as f32;
+            let delay = (fixture["bleed_delay_ms"].as_u64().unwrap() / 30) as usize;
+
+            let mut own = vec![0.0f32; frames * Self::FRAME];
+            let mut loopback = vec![0.0f32; frames * Self::FRAME];
+            let mut bleed = vec![0.0f32; frames * Self::FRAME];
+            let mut lines = Vec::new();
+            let mut echoes = Vec::new();
+            // A frame at its measured level on a carrier.
+            let voice = |track: &mut [f32], frame: usize, level: f32, freq: f32| {
+                for n in frame * Self::FRAME..((frame + 1) * Self::FRAME).min(track.len()) {
+                    let t = n as f32 / 16000.0;
+                    track[n] += std::f32::consts::SQRT_2
+                        * level
+                        * (2.0 * std::f32::consts::PI * freq * t).sin();
+                }
+            };
+            let (mut mics, mut remotes) = (0, 0);
+            for u in fixture["utterances"].as_array().unwrap() {
+                let first = (u["start_ms"].as_u64().unwrap() / 30) as usize;
+                let last = ((u["end_ms"].as_u64().unwrap() / 30) as usize).min(frames);
+                let text = u["text"].as_str().unwrap().to_string();
+                if u["track"] == "mic" {
+                    let freq = 400.0 + 200.0 * mics as f32;
+                    mics += 1;
+                    for (f, &level) in own_rms.iter().enumerate().take(last).skip(first) {
+                        voice(&mut own, f, level, freq);
+                    }
+                    lines.push(DemoLine {
+                        freq,
+                        text: Some(text),
+                    });
+                } else {
+                    let freq = 3000.0 + 200.0 * remotes as f32;
+                    let echo_freq = 5000.0 + 200.0 * remotes as f32;
+                    remotes += 1;
+                    for (f, &level) in remote_rms.iter().enumerate().take(last).skip(first) {
+                        voice(&mut loopback, f, level, freq);
+                        if f + delay < frames {
+                            voice(&mut bleed, f + delay, gain * level, echo_freq);
+                        }
+                    }
+                    let heard = u["heard_on_mic"].as_str().map(str::to_string);
+                    echoes.extend(heard.clone());
+                    lines.push(DemoLine {
+                        freq,
+                        text: Some(text),
+                    });
+                    lines.push(DemoLine {
+                        freq: echo_freq,
+                        text: heard,
+                    });
+                }
+            }
+            let good = (18150 / 30) as usize;
+            for &(start, text) in replies {
+                let freq = 400.0 + 200.0 * mics as f32;
+                mics += 1;
+                let at = (start / 0.03) as usize;
+                for i in 0..15 {
+                    voice(&mut own, at + i, own_rms[good + i], freq);
+                }
+                lines.push(DemoLine {
+                    freq,
+                    text: Some(text.to_string()),
+                });
+            }
+            let mic = own.iter().zip(&bleed).map(|(o, b)| o + b).collect();
+            Self {
+                mic,
+                loopback,
+                lines,
+                echoes,
+            }
+        }
+
+        /// Feed it in 30 s chunks and return the saved transcript as
+        /// "Speaker: text" lines, and what was published live.
+        async fn run(self, h: &mut Harness) -> (Vec<String>, Vec<String>) {
+            h.daemon.transcriber = Some(Arc::new(DemoEngine {
+                lines: self.lines,
+                said: std::sync::Mutex::new(std::collections::HashSet::new()),
+            }));
+            let chunk = 30 * 16000;
+            for start in (0..self.mic.len()).step_by(chunk) {
+                let end = (start + chunk).min(self.mic.len());
+                h.daemon
+                    .process_pair(
+                        self.mic[start..end].to_vec(),
+                        self.loopback[start..end].to_vec(),
+                    )
+                    .await;
+            }
+            let said = |segs: &[TranscriptSegment]| {
+                let mut segs = segs.to_vec();
+                segs.sort_by_key(|s| s.start_ms);
+                segs.iter()
+                    .map(|s| format!("{}: {}", s.speaker_display(), s.text))
+                    .collect::<Vec<_>>()
+            };
+            let mut live = Vec::new();
+            while let Ok(event) = h.events.try_recv() {
+                if let MeetingEvent::ChunkProcessed { segments, .. } = event {
+                    live.extend(segments);
+                }
+            }
+            (said(&h.saved().transcript.segments), said(&live))
+        }
+    }
+
+    /// Hears the demo's carriers: each line once, timed by the frames where
+    /// its carrier is the loudest.
+    struct DemoEngine {
+        lines: Vec<DemoLine>,
+        said: std::sync::Mutex<std::collections::HashSet<usize>>,
+    }
+
+    impl DemoEngine {
+        fn loudest(&self, frame: &[f32]) -> Option<usize> {
+            let n = frame.len() as f32;
+            let amplitude = |freq: f32| {
+                let w = 2.0 * std::f32::consts::PI * freq / 16000.0;
+                let (re, im) = frame
+                    .iter()
+                    .enumerate()
+                    .fold((0.0, 0.0), |(re, im), (i, s)| {
+                        (re + s * (w * i as f32).cos(), im - s * (w * i as f32).sin())
+                    });
+                2.0 * (re * re + im * im).sqrt() / n
+            };
+            self.lines
+                .iter()
+                .map(|l| amplitude(l.freq))
+                .enumerate()
+                .filter(|&(_, a)| a > 0.003)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        }
+    }
+
+    impl Transcriber for DemoEngine {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
+        fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
+            Ok(self
+                .transcribe_timed(samples)?
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<Vec<_>>()
+                .join(" "))
+        }
+
+        fn transcribe_timed(
+            &self,
+            samples: &[f32],
+        ) -> std::result::Result<Vec<crate::transcribe::TimedSegment>, TranscribeError> {
+            // Runs of frames per carrier, bridging pauses shorter than the
+            // utterance gap; a line is timed by its longest run.
+            let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+            for (f, frame) in samples.chunks(ReleaseSync::FRAME).enumerate() {
+                let Some(line) = self.loudest(frame) else {
+                    continue;
+                };
+                match runs.last_mut() {
+                    Some((l, _, last)) if *l == line && f - *last <= 23 => *last = f,
+                    _ => runs.push((line, f, f)),
+                }
+            }
+            let mut said = self.said.lock().unwrap();
+            let mut out = Vec::new();
+            for line in runs
+                .iter()
+                .map(|r| r.0)
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                let Some(text) = &self.lines[line].text else {
+                    continue;
+                };
+                let (_, first, last) = runs
+                    .iter()
+                    .filter(|r| r.0 == line)
+                    .max_by_key(|r| r.2 - r.1)
+                    .copied()
+                    .unwrap();
+                if said.insert(line) {
+                    out.push(crate::transcribe::TimedSegment {
+                        text: text.clone(),
+                        start_secs: first as f32 * 0.03,
+                        end_secs: (last + 1) as f32 * 0.03,
+                    });
+                }
+            }
+            out.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+            Ok(out)
+        }
+    }
+
+    /// The demo's own lines, in order, with `replies` slotted in by time.
+    fn demo_lines(extra: &[(&str, usize)]) -> Vec<String> {
+        let mut lines = vec![
+            "You: Okay, let's start the release sync.",
+            "You: The build for 1.2.1 passed on every variant last night.",
+            "Remote: Great! I tested the Amarky package this morning, and the settings panel opened without any problems.",
+            "You: Good. Are there any blockers left before we tag it?",
+            "Remote: Only one. The restart banner stays visible after the demon restarts. I think we can ship with that as a known issue.",
+            "You: Agreed. Let's put it in the release notes and fix it in the next patch.",
+            "Remote: I'll draft the notes today and send them to you by five.",
+            "You: Perfect, then we tag tomorrow morning at 10. Thanks, Dana.",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+        for &(line, at) in extra.iter().rev() {
+            lines.insert(at, line.to_string());
+        }
+        lines
+    }
+
+    /// The echo fragments the demo left under "You" ("Omarky problem.",
+    /// "after the daemon restarts.", "5.") are misheard, so the exact rules
+    /// keep them; the fuzzy rule drops them.
+    #[tokio::test]
+    async fn misheard_echo_from_the_demo_is_dropped() {
+        let mut h = harness().await;
+        let demo = ReleaseSync::load(&[]);
+        let echoes = demo.echoes.clone();
+        assert_eq!(echoes.len(), 3);
+        let (saved, live) = demo.run(&mut h).await;
+        assert_eq!(saved, demo_lines(&[]), "{saved:#?}");
+        assert_eq!(live, saved);
+
+        let mut h = harness().await;
+        h.daemon.config.echo_rules.fuzzy = false;
+        let (saved, _) = ReleaseSync::load(&[]).run(&mut h).await;
+        for echo in &echoes {
+            assert!(
+                saved.contains(&format!("You: {echo}")),
+                "without the fuzzy rule {echo:?} stays: {saved:#?}"
+            );
+        }
+    }
+
+    /// Short replies of yours that repeat the remote's words, one said over
+    /// the remote ("Only one?" while Dana says "Only one.") and one just
+    /// after it, are kept: the microphone is louder than the echo explains.
+    #[tokio::test]
+    async fn real_short_replies_over_the_remote_are_kept() {
+        let mut h = harness().await;
+        let replies = [(16.8, "Problems?"), (23.1, "Only one?")];
+        let (saved, live) = ReleaseSync::load(&replies).run(&mut h).await;
+        let expected = demo_lines(&[("You: Problems?", 3), ("You: Only one?", 5)]);
+        assert_eq!(saved, expected, "{saved:#?}");
+        assert_eq!(live, saved);
     }
 
     /// Clusters each loopback chunk as the next new voice: Auto(0), then

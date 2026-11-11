@@ -1719,6 +1719,19 @@ The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
 `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
 terminal: anything that prompts for input fails.
 
+## Meetings: The Remote Side Shows Up Under "You"
+
+With speakers instead of headphones, your microphone hears the call. Voxtype removes that echo from your lines, but what is left can still show up:
+
+- **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track. Keep `[meeting.audio] echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones.
+- **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. `[meeting.audio] echo_fuzzy = true` (the default) drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
+- **A short reply of yours went missing.** The short-line checks keep a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud remote can still read as echo. Speak up, lower the call volume, or set `echo_fuzzy = false` to keep only exact-word matching. The log counts the words removed per chunk ("Removed N bleed-through word(s) via dedup"); at debug level it names each stripped line:
+
+```bash
+systemctl --user stop voxtype
+RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -i "short echo"
+```
+
 ---
 
 ## Meeting Assistant: Summaries Don't Appear

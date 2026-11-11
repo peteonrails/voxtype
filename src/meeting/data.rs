@@ -214,12 +214,29 @@ impl Transcript {
     /// that appear in any loopback segment and strips them out, keeping the user's
     /// actual speech. Returns the number of words removed.
     pub fn dedup_bleed_through(&mut self) -> usize {
+        let exact_only = crate::meeting::echo::EchoRules {
+            fuzzy: false,
+            ..Default::default()
+        };
+        self.dedup_bleed_through_with(&exact_only, &|_| false)
+    }
+
+    /// [`Transcript::dedup_bleed_through`] with the short-line rules set by
+    /// `rules`: misheard short echoes too when `rules.fuzzy`. A microphone
+    /// segment for which `own_voice` is true (the audio shows you speaking,
+    /// see [`crate::meeting::echo::EchoProbe`]) is never taken for a short
+    /// echo, so a "yes" you say while the remote says "yes" stays.
+    pub fn dedup_bleed_through_with(
+        &mut self,
+        rules: &crate::meeting::echo::EchoRules,
+        own_voice: &dyn Fn(&TranscriptSegment) -> bool,
+    ) -> usize {
         // Build a set of loopback n-grams for fast lookup.
         // We use 4-grams as the minimum match length to avoid false positives.
         let min_ngram = 4;
 
-        let total_removed =
-            self.dedup_short_echoes(min_ngram) + self.dedup_echoed_phrases(min_ngram);
+        let total_removed = self.dedup_short_echoes(min_ngram, rules, own_voice)
+            + self.dedup_echoed_phrases(min_ngram);
 
         // A segment that was all echo is gone, not an empty line.
         self.segments.retain(|s| !s.text.trim().is_empty());
@@ -231,8 +248,14 @@ impl Transcript {
     /// is echo when a loopback segment overlapping it in time holds the same
     /// words in the same order. The overlap is what keeps a reply you make
     /// later in the same words.
-    fn dedup_short_echoes(&mut self, min_ngram: usize) -> usize {
-        const TOLERANCE_MS: u64 = 1000;
+    fn dedup_short_echoes(
+        &mut self,
+        min_ngram: usize,
+        rules: &crate::meeting::echo::EchoRules,
+        own_voice: &dyn Fn(&TranscriptSegment) -> bool,
+    ) -> usize {
+        use crate::meeting::echo::{fuzzy_echo, normalize_word, overlapping_loopback_words};
+        const TOLERANCE_MS: u64 = crate::meeting::echo::ECHO_TOLERANCE_MS;
         let loopback: Vec<(u64, u64, Vec<String>)> = self
             .segments
             .iter()
@@ -240,22 +263,47 @@ impl Transcript {
             .map(|s| (s.start_ms, s.end_ms, normalize_for_dedup(&s.text)))
             .collect();
 
+        // Misheard echoes, judged before any line is cleared.
+        let fuzzy: Vec<bool> = self
+            .segments
+            .iter()
+            .map(|seg| {
+                rules.fuzzy
+                    && seg.source == AudioSource::Microphone
+                    && !own_voice(seg)
+                    && fuzzy_echo(
+                        &seg.text
+                            .split_whitespace()
+                            .map(normalize_word)
+                            .filter(|w| !w.is_empty())
+                            .collect::<Vec<_>>(),
+                        &overlapping_loopback_words(seg, &self.segments),
+                        rules.fuzzy_max_words,
+                    )
+            })
+            .collect();
+
         let mut removed = 0;
-        for seg in &mut self.segments {
-            if seg.source != AudioSource::Microphone {
+        for (seg, fuzzy) in self.segments.iter_mut().zip(fuzzy) {
+            if seg.source != AudioSource::Microphone || own_voice(seg) {
                 continue;
             }
             let words = normalize_for_dedup(&seg.text);
-            if words.is_empty() || words.len() >= min_ngram {
+            if words.is_empty() {
                 continue;
             }
-            let echoed = loopback.iter().any(|(start, end, said)| {
-                seg.start_ms < end + TOLERANCE_MS
-                    && *start < seg.end_ms + TOLERANCE_MS
-                    && said.windows(words.len()).any(|w| w == words.as_slice())
-            });
-            if echoed {
-                tracing::debug!("Stripping short echo: {:?}", seg.text);
+            let exact = words.len() < min_ngram
+                && loopback.iter().any(|(start, end, said)| {
+                    seg.start_ms < end + TOLERANCE_MS
+                        && *start < seg.end_ms + TOLERANCE_MS
+                        && said.windows(words.len()).any(|w| w == words.as_slice())
+                });
+            if exact || fuzzy {
+                tracing::debug!(
+                    "Stripping short echo{}: {:?}",
+                    if exact { "" } else { " (misheard)" },
+                    seg.text
+                );
                 removed += words.len();
                 seg.text.clear();
             }
@@ -1241,6 +1289,85 @@ mod tests {
         ));
         t.dedup_bleed_through();
         assert_eq!(lines(&t), vec!["Remote: Sounds good.", "You: Sounds good."]);
+    }
+
+    /// The demo's remote line and what the microphone made of its echo.
+    fn misheard_echo(mic_start: u64, mic_text: &str) -> Transcript {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            10_320,
+            16_290,
+            AudioSource::Loopback,
+            "Great! I tested the Amarky package this morning, and the settings panel opened without any problems.",
+        ));
+        t.add_segment(said(
+            1,
+            mic_start,
+            mic_start + 900,
+            AudioSource::Microphone,
+            mic_text,
+        ));
+        t
+    }
+
+    const FUZZY: crate::meeting::echo::EchoRules = crate::meeting::echo::EchoRules {
+        fuzzy: true,
+        fuzzy_max_words: 4,
+    };
+
+    #[test]
+    fn fuzzy_rule_drops_a_misheard_short_echo() {
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        assert_eq!(t.dedup_bleed_through_with(&FUZZY, &|_| false), 2);
+        assert_eq!(lines(&t).len(), 1);
+
+        // The exact rule alone keeps it: these are not the remote's words.
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t)[1], "You: Omarky problem.");
+    }
+
+    #[test]
+    fn fuzzy_rule_keeps_your_voice_late_lines_and_long_lines() {
+        // The audio showed you speaking.
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        t.dedup_bleed_through_with(&FUZZY, &|s| s.id == 1);
+        assert_eq!(lines(&t)[1], "You: Omarky problem.");
+
+        // Well after the remote line.
+        let mut t = misheard_echo(20_000, "Omarky problem.");
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t).len(), 2);
+
+        // Longer than fuzzy_max_words.
+        let mut t = misheard_echo(15_000, "tested the Omarky package this");
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t).len(), 2);
+    }
+
+    /// "Yes" said while the remote also says "yes" is caught by the exact
+    /// rule on text alone; the audio is what keeps it.
+    #[test]
+    fn own_voice_keeps_an_exact_short_reply() {
+        let remote_yes = || {
+            let mut t = Transcript::new();
+            t.add_segment(said(
+                0,
+                4_000,
+                6_000,
+                AudioSource::Loopback,
+                "Yes, ship it.",
+            ));
+            t.add_segment(said(1, 4_100, 4_600, AudioSource::Microphone, "Yes."));
+            t
+        };
+        let mut t = remote_yes();
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t), vec!["Remote: Yes, ship it."]);
+        let mut t = remote_yes();
+        t.dedup_bleed_through_with(&FUZZY, &|s| s.id == 1);
+        assert_eq!(lines(&t), vec!["Remote: Yes, ship it.", "You: Yes."]);
     }
 
     fn spoken_by(id: u32, speaker: &str) -> TranscriptSegment {
