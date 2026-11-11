@@ -157,6 +157,11 @@ enum WireEvent {
     SegmentUpdated {
         segment: TranscriptSegment,
     },
+    NotesUpdated {
+        meeting_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        updated_at: Option<DateTime<Utc>>,
+    },
     Status {
         status: String,
     },
@@ -295,6 +300,14 @@ impl MeetingEventHub {
     pub fn publish_segment_updated(&self, segment: &TranscriptSegment) {
         self.publish(WireEvent::SegmentUpdated {
             segment: segment.clone(),
+        });
+    }
+
+    /// Broadcast a `notes_updated` event: the meeting's notes.md changed.
+    pub fn publish_notes_updated(&self, notes: &crate::meeting::notes::MeetingNotes) {
+        self.publish(WireEvent::NotesUpdated {
+            meeting_id: notes.meeting_id.clone(),
+            updated_at: notes.updated_at,
         });
     }
 
@@ -655,6 +668,48 @@ mod tests {
         assert_eq!(value["event"], "segments");
         assert_eq!(value["chunk_id"], 0);
         assert_eq!(value["segments"][0]["text"], "hello there");
+
+        hub.cleanup();
+    }
+
+    #[tokio::test]
+    async fn segment_updated_and_notes_updated_reach_subscribers() {
+        let (_tmp, path) = temp_socket_dir();
+        let hub = MeetingEventHub::start(path.clone())
+            .await
+            .expect("start hub");
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        let _hello = read_line(&mut client).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut segment = TranscriptSegment::new(28, 127_000, 130_000, "hm".to_string(), 4);
+        segment.speaker_id = Some("Person 1".to_string());
+        segment.original_speaker = Some("Remote 1".to_string());
+        segment.annotation = Some(crate::meeting::SegmentAnnotation {
+            text: "check this".to_string(),
+            highlight: true,
+        });
+        hub.publish_segment_updated(&segment);
+        let value = read_line(&mut client).await;
+        assert_eq!(value["event"], "segment_updated");
+        assert_eq!(value["segment"]["id"], 28);
+        assert_eq!(value["segment"]["original_speaker"], "Remote 1");
+        assert_eq!(value["segment"]["annotation"]["text"], "check this");
+        assert_eq!(value["segment"]["annotation"]["highlight"], true);
+
+        let updated_at = chrono::DateTime::parse_from_rfc3339("2026-11-11T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        hub.publish_notes_updated(&crate::meeting::notes::MeetingNotes {
+            meeting_id: "abc".to_string(),
+            notes: "secret".to_string(),
+            updated_at: Some(updated_at),
+        });
+        let value = read_line(&mut client).await;
+        assert_eq!(
+            value,
+            serde_json::json!({"event": "notes_updated", "meeting_id": "abc", "updated_at": "2026-11-11T20:00:00Z"})
+        );
 
         hub.cleanup();
     }

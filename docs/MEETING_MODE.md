@@ -216,6 +216,36 @@ The move is stored per segment and applied whenever the transcript is saved or r
 
 This works during a meeting too. The command stores the move and the daemon applies it before the next chunk, sending the changed line to the meeting socket.
 
+### Notes
+
+Each meeting has free-text notes, kept as `notes.md` in the meeting's folder. You can write them during the meeting or after it; the daemon never overwrites them.
+
+```bash
+voxtype meeting notes latest                         # print them
+voxtype meeting notes latest --append "Ask Dana about travel"
+voxtype meeting notes latest --set-file agenda.md    # replace them ("-" reads stdin)
+voxtype meeting notes latest --json                  # {meeting_id, notes, updated_at}
+```
+
+Exports and `transcript.md` show the notes at the top, under "Notes".
+
+### Annotating a Line
+
+Attach a note or a highlight to one transcript line, by the segment's `id` from `meeting show --json`:
+
+```bash
+voxtype meeting annotate latest 28 "Check this number"
+voxtype meeting annotate latest 28 "Decision" --highlight
+voxtype meeting annotate latest 28 --highlight       # highlight without a note
+voxtype meeting annotate latest 28 --remove
+```
+
+A line has at most one annotation; annotating it again replaces it. Annotations are stored beside speaker moves and applied whenever the transcript is saved or read, so later chunks cannot remove them. Exports show each one as a quote under its line (`> Note: ...`, or `> **Highlight: ...**`), and `meeting show --json` and the meeting socket carry it on the segment as `"annotation": {"text": "...", "highlight": true}`. Both commands work during a meeting.
+
+### The Meeting Folder
+
+Each meeting folder holds `metadata.json`, `transcript.json` (the segments, with speaker names, moves and annotations applied), `transcript.md` (the same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change), and `notes.md` once you write notes.
+
 ### AI Summarization
 
 Generate a summary with key points, action items, and decisions:

@@ -147,6 +147,7 @@ needed:
 {"event": "segments", "chunk_id": 8, "segments": [ /* TranscriptSegment[] for this chunk only */ ]}
 {"event": "speaker_renamed", "from": "Remote", "to": "Remote 1"}
 {"event": "segment_updated", "segment": { /* one TranscriptSegment, same shape as in segments */ }}
+{"event": "notes_updated", "meeting_id": "...", "updated_at": "2026-11-11T20:00:00Z"}
 {"event": "status", "status": "paused"}
 {"event": "error", "message": "..."}
 ```
@@ -179,6 +180,16 @@ given it (absent after a reset). A moved line is never moved back by a later
 chunk, and a `speaker_renamed` applies to it like any other: rename by
 `speaker_id`, and rename `original_speaker` too if you keep it. The next
 `hello` already carries the change.
+
+A segment the user annotated (`voxtype meeting annotate`) carries
+`"annotation": {"text": "...", "highlight": true}`; the field is absent when
+there is none, and `text` is empty for a bare highlight. Adding, changing or
+removing an annotation during a meeting sends `segment_updated`.
+
+`notes_updated` means the meeting's notes (`notes.md`) changed. It carries
+no text: read it with `voxtype meeting notes <meeting_id> --json`, which
+prints `{"meeting_id": "...", "notes": "...", "updated_at": "..."}`
+(`updated_at` is null when there are no notes).
 
 Events fire roughly once per `chunk_duration_secs` (default 30s), not per
 word — meeting mode transcribes in chunks, it does not stream. A UI built on

@@ -55,6 +55,12 @@ impl Exporter for MarkdownExporter {
             output.push('\n');
         }
 
+        if let Some(ref notes) = meeting.notes {
+            output.push_str("## Notes\n\n");
+            output.push_str(notes.trim_end());
+            output.push_str("\n\n");
+        }
+
         // Summary (if available, Phase 5)
         if let Some(ref summary) = meeting.metadata.summary {
             output.push_str("## Summary\n\n");
@@ -118,6 +124,15 @@ impl Exporter for MarkdownExporter {
 
             output.push_str(&segment.text);
             output.push_str("\n\n");
+
+            if let Some(ref annotation) = segment.annotation {
+                let line = super::annotation_line(annotation);
+                if annotation.highlight {
+                    output.push_str(&format!("> **{}**\n\n", line));
+                } else {
+                    output.push_str(&format!("> {}\n\n", line));
+                }
+            }
         }
 
         Ok(output)

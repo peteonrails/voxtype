@@ -451,8 +451,7 @@ pub(crate) async fn run_meeting_command(
             // While the meeting records, the daemon owns transcript.json and
             // rewrites it after every chunk: store the move and let the
             // daemon apply it, rather than racing it for the file.
-            let runtime_dir = config::Config::runtime_dir();
-            let live = live_meeting_id(&runtime_dir).as_deref() == Some(&id.to_string());
+            let live = meeting_is_live(&id);
 
             let segment = if reset {
                 storage.reset_segment_speaker(&id, segment_id, !live)
@@ -463,8 +462,7 @@ pub(crate) async fn run_meeting_command(
             .map_err(|e| anyhow::anyhow!("Failed to reassign segment: {}", e))?;
 
             if live {
-                std::fs::create_dir_all(&runtime_dir)?;
-                std::fs::write(runtime_dir.join("meeting_reassign"), segment_id.to_string())?;
+                poke_daemon("meeting_edit", &segment_id.to_string())?;
             }
 
             if json {
@@ -483,6 +481,105 @@ pub(crate) async fn run_meeting_command(
                     segment.speaker_display(),
                     meeting_id
                 );
+            }
+        }
+
+        MeetingAction::Notes {
+            meeting_id,
+            append,
+            set_file,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+
+            let written = if let Some(text) = append {
+                Some(storage.append_notes(&id, &text))
+            } else if let Some(path) = set_file {
+                let text = if path.as_os_str() == "-" {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                    text
+                } else {
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", path.display(), e))?
+                };
+                Some(storage.set_notes(&id, &text))
+            } else {
+                None
+            };
+
+            let wrote = written.is_some();
+            let notes = match written {
+                Some(result) => {
+                    let notes =
+                        result.map_err(|e| anyhow::anyhow!("Failed to save notes: {}", e))?;
+                    if meeting_is_live(&id) {
+                        poke_daemon("meeting_notes", "")?;
+                    }
+                    notes
+                }
+                None => storage
+                    .load_notes(&id)
+                    .map_err(|e| anyhow::anyhow!("Failed to read notes: {}", e))?,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&notes)?);
+            } else if wrote {
+                println!("Notes saved for meeting {}", meeting_id);
+            } else {
+                print!("{}", notes.notes);
+                if !notes.notes.is_empty() && !notes.notes.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+
+        MeetingAction::Annotate {
+            meeting_id,
+            segment_id,
+            text,
+            highlight,
+            remove,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let live = meeting_is_live(&id);
+
+            let segment = if remove {
+                storage.remove_annotation(&id, segment_id, !live)
+            } else {
+                storage.annotate_segment(
+                    &id,
+                    segment_id,
+                    text.as_deref().unwrap_or_default(),
+                    highlight,
+                    !live,
+                )
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to annotate segment: {}", e))?;
+
+            if live {
+                poke_daemon("meeting_edit", &segment_id.to_string())?;
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&segment)?);
+            } else if remove {
+                println!(
+                    "Removed the annotation on segment {} in meeting {}",
+                    segment.id, meeting_id
+                );
+            } else {
+                println!("Annotated segment {} in meeting {}", segment.id, meeting_id);
             }
         }
 
@@ -636,6 +733,19 @@ fn base_meeting_state(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<St
         .filter(|id| !id.is_empty())
         .map(str::to_string);
     (phase, id)
+}
+
+/// Whether the daemon is recording, paused on or finishing this meeting.
+fn meeting_is_live(id: &meeting::MeetingId) -> bool {
+    live_meeting_id(&config::Config::runtime_dir()).as_deref() == Some(&id.to_string())
+}
+
+/// Tell the daemon, through a trigger file, that a running meeting changed
+/// in storage.
+fn poke_daemon(trigger: &str, content: &str) -> std::io::Result<()> {
+    let runtime_dir = config::Config::runtime_dir();
+    std::fs::create_dir_all(&runtime_dir)?;
+    std::fs::write(runtime_dir.join(trigger), content)
 }
 
 /// The ID of the meeting the daemon is recording, paused or finishing.

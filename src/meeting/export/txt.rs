@@ -37,6 +37,12 @@ impl Exporter for TextExporter {
             output.push_str("\n\n");
         }
 
+        if let Some(ref notes) = meeting.notes {
+            output.push_str("Notes:\n");
+            output.push_str(notes.trim_end());
+            output.push_str("\n\n");
+        }
+
         // Transcript
         let mut last_speaker = String::new();
 
@@ -70,6 +76,10 @@ impl Exporter for TextExporter {
                 output.push_str(&line);
             }
             output.push('\n');
+
+            if let Some(ref annotation) = segment.annotation {
+                output.push_str(&format!("  > {}\n", super::annotation_line(annotation)));
+            }
         }
 
         Ok(output)

@@ -4,8 +4,10 @@
 //! storage for transcripts and audio files.
 
 use crate::meeting::data::{
-    MeetingData, MeetingId, MeetingMetadata, MeetingStatus, Transcript, TranscriptSegment,
+    MeetingData, MeetingId, MeetingMetadata, MeetingStatus, SegmentAnnotation, Transcript,
+    TranscriptSegment,
 };
+use crate::meeting::notes::MeetingNotes;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
@@ -48,6 +50,9 @@ pub enum StorageError {
         last: Option<u32>,
     },
 
+    #[error("An annotation needs text, --highlight, or both")]
+    EmptyAnnotation,
+
     #[error("Meeting ID '{0}' matches more than one meeting; give more of it")]
     AmbiguousId(String),
 }
@@ -57,6 +62,35 @@ fn segment_range(first: Option<u32>, last: Option<u32>) -> String {
         (Some(first), Some(last)) => format!("Valid segment ids: {first} to {last}."),
         _ => "It has no segments yet.".to_string(),
     }
+}
+
+/// The user's free-text notes in a meeting folder.
+pub const NOTES_FILE: &str = "notes.md";
+
+/// The readable transcript kept beside transcript.json.
+pub const TRANSCRIPT_MARKDOWN_FILE: &str = "transcript.md";
+
+/// Render the meeting as Markdown into its folder, atomically.
+fn write_transcript_markdown(dir: &std::path::Path, data: &MeetingData) -> std::io::Result<()> {
+    let options = crate::meeting::export::ExportOptions {
+        include_timestamps: true,
+        include_speakers: true,
+        include_metadata: true,
+        line_width: 0,
+    };
+    let markdown = crate::meeting::export::export_meeting(
+        data,
+        crate::meeting::export::ExportFormat::Markdown,
+        &options,
+    )
+    .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let staged = dir.join(format!(
+        ".{}.{}",
+        TRANSCRIPT_MARKDOWN_FILE,
+        std::process::id()
+    ));
+    std::fs::write(&staged, markdown)?;
+    std::fs::rename(&staged, dir.join(TRANSCRIPT_MARKDOWN_FILE))
 }
 
 fn speaker_list(speakers: &[String]) -> String {
@@ -178,6 +212,17 @@ impl MeetingStorage {
                 segment_id INTEGER NOT NULL,
                 speaker_key TEXT NOT NULL,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, segment_id)
+            );
+
+            -- A note or highlight the user attached to one line, applied
+            -- like the speaker overrides above.
+            CREATE TABLE IF NOT EXISTS segment_annotations (
+                meeting_id TEXT NOT NULL,
+                segment_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                highlight INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (meeting_id, segment_id)
             );
             "#,
@@ -370,25 +415,43 @@ impl MeetingStorage {
 
         let storage_path = metadata
             .storage_path
+            .clone()
             .ok_or(StorageError::PathNotConfigured)?;
 
         // Labels live in the index, not in the caller's transcript: the
         // daemon rewrites transcript.json after every chunk from its own
         // in-memory copy, which knows nothing of a `meeting label` run
         // mid-meeting. Applying them here keeps every write labelled.
-        let labels = self.get_speaker_labels(meeting_id)?;
-        let overrides = self.get_speaker_overrides(meeting_id)?;
-        let json = if labels.is_empty() && overrides.is_empty() {
-            serde_json::to_string_pretty(transcript)?
-        } else {
-            let mut labelled = transcript.clone();
-            labelled.apply_speaker_overrides(&overrides);
-            labelled.apply_speaker_labels(&labels);
-            serde_json::to_string_pretty(&labelled)?
-        };
+        let mut edited = transcript.clone();
+        self.apply_edits(meeting_id, &mut edited)?;
         let transcript_path = storage_path.join("transcript.json");
-        std::fs::write(transcript_path, json)?;
+        std::fs::write(transcript_path, serde_json::to_string_pretty(&edited)?)?;
 
+        // transcript.md beside it, so the folder reads without voxtype.
+        let notes = self.load_notes(meeting_id)?.notes;
+        let data = MeetingData {
+            metadata,
+            transcript: edited,
+            notes: (!notes.trim().is_empty()).then_some(notes),
+        };
+        if let Err(e) = write_transcript_markdown(&storage_path, &data) {
+            tracing::warn!("Failed to write transcript.md: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Everything the user changed by hand, which lives in the index rather
+    /// than in the daemon's in-memory transcript: speakers moved line by
+    /// line, then speaker names, then annotations.
+    pub fn apply_edits(
+        &self,
+        meeting_id: &MeetingId,
+        transcript: &mut Transcript,
+    ) -> Result<(), StorageError> {
+        transcript.apply_speaker_overrides(&self.get_speaker_overrides(meeting_id)?);
+        transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
+        transcript.apply_annotations(&self.get_annotations(meeting_id)?);
         Ok(())
     }
 
@@ -406,8 +469,7 @@ impl MeetingStorage {
         let json = std::fs::read_to_string(transcript_path)?;
         let mut transcript: Transcript = serde_json::from_str(&json)?;
         transcript.sort_chronologically();
-        transcript.apply_speaker_overrides(&self.get_speaker_overrides(meeting_id)?);
-        transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
+        self.apply_edits(meeting_id, &mut transcript)?;
 
         Ok(transcript)
     }
@@ -419,10 +481,12 @@ impl MeetingStorage {
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
 
         let transcript = self.load_transcript(meeting_id).unwrap_or_default();
+        let notes = self.load_notes(meeting_id)?.notes;
 
         Ok(MeetingData {
             metadata,
             transcript,
+            notes: (!notes.trim().is_empty()).then_some(notes),
         })
     }
 
@@ -442,6 +506,10 @@ impl MeetingStorage {
         )?;
         self.conn.execute(
             "DELETE FROM segment_speaker_overrides WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM segment_annotations WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
 
@@ -652,6 +720,137 @@ impl MeetingStorage {
         self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
     }
 
+    /// Attach a note or highlight to one line, replacing any it had.
+    ///
+    /// As with [`MeetingStorage::reassign_segment`], `rewrite` is false
+    /// while the meeting daemon owns the transcript file. Returns the
+    /// segment as it now reads.
+    pub fn annotate_segment(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        text: &str,
+        highlight: bool,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let text = text.trim();
+        if text.is_empty() && !highlight {
+            return Err(StorageError::EmptyAnnotation);
+        }
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO segment_annotations \
+             (meeting_id, segment_id, text, highlight, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, strftime('%s', 'now'))",
+            params![meeting_id.to_string(), segment_id, text, highlight],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Remove the note or highlight on one line.
+    pub fn remove_annotation(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "DELETE FROM segment_annotations WHERE meeting_id = ?1 AND segment_id = ?2",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// The user's notes and highlights: segment ID to annotation.
+    pub fn get_annotations(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<std::collections::HashMap<u32, SegmentAnnotation>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT segment_id, text, highlight FROM segment_annotations WHERE meeting_id = ?1",
+        )?;
+        let annotations = stmt
+            .query_map(params![meeting_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    SegmentAnnotation {
+                        text: row.get(1)?,
+                        highlight: row.get(2)?,
+                    },
+                ))
+            })?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        Ok(annotations)
+    }
+
+    /// The meeting's notes.md. A meeting without notes has empty `notes`
+    /// and no `updated_at`.
+    pub fn load_notes(&self, meeting_id: &MeetingId) -> Result<MeetingNotes, StorageError> {
+        let path = self.get_meeting_path(meeting_id)?.join(NOTES_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(notes) => Ok(MeetingNotes {
+                meeting_id: meeting_id.to_string(),
+                notes,
+                updated_at: std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(DateTime::<Utc>::from),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MeetingNotes {
+                meeting_id: meeting_id.to_string(),
+                notes: String::new(),
+                updated_at: None,
+            }),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Replace the meeting's notes. The meeting daemon never writes
+    /// notes.md, so this is safe while it records. Written to a temporary
+    /// file and renamed into place, so a reader never sees half of it.
+    pub fn set_notes(
+        &self,
+        meeting_id: &MeetingId,
+        notes: &str,
+    ) -> Result<MeetingNotes, StorageError> {
+        let dir = self.get_meeting_path(meeting_id)?;
+        let path = dir.join(NOTES_FILE);
+        let staged = dir.join(format!(".{}.{}", NOTES_FILE, std::process::id()));
+        std::fs::write(&staged, notes)?;
+        std::fs::rename(&staged, &path)?;
+        self.refresh_transcript_markdown(meeting_id);
+        self.load_notes(meeting_id)
+    }
+
+    /// Add a paragraph to the end of the meeting's notes.
+    pub fn append_notes(
+        &self,
+        meeting_id: &MeetingId,
+        text: &str,
+    ) -> Result<MeetingNotes, StorageError> {
+        let mut notes = self.load_notes(meeting_id)?.notes;
+        if !notes.is_empty() && !notes.ends_with('\n') {
+            notes.push('\n');
+        }
+        notes.push_str(text.trim_end());
+        notes.push('\n');
+        self.set_notes(meeting_id, &notes)
+    }
+
+    /// Rewrite transcript.md from what is saved, after a change that does
+    /// not go through save_transcript. Best effort: the next save writes
+    /// it again anyway.
+    fn refresh_transcript_markdown(&self, meeting_id: &MeetingId) {
+        let result = self.load_meeting_data(meeting_id).and_then(|data| {
+            let dir = self.get_meeting_path(meeting_id)?;
+            write_transcript_markdown(&dir, &data).map_err(StorageError::Io)
+        });
+        if let Err(e) = result {
+            tracing::warn!("Failed to refresh transcript.md: {}", e);
+        }
+    }
+
     /// Lines moved to another speaker by hand: segment ID to speaker ID.
     pub fn get_speaker_overrides(
         &self,
@@ -704,8 +903,7 @@ impl MeetingStorage {
         if rewrite {
             self.save_transcript(meeting_id, transcript)?;
         }
-        transcript.apply_speaker_overrides(&self.get_speaker_overrides(meeting_id)?);
-        transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
+        self.apply_edits(meeting_id, transcript)?;
         Ok(transcript
             .segments
             .iter()
@@ -1598,6 +1796,146 @@ mod tests {
         assert_eq!(storage.resolve_meeting_id(&full[..8]).unwrap(), metadata.id);
         assert!(storage.resolve_meeting_id("abc").is_err());
         assert!(storage.resolve_meeting_id("zzzzzzzz").is_err());
+    }
+
+    #[test]
+    fn annotate_attaches_a_note_and_highlight_to_one_line() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+
+        let seg = storage
+            .annotate_segment(&id, 2, " check this number ", true, true)
+            .unwrap();
+        assert_eq!(
+            seg.annotation,
+            Some(SegmentAnnotation {
+                text: "check this number".to_string(),
+                highlight: true
+            })
+        );
+        // Replacing it, then a bare highlight.
+        storage
+            .annotate_segment(&id, 2, "other", false, true)
+            .unwrap();
+        let seg = storage.annotate_segment(&id, 3, "", true, true).unwrap();
+        assert_eq!(seg.annotation.unwrap().text, "");
+
+        let loaded = storage.load_transcript(&id).unwrap();
+        let notes: Vec<_> = loaded
+            .segments
+            .iter()
+            .map(|s| {
+                s.annotation
+                    .as_ref()
+                    .map(|a| (a.text.as_str(), a.highlight))
+            })
+            .collect();
+        assert_eq!(
+            notes,
+            vec![None, None, Some(("other", false)), Some(("", true))]
+        );
+
+        let seg = storage.remove_annotation(&id, 2, true).unwrap();
+        assert_eq!(seg.annotation, None);
+        assert_eq!(storage.get_annotations(&id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn annotate_rejects_nothing_and_unknown_segments() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+        assert!(matches!(
+            storage.annotate_segment(&id, 1, "  ", false, true),
+            Err(StorageError::EmptyAnnotation)
+        ));
+        assert!(matches!(
+            storage.annotate_segment(&id, 99, "x", false, true),
+            Err(StorageError::UnknownSegment { segment: 99, .. })
+        ));
+    }
+
+    #[test]
+    fn an_annotation_survives_the_daemons_next_save() {
+        let (storage, _temp) = create_test_storage();
+        let (id, in_memory) = hybrid_meeting(&storage);
+        storage
+            .annotate_segment(&id, 1, "important", true, false)
+            .unwrap();
+        storage.save_transcript(&id, &in_memory).unwrap();
+        assert_eq!(
+            storage.load_transcript(&id).unwrap().segments[1]
+                .annotation
+                .as_ref()
+                .map(|a| a.text.as_str()),
+            Some("important")
+        );
+    }
+
+    #[test]
+    fn notes_load_set_and_append() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+
+        let empty = storage.load_notes(&id).unwrap();
+        assert_eq!(empty.notes, "");
+        assert_eq!(empty.updated_at, None);
+
+        let notes = storage.append_notes(&id, "First thought").unwrap();
+        assert_eq!(notes.notes, "First thought\n");
+        assert!(notes.updated_at.is_some());
+        let notes = storage.append_notes(&id, "Second thought").unwrap();
+        assert_eq!(notes.notes, "First thought\nSecond thought\n");
+
+        storage.set_notes(&id, "# Agenda\n- budget").unwrap();
+        let notes = storage.append_notes(&id, "- travel").unwrap();
+        assert_eq!(notes.notes, "# Agenda\n- budget\n- travel\n");
+        assert_eq!(notes.meeting_id, id.to_string());
+
+        let config = crate::meeting::MeetingConfig {
+            storage: storage.config.clone(),
+            ..Default::default()
+        };
+        assert_eq!(crate::meeting::notes::load(&config, &id).unwrap(), notes);
+    }
+
+    /// The daemon saves the transcript after every chunk; notes written in
+    /// between must survive, and land at the top of transcript.md.
+    #[test]
+    fn notes_survive_transcript_saves_and_reach_transcript_md() {
+        let (storage, _temp) = create_test_storage();
+        let (id, in_memory) = hybrid_meeting(&storage);
+        storage.set_notes(&id, "Ask about the budget").unwrap();
+        storage
+            .annotate_segment(&id, 2, "check this", false, false)
+            .unwrap();
+        storage.save_transcript(&id, &in_memory).unwrap();
+
+        assert_eq!(
+            storage.load_notes(&id).unwrap().notes,
+            "Ask about the budget"
+        );
+        let data = storage.load_meeting_data(&id).unwrap();
+        assert_eq!(data.notes.as_deref(), Some("Ask about the budget"));
+
+        let md = std::fs::read_to_string(
+            storage
+                .get_meeting_path(&id)
+                .unwrap()
+                .join(TRANSCRIPT_MARKDOWN_FILE),
+        )
+        .unwrap();
+        let notes_at = md.find("## Notes\n\nAsk about the budget").expect(&md);
+        assert!(notes_at < md.find("## Transcript").unwrap(), "{md}");
+        assert!(md.contains("line 2\n\n> Note: check this\n"), "{md}");
+    }
+
+    #[test]
+    fn deleting_a_meeting_drops_its_annotations() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+        storage.annotate_segment(&id, 2, "x", false, true).unwrap();
+        storage.delete_meeting(&id).unwrap();
+        assert!(storage.get_annotations(&id).unwrap().is_empty());
     }
 
     #[test]
