@@ -2961,6 +2961,17 @@ impl Daemon {
         }
     }
 
+    /// Drop a deleted segment from the HUD snapshot and tell meeting.sock
+    /// subscribers.
+    fn publish_segment_deleted(&mut self, segment_id: u32) {
+        self.meeting_hud.remove_segment(segment_id);
+        if let Some(ref hub) = self.meeting_event_hub {
+            let meeting_id = self.meeting_hud.meeting_id.clone().unwrap_or_default();
+            hub.publish_segment_deleted(&meeting_id, segment_id);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
@@ -3210,6 +3221,9 @@ impl Daemon {
                     }
                     MeetingEvent::SegmentUpdated { segment } => {
                         self.publish_segment_updated(&segment);
+                    }
+                    MeetingEvent::SegmentDeleted { segment_id } => {
+                        self.publish_segment_deleted(segment_id);
                     }
                     _ => {}
                 }
@@ -5686,6 +5700,9 @@ impl Daemon {
                         }
                         Some(MeetingEvent::SegmentUpdated { segment }) => {
                             self.publish_segment_updated(&segment);
+                        }
+                        Some(MeetingEvent::SegmentDeleted { segment_id }) => {
+                            self.publish_segment_deleted(segment_id);
                         }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via

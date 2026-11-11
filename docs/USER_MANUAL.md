@@ -2768,6 +2768,10 @@ voxtype meeting reassign latest 28 --reset
 voxtype meeting notes latest --append "Ask Dana about travel"
 voxtype meeting annotate latest 28 "Check this number" --highlight
 
+# Correct or hide a line (id from show --json); --reset / --restore undo
+voxtype meeting edit latest 28 "We ship on Friday."
+voxtype meeting delete-line latest 31
+
 # AI summarization (your coding agent, or Ollama)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json

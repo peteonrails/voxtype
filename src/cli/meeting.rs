@@ -208,6 +208,59 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Correct the text of one transcript line
+    ///
+    /// The line keeps what was transcribed as `original_text`, and --reset
+    /// restores it. Segment IDs are the `id` of each segment in
+    /// `meeting show --json`. Works while the meeting is still recording;
+    /// later chunks do not undo the correction.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting edit latest 28 'We ship on Friday.'\n  \
+        voxtype meeting edit latest 28 'We ship on Friday.' --json\n  \
+        voxtype meeting edit latest 28 --reset")]
+    Edit {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// The segment to correct (its `id` in `meeting show --json`)
+        segment_id: u32,
+
+        /// The corrected text
+        #[arg(required_unless_present = "reset", conflicts_with = "reset")]
+        text: Option<String>,
+
+        /// Restore the text as transcribed
+        #[arg(long)]
+        reset: bool,
+
+        /// Print the updated segment as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hide one transcript line, or bring it back
+    ///
+    /// The line is kept (marked deleted in transcript.json) so --restore can
+    /// bring it back, but exports, transcript.md, `meeting show` and the
+    /// meeting assistant leave it out. Works while the meeting is still
+    /// recording.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting delete-line latest 28\n  \
+        voxtype meeting delete-line latest 28 --restore")]
+    DeleteLine {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// The segment to hide (its `id` in `meeting show --json`)
+        segment_id: u32,
+
+        /// Bring the line back
+        #[arg(long)]
+        restore: bool,
+
+        /// Print the segment as JSON (with "deleted": true when hidden)
+        #[arg(long)]
+        json: bool,
+    },
     /// Read or write a meeting's notes
     ///
     /// Free-text notes kept in notes.md in the meeting's folder. With no

@@ -251,6 +251,19 @@ The move is stored per segment and applied whenever the transcript is saved or r
 
 This works during a meeting too. The command stores the move and the daemon applies it before the next chunk, sending the changed line to the meeting socket.
 
+### Correcting and Deleting Lines
+
+Fix a line the engine misheard, or hide one that should not be there, by the segment's `id` from `meeting show --json`:
+
+```bash
+voxtype meeting edit latest 28 "We ship on Friday."
+voxtype meeting edit latest 28 --reset           # back to the transcribed text
+voxtype meeting delete-line latest 31
+voxtype meeting delete-line latest 31 --restore
+```
+
+An edited line keeps what was transcribed as `original_text`. A deleted line is not destroyed: it stays in `transcript.json` marked `"deleted": true`, so `--restore` can bring it back, but exports, `transcript.md`, `meeting show` and the meeting assistant leave it out. Both are stored beside speaker moves and annotations and applied whenever the transcript is saved or read, so later chunks cannot undo them, and both work during a meeting. Add `--json` to print the segment.
+
 ### Notes
 
 Each meeting has free-text notes, kept as `notes.md` in the meeting's folder. You can write them during the meeting or after it; the daemon never overwrites them.
@@ -279,7 +292,7 @@ A line has at most one annotation; annotating it again replaces it. Annotations 
 
 ### The Meeting Folder
 
-Each meeting folder holds `metadata.json`, `transcript.json` (the segments, with speaker names, moves and annotations applied), `transcript.md` (the same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change), and `notes.md` once you write notes.
+Each meeting folder holds `metadata.json`, `transcript.json` (the segments, with speaker names, moves, annotations and text corrections applied, and deleted lines kept but marked `"deleted": true`), `transcript.md` (the same as `meeting export --timestamps --speakers --metadata` in Markdown, rewritten after every chunk and every change), and `notes.md` once you write notes.
 
 ### Asking About a Meeting
 
