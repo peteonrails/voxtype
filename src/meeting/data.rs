@@ -159,9 +159,23 @@ impl Transcript {
         Self::default()
     }
 
-    /// Add a segment to the transcript
+    /// Add a segment, keeping the transcript in order of start time.
+    ///
+    /// The microphone and loopback tracks are transcribed one after the
+    /// other for the same stretch of time, so appending would list all of
+    /// one side and then all of the other. A segment goes after any that
+    /// start at the same moment, so arrival order breaks ties.
     pub fn add_segment(&mut self, segment: TranscriptSegment) {
-        self.segments.push(segment);
+        let at = self
+            .segments
+            .partition_point(|s| s.start_ms <= segment.start_ms);
+        self.segments.insert(at, segment);
+    }
+
+    /// Order segments by start time. Transcripts written before segments
+    /// were kept in order list each chunk's tracks one after the other.
+    pub fn sort_chronologically(&mut self) {
+        self.segments.sort_by_key(|s| s.start_ms);
     }
 
     /// Remove echoed phrases from mic segments that match loopback transcripts.
@@ -891,6 +905,53 @@ mod tests {
         assert_eq!(deserialized.text, "Hello world");
         assert_eq!(deserialized.source, AudioSource::Microphone);
         assert_eq!(deserialized.speaker_id, Some("SPEAKER_00".to_string()));
+    }
+
+    fn segment(id: u32, start_ms: u64, source: AudioSource, chunk_id: u32) -> TranscriptSegment {
+        let mut seg =
+            TranscriptSegment::new(id, start_ms, start_ms + 1500, format!("s{}", id), chunk_id);
+        seg.source = source;
+        seg
+    }
+
+    /// The daemon transcribes a chunk's microphone track, then its loopback
+    /// track. Turn order has to come from the timestamps, not arrival.
+    #[test]
+    fn transcript_interleaves_tracks_by_start_time() {
+        let mut transcript = Transcript::new();
+        // Chunk 0: mic then loopback.
+        transcript.add_segment(segment(0, 1_000, AudioSource::Microphone, 0));
+        transcript.add_segment(segment(1, 12_000, AudioSource::Microphone, 0));
+        transcript.add_segment(segment(2, 5_000, AudioSource::Loopback, 1));
+        transcript.add_segment(segment(3, 20_000, AudioSource::Loopback, 1));
+        // Chunk 1.
+        transcript.add_segment(segment(4, 31_000, AudioSource::Microphone, 2));
+        transcript.add_segment(segment(5, 30_500, AudioSource::Loopback, 3));
+
+        let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 2, 1, 3, 5, 4]);
+    }
+
+    #[test]
+    fn transcript_keeps_arrival_order_for_equal_starts() {
+        let mut transcript = Transcript::new();
+        transcript.add_segment(segment(0, 1_000, AudioSource::Microphone, 0));
+        transcript.add_segment(segment(1, 1_000, AudioSource::Loopback, 1));
+        let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    #[test]
+    fn sort_chronologically_reorders_a_chunk_grouped_transcript() {
+        let mut transcript = Transcript::new();
+        transcript.segments = vec![
+            segment(0, 1_000, AudioSource::Microphone, 0),
+            segment(1, 12_000, AudioSource::Microphone, 0),
+            segment(2, 5_000, AudioSource::Loopback, 1),
+        ];
+        transcript.sort_chronologically();
+        let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 2, 1]);
     }
 
     #[test]

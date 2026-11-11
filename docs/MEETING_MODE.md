@@ -180,6 +180,8 @@ voxtype meeting export latest --format vtt --output meeting.vtt
 | `--speakers` | Include speaker labels |
 | `--metadata` | Include a metadata header (title, date, duration) |
 
+Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did.
+
 ### Labeling Speakers
 
 Every transcript names its speakers. With simple diarization they are `You` (your microphone) and `Remote` (system audio); with ML diarization they are auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc. You can replace any of them with real names:

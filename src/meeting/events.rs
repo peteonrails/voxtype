@@ -96,6 +96,18 @@ impl MeetingHudState {
             ..Default::default()
         }
     }
+
+    /// Add a chunk's segments to the backlog, kept in order of start time
+    /// like the saved transcript, so the `hello` snapshot interleaves the
+    /// two tracks instead of listing them a chunk at a time.
+    pub fn push_segments(&mut self, segments: &[TranscriptSegment]) {
+        for segment in segments {
+            let at = self
+                .segments
+                .partition_point(|s| s.start_ms <= segment.start_ms);
+            self.segments.insert(at, segment.clone());
+        }
+    }
 }
 
 /// One line on the wire. Internally tagged on `event` so consumers can
@@ -449,6 +461,24 @@ async fn run_broadcast_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hud_backlog_interleaves_tracks_by_start_time() {
+        use crate::meeting::data::AudioSource;
+        let seg = |id: u32, start: u64, source: AudioSource| {
+            let mut s = TranscriptSegment::new(id, start, start + 1000, String::new(), 0);
+            s.source = source;
+            s
+        };
+        let mut hud = MeetingHudState::idle();
+        hud.push_segments(&[
+            seg(0, 1_000, AudioSource::Microphone),
+            seg(1, 9_000, AudioSource::Microphone),
+        ]);
+        hud.push_segments(&[seg(2, 4_000, AudioSource::Loopback)]);
+        let order: Vec<u32> = hud.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 2, 1]);
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, BufReader};

@@ -373,6 +373,7 @@ impl MeetingStorage {
         let transcript_path = storage_path.join("transcript.json");
         let json = std::fs::read_to_string(transcript_path)?;
         let mut transcript: Transcript = serde_json::from_str(&json)?;
+        transcript.sort_chronologically();
         transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
 
         Ok(transcript)

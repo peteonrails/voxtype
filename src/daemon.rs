@@ -5563,7 +5563,7 @@ impl Daemon {
                         Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
                             tracing::debug!("Meeting event: chunk {} processed with {} segments",
                                 chunk_id, segments.len());
-                            self.meeting_hud.segments.extend(segments.iter().cloned());
+                            self.meeting_hud.push_segments(&segments);
                             self.meeting_hud.chunk_count = chunk_id + 1;
                             if let Some(ref hub) = self.meeting_event_hub {
                                 hub.publish_segments(chunk_id, &segments);

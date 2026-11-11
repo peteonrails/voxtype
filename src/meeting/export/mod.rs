@@ -136,6 +136,76 @@ pub fn export_meeting_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting::data::{AudioSource, TranscriptSegment};
+
+    /// A conversation as the daemon records it: per chunk, the microphone
+    /// track's segments arrive before the loopback track's.
+    fn conversation() -> MeetingData {
+        let mut meeting = MeetingData::new(Some("Turns".to_string()));
+        let lines = [
+            (0, 2_000, AudioSource::Microphone, "Can you hear me?"),
+            (1, 14_000, AudioSource::Microphone, "Great, let's start."),
+            (2, 6_000, AudioSource::Loopback, "Yes, loud and clear."),
+            (3, 21_000, AudioSource::Loopback, "Sounds good."),
+        ];
+        for (id, start, source, text) in lines {
+            let mut seg = TranscriptSegment::new(id, start, start + 3_000, text.to_string(), 0);
+            seg.source = source;
+            meeting.transcript.add_segment(seg);
+        }
+        meeting
+    }
+
+    /// Bug: exports listed all of You, then all of Remote, per chunk.
+    #[test]
+    fn every_format_keeps_turn_order_and_per_line_timestamps() {
+        let meeting = conversation();
+        let options = ExportOptions {
+            include_timestamps: true,
+            include_speakers: true,
+            ..Default::default()
+        };
+        let in_order = [
+            "Can you hear me?",
+            "loud and clear",
+            "let's start",
+            "Sounds good",
+        ];
+
+        for format in [
+            ExportFormat::Text,
+            ExportFormat::Markdown,
+            ExportFormat::Json,
+            ExportFormat::Srt,
+            ExportFormat::Vtt,
+        ] {
+            let out = export_meeting(&meeting, format, &options).unwrap();
+            let positions: Vec<usize> = in_order
+                .iter()
+                .map(|line| {
+                    out.find(line)
+                        .unwrap_or_else(|| panic!("{format}: {line} missing"))
+                })
+                .collect();
+            assert!(
+                positions.windows(2).all(|w| w[0] < w[1]),
+                "{format} lost turn order:\n{out}"
+            );
+        }
+
+        let text = export_meeting(&meeting, ExportFormat::Text, &options).unwrap();
+        for stamp in ["[00:02]", "[00:06]", "[00:14]", "[00:21]"] {
+            assert!(text.contains(stamp), "text export missing {stamp}:\n{text}");
+        }
+        let md = export_meeting(&meeting, ExportFormat::Markdown, &options).unwrap();
+        for stamp in ["*[00:02]*", "*[00:06]*", "*[00:14]*", "*[00:21]*"] {
+            assert!(md.contains(stamp), "markdown export missing {stamp}:\n{md}");
+        }
+        let srt = export_meeting(&meeting, ExportFormat::Srt, &options).unwrap();
+        assert!(srt.contains("00:00:06,000 --> 00:00:09,000\n[Remote] Yes, loud and clear."));
+        let vtt = export_meeting(&meeting, ExportFormat::Vtt, &options).unwrap();
+        assert!(vtt.contains("00:00:14.000 --> 00:00:17.000\n<v You>Great, let's start."));
+    }
 
     #[test]
     fn test_format_from_str() {
