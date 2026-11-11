@@ -76,6 +76,17 @@ async fn supervise(frontend: Option<OsdFrontend>) {
         // the Quickshell launcher (otherwise kill_on_drop has nothing
         // to kill — see #395).
         cmd.env("VOXTYPE_OSD_SUPERVISED", "1");
+        // A daemon started before the compositor exported its environment
+        // has no WAYLAND_DISPLAY, and libwayland would then try wayland-0,
+        // which Hyprland often doesn't use. Point the OSD at the socket the
+        // frontend resolver found.
+        if std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty()) {
+            if let Some(socket) = std::env::var_os("XDG_RUNTIME_DIR")
+                .and_then(|d| super::frontend::wayland_socket_in(std::path::Path::new(&d)))
+            {
+                cmd.env("WAYLAND_DISPLAY", socket);
+            }
+        }
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,

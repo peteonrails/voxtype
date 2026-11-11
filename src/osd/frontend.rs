@@ -155,10 +155,11 @@ fn gtk4_library_blocker(missing: &[String]) -> Option<String> {
     Some(format!("gtk4 OSD installed but {name} is missing"))
 }
 
-/// `WAYLAND_DISPLAY` set, or the default `wayland-0` socket present in
-/// the runtime dir. The second case covers a daemon started by systemd
-/// before the compositor imported its environment: libwayland clients
-/// connect to `wayland-0` when `WAYLAND_DISPLAY` is unset.
+/// `WAYLAND_DISPLAY` set, or a `wayland-N` socket present in the runtime
+/// dir. The second case covers a shell without the variable (SSH, a tool's
+/// subshell) and a daemon started by systemd before the compositor imported
+/// its environment. Compositors do not always take `wayland-0`: Hyprland
+/// commonly listens on `wayland-1`.
 fn wayland_reachable(
     wayland_display: Option<&std::ffi::OsStr>,
     runtime_dir: Option<&std::ffi::OsStr>,
@@ -168,7 +169,25 @@ fn wayland_reachable(
     }
     runtime_dir
         .filter(|d| !d.is_empty())
-        .is_some_and(|d| Path::new(d).join("wayland-0").exists())
+        .and_then(|d| wayland_socket_in(Path::new(d)))
+        .is_some()
+}
+
+/// The first `wayland-N` socket in `runtime_dir` (lowest N), ignoring the
+/// compositor's `.lock` files. Its file name is what `WAYLAND_DISPLAY` would
+/// hold.
+pub fn wayland_socket_in(runtime_dir: &Path) -> Option<String> {
+    let mut names: Vec<(u32, String)> = std::fs::read_dir(runtime_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let n = name.strip_prefix("wayland-")?.parse::<u32>().ok()?;
+            Some((n, name))
+        })
+        .collect();
+    names.sort();
+    names.into_iter().next().map(|(_, name)| name)
 }
 
 /// The frontend a configured value resolves to, and why.
@@ -708,15 +727,21 @@ mod tests {
     }
 
     #[test]
-    fn wayland_reachable_uses_the_variable_or_the_default_socket() {
+    fn wayland_reachable_uses_the_variable_or_any_wayland_socket() {
         use std::ffi::OsStr;
         assert!(wayland_reachable(Some(OsStr::new("wayland-1")), None));
         assert!(!wayland_reachable(Some(OsStr::new("")), None));
         assert!(!wayland_reachable(None, None));
         let dir = tempfile::tempdir().unwrap();
         assert!(!wayland_reachable(None, Some(dir.path().as_os_str())));
-        std::fs::write(dir.path().join("wayland-0"), "").unwrap();
+        // Hyprland's socket is often wayland-1; its lock file never counts.
+        std::fs::write(dir.path().join("wayland-1.lock"), "").unwrap();
+        assert!(!wayland_reachable(None, Some(dir.path().as_os_str())));
+        std::fs::write(dir.path().join("wayland-1"), "").unwrap();
         assert!(wayland_reachable(None, Some(dir.path().as_os_str())));
+        assert_eq!(wayland_socket_in(dir.path()).as_deref(), Some("wayland-1"));
+        std::fs::write(dir.path().join("wayland-0"), "").unwrap();
+        assert_eq!(wayland_socket_in(dir.path()).as_deref(), Some("wayland-0"));
     }
 
     #[test]
