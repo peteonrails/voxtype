@@ -423,7 +423,7 @@ enabled = true
 # [tray]
 # enabled = true
 
-# On Omarchy, the daemon links the packaged Voxtype Settings panel into
+# On Omarchy, the daemon links the packaged Voxtype panel into
 # ~/.config/omarchy/plugins on first start. Set false to opt out; run
 # `voxtype setup omarchy` to link it by hand.
 # [omarchy]

@@ -837,7 +837,7 @@ pub fn decide(status: &Status, marker: &Marker, opted_in: bool) -> AutoAction {
 
 /// Desktop notification sent once when the daemon first finds an old copy:
 /// copies made before 1.2.1 have no Switch banner of their own.
-pub const COPY_NOTICE_TITLE: &str = "Voxtype Settings panel";
+pub const COPY_NOTICE_TITLE: &str = "Voxtype panel";
 pub const COPY_NOTICE_BODY: &str =
     "Your Settings panel is a copy that does not update with voxtype. \
      Run voxtype setup omarchy --replace to switch to the packaged one.";
@@ -866,7 +866,7 @@ pub fn auto_link(
         AutoAction::Link => match link(ctx, shell, &mut marker, true) {
             Ok(report) => {
                 tracing::info!(
-                    "Linked the Voxtype Settings panel for Omarchy: {} -> {}",
+                    "Linked the Voxtype panel for Omarchy: {} -> {}",
                     report.path.display(),
                     report.target.display()
                 );
@@ -883,11 +883,11 @@ pub fn auto_link(
             let enable = marker.enable_pending;
             match link(ctx, shell, &mut marker, enable) {
                 Ok(report) if report.rescanned => tracing::info!(
-                    "Omarchy reloaded the Voxtype Settings panel at version {}",
+                    "Omarchy reloaded the Voxtype panel at version {}",
                     report.version.as_deref().unwrap_or("unknown")
                 ),
                 Ok(_) => tracing::info!(
-                    "The Voxtype Settings panel changed version, but Omarchy's shell did not \
+                    "The Voxtype panel changed version, but Omarchy's shell did not \
                      answer. It loads the new version when the shell starts, or now with: \
                      omarchy-shell shell rescanPlugins"
                 ),
@@ -899,14 +899,14 @@ pub fn auto_link(
             if ok {
                 marker.enable_pending = false;
                 save_marker(ctx, &marker);
-                tracing::info!("Enabled the Voxtype Settings panel in Omarchy");
+                tracing::info!("Enabled the Voxtype panel in Omarchy");
             } else {
                 tracing::info!("Omarchy's shell did not answer; will enable the panel later");
             }
         }
         AutoAction::NoteCopy => {
             tracing::info!(
-                "Found your own copy of the Voxtype Settings panel at {}; leaving it alone. \
+                "Found your own copy of the Voxtype panel at {}; leaving it alone. \
                  To switch to the packaged panel, which updates with voxtype: \
                  voxtype setup omarchy --replace",
                 status
@@ -1165,10 +1165,7 @@ pub fn execute(
                     }
                 }
             }
-            None => writeln!(
-                out,
-                "The Voxtype Settings panel is not linked; nothing to remove."
-            )?,
+            None => writeln!(out, "The Voxtype panel is not linked; nothing to remove.")?,
         }
         return Ok(());
     }
@@ -1184,7 +1181,7 @@ pub fn execute(
         LinkState::Copy | LinkState::ForeignLink => {
             let path = display(status.path.as_deref());
             let question = format!(
-                "Replace your copy of Voxtype Settings at {path} with the packaged one? \
+                "Replace your copy of the Voxtype panel at {path} with the packaged one? \
                  Your copy is kept as a hidden backup beside it."
             );
             // Replacing takes --replace plus --yes, or a "yes" typed at a
@@ -2276,7 +2273,7 @@ mod tests {
         assert_eq!(
             notices.sent(),
             vec![(
-                "Voxtype Settings panel".to_string(),
+                "Voxtype panel".to_string(),
                 "Your Settings panel is a copy that does not update with voxtype. \
                  Run voxtype setup omarchy --replace to switch to the packaged one."
                     .to_string()
@@ -2591,7 +2588,7 @@ mod tests {
         let (result, _, asked) = f.run_cli(&FakeRunner::running(), CliArgs::default(), true, false);
         result.unwrap();
         assert_eq!(asked.len(), 1);
-        assert!(asked[0].starts_with("Replace your copy of Voxtype Settings"));
+        assert!(asked[0].starts_with("Replace your copy of the Voxtype panel"));
         assert!(copy.join("user-file").is_file());
         assert!(!f.is_link());
     }
