@@ -52,6 +52,8 @@ Item {
   signal upgradeCleanupRequested()
   signal osdSwitchRequested()
   signal osdNotNowRequested()
+  signal calendarSetRequested(string link)
+  signal calendarClearRequested()
 
   // A row's field gave the keyboard back (Escape); the panel puts focus on the
   // card's key catcher so j/k drive the cursor again.
@@ -137,6 +139,23 @@ Item {
   property var rowNotes: ({})
   property var rowNotices: ({})
 
+  // The calendar link (see CalendarLinkRow): `meeting calendar status --json`,
+  // or null for a CLI without it, which shows no row. The row sits right
+  // above the meeting.calendar.* keys, in their section, as one entry of the
+  // list so the keyboard cursor and search reach it like any other row.
+  property var calendarStatus: null
+  property string calendarBusy: ""
+  property string calendarError: ""
+  property string calendarNotice: ""
+  property int calendarSaved: 0
+  readonly property string calendarRowKey: "__calendar_link"
+  readonly property var calendarRowSpec: ({
+    key: root.calendarRowKey,
+    section: "",
+    label: "Calendar (iCal link)",
+    description: "Name meetings from your calendar's private iCal link: Google Calendar, Outlook, iCloud, Fastmail."
+  })
+
   readonly property string osdSection: {
     for (var i = 0; i < root.keys.length; i++) {
       var spec = root.keys[i]
@@ -166,8 +185,9 @@ Item {
     // Do not show editors for the configured engine below another catalog.
     if (root.showEngineCard && root.catalogEngine !== root.engine) return []
     var out = []
-    for (var i = 0; i < root.keys.length; i++) {
-      var spec = root.keys[i]
+    var listed = root.withCalendarRow(root.keys)
+    for (var i = 0; i < listed.length; i++) {
+      var spec = listed[i]
       if (!spec) continue
       if (!root.appliesToEngine(spec)) continue
       if (!root.appliesToModel(spec)) continue
@@ -187,6 +207,21 @@ Item {
       for (var j = 0; j < out.length; j++)
         if (root.cleanupGroup(String(out[j].key)) === groups[g]) ordered.push(out[j])
     return ordered
+  }
+
+  // `keys` with the calendar link's entry before the first meeting.calendar.*
+  // key, when the CLI answered `meeting calendar status`.
+  function withCalendarRow(keys) {
+    if (root.calendarStatus === null) return keys
+    for (var i = 0; i < keys.length; i++) {
+      var spec = keys[i]
+      if (!spec || String(spec.key).indexOf("meeting.calendar.") !== 0) continue
+      var row = {}
+      for (var k in root.calendarRowSpec) row[k] = root.calendarRowSpec[k]
+      row.section = String(spec.section || "")
+      return keys.slice(0, i).concat([row], keys.slice(i))
+    }
+    return keys
   }
 
   // These are independent canonical keys, not a synthetic master switch that
@@ -473,7 +508,8 @@ Item {
             required property var modelData
             required property int index
 
-            readonly property alias control: setting
+            readonly property bool isCalendar: String(entry.modelData.key) === root.calendarRowKey
+            readonly property var control: entry.isCalendar ? calendarLoader.item : setting
             readonly property bool highlighted: root.highlightIndex === root.leadingRows + entry.index
 
             width: parent.width
@@ -518,9 +554,30 @@ Item {
             // The cursor paints the whole row, not just its control, because
             // the label is what tells you which setting you are about to
             // change.
-            CursorSurface {
+            Loader {
+              id: calendarLoader
               width: parent.width
-              height: setting.implicitHeight + Style.spacing.md * 2
+              active: entry.isCalendar
+              visible: active
+              sourceComponent: CalendarLinkRow {
+                width: calendarLoader.width
+                status: root.calendarStatus
+                busy: root.calendarBusy
+                errorText: root.calendarError
+                noticeText: root.calendarNotice
+                savedCount: root.calendarSaved
+                highlighted: entry.highlighted
+                onSetRequested: function(link) { root.calendarSetRequested(link) }
+                onClearRequested: root.calendarClearRequested()
+                onEditorFocusChanged: function(active) { root.noteEditorFocus(active) }
+                onEditorEscaped: root.focusReturned()
+              }
+            }
+
+            CursorSurface {
+              visible: !entry.isCalendar
+              width: parent.width
+              height: visible ? setting.implicitHeight + Style.spacing.md * 2 : 0
               hasCursor: entry.highlighted
 
               SettingDelegate {
@@ -530,7 +587,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Style.spacing.md
                 anchors.rightMargin: Style.spacing.md
-                spec: entry.modelData
+                spec: entry.isCalendar ? null : entry.modelData
                 choices: root.choicesFor(String(entry.modelData.key))
                 dynamicOptions: root.optionsForSource(entry.modelData.source)
                 errorText: root.errors[String(entry.modelData.key)] || ""

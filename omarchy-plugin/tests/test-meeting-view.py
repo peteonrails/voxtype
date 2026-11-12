@@ -525,10 +525,14 @@ def run(scenario, host, shell, evidence):
 
 
 def read_only(argv):
-    """Reads the view makes on its own (notes, assistant status, show)."""
+    """Reads made without the user asking (notes, assistant status, show, and
+    the Settings panel's calendar status)."""
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
     if argv == ["meeting", "play", "--status", "--json"]:
+        return True
+    # The Settings panel's calendar link row, when it is open.
+    if argv == ["meeting", "calendar", "status", "--json"]:
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 

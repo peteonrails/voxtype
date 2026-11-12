@@ -1222,6 +1222,131 @@ Item {
     }
   }
 
+  // ------------------------------------------------------- calendar link
+  //
+  // `meeting calendar status --json` describes the private iCal link that
+  // names untitled meetings (never the link itself), and which source names
+  // them now. A build without `meeting calendar` exits non-zero: no answer,
+  // and the panel shows no calendar row.
+  //
+  // `set-ics -` reads the link from stdin: a secret in argv is visible to
+  // every user through `ps`. On success it prints {set, host, events};
+  // on failure one stderr line that names only the host.
+
+  // null when the answer could not be read.
+  signal calendarStatusLoaded(var status)
+  // action is "set" or "clear"; result is the --json answer on success.
+  signal calendarActionFinished(string action, bool ok, string message, var result)
+
+  property bool pendingCalendarStatus: false
+  readonly property string calendarBusy: calendarActionProc.running ? calendarActionProc.action : ""
+
+  function fetchCalendarStatus() {
+    if (calendarStatusProc.running) {
+      root.pendingCalendarStatus = true
+      return
+    }
+    root.pendingCalendarStatus = false
+    calendarStatusProc.out = ""
+    calendarStatusProc.launch([root.bin, "meeting", "calendar", "status", "--json"])
+  }
+
+  CliProcess {
+    id: calendarStatusProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: calendarStatusProc.out = String(text || "")
+    }
+    onFailedToStart: {
+      root.pendingCalendarStatus = false
+      root.calendarStatusLoaded(null)
+    }
+    onExited: function(exitCode) {
+      if (root.pendingCalendarStatus) {
+        root.pendingCalendarStatus = false
+        Qt.callLater(root.fetchCalendarStatus)
+        return
+      }
+      var parsed = null
+      if (exitCode === 0) {
+        try {
+          parsed = JSON.parse(calendarStatusProc.out)
+        } catch (e) {
+          parsed = null
+        }
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = null
+      root.calendarStatusLoaded(parsed)
+    }
+  }
+
+  function setCalendarLink(link) {
+    var value = String(link || "").trim()
+    if (value === "" || calendarActionProc.running) return
+    calendarActionProc.secret = value
+    root.runCalendarAction("set", [root.bin, "meeting", "calendar", "set-ics", "-", "--json"])
+  }
+
+  function clearCalendarLink() {
+    root.runCalendarAction("clear", [root.bin, "meeting", "calendar", "clear", "--json"])
+  }
+
+  function runCalendarAction(action, args) {
+    if (calendarActionProc.running) return
+    calendarActionProc.action = action
+    calendarActionProc.out = ""
+    calendarActionProc.err = ""
+    calendarActionProc.stdinEnabled = action === "set"
+    calendarActionProc.launch(args)
+  }
+
+  CliProcess {
+    id: calendarActionProc
+    property string action: ""
+    property string out: ""
+    property string err: ""
+    // The link, held only until it is written to the CLI's stdin.
+    property string secret: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: calendarActionProc.out = String(text || "")
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: calendarActionProc.err = String(text || "").trim()
+    }
+    onStarted: {
+      if (calendarActionProc.action !== "set") return
+      calendarActionProc.write(calendarActionProc.secret + "\n")
+      calendarActionProc.secret = ""
+      calendarActionProc.stdinEnabled = false
+    }
+    onFailedToStart: {
+      calendarActionProc.secret = ""
+      root.calendarActionFinished(calendarActionProc.action, false, "Could not run " + root.bin, null)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      calendarActionProc.secret = ""
+      var result = null
+      if (exitCode === 0) {
+        try {
+          result = JSON.parse(calendarActionProc.out)
+        } catch (e) {
+          result = null
+        }
+      }
+      var message = ""
+      if (exitCode !== 0) {
+        var lines = calendarActionProc.err.split("\n").filter(function(l) { return l.trim() !== "" })
+        message = lines.length > 0 ? lines[lines.length - 1].replace(/^Error:\s*/, "")
+          : ("voxtype meeting calendar " + calendarActionProc.action + " exited " + exitCode)
+      }
+      root.calendarActionFinished(calendarActionProc.action, exitCode === 0, message, result)
+    }
+  }
+
   // --------------------------------------------- things that want a terminal
   //
   // Every one of these has to be launched *after* the panel is dismissed. The

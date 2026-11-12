@@ -461,6 +461,8 @@ Inside the panel:
 | OSD frontend, and whether to offer Quickshell | `voxtype setup osd --status --json` |
 | Switch on the OSD offer | `voxtype setup osd --use-auto`, then the restart above |
 | Not now on the OSD offer | `voxtype setup osd --dismiss-offer` |
+| Calendar link: where meeting titles come from | `voxtype meeting calendar status --json` |
+| Set / clear the calendar link | `voxtype meeting calendar set-ics - --json` (the link on stdin, never in argv), `voxtype meeting calendar clear --json` |
 
 ## Development
 
@@ -531,6 +533,22 @@ the meeting ends, pause/resume/stop through finalizing, opening on a start
 socket that goes away and a daemon restart, the idle state and a refused start,
 no daemon at all, and auto-scroll. `--evidence` also saves a screenshot of the
 view in each state.
+
+### Calendar link test
+
+```bash
+python3 omarchy-plugin/tests/test-calendar-link.py [--evidence DIR] [--scenario NAME]
+REAL_VOXTYPE=target/debug/voxtype python3 omarchy-plugin/tests/test-calendar-link.py --scenario real
+```
+
+Same harness and isolation rules as the tests above. The Meeting section's
+Calendar (iCal link) row: setting a link (a refused one stays in the field,
+a good one empties it and the status line takes over), a 404 from the
+server, a saved link whose last fetch failed, Clear, the keyboard cursor and
+search, and an older CLI that shows no row. Every scenario checks that the
+link reached `set-ics -` on stdin and never appeared in argv or in the shell's
+log. `real` (run only when `REAL_VOXTYPE` is set) hands `meeting calendar` to
+that binary, which fetches a feed from a local HTTP server.
 
 ### Schema boundary regression test
 

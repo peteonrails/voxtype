@@ -136,6 +136,13 @@ Item {
   // The `setup osd --status --json` object, or null (including a CLI that
   // predates --status, which means no offer).
   property var osdStatus: null
+  // `meeting calendar status --json`, or null (a CLI without it): the
+  // calendar link row. Its last Set/Clear failure, what the last Set reported,
+  // and a count of saves, each of which empties the row's field.
+  property var calendarStatus: null
+  property string calendarError: ""
+  property string calendarNotice: ""
+  property int calendarSaved: 0
   // "Not now" whose recording failed: hidden for as long as the shell keeps
   // this panel loaded, as for the plugin copy banner.
   property bool osdDismissedHere: false
@@ -278,6 +285,8 @@ Item {
     root.upgradeActionError = ""
     root.osdOfferError = ""
     root.osdStyleNotice = ""
+    root.calendarError = ""
+    root.calendarNotice = ""
     if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
     root.refreshAll()
@@ -309,6 +318,7 @@ Item {
     cli.fetchUpgrade()
     cli.fetchPluginLink()
     cli.fetchOsdStatus()
+    cli.fetchCalendarStatus()
   }
 
   // A binary that cannot be run cannot vouch for anything shown from its last
@@ -339,6 +349,7 @@ Item {
     root.upgradeStatus = null
     root.pluginLink = null
     root.osdStatus = null
+    root.calendarStatus = null
     root.infoErrors = ({})
   }
 
@@ -740,6 +751,20 @@ Item {
     }
     onPluginLinkLoaded: function(status) { root.pluginLink = status }
     onOsdStatusLoaded: function(status) { root.osdStatus = status }
+    onCalendarStatusLoaded: function(status) { root.calendarStatus = status }
+    onCalendarActionFinished: function(action, ok, message, result) {
+      root.calendarError = ok ? "" : message
+      root.calendarNotice = ""
+      if (ok && action === "set") {
+        root.calendarSaved += 1
+        var host = result && result.host ? String(result.host) : "your calendar"
+        var n = result ? result.events : null
+        root.calendarNotice = "Linked to " + host + (n === null || n === undefined ? "." :
+          ": " + n + (n === 1 ? " event" : " events") + " in the next 48 hours.")
+      }
+      if (ok && action === "clear") root.calendarNotice = "Calendar link removed."
+      cli.fetchCalendarStatus()
+    }
     onOsdActionFinished: function(action, ok, message) {
       if (action === "use-auto") {
         if (ok) {
@@ -1284,6 +1309,21 @@ Item {
             osdOfferError: root.osdOfferError
             onOsdSwitchRequested: root.switchToQuickshellOsd()
             onOsdNotNowRequested: { root.osdOfferError = ""; cli.dismissOsdOffer() }
+            calendarStatus: root.calendarStatus
+            calendarBusy: cli.calendarBusy
+            calendarError: root.calendarError
+            calendarNotice: root.calendarNotice
+            calendarSaved: root.calendarSaved
+            onCalendarSetRequested: function(link) {
+              root.calendarError = ""
+              root.calendarNotice = ""
+              cli.setCalendarLink(link)
+            }
+            onCalendarClearRequested: {
+              root.calendarError = ""
+              root.calendarNotice = ""
+              cli.clearCalendarLink()
+            }
             rowNotes: ({ "osd.style": root.osdStyleHelp })
             rowNotices: ({ "osd.style": root.osdStyleNotice })
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }
