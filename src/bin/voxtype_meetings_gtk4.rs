@@ -212,6 +212,7 @@ fn meeting_config() -> MeetingConfig {
     MeetingConfig {
         storage: StorageConfig {
             storage_path,
+            my_name: config.meeting.my_name.clone(),
             ..StorageConfig::default()
         },
         ..MeetingConfig::default()
