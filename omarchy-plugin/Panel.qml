@@ -297,6 +297,10 @@ Item {
   // `section` verb on an open panel both re-read all of it: either can follow a
   // change made behind the panel's back (an upgrade, a new binary, a tray
   // click after a model update).
+  // The account's full name, offered (as placeholder text) for an unset
+  // meeting.my_name; "" when there is none or the CLI cannot say.
+  property string myNameSuggestion: ""
+
   function refreshAll() {
     cli.fetchSchema()
     cli.fetchStatus()
@@ -309,6 +313,7 @@ Item {
     cli.fetchUpgrade()
     cli.fetchPluginLink()
     cli.fetchOsdStatus()
+    cli.fetchMyName()
   }
 
   // A binary that cannot be run cannot vouch for anything shown from its last
@@ -740,6 +745,7 @@ Item {
     }
     onPluginLinkLoaded: function(status) { root.pluginLink = status }
     onOsdStatusLoaded: function(status) { root.osdStatus = status }
+    onMyNameLoaded: function(answer) { root.myNameSuggestion = answer && answer.suggestion ? String(answer.suggestion) : "" }
     onOsdActionFinished: function(action, ok, message) {
       if (action === "use-auto") {
         if (ok) {
@@ -1285,6 +1291,8 @@ Item {
             onOsdSwitchRequested: root.switchToQuickshellOsd()
             onOsdNotNowRequested: { root.osdOfferError = ""; cli.dismissOsdOffer() }
             rowNotes: ({ "osd.style": root.osdStyleHelp })
+            // An empty "Your name" shows the account's full name to type in.
+            rowPlaceholders: ({ "meeting.my_name": root.myNameSuggestion })
             rowNotices: ({ "osd.style": root.osdStyleNotice })
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }
             onReplacementUnsetRequested: function(from) { cli.unsetReplacement(from) }

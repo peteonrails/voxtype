@@ -136,6 +136,8 @@ Item {
   // schema's: the Style row names the OSD frontend its styles belong to.
   property var rowNotes: ({})
   property var rowNotices: ({})
+  // Placeholder text for a text field, by key.
+  property var rowPlaceholders: ({})
 
   readonly property string osdSection: {
     for (var i = 0; i < root.keys.length; i++) {
@@ -536,6 +538,7 @@ Item {
                 errorText: root.errors[String(entry.modelData.key)] || ""
                 helpNote: root.rowNotes[String(entry.modelData.key)] || ""
                 noticeText: root.rowNotices[String(entry.modelData.key)] || ""
+                placeholder: root.rowPlaceholders[String(entry.modelData.key)] || ""
                 highlighted: entry.highlighted
                 onSetRequested: function(key, value) { root.setRequested(key, value) }
                 onUnsetRequested: function(key) { root.unsetRequested(key) }

@@ -28,6 +28,12 @@ Scenarios:
                     clears on reopen after a restart made while closed.
   threads           parakeet.threads unset shows "default", not 1, and writes
                     nothing until a number is entered; reset brings it back.
+  meeting           the Meeting section's 1.3.1 rows with plain labels: Your
+                    name (the account's name from `meeting my-name --json` as
+                    placeholder text), Meeting view (auto/quickshell/gtk4/
+                    terminal/none) and Echo guard; typing a name writes it.
+  meetingold        a CLI without `meeting my-name`: no placeholder, nothing
+                    else changes.
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -58,6 +64,8 @@ SCENARIOS = {
     "styleactive": {"osd": AUTO_QS},
     "stalebanner": {"osd": AUTO_QS},
     "threads": {"osd": AUTO_QS, "threads_key": True},
+    "meeting": {"osd": AUTO_QS, "meeting_keys": True, "my_name_suggestion": "Dana Smith"},
+    "meetingold": {"osd": AUTO_QS, "meeting_keys": True},
 }
 
 STATUS = ["setup", "osd", "--status", "--json"]
@@ -79,6 +87,7 @@ EXPECTED_ACTIONS = {
     "stalebanner": [["config", "set", "osd.style", "pill"], RESTART,
                     ["config", "set", "osd.style", "hud"], RESTART],
     "threads": [["config", "set", "parakeet.threads", "8"], ["config", "unset", "parakeet.threads"]],
+    "meeting": [["config", "set", "meeting.my_name", "Dana"]],
 }
 
 
@@ -110,7 +119,9 @@ def run(scenario, shell, evidence):
         systemctl.write_text("#!/bin/sh\nexec " + sys.executable + " -I " + str(h.HERE / "fake-systemctl.py") + ' "$@"\n')
         systemctl.chmod(0o755)
         r.dev_json(r.fake)
-        output, code = r.run(h.HERE / "osd-panel.qml", {"__SCENARIO__": scenario},
+        shots = evidence / scenario if evidence else r.root
+        shots.mkdir(parents=True, exist_ok=True)
+        output, code = r.run(h.HERE / "osd-panel.qml", {"__SCENARIO__": scenario, "__EVIDENCE__": str(shots)},
                              env={"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", "")}, timeout=90)
         calls = r.calls()
         launched = r.launched()
