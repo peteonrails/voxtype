@@ -195,6 +195,9 @@ pub struct Environment {
     /// The sink whose sound the canceller removes, when it is not the
     /// default sink: the one `loopback_device` records the call from
     pub reference: Option<String>,
+    /// The mic is that sink's own monitor (directly or through filters), so
+    /// it hears nothing but what the canceller would remove
+    pub mic_hears_output: bool,
 }
 
 /// Classify one sink from `pactl -f json list sinks`.
@@ -251,6 +254,11 @@ pub fn plan(mode: Mode, env: &Environment) -> (EchoPath, &'static str) {
         _ if matches!(env.mic, Mic::Unmapped(_)) => (
             EchoPath::Gtcrn,
             "meeting.audio.mic_device is not a PipeWire source the canceller can record",
+        ),
+        _ if env.mic_hears_output => (
+            EchoPath::Gtcrn,
+            "the mic is a monitor of the output the canceller would cancel, so it would remove \
+             everything the mic hears",
         ),
         _ if env.system_canceller && env.mic == Mic::Default => (
             EchoPath::Gtcrn,
@@ -360,6 +368,12 @@ pub fn environment_from(
     };
     let reference = reference_sink(loopback_device, sinks_json);
     let cancelled = reference.as_deref().unwrap_or(default_sink.trim());
+    let mic_name = match mic_device {
+        "default" | "" | "pipewire" | "pulse" => default_source,
+        named => named,
+    };
+    let mic_hears_output = !cancelled.is_empty()
+        && monitor_beneath(mic_name, &sources, &outputs).as_deref() == Some(cancelled);
     Environment {
         output: classify_default(sinks_json, cancelled),
         mic,
@@ -367,6 +381,7 @@ pub fn environment_from(
         wraps,
         available,
         reference,
+        mic_hears_output,
     }
 }
 
@@ -379,6 +394,34 @@ pub fn reference_sink(loopback_device: &str, sinks_json: &str) -> Option<String>
         .iter()
         .any(|s| s["name"].as_str() == Some(sink))
         .then(|| sink.to_string())
+}
+
+/// The sink whose monitor `name` is, or sits on through filters: a virtual
+/// mic fed from an output rather than a microphone.
+pub fn monitor_beneath(
+    name: &str,
+    sources: &[serde_json::Value],
+    outputs: &[serde_json::Value],
+) -> Option<String> {
+    let mut current = sources.iter().find(|s| s["name"].as_str() == Some(name))?;
+    for _ in 0..5 {
+        let monitored = current["monitor_source"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| current["name"].as_str()?.strip_suffix(".monitor"));
+        if let Some(sink) = monitored {
+            return Some(sink.to_string());
+        }
+        let group = current["properties"]["node.link-group"].as_str()?;
+        let upstream = outputs
+            .iter()
+            .find(|o| o["properties"]["node.link-group"].as_str() == Some(group))?["source"]
+            .as_u64()?;
+        current = sources
+            .iter()
+            .find(|s| s["index"].as_u64() == Some(upstream))?;
+    }
+    None
 }
 
 /// Decide a meeting's echo handling and, for the canceller, start it. Never
@@ -410,6 +453,7 @@ pub fn begin(
             wraps: None,
             available: tools.is_some(),
             reference: None,
+            mic_hears_output: false,
         }
     } else {
         environment_from(
@@ -835,6 +879,7 @@ mod tests {
             wraps: None,
             available: true,
             reference: None,
+            mic_hears_output: false,
         }
     }
 
@@ -959,9 +1004,10 @@ mod tests {
     }
 
     /// The call can play on a sink other than the default, with
-    /// `loopback_device` naming its monitor.
+    /// `loopback_device` naming its monitor; and a virtual mic can be fed
+    /// from the very output the canceller removes.
     #[test]
-    fn the_reference_follows_an_explicit_loopback_monitor() {
+    fn the_reference_follows_the_loopback_and_a_monitor_mic_is_left_alone() {
         let sinks = json!([
             sink("spk", "[Out] Speaker", "Speaker", json!({})),
             sink("call", "[Out] Speaker", "Speaker", json!({})),
@@ -1007,6 +1053,26 @@ mod tests {
         assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Webrtc);
         let e = env("hp", "mic", "default", "auto");
         assert_eq!((e.reference, e.output), (None, Output::Headphones));
+        assert!(!e.mic_hears_output);
+
+        // A mic that is the cancelled output's monitor, outright, through a
+        // filter, or named in mic_device: nothing would be left of it.
+        for (source, mic, loopback) in [
+            ("spk.monitor", "default", "auto"),
+            ("monmic", "default", "auto"),
+            ("odd_name", "default", "auto"),
+            ("mic", "call.monitor", "call.monitor"),
+        ] {
+            let e = env("spk\n", source, mic, loopback);
+            assert!(e.mic_hears_output, "{source} {mic} {loopback}");
+            let (path, why) = plan(Mode::Webrtc, &e);
+            assert_eq!(path, EchoPath::Gtcrn);
+            assert!(why.contains("monitor of the output"), "{why}");
+        }
+        // A monitor of some other output is a mic like any other.
+        let e = env("spk", "spk.monitor", "default", "call.monitor");
+        assert!(!e.mic_hears_output);
+        assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Webrtc);
     }
 
     /// Pete's machine on 2026-11-11, from `pactl -f json list sources` and

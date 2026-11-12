@@ -18,7 +18,8 @@
 #     echo checks)
 #   - disabled: the control, where they do
 # then a call played on a sink other than the default, named by
-# loopback_device, must be cancelled against that sink; a canceller
+# loopback_device, must be cancelled against that sink; a mic that is the
+# speakers' own monitor must skip the canceller and say why; a canceller
 # that hears nothing (its capture pointed at a silent source) must be left
 # for the direct mic within seconds; and a meeting on the canceller is
 # killed with SIGKILL, and the canceller must be gone. The loopback track is
@@ -192,6 +193,21 @@ python3 -c "import sys; sys.exit(0 if float(sys.argv[2]) - float(sys.argv[1]) >=
 [ "$OWN" -ge 80 ] || fail "call sink: only $OWN% of your words reached the mic track"
 kill $DPID; wait $DPID 2>/dev/null
 pactl unload-module $CE
+
+# A mic that is the speakers' own monitor: cancelling would remove all of
+# it, so the canceller must not run, and the log must say why.
+pactl set-default-source speakers.monitor
+daemon auto
+$BIN meeting start --title "monitor mic" >/dev/null; state recording; sleep 2
+UP=$(pactl list short sources | grep -c voxtype_meeting_aec_source)
+S=$($BIN meeting status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['echo_cancel'])")
+$BIN meeting stop >/dev/null; state idle
+echo "mic is the speakers' monitor: echo_cancel=$S, canceller sources: $UP"
+[ "$UP" = 0 ] || fail "monitor mic: the canceller ran"
+case "$S" in gtcrn|none) ;; *) fail "monitor mic: status says $S";; esac
+grep -q "monitor of the output the canceller would cancel" $OUT/daemon.log || fail "monitor mic: no reason in the log"
+kill $DPID; wait $DPID 2>/dev/null
+pactl set-default-source mic
 
 # A canceller that hears nothing: a pipewire on the daemon's PATH points
 # its capture at a source nobody plays into. Within seconds the meeting
