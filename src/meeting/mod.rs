@@ -192,6 +192,15 @@ pub struct MeetingDaemon {
     title_labels: Option<title_labels::TitleLabels>,
 }
 
+/// Who the title names as the user, when titles name speakers at all:
+/// `meeting.my_name` first, then the account's full name.
+fn title_me(config: &MeetingConfig) -> Option<title_labels::Me> {
+    if !config.auto_label_from_title {
+        return None;
+    }
+    title_labels::Me::resolve(config.storage.my_name.as_deref())
+}
+
 impl MeetingDaemon {
     /// Create a new meeting daemon.
     ///
@@ -249,11 +258,7 @@ impl MeetingDaemon {
             }
         });
 
-        // No setting names the user yet: the account's full name does.
-        let me = config
-            .auto_label_from_title
-            .then(|| title_labels::Me::resolve(None))
-            .flatten();
+        let me = title_me(&config);
 
         Ok(Self {
             config,
@@ -2616,6 +2621,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(on.me, Some(title_labels::Me::named(&["Pete Jackson"])));
+    }
+
+    /// `meeting.my_name` is who the title is matched against first, ahead
+    /// of the account's full name, and it is the name your side gets.
+    #[tokio::test]
+    async fn my_name_wins_over_the_account_name_for_title_labels() {
+        let dir = tempfile::TempDir::new().unwrap();
+        title_labels::set_account_name_for_test(Some("Pete Jackson"));
+        let (tx, _events) = mpsc::channel(64);
+        let mut app = crate::config::Config::default();
+        app.whisper.model = "/nonexistent/ggml-model.bin".into();
+        let daemon = MeetingDaemon::new(
+            MeetingConfig {
+                storage: StorageConfig {
+                    storage_path: dir.path().to_path_buf(),
+                    retain_audio: false,
+                    max_meetings: 0,
+                    my_name: Some("Peter".to_string()),
+                },
+                auto_label_from_title: true,
+                ..Default::default()
+            },
+            &app,
+            tx,
+            Some(Arc::new(CountingTranscriber(AtomicU32::new(0)))),
+        )
+        .unwrap();
+        let me = daemon.me.expect("the user is known");
+        assert_eq!(me, title_labels::Me::named(&["Peter", "Pete Jackson"]));
+        // "Peter <> Andrew" only matches through my_name.
+        let labels = title_labels::labels_for("Peter <> Andrew", &me).unwrap();
+        assert_eq!(
+            (labels.you.as_str(), labels.other.as_str()),
+            ("Peter", "Andrew")
+        );
     }
 
     fn drain(events: &mut mpsc::Receiver<MeetingEvent>) -> Vec<String> {

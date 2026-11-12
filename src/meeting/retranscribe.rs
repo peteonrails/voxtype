@@ -207,7 +207,9 @@ pub async fn retranscribe(
     // The scratch meeting named its speakers in the scratch store; the new
     // speaker IDs need the names here too.
     if config.meeting.auto_label_from_title {
-        if let Some(me) = crate::meeting::title_labels::Me::resolve(None) {
+        if let Some(me) =
+            crate::meeting::title_labels::Me::resolve(config.meeting.my_name.as_deref())
+        {
             crate::meeting::title_labels::label_stored(&storage, &id, &me)?;
         }
     }
@@ -458,6 +460,51 @@ mod tests {
             .unwrap();
         assert_eq!(names(&storage), ["PJ", "Chris"]);
         let labels = storage.get_speaker_labels(&id).unwrap();
+        assert_eq!(labels.get("Remote").map(String::as_str), Some("Chris"));
+    }
+
+    /// Retranscribing matches the title against `meeting.my_name` first:
+    /// here only my_name, not the account name, is the title's "Peter".
+    #[tokio::test]
+    async fn retranscribing_matches_the_title_against_my_name() {
+        if !ffmpeg_present() {
+            return;
+        }
+        crate::meeting::title_labels::set_account_name_for_test(Some("Pete Jackson"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("call.wav");
+        wav(&file, 12.0, &[&[(1.0, 3.0)], &[(5.0, 7.0)]]);
+        let mut config = config_in(&dir.path().join("meetings"));
+        config.meeting.auto_label_from_title = false;
+        let imported = import(
+            &config,
+            &ImportRequest {
+                file,
+                title: Some("Peter <> Chris".to_string()),
+                channels: Some("mic,loopback".to_string()),
+                ..Default::default()
+            },
+            counting(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let id = MeetingId::parse(&imported.meeting_id).unwrap();
+
+        config.meeting.auto_label_from_title = true;
+        config.meeting.my_name = Some("Peter".to_string());
+        let request = RetranscribeRequest {
+            meeting: "latest".to_string(),
+            keep_edits: true,
+            ..Default::default()
+        };
+        retranscribe(&config, &request, counting(), &mut |_| {})
+            .await
+            .unwrap();
+        let storage =
+            MeetingStorage::open(meeting_config_for(&config, None).storage.clone()).unwrap();
+        let labels = storage.get_speaker_labels(&id).unwrap();
+        assert_eq!(labels.get("You").map(String::as_str), Some("Peter"));
         assert_eq!(labels.get("Remote").map(String::as_str), Some("Chris"));
     }
 

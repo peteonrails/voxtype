@@ -457,7 +457,7 @@ Every meeting then shows your side as "Pete": the live view, exports, `transcrip
 
 A two-person meeting usually says who is in it: "Pete <> Andrew standup", "Andrew <> Pete Standup", "Pete / Chris", "Pete x Chris", "Pete & Chris", "Pete and Chris 1:1", "1:1 Pete/Chris" or "Chris - Pete sync". When a meeting's title reads like that, voxtype names the speakers for you. The side of the title that is you names your microphone, and the other side names every remote voice. In a 1:1 every remote voice is the same person, so this also tidies up a diarizer that heard one person as `Remote 1`, `Remote 2` and `Remote 3`.
 
-You are recognized by your account's full name (the GECOS field, as `getent passwd $USER` shows it). Matching ignores case, and a first name is enough: an account named "Pete Jackson" matches a title that says "Pete". Your microphone is labelled with your full name.
+You are recognized by [your name](#your-name) (`meeting.my_name`) when it is set, and otherwise, or as well, by your account's full name (the GECOS field, as `getent passwd $USER` shows it). Matching ignores case, and a first name is enough: an account named "Pete Jackson" matches a title that says "Pete". Your microphone is labelled with `my_name` when it is set, and otherwise with your full name.
 
 The rules are strict on purpose, because a wrong name is worse than none. Each name is one or two capitalized words. Words like standup, sync, weekly, check-in and 1:1 before or after the names are ignored. Nothing is named when:
 
