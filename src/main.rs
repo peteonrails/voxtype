@@ -31,13 +31,14 @@ async fn main() -> anyhow::Result<()> {
     // Check if this is the worker command (needs stderr-only logging)
     let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
     // Import and retranscribe print their own progress, and with --json
-    // their stdout is NDJSON, so logs go to stderr and only warnings show
-    // unless -v asks for more.
+    // their stdout is NDJSON (the waveform's is one JSON object), so logs go
+    // to stderr and only warnings show unless -v asks for more.
     let is_import = matches!(
         cli.command,
         Some(Commands::Meeting {
             action: voxtype::MeetingAction::Import { .. }
                 | voxtype::MeetingAction::Retranscribe { .. }
+                | voxtype::MeetingAction::Waveform { .. }
         })
     );
 
