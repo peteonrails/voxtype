@@ -99,6 +99,10 @@ Scenarios:
               Summarizing into the card, twice; local_only hides "Use …"
   summary-stale  an error event naming no meeting (an older daemon) still
               ends Summarizing; a status without summary_backend falls back
+  live-labels  names given mid-meeting stick: a renamed Remote 1 keeps its
+              name on lines that arrive later, and after the view reconnects
+              (a fresh hello) both a talking and a silent renamed speaker
+              keep theirs
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -124,7 +128,7 @@ import time
 
 import panel_harness as h
 
-SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-settings", "reconnect",
+SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-settings", "reconnect",
              "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
@@ -214,6 +218,18 @@ def running_meeting(seconds_ago=65):
             ]}
 
 
+def hybrid_meeting():
+    """Hybrid diarization with two remote voices."""
+    m = running_meeting()
+    m["segments"] = [
+        seg(1, 4, "Morning. Can everyone hear me?", "microphone", "You", 0),
+        seg(2, 9, "Yes, loud and clear.", "loopback", "Remote 1", 0),
+        seg(3, 15, "This meeting is being recorded.", "loopback", "Remote 2", 0),
+        seg(4, 21, "Great, let's start with the release.", "microphone", "You", 0),
+    ]
+    return m
+
+
 def scroll_meeting():
     m = running_meeting()
     m["segments"] = [seg(i + 1, i * 3, "Line number %d of a long meeting, long enough to wrap onto a second "
@@ -226,6 +242,7 @@ def scroll_meeting():
 # Built per run, so a meeting's start time is relative to its own scenario.
 INITIAL = {
     "live": lambda: [running_meeting()],
+    "live-labels": lambda: [hybrid_meeting()],
     "reconnect": lambda: [running_meeting()],
     "scroll": lambda: [scroll_meeting()],
     "reassign": lambda: [running_meeting()],
@@ -613,6 +630,9 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "play-errors":
         start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
         expect(meeting, [start, start], "meeting commands")
+    elif scenario == "live-labels":
+        expect(meeting, [["meeting", "label", MEETING_ID, "Remote 1", "Chris"],
+                         ["meeting", "label", MEETING_ID, "Remote 2", "Announcer"]], "meeting commands")
     elif scenario == "agent-missing":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario == "copy":

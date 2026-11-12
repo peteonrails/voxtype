@@ -340,6 +340,10 @@ Replace the segment with the same `id` by this copy. It follows
 restored line is one you do not have: put it back in order of `start_ms`. A
 moved line is never moved back by a later chunk.
 
+`meeting label` during a meeting sends one for every line already sent under
+that speaker, now carrying `speaker_label`, and the `hello` backlog has the
+name from then on. Lines transcribed later carry it in `segments`.
+
 #### `segment_deleted`
 
 ```json

@@ -472,6 +472,13 @@ pub(crate) async fn run_meeting_command(
                 .set_speaker_label(&id, &speaker_id, &label)
                 .map_err(|e| anyhow::anyhow!("Failed to label speaker: {}", e))?;
 
+            // A running meeting: have the daemon name the lines it already
+            // sent, so every view (and one reopened later) shows the name,
+            // not only lines transcribed from now on.
+            if meeting_is_live(&id) {
+                poke_daemon("meeting_edit", "label")?;
+            }
+
             println!(
                 "Labeled {} as '{}' in meeting {}",
                 keys.join(", "),

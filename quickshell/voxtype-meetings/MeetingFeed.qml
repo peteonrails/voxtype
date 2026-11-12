@@ -141,9 +141,10 @@ Item {
     return next
   }
 
-  // A rename made here and accepted by `meeting label`: the daemon does not
-  // announce it on the socket, so the feed applies it itself. Segments that
-  // arrive later carry it in speaker_label anyway.
+  // A rename made here and accepted by `meeting label`, shown at once. The
+  // daemon then sends segment_updated, with speaker_label, for the lines it
+  // already sent (and its hello backlog has the name); later segments carry
+  // it too. An older daemon sends neither, so this keeps it until then.
   function applyLabel(keys, name) {
     var next = root.copyLabels()
     for (var i = 0; i < keys.length; i++) next[keys[i]] = name

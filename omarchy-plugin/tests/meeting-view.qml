@@ -143,6 +143,7 @@ Item {
           else if (s === "export") tc.driveExport()
           else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
+          else if (s === "live-labels") tc.driveLiveLabels()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
           else if (s === "summary-stale") tc.driveSummaryStale()
@@ -1727,6 +1728,45 @@ Item {
       if (useAgent !== "") check(txt("summaryUseAgent") === "Use " + useAgent + " instead", "use: " + txt("summaryUseAgent"))
       check(shown(find(view(), "summarySettings")) === view().canOpenSettings, "Settings offered where the host has it")
       check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+    }
+
+    function speakerOf(text) {
+      var all = lines()
+      for (var i = 0; i < all.length; i++) if (all[i][2] === text) return all[i][1]
+      return "<no line " + text + ">"
+    }
+
+    function driveLiveLabels() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(speakerOf("Yes, loud and clear.") === "Remote 1", "Remote 1 at first")
+      rename(1, "Chris")
+      waitFor(function() { return speakerOf("Yes, loud and clear.") === "Chris" }, "renamed: " + speakerOf("Yes, loud and clear."))
+      waitFor(idleCli, "label stored")
+      // Remote 1 talks again: the new lines keep the name.
+      ctl({ cmd: "segments", chunk_id: 2, segments: [seg(5, 40, "Shall I share my screen?", "loopback", "Remote 1", 2),
+                                                     seg(6, 44, "Go ahead.", "microphone", "You", 2)] })
+      waitFor(function() { return lines().length === 6 }, "chunk 2")
+      check(speakerOf("Shall I share my screen?") === "Chris", "later line keeps the name: " + speakerOf("Shall I share my screen?"))
+      // Remote 2 is named and never speaks again.
+      rename(2, "Announcer")
+      waitFor(function() { return speakerOf("This meeting is being recorded.") === "Announcer" }, "second rename")
+      waitFor(idleCli, "second label stored")
+      shot("labels")
+      // The view starts over from the daemon's hello, as after a shell
+      // restart or reopening: the names come from the backlog itself.
+      ctl({ cmd: "drop" })
+      waitFor(function() { return !feed().connected }, "dropped")
+      waitFor(function() { return feed().connected && lines().length === 6 }, "reconnected", 12000)
+      check(speakerOf("Yes, loud and clear.") === "Chris", "Remote 1's first line after hello: " + speakerOf("Yes, loud and clear."))
+      check(speakerOf("Shall I share my screen?") === "Chris", "Remote 1's later line after hello")
+      check(speakerOf("This meeting is being recorded.") === "Announcer",
+            "a silent renamed speaker keeps the name after hello: " + speakerOf("This meeting is being recorded."))
+      ctl({ cmd: "segments", chunk_id: 3, segments: [seg(7, 70, "Here it is.", "loopback", "Remote 1", 3)] })
+      waitFor(function() { return lines().length === 7 }, "chunk 3")
+      check(speakerOf("Here it is.") === "Chris", "and after it: " + speakerOf("Here it is."))
+      var names = renderedChips()
+      check(names.indexOf("Remote 1") === -1 && names.indexOf("Remote 2") === -1, "no bare ids in the chips: " + JSON.stringify(names))
     }
 
     function driveSummaryError() {
