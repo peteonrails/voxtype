@@ -5,8 +5,15 @@
 //!
 //! Note: Remote APIs don't support language arrays. When a language array is
 //! configured, the first/primary language is used.
+//!
+//! Meeting chunks go through [`Transcriber::transcribe_timed`], which asks
+//! for `response_format=verbose_json` to get the server's segment
+//! timestamps. Not every OpenAI-compatible server has it, so the first
+//! timed request doubles as a probe and the answer is kept: a server that
+//! rejects the format, or ignores it and sends no `segments`, gets plain
+//! `json` from then on and one segment per chunk, as before.
 
-use super::Transcriber;
+use super::{TimedSegment, Transcriber};
 use crate::config::{LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::io::Cursor;
@@ -35,6 +42,17 @@ pub struct RemoteTranscriber {
     send_auto_language: bool,
     /// Request timeout
     timeout: Duration,
+    /// Whether the server returns segments for `verbose_json`: unknown
+    /// until the first timed request, then kept for the transcriber's life.
+    verbose_json: Mutex<Option<bool>>,
+}
+
+/// What came back for a request.
+enum Reply {
+    Json(serde_json::Value),
+    /// A 4xx answer, or a body that is not JSON: the request itself was not
+    /// acceptable, which for `verbose_json` means the format is unsupported.
+    Rejected(String),
 }
 
 impl RemoteTranscriber {
@@ -114,6 +132,7 @@ impl RemoteTranscriber {
             active_vocabulary: Mutex::new(Vec::new()),
             send_auto_language: config.remote_send_auto_language,
             timeout,
+            verbose_json: Mutex::new(None),
         })
     }
 
@@ -173,7 +192,13 @@ impl RemoteTranscriber {
     }
 
     /// Build the multipart form body for the API request
+    #[cfg(test)]
     fn build_multipart_body(&self, wav_data: &[u8]) -> (String, Vec<u8>) {
+        self.build_multipart_body_as(wav_data, "json")
+    }
+
+    /// The multipart body with the given `response_format`.
+    fn build_multipart_body_as(&self, wav_data: &[u8], format: &str) -> (String, Vec<u8>) {
         let boundary = format!(
             "----VoxtypeBoundary{}",
             std::time::SystemTime::now()
@@ -227,13 +252,137 @@ impl RemoteTranscriber {
         // Add response_format field
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"response_format\"\r\n\r\n");
-        body.extend_from_slice(b"json\r\n");
+        body.extend_from_slice(format.as_bytes());
+        body.extend_from_slice(b"\r\n");
 
         // End boundary
         body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
         (boundary, body)
     }
+}
+
+impl RemoteTranscriber {
+    /// Send `samples` asking for `format`. Transport failures and 5xx
+    /// answers are errors; a 4xx answer or a non-JSON body is
+    /// [`Reply::Rejected`].
+    fn request(&self, samples: &[f32], format: &str) -> Result<Reply, TranscribeError> {
+        let wav_data = self.encode_wav(samples)?;
+        tracing::debug!("Encoded WAV: {} bytes", wav_data.len());
+        let (boundary, body) = self.build_multipart_body_as(&wav_data, format);
+        let url = self.request_url();
+
+        let mut request = ureq::post(&url).timeout(self.timeout).set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={}", boundary),
+        );
+        if let Some(ref key) = self.api_key {
+            request = request.set("Authorization", &format!("Bearer {}", key));
+        }
+
+        let response = match request.send_bytes(&body) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                let message = format!("Server returned {}: {}", code, body);
+                return if (400..500).contains(&code) {
+                    Ok(Reply::Rejected(message))
+                } else {
+                    Err(TranscribeError::RemoteError(message))
+                };
+            }
+            Err(ureq::Error::Transport(t)) => {
+                return Err(TranscribeError::NetworkError(format!(
+                    "Request failed: {}",
+                    t
+                )))
+            }
+        };
+        let text = response
+            .into_string()
+            .map_err(|e| TranscribeError::RemoteError(format!("Failed to read response: {}", e)))?;
+        Ok(match serde_json::from_str(&text) {
+            Ok(json) => Reply::Json(json),
+            Err(e) => Reply::Rejected(format!("Failed to parse response: {}", e)),
+        })
+    }
+
+    /// The `text` field of a JSON reply.
+    fn reply_text(json: &serde_json::Value) -> Result<String, TranscribeError> {
+        Ok(json
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                TranscribeError::RemoteError(format!("Response missing 'text' field: {}", json))
+            })?
+            .trim()
+            .to_string())
+    }
+
+    /// A plain `json` request, the way dictation always asks.
+    fn transcribe_json(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        match self.request(samples, "json")? {
+            Reply::Json(json) => Self::reply_text(&json),
+            Reply::Rejected(message) => Err(TranscribeError::RemoteError(message)),
+        }
+    }
+
+    fn verbose_supported(&self) -> Option<bool> {
+        self.verbose_json.lock().ok().and_then(|g| *g)
+    }
+
+    fn remember_verbose(&self, supported: bool) {
+        if let Ok(mut g) = self.verbose_json.lock() {
+            if g.is_none() {
+                tracing::info!(
+                    "Remote server {} segment timestamps (verbose_json)",
+                    if supported {
+                        "returns"
+                    } else {
+                        "does not return"
+                    }
+                );
+            }
+            *g = Some(supported);
+        }
+    }
+}
+
+/// The text of a whole chunk as one segment spanning it, the way engines
+/// without timestamps report.
+fn one_segment(text: String, duration_secs: f32) -> Vec<TimedSegment> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![TimedSegment {
+            text,
+            start_secs: 0.0,
+            end_secs: duration_secs,
+        }]
+    }
+}
+
+/// The `segments` of a `verbose_json` reply, or `None` when there are none
+/// to read (the server ignored the format). Text is trimmed, times clamped
+/// to the audio, and segments without words dropped.
+fn verbose_segments(json: &serde_json::Value, duration_secs: f32) -> Option<Vec<TimedSegment>> {
+    let raw = json.get("segments")?.as_array()?;
+    let mut out = Vec::new();
+    for seg in raw {
+        let text = seg.get("text")?.as_str()?.trim();
+        let start = seg.get("start")?.as_f64()? as f32;
+        let end = seg.get("end")?.as_f64()? as f32;
+        if !text.chars().any(char::is_alphanumeric) {
+            continue;
+        }
+        let start = start.max(0.0).min(duration_secs);
+        out.push(TimedSegment {
+            text: text.to_string(),
+            start_secs: start,
+            end_secs: end.clamp(start, duration_secs),
+        });
+    }
+    Some(out)
 }
 
 impl Transcriber for RemoteTranscriber {
@@ -258,51 +407,7 @@ impl Transcriber for RemoteTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Encode audio to WAV
-        let wav_data = self.encode_wav(samples)?;
-        tracing::debug!("Encoded WAV: {} bytes", wav_data.len());
-
-        // Build multipart form
-        let (boundary, body) = self.build_multipart_body(&wav_data);
-
-        let url = self.request_url();
-
-        // Build request
-        let mut request = ureq::post(&url).timeout(self.timeout).set(
-            "Content-Type",
-            &format!("multipart/form-data; boundary={}", boundary),
-        );
-
-        // Add authorization if API key is configured
-        if let Some(ref key) = self.api_key {
-            request = request.set("Authorization", &format!("Bearer {}", key));
-        }
-
-        // Send request
-        let response = request.send_bytes(&body).map_err(|e| match e {
-            ureq::Error::Status(code, resp) => {
-                let body = resp.into_string().unwrap_or_default();
-                TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
-            }
-            ureq::Error::Transport(t) => {
-                TranscribeError::NetworkError(format!("Request failed: {}", t))
-            }
-        })?;
-
-        // Parse JSON response
-        let json: serde_json::Value = response.into_json().map_err(|e| {
-            TranscribeError::RemoteError(format!("Failed to parse response: {}", e))
-        })?;
-
-        // Extract text from response
-        let text = json
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                TranscribeError::RemoteError(format!("Response missing 'text' field: {}", json))
-            })?
-            .trim()
-            .to_string();
+        let text = self.transcribe_json(samples)?;
 
         tracing::info!(
             "Remote transcription completed in {:.2}s: {:?}",
@@ -315,6 +420,50 @@ impl Transcriber for RemoteTranscriber {
         );
 
         Ok(text)
+    }
+
+    /// Ask for the server's segment timestamps (`verbose_json`), once per
+    /// call while the server is known or presumed to have them. See the
+    /// module docs for how a server without them is detected and remembered.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
+        }
+        let duration_secs = samples.len() as f32 / 16000.0;
+        if self.verbose_supported() == Some(false) {
+            return Ok(one_segment(self.transcribe_json(samples)?, duration_secs));
+        }
+
+        let start = std::time::Instant::now();
+        match self.request(samples, "verbose_json")? {
+            Reply::Json(json) => match verbose_segments(&json, duration_secs) {
+                Some(segments) => {
+                    self.remember_verbose(true);
+                    tracing::info!(
+                        "Remote timed transcription of {:.2}s completed in {:.2}s: {} segment(s)",
+                        duration_secs,
+                        start.elapsed().as_secs_f32(),
+                        segments.len()
+                    );
+                    Ok(segments)
+                }
+                None => {
+                    // Answered, just without segments: use the text, and ask
+                    // for plain json from now on.
+                    self.remember_verbose(false);
+                    Ok(one_segment(Self::reply_text(&json)?, duration_secs))
+                }
+            },
+            Reply::Rejected(message) => {
+                tracing::debug!("verbose_json rejected: {}", message);
+                // Only a server that then takes plain json has shown the
+                // format is the problem; a bad key fails both and is not
+                // remembered as "no segments".
+                let text = self.transcribe_json(samples)?;
+                self.remember_verbose(false);
+                Ok(one_segment(text, duration_secs))
+            }
+        }
     }
 }
 
@@ -408,6 +557,208 @@ mod tests {
             assert!(request.contains(field), "missing multipart field: {field}");
         }
         request.lines().next().unwrap().to_string()
+    }
+
+    /// A loopback server that answers each request with the next scripted
+    /// (status, body) and reports the `response_format` each one asked for.
+    /// No provider is ever contacted.
+    fn scripted(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (WhisperConfig, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut formats = Vec::new();
+            for (status, body) in replies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() > deadline {
+                                return formats;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("fixture accept failed: {e}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break request.len();
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request).into_owned();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                request.resize(header_end + length, 0);
+                stream.read_exact(&mut request[header_end..]).unwrap();
+                let text = String::from_utf8_lossy(&request);
+                let marker = "name=\"response_format\"\r\n\r\n";
+                let at = text.find(marker).unwrap() + marker.len();
+                formats.push(text[at..].split("\r\n").next().unwrap().to_string());
+                let reason = if status == 200 { "OK" } else { "Error" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+            formats
+        });
+        let config = WhisperConfig {
+            remote_endpoint: Some(format!("http://{address}")),
+            remote_timeout_secs: Some(5),
+            ..Default::default()
+        };
+        (config, server)
+    }
+
+    const VERBOSE: &str = r#"{"text":"We ship. Agreed.","segments":[
+        {"id":0,"start":0.0,"end":4.5,"text":" We ship."},
+        {"id":1,"start":4.5,"end":13.0,"text":" Agreed."},
+        {"id":2,"start":13.0,"end":14.0,"text":" ..."},
+        {"id":3,"start":28.0,"end":31.0,"text":" Bye."}]}"#;
+    const PLAIN: &str = r#"{"text":" We ship. Agreed. "}"#;
+
+    fn spans(segments: &[TimedSegment]) -> Vec<(&str, f32, f32)> {
+        segments
+            .iter()
+            .map(|s| (s.text.as_str(), s.start_secs, s.end_secs))
+            .collect()
+    }
+
+    #[test]
+    fn verbose_json_segments_are_used_and_remembered() {
+        let (config, server) = scripted(vec![(200, VERBOSE), (200, VERBOSE)]);
+        let t = RemoteTranscriber::new(&config).unwrap();
+        let audio = vec![0.0f32; 30 * 16000];
+        let got = t.transcribe_timed(&audio).unwrap();
+        assert_eq!(
+            spans(&got),
+            vec![
+                ("We ship.", 0.0, 4.5),
+                ("Agreed.", 4.5, 13.0),
+                // Clamped to the 30 s of audio; "..." has no words.
+                ("Bye.", 28.0, 30.0),
+            ]
+        );
+        assert_eq!(t.transcribe_timed(&audio).unwrap().len(), 3);
+        assert_eq!(server.join().unwrap(), vec!["verbose_json", "verbose_json"]);
+        assert_eq!(t.verbose_supported(), Some(true));
+    }
+
+    #[test]
+    fn a_server_that_rejects_verbose_json_gets_plain_json_from_then_on() {
+        let (config, server) = scripted(vec![
+            (400, r#"{"error":"unsupported response_format"}"#),
+            (200, PLAIN),
+            (200, PLAIN),
+        ]);
+        let t = RemoteTranscriber::new(&config).unwrap();
+        let audio = vec![0.0f32; 16000 * 10];
+        assert_eq!(
+            spans(&t.transcribe_timed(&audio).unwrap()),
+            vec![("We ship. Agreed.", 0.0, 10.0)]
+        );
+        assert_eq!(t.transcribe_timed(&audio).unwrap().len(), 1);
+        assert_eq!(server.join().unwrap(), vec!["verbose_json", "json", "json"]);
+    }
+
+    #[test]
+    fn a_server_that_ignores_verbose_json_is_not_asked_again() {
+        let (config, server) = scripted(vec![(200, PLAIN), (200, PLAIN)]);
+        let t = RemoteTranscriber::new(&config).unwrap();
+        let audio = vec![0.0f32; 16000 * 10];
+        assert_eq!(t.transcribe_timed(&audio).unwrap().len(), 1);
+        assert_eq!(t.transcribe_timed(&audio).unwrap().len(), 1);
+        // One request each: the ignored format cost nothing extra.
+        assert_eq!(server.join().unwrap(), vec!["verbose_json", "json"]);
+    }
+
+    #[test]
+    fn failures_that_are_not_about_the_format_are_not_remembered() {
+        let (config, server) = scripted(vec![
+            (500, r#"{"error":"busy"}"#),
+            (401, r#"{"error":"bad key"}"#),
+            (401, r#"{"error":"bad key"}"#),
+            (200, VERBOSE),
+        ]);
+        let t = RemoteTranscriber::new(&config).unwrap();
+        let audio = vec![0.0f32; 16000 * 30];
+        assert!(t.transcribe_timed(&audio).is_err(), "5xx is an error");
+        assert_eq!(t.verbose_supported(), None);
+        assert!(t.transcribe_timed(&audio).is_err(), "bad key fails both");
+        assert_eq!(t.verbose_supported(), None);
+        assert_eq!(t.transcribe_timed(&audio).unwrap().len(), 3);
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["verbose_json", "verbose_json", "json", "verbose_json"]
+        );
+    }
+
+    #[test]
+    fn dictation_still_asks_for_plain_json() {
+        let (config, server) = scripted(vec![(200, PLAIN)]);
+        let t = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(t.transcribe(&[0.0; 16000]).unwrap(), "We ship. Agreed.");
+        assert_eq!(server.join().unwrap(), vec!["json"]);
+    }
+
+    /// A meeting chunk through a remote server with segments: one request,
+    /// a line per segment, each fitted to its speech like local Whisper's,
+    /// and a segment over silence dropped.
+    #[test]
+    fn remote_meeting_chunks_get_fitted_lines() {
+        use crate::meeting::chunk::{ChunkConfig, ChunkProcessor};
+        use crate::meeting::data::AudioSource;
+
+        let (config, server) = scripted(vec![(200, VERBOSE)]);
+        let t = std::sync::Arc::new(RemoteTranscriber::new(&config).unwrap());
+        let mut audio = vec![0.0f32; 30 * 16000];
+        for (start, end) in [(2.0f32, 4.0f32), (10.0, 12.5)] {
+            let span = (start * 16000.0) as usize..(end * 16000.0) as usize;
+            for (i, sample) in audio[span.clone()].iter_mut().enumerate() {
+                let t = (span.start + i) as f32 / 16000.0;
+                *sample = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+            }
+        }
+        let mut processor = ChunkProcessor::new(ChunkConfig::default(), t);
+        let mut buffer = processor.new_buffer(1, AudioSource::Loopback, 30_000);
+        buffer.add_samples(&audio);
+        let segments = processor.process_chunk(buffer).unwrap().segments;
+        // Fitted to 2-4 s and 10-12.5 s plus the 200 ms pad (within one
+        // 30 ms analysis frame), offset by 30 s; "Bye." at 28-30 s is over
+        // silence and dropped.
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["We ship.", "Agreed."], "{segments:?}");
+        for (seg, (start, end)) in segments.iter().zip([(31_800, 34_200), (39_800, 42_700)]) {
+            assert!(
+                seg.start_ms.abs_diff(start) <= 30 && seg.end_ms.abs_diff(end) <= 30,
+                "{segments:?}"
+            );
+        }
+        assert_eq!(server.join().unwrap(), vec!["verbose_json"]);
     }
 
     #[test]

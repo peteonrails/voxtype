@@ -139,6 +139,26 @@ impl VoiceActivityDetector {
             || speech_frames as u32 * self.window_ms >= MIN_SPEECH_MS
     }
 
+    /// From the start of the first voiced analysis frame of `samples` to
+    /// the end of the last, in samples; `None` when no frame is voiced.
+    /// With the gate off (threshold 0) all of `samples` counts as voiced.
+    pub fn voiced_span(&self, samples: &[f32]) -> Option<(usize, usize)> {
+        if samples.is_empty() {
+            return None;
+        }
+        if self.threshold <= 0.0 {
+            return Some((0, samples.len()));
+        }
+        let window_size = ((self.sample_rate * self.window_ms / 1000) as usize).max(1);
+        let voiced = |(_, chunk): &(usize, &[f32])| Self::calculate_rms(chunk) > self.threshold;
+        let first = samples.chunks(window_size).enumerate().find(voiced)?.0;
+        let last = samples.chunks(window_size).enumerate().rfind(voiced)?.0;
+        Some((
+            first * window_size,
+            ((last + 1) * window_size).min(samples.len()),
+        ))
+    }
+
     /// Calculate RMS energy of samples
     fn calculate_rms(samples: &[f32]) -> f32 {
         if samples.is_empty() {
@@ -195,6 +215,15 @@ impl VoiceActivityDetector {
 
 /// Speech a chunk needs before it is transcribed at all.
 const MIN_SPEECH_MS: u32 = 300;
+
+/// How far before a whole-chunk engine's segment start, and after its end,
+/// to look for the speech it timed. Whisper starts late less often than it
+/// ends early, so the window leans forward.
+const SEGMENT_SLACK_BEFORE: f32 = 0.2;
+const SEGMENT_SLACK_AFTER: f32 = 0.3;
+
+/// Silence kept around a fitted segment, like the pad on utterance regions.
+const SEGMENT_PAD: f32 = 0.2;
 
 /// Silence at least this long separates two utterances.
 const UTTERANCE_GAP_SECS: f32 = 0.7;
@@ -433,7 +462,8 @@ impl ChunkProcessor {
         // Engines whose per-call cost does not shrink with the clip (Whisper,
         // a process or request per call) keep one call per chunk, timed by
         // whatever their transcribe_timed reports.
-        let regions = if self.transcriber.short_clips_are_cheap() {
+        let per_utterance = self.transcriber.short_clips_are_cheap();
+        let regions = if per_utterance {
             utterance_regions(&samples, self.config.sample_rate, self.config.vad_threshold)
         } else {
             vec![(0, samples.len())]
@@ -453,17 +483,55 @@ impl ChunkProcessor {
                 .transcriber
                 .transcribe_timed(&samples[region_start..region_end])?;
 
+            // Where the previous fitted segment ended, so a segment that
+            // Whisper starts right at its neighbour's end cannot reach back
+            // into the neighbour's speech.
+            let mut prev_end = 0usize;
             for timed in &timed_segments {
                 if timed.text.trim().is_empty() {
                     continue;
                 }
+                // A whole-chunk decode (Whisper) times its segments loosely:
+                // a segment after a pause starts where the previous one
+                // ended, so the pause is counted as speech, and it can put
+                // words on a stretch with no sound at all (the familiar
+                // "Thank you." over silence). Fit each segment to the voiced
+                // audio inside its span, and drop it when there is none.
+                let (start_secs, end_secs) = if per_utterance {
+                    (timed.start_secs, timed.end_secs)
+                } else {
+                    let rate = self.config.sample_rate as f32;
+                    let len = region_end - region_start;
+                    let lo = (((timed.start_secs - SEGMENT_SLACK_BEFORE).max(0.0)) * rate) as usize;
+                    let hi = (((timed.end_secs + SEGMENT_SLACK_AFTER) * rate) as usize).min(len);
+                    let lo = lo.max(prev_end).min(hi);
+                    let region = &samples[region_start..region_end];
+                    match self.vad.voiced_span(&region[lo..hi]) {
+                        None => {
+                            tracing::debug!(
+                                chunk_id,
+                                text = %timed.text,
+                                "Dropping a segment timed over silence"
+                            );
+                            continue;
+                        }
+                        Some((a, b)) => {
+                            let pad = (SEGMENT_PAD * rate) as usize;
+                            let from = (lo + a).saturating_sub(pad).max(lo);
+                            let to = (lo + b + pad).min(hi);
+                            prev_end = to;
+                            (from as f32 / rate, to as f32 / rate)
+                        }
+                    }
+                };
+
                 let segment_id = self.next_segment_id;
                 self.next_segment_id += 1;
 
                 let seg_start_ms =
-                    start_offset_ms + ((region_offset_secs + timed.start_secs) * 1000.0) as u64;
+                    start_offset_ms + ((region_offset_secs + start_secs) * 1000.0) as u64;
                 let seg_end_ms =
-                    start_offset_ms + ((region_offset_secs + timed.end_secs) * 1000.0) as u64;
+                    start_offset_ms + ((region_offset_secs + end_secs) * 1000.0) as u64;
 
                 let mut segment = TranscriptSegment::new(
                     segment_id,
@@ -621,6 +689,239 @@ mod tests {
         let result = processor.process_chunk(buffer).unwrap();
         assert_eq!(transcriber.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(result.segments.len(), 1);
+    }
+
+    /// Whisper's shape: one call per chunk (short clips are not cheaper),
+    /// but the call returns its own timed segments.
+    struct SegmentingTranscriber(std::sync::atomic::AtomicU32);
+
+    impl Transcriber for SegmentingTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> Result<String, TranscribeError> {
+            unreachable!("meeting chunks use transcribe_timed")
+        }
+
+        fn transcribe_timed(
+            &self,
+            samples: &[f32],
+        ) -> Result<Vec<crate::transcribe::TimedSegment>, TranscribeError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(samples.len(), 30 * 16000, "the whole chunk in one call");
+            let seg = |text: &str, a: f32, b: f32| crate::transcribe::TimedSegment {
+                text: text.to_string(),
+                start_secs: a,
+                end_secs: b,
+            };
+            Ok(vec![
+                seg("We ship Friday.", 2.0, 4.0),
+                seg(" ", 5.0, 6.0),
+                // Whisper's way after a pause: starts where the last ended.
+                seg("Agreed.", 4.0, 12.5),
+                // Over pure silence: a hallucination, dropped.
+                seg("Thank you.", 17.0, 19.0),
+                seg("Bye.", 25.0, 27.0),
+            ])
+        }
+    }
+
+    /// Whisper meetings: one call per chunk, yet one line per utterance,
+    /// each at its own time.
+    #[test]
+    fn a_segmenting_engine_gets_one_line_per_segment_from_one_call() {
+        let transcriber = Arc::new(SegmentingTranscriber(Default::default()));
+        let mut processor = ChunkProcessor::new(ChunkConfig::default(), transcriber.clone())
+            .with_first_segment_id(7);
+        let mut buffer = processor.new_buffer(2, AudioSource::Loopback, 60_000);
+        buffer.add_samples(&speech_at(30.0, &[(2.0, 4.0), (10.0, 12.5), (25.0, 27.0)]));
+
+        let result = processor.process_chunk(buffer).unwrap();
+        assert_eq!(transcriber.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let got: Vec<(u32, &str)> = result
+            .segments
+            .iter()
+            .map(|s| (s.id, s.text.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(7, "We ship Friday."), (8, "Agreed."), (9, "Bye.")]
+        );
+        // Each fitted to its own speech, 200 ms pad either side, offset by
+        // the chunk: "Agreed." starts at 10 s, not where Whisper put it.
+        let expected = [(61_800, 64_200), (69_800, 72_700), (84_800, 87_200)];
+        for (seg, (start, end)) in result.segments.iter().zip(expected) {
+            assert!(
+                near(seg.start_ms, start) && near(seg.end_ms, end),
+                "{:?}",
+                result.segments
+            );
+        }
+        assert!(result
+            .segments
+            .iter()
+            .all(|s| s.source == AudioSource::Loopback));
+    }
+
+    /// The real Whisper model on real speech, when one is given:
+    /// `VOXTYPE_TEST_WHISPER_MODEL=/path/ggml-tiny.en.bin cargo test whisper_meeting`.
+    /// Two sentences eight seconds apart in one chunk become two lines at
+    /// their own times, from one decode.
+    #[test]
+    fn whisper_meeting_chunk_gets_a_line_per_sentence() {
+        let Ok(model) = std::env::var("VOXTYPE_TEST_WHISPER_MODEL") else {
+            eprintln!("skipping: VOXTYPE_TEST_WHISPER_MODEL is not set");
+            return;
+        };
+        let sentence: Vec<f32> = hound::WavReader::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/vad/speech_long.wav"
+        ))
+        .unwrap()
+        .samples::<i16>()
+        .map(|s| s.unwrap() as f32 / 32768.0)
+        .collect();
+        let mut audio = vec![0.0f32; 16000];
+        audio.extend(&sentence);
+        let second_at = audio.len() as f32 / 16000.0 + 8.0;
+        audio.extend(vec![0.0f32; 8 * 16000]);
+        audio.extend(&sentence);
+        audio.resize(30 * 16000, 0.0);
+
+        let config = crate::config::WhisperConfig {
+            model,
+            language: crate::config::LanguageConfig::Single("en".into()),
+            ..Default::default()
+        };
+        let whisper = crate::transcribe::whisper::WhisperTranscriber::new(&config).unwrap();
+        let mut processor = ChunkProcessor::new(ChunkConfig::default(), Arc::new(whisper));
+        let mut buffer = processor.new_buffer(0, AudioSource::Loopback, 0);
+        buffer.add_samples(&audio);
+        let segments = processor.process_chunk(buffer).unwrap().segments;
+        eprintln!("{segments:#?}");
+        assert_eq!(segments.len(), 2, "{segments:?}");
+        assert!(segments[0].start_ms.abs_diff(800) < 300, "{segments:?}");
+        let expected = ((second_at - 0.2) * 1000.0) as u64;
+        assert!(
+            segments[1].start_ms.abs_diff(expected) < 300,
+            "second line at {expected} ms: {segments:?}"
+        );
+    }
+
+    /// Parakeet's own token times, when a model is given:
+    /// `VOXTYPE_TEST_PARAKEET_MODEL=/path/parakeet-tdt-0.6b-v3-int8 cargo test
+    /// --features parakeet parakeet_meeting -- --nocapture`. Two sentences
+    /// 0.3 s apart are one utterance to the pause splitter; they come back as
+    /// two lines, the second at its own start. With
+    /// `VOXTYPE_TEST_MEETING_WAVS=a.wav:b.wav` it also prints, per file,
+    /// the lines with and without the token times, and how much silence each
+    /// line's start runs ahead of its speech.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn parakeet_meeting_lines_follow_its_token_times() {
+        let Ok(model) = std::env::var("VOXTYPE_TEST_PARAKEET_MODEL") else {
+            eprintln!("skipping: VOXTYPE_TEST_PARAKEET_MODEL is not set");
+            return;
+        };
+        let read = |path: &str| -> Vec<f32> {
+            hound::WavReader::open(path)
+                .unwrap()
+                .samples::<i16>()
+                .map(|s| s.unwrap() as f32 / 32768.0)
+                .collect()
+        };
+        let parakeet: Arc<dyn Transcriber> = Arc::new(
+            crate::transcribe::parakeet::ParakeetTranscriber::new(&crate::config::ParakeetConfig {
+                model,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        /// The engine as meetings saw it before: one line per utterance.
+        struct Untimed(Arc<dyn Transcriber>);
+        impl Transcriber for Untimed {
+            fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+                self.0.transcribe(samples)
+            }
+            fn short_clips_are_cheap(&self) -> bool {
+                true
+            }
+        }
+        let lines = |engine: Arc<dyn Transcriber>, track: &[f32]| {
+            let mut processor = ChunkProcessor::new(ChunkConfig::default(), engine);
+            let (mut out, mut at, mut id) = (Vec::new(), 0usize, 0u32);
+            while at < track.len() {
+                let rest = &track[at..];
+                let cut = chunk_cut_point(rest, &[], 30 * 16000, 16000, 0.01).max(1);
+                let mut buffer =
+                    processor.new_buffer(id, AudioSource::Microphone, (at / 16) as u64);
+                buffer.add_samples(&rest[..cut]);
+                out.extend(processor.process_chunk(buffer).unwrap().segments);
+                at += cut;
+                id += 1;
+            }
+            out
+        };
+        // Silence between a line's start and its first voiced 30 ms frame.
+        let lead_ms = |track: &[f32], seg: &TranscriptSegment| -> u64 {
+            let from = (seg.start_ms * 16) as usize;
+            track[from.min(track.len())..]
+                .chunks(480)
+                .position(|f| VoiceActivityDetector::calculate_rms(f) > 0.01)
+                .map_or(0, |n| n as u64 * 30)
+        };
+
+        let sentence = read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/vad/speech_long.wav"
+        ));
+        let mut audio = vec![0.0f32; 16000];
+        audio.extend(&sentence);
+        audio.extend(vec![0.0f32; 4800]);
+        let second_at_ms = (audio.len() / 16) as u64;
+        audio.extend(&sentence);
+        audio.resize(15 * 16000, 0.0);
+        let timed = lines(parakeet.clone(), &audio);
+        let untimed = lines(Arc::new(Untimed(parakeet.clone())), &audio);
+        eprintln!("timed: {timed:#?}\nuntimed: {untimed:#?}");
+        assert_eq!(untimed.len(), 1, "one utterance to the pause splitter");
+        assert!(timed.len() >= 2, "{timed:?}");
+        assert!(
+            timed
+                .iter()
+                .any(|s| s.start_ms.abs_diff(second_at_ms) < 400),
+            "a line starts with the second sentence at {second_at_ms} ms: {timed:?}"
+        );
+
+        for path in std::env::var("VOXTYPE_TEST_MEETING_WAVS")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|p| !p.is_empty())
+        {
+            let track = read(path);
+            for (name, engine) in [
+                (
+                    "untimed",
+                    Arc::new(Untimed(parakeet.clone())) as Arc<dyn Transcriber>,
+                ),
+                ("timed", parakeet.clone()),
+            ] {
+                let segs = lines(engine, &track);
+                let leads: Vec<u64> = segs.iter().map(|s| lead_ms(&track, s)).collect();
+                eprintln!(
+                    "{path} {name}: {} lines, lead silence mean {} ms, max {} ms",
+                    segs.len(),
+                    leads.iter().sum::<u64>() / leads.len().max(1) as u64,
+                    leads.iter().max().unwrap_or(&0)
+                );
+                for (s, lead) in segs.iter().zip(&leads) {
+                    eprintln!(
+                        "  {:>6.2}-{:>6.2} lead {:>4} ms  {}",
+                        s.start_ms as f32 / 1000.0,
+                        s.end_ms as f32 / 1000.0,
+                        lead,
+                        s.text
+                    );
+                }
+            }
+        }
     }
 
     /// Bug: a chunk was transcribed only if over 10% of it was speech, so a

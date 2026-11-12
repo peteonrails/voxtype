@@ -1256,6 +1256,8 @@ cold_model_timeout_secs = 60  # Evict unused models after 1 minute
 
 The following options are used when `backend = "remote"`. They have no effect when using local transcription.
 
+In meeting mode the remote backend asks for `response_format=verbose_json` to get the server's segment timestamps, so a meeting chunk becomes one line per utterance. A server without `verbose_json` is detected on the first chunk and sent plain `json` from then on, with one line per chunk. Dictation always uses plain `json`.
+
 > **Privacy Notice**: Remote transcription sends your audio over the network. This feature was designed for users who self-host Whisper servers on their own hardware. While it can also connect to cloud services like OpenAI, users with privacy concerns should carefully consider the implications. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for details.
 
 ### remote_endpoint

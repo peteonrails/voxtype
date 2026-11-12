@@ -105,7 +105,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// A timed segment from transcription (word or sentence level)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TimedSegment {
     pub text: String,
     /// Start time in seconds relative to the audio input
