@@ -41,6 +41,10 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    or as segment_updated with "deleted": true
   {"cmd": "playback", "meeting_id", "track", "state", "from_ms"}
                                    a playback event, as the daemon sends one
+  {"cmd": "levels", "mic", "mic_peak", "loopback", "loopback_peak", "t_ms",
+   "meeting_id"?, "soundcheck"?}
+                                   a levels event for the running meeting (or
+                                   a sound check's, with "soundcheck": true)
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -212,6 +216,16 @@ class Server:
             self.broadcast(ev)
         elif kind == "error":
             self.broadcast({"event": "error", "message": cmd["message"]})
+        elif kind == "levels":
+            # As the daemon sends them: the meeting's id (or null and
+            # "soundcheck": true for a sound check's).
+            ev = {"event": "levels", "meeting_id": cmd.get("meeting_id", self.state.get("meeting_id")),
+                  "t_ms": cmd.get("t_ms", 0), "mic": cmd.get("mic"), "mic_peak": cmd.get("mic_peak"),
+                  "loopback": cmd.get("loopback"), "loopback_peak": cmd.get("loopback_peak")}
+            if cmd.get("soundcheck"):
+                ev["meeting_id"] = None
+                ev["soundcheck"] = True
+            self.broadcast(ev)
         elif kind == "label":
             self.labels[cmd["key"]] = cmd["name"]
         elif kind == "update":

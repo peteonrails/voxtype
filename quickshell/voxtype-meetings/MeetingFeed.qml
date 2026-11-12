@@ -44,6 +44,16 @@ Item {
   property bool diarization: false
   // Wall-clock ms of the last `segments` event, for the listening indicator.
   property real lastSegmentsAt: 0
+  // The running meeting's levels (`levels` events naming it), dBFS with a
+  // -100 floor; null for no audio in that window. `levelsAt` is when the last
+  // arrived (0: none, or a daemon that sends none). `loopbackSeen`: the
+  // meeting records the call (loopback has carried a number).
+  property var micDb: null
+  property var micPeakDb: null
+  property var loopbackDb: null
+  property var loopbackPeakDb: null
+  property real levelsAt: 0
+  property bool loopbackSeen: false
   property string lastError: ""
 
   // speaker key → human name, from segments' speaker_label and from renames
@@ -422,6 +432,7 @@ Item {
     root.chunkCount = 0
     root.diarization = false
     root.lastSegmentsAt = 0
+    root.clearLevels()
     root.ended = false
     root.endedAt = 0
   }
@@ -457,6 +468,14 @@ Item {
       root.meetingStarted()
   }
 
+  function clearLevels() {
+    root.micDb = root.micPeakDb = root.loopbackDb = root.loopbackPeakDb = null
+    root.levelsAt = 0
+    root.loopbackSeen = false
+  }
+
+  function dbOf(v) { return v === null || v === undefined ? null : Number(v) }
+
   function handleEvent(ev) {
     // Every event is tagged `event`. `type` is accepted too: an early draft
     // of the segment_updated contract used it.
@@ -475,6 +494,16 @@ Item {
                         ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
+    } else if (kind === "levels") {
+      // A sound check's levels carry `soundcheck` and no meeting; the sound
+      // check panel reads those from its own command.
+      if (ev.soundcheck === true || typeof ev.meeting_id !== "string" || ev.meeting_id !== root.meetingId) return
+      root.micDb = root.dbOf(ev.mic)
+      root.micPeakDb = root.dbOf(ev.mic_peak)
+      root.loopbackDb = root.dbOf(ev.loopback)
+      root.loopbackPeakDb = root.dbOf(ev.loopback_peak)
+      if (root.loopbackDb !== null) root.loopbackSeen = true
+      root.levelsAt = Date.now()
     } else if (kind === "playback") {
       root.playbackEvent(ev)
     } else if (kind === "segment_deleted") {

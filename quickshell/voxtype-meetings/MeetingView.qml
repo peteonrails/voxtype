@@ -706,6 +706,51 @@ Item {
           elide: root.ended ? Text.ElideNone : Text.ElideRight
           wrapMode: root.ended ? Text.WordWrap : Text.NoWrap
         }
+
+        // Live levels, once the daemon sends them: you, and the call when
+        // the meeting records it. They fall to empty while paused.
+        Row {
+          objectName: "liveMeters"
+          visible: root.feed !== null && root.feed.levelsAt > 0 && root.status !== "finalizing"
+          spacing: root.theme.md
+          Text {
+            text: "You"
+            anchors.verticalCenter: parent.verticalCenter
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.caption
+          }
+          LevelMeter {
+            objectName: "liveMicMeter"
+            anchors.verticalCenter: parent.verticalCenter
+            width: 44
+            implicitHeight: 5
+            theme: root.theme
+            db: root.feed ? root.feed.micDb : null
+            peakDb: root.feed ? root.feed.micPeakDb : null
+            at: root.feed ? root.feed.levelsAt : 0
+          }
+          Text {
+            visible: root.feed !== null && root.feed.loopbackSeen
+            text: "Call"
+            anchors.verticalCenter: parent.verticalCenter
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.caption
+          }
+          LevelMeter {
+            objectName: "liveCallMeter"
+            visible: root.feed !== null && root.feed.loopbackSeen
+            anchors.verticalCenter: parent.verticalCenter
+            width: 44
+            implicitHeight: 5
+            theme: root.theme
+            color: root.theme.alpha(root.theme.fg, 0.75)
+            db: root.feed ? root.feed.loopbackDb : null
+            peakDb: root.feed ? root.feed.loopbackPeakDb : null
+            at: root.feed ? root.feed.levelsAt : 0
+          }
+        }
       }
 
       // Ended: a new meeting can start from here, replacing this one.

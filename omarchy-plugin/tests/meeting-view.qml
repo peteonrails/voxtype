@@ -144,6 +144,7 @@ Item {
           else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
           else if (s === "soundcheck") tc.driveSoundCheck()
+          else if (s === "levels") tc.driveLevels()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
           else if (s === "soundcheck-error") tc.driveSoundCheckError()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
@@ -1828,6 +1829,33 @@ Item {
       click(find(view(), "soundCheckButton"), "Sound check")
       waitFor(function() { return shown(find(view(), "soundCheckPane")) }, "sound check pane")
       check(!shown(find(view(), "meetingListPane")), "the pane replaces the list")
+    }
+
+    function driveLevels() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(!shown(find(view(), "liveMeters")), "no meters before any levels")
+      for (var i = 0; i < 4; i++) {
+        ctl({ cmd: "levels", t_ms: 100 * i, mic: -30, mic_peak: -24, loopback: null, loopback_peak: null })
+        wait(100)
+      }
+      waitFor(function() { return shown(find(view(), "liveMeters")) && meterFill("liveMicMeter") > 0 }, "mic meter")
+      check(!shown(find(view(), "liveCallMeter")), "no call meter while loopback is null")
+      // A sound check's levels and another meeting's are not this meeting's.
+      var mic = feed().micDb
+      ctl({ cmd: "levels", soundcheck: true, mic: -5, mic_peak: -2, loopback: -5, loopback_peak: -2 })
+      ctl({ cmd: "levels", meeting_id: "00000000-0000-4000-8000-000000000000", mic: -5, mic_peak: -2, loopback: -5, loopback_peak: -2 })
+      wait(300)
+      check(feed().micDb === mic && !feed().loopbackSeen, "ignored: " + feed().micDb + " " + feed().loopbackSeen)
+      for (var j = 0; j < 6; j++) {
+        ctl({ cmd: "levels", t_ms: 500 + 100 * j, mic: -20, mic_peak: -12, loopback: -18, loopback_peak: -9 })
+        wait(100)
+      }
+      waitFor(function() { return shown(find(view(), "liveCallMeter")) && meterFill("liveCallMeter") > 0 }, "call meter")
+      shot("levels")
+      // Levels stop (paused, or the daemon went quiet): the bars fall.
+      waitFor(function() { return meterFill("liveMicMeter") === 0 && meterFill("liveCallMeter") === 0 }, "meters fall", 2000)
+      check(shown(find(view(), "liveMeters")), "meters stay, empty")
     }
 
     function driveSoundCheck() {

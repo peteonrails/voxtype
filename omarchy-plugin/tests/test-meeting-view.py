@@ -105,6 +105,10 @@ Scenarios:
   soundcheck-no-loopback  no call audio and no echo cancellation said so;
               leaving the panel while it runs stops the check
   soundcheck-error  the command's error shown as it words it
+  levels      live meters in the card from `levels` events: hidden until the
+              first, the call meter only once loopback carries a number, a
+              sound check's or another meeting's levels ignored, and the bars
+              fall when levels stop
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -138,7 +142,8 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
-             "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error")
+             "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
+             "levels")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -269,6 +274,7 @@ INITIAL = {
     "play-no-audio": lambda: [running_meeting()],
     "play-errors": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
+    "levels": lambda: [running_meeting()],
     "summary-local-error": lambda: [running_meeting()],
     "summary-error-cli": lambda: [running_meeting()],
     "summary-stale": lambda: [running_meeting()],
@@ -627,6 +633,8 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "soundcheck-no-loopback":
         expect(meeting, [["meeting", "soundcheck", "--seconds", "30", "--json"],
                          ["meeting", "soundcheck", "--stop"]], "meeting commands")
+    elif scenario == "levels":
+        expect(meeting, [], "meeting commands")
     elif scenario == "soundcheck-error":
         expect(meeting, [["meeting", "soundcheck", "--seconds", "30", "--json"]], "meeting commands")
     elif scenario == "agent-missing":
