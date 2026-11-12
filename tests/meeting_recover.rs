@@ -19,6 +19,8 @@ use voxtype::meeting::{MeetingStorage, StorageConfig};
 
 struct Scratch {
     dir: tempfile::TempDir,
+    /// The session bus the commands see; none by default.
+    bus: std::cell::RefCell<String>,
 }
 
 impl Scratch {
@@ -27,7 +29,10 @@ impl Scratch {
         for sub in ["config/voxtype", "data/voxtype", "runtime/voxtype", "state"] {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
-        let s = Self { dir };
+        let s = Self {
+            dir,
+            bus: std::cell::RefCell::new("disabled:".to_string()),
+        };
         // No agent is ever asked for a summary; the post-meeting command
         // leaves a mark to show it ran.
         std::fs::write(
@@ -67,7 +72,7 @@ impl Scratch {
             .env("XDG_STATE_HOME", self.path("state"))
             .env("XDG_CACHE_HOME", self.path("cache"))
             .env("XDG_RUNTIME_DIR", self.path("runtime"))
-            .env("DBUS_SESSION_BUS_ADDRESS", "disabled:")
+            .env("DBUS_SESSION_BUS_ADDRESS", self.bus.borrow().as_str())
             .env("RUST_LOG", "warn")
             .args(args)
             .stdin(Stdio::null());
@@ -303,4 +308,214 @@ fn read_event(lines: &mut BufReader<UnixStream>) -> serde_json::Value {
     let mut line = String::new();
     lines.read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
+}
+
+// ---------------------------------------------------------------- the notice
+
+/// A private session bus, so nothing reaches the user's desktop.
+struct PrivateBus {
+    child: Child,
+    address: String,
+}
+
+impl PrivateBus {
+    fn start() -> Option<Self> {
+        let mut child = Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut line = String::new();
+        BufReader::new(child.stdout.take()?)
+            .read_line(&mut line)
+            .ok()?;
+        let address = line.trim().to_string();
+        (!address.is_empty()).then_some(Self { child, address })
+    }
+}
+
+impl Drop for PrivateBus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Logs every notification and clicks `answer` on the ones about meetings
+/// that didn't finish.
+struct FakeNotifications {
+    answer: &'static str,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl FakeNotifications {
+    #[allow(clippy::too_many_arguments)]
+    async fn notify(
+        &self,
+        #[zbus(signal_context)] ctxt: zbus::SignalContext<'_>,
+        _app_name: String,
+        _replaces_id: u32,
+        _app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        _hints: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        _expire_timeout: i32,
+    ) -> u32 {
+        let mut log = self.log.lock().unwrap();
+        log.push(format!("{summary}|{body}|{}", actions.join(",")));
+        let id = 100 + log.len() as u32;
+        if summary.contains("didn't finish") {
+            let answer = self.answer;
+            let ctxt = ctxt.to_owned();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = FakeNotifications::action_invoked(&ctxt, id, answer).await;
+            });
+        }
+        id
+    }
+
+    fn get_capabilities(&self) -> Vec<String> {
+        vec!["actions".into(), "body".into()]
+    }
+
+    fn close_notification(&self, _id: u32) {}
+
+    #[zbus(signal)]
+    async fn action_invoked(
+        ctxt: &zbus::SignalContext<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_meeting_is_announced_once_and_finish_finishes_it() {
+    let Some(bus) = PrivateBus::start() else {
+        eprintln!("skipping: dbus-daemon is not available");
+        return;
+    };
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.Notifications")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/Notifications",
+            FakeNotifications {
+                answer: "finish",
+                log: log.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let s = Scratch::new();
+    *s.bus.borrow_mut() = bus.address.clone();
+    let id = s.killed_meeting("Release sync");
+    let notices = || -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("didn't finish"))
+            .cloned()
+            .collect()
+    };
+
+    let daemon = tokio::task::block_in_place(|| s.daemon());
+    // The click on Finish runs `meeting recover --finish`.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let show = tokio::task::block_in_place(|| s.voxtype(&["meeting", "show", &id, "--json"]));
+        let v: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap_or_default();
+        if v["metadata"]["status"] == "completed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Finish never finished it: {:?}",
+            notices()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        notices(),
+        vec![
+            "A meeting didn't finish|Release sync\nVoxtype stopped while it recorded. Finish it \
+             from what was saved, or open the meeting view.|finish,Finish,open,Open"
+                .to_string()
+        ]
+    );
+    daemon.kill();
+
+    // Another crash: only the new meeting is announced, and only once.
+    let second = s.killed_meeting("Standup");
+    let third = s.killed_meeting("Retro");
+    let daemon = tokio::task::block_in_place(|| s.daemon());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon.kill();
+    let daemon = tokio::task::block_in_place(|| s.daemon());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon.kill();
+    let seen = notices();
+    assert_eq!(seen.len(), 2, "{seen:#?}");
+    assert!(
+        seen[1].starts_with("2 meetings didn't finish|"),
+        "{seen:#?}"
+    );
+    assert!(seen[1].ends_with("|open,Open"), "{seen:#?}");
+    assert!(seen[1].contains("Standup") && seen[1].contains("Retro"));
+    let _ = (second, third);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_notifications_never_keeps_it_quiet() {
+    let Some(bus) = PrivateBus::start() else {
+        eprintln!("skipping: dbus-daemon is not available");
+        return;
+    };
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.Notifications")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/Notifications",
+            FakeNotifications {
+                answer: "open",
+                log: log.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let s = Scratch::new();
+    let config = s.path("config/voxtype/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "[meeting]\n",
+            "[meeting]\nstatus_notifications = \"never\"\n",
+        ),
+    )
+    .unwrap();
+    *s.bus.borrow_mut() = bus.address.clone();
+    s.killed_meeting("Release sync");
+    let mut daemon = tokio::task::block_in_place(|| s.daemon());
+    // The card still gets it.
+    tokio::task::block_in_place(|| daemon.next("recoverable"));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon.kill();
+    let seen = log.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|l| l.contains("didn't finish")),
+        "{seen:#?}"
+    );
 }

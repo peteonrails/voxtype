@@ -441,7 +441,7 @@ Permanently deletes the meeting: its record, its folder and everything in it, au
 
 ### Recovering an Interrupted Meeting
 
-A meeting is saved while it records: the transcript after every chunk, and the audio as it arrives when `retain_audio` is on. If the daemon crashes, is killed, or the computer loses power mid-meeting, all of that is still in the meeting's folder, but the meeting never ends: it has no end time, no summary, and `post_meeting_command` never ran. The next time the daemon starts it marks such meetings `interrupted`, and the meeting view offers to finish them.
+A meeting is saved while it records: the transcript after every chunk, and the audio as it arrives when `retain_audio` is on. If the daemon crashes, is killed, or the computer loses power mid-meeting, all of that is still in the meeting's folder, but the meeting never ends: it has no end time, no summary, and `post_meeting_command` never ran. The next time the daemon starts it marks such meetings `interrupted`, the meeting view offers to finish them, and a notification says "A meeting didn't finish". For one meeting it has a **Finish** button, which finishes it as below, and an **Open** button for the meeting view; for several, **Open**. It comes once per meeting, not on every restart, and follows [`status_notifications`](CONFIGURATION.md#status_notifications): by default it is skipped while the meeting view is on screen, since the view shows the same.
 
 From the command line:
 

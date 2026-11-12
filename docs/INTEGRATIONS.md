@@ -985,6 +985,7 @@ can change in any release; use the command named instead.
 | `$XDG_STATE_HOME/voxtype/assistant-consent.json` | No | `voxtype meeting assistant status --json`, `allow`, `revoke` |
 | `$XDG_STATE_HOME/voxtype/meeting-view.json` | No | Where the view was left, per host and screen; the view's **Reset position and size** |
 | `$XDG_STATE_HOME/voxtype/meeting_offer.json` | No | The answers to the "Turn on meetings" offer |
+| `$XDG_STATE_HOME/voxtype/meeting-recover-notified.json` | No | `voxtype meeting recover --json` lists the meetings; this only remembers which were announced |
 
 ## What Voxtype will not do for you
 

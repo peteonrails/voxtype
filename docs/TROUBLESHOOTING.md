@@ -1772,7 +1772,8 @@ terminal: anything that prompts for input fails.
 
 ### A meeting shows as interrupted, with no summary
 
-The daemon stopped while the meeting recorded: it crashed, was killed, or the
+This is what the "A meeting didn't finish" notification is about. The
+daemon stopped while the meeting recorded: it crashed, was killed, or the
 computer lost power. Everything saved until then is in the meeting's folder,
 but nothing finished the meeting, so it has no end time or summary and
 `post_meeting_command` did not run. Finish it from what is on disk, or
