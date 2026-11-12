@@ -242,6 +242,7 @@ what is wrong instead of showing an empty pane:
 - [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
+- [Meeting Titles: The Calendar Title Was Not Used](#meeting-titles-the-calendar-title-was-not-used)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1823,6 +1824,19 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 
 ---
+
+## Meeting Titles: The Calendar Title Was Not Used
+
+A meeting takes its title from the calendar only when it started without a real title (none, "Zoom call", "Google Meet call", "Teams call" or the date-only default) and an event is running or starts within `[meeting.calendar] window_mins` of the start. Anything else is logged at debug level. Run the daemon with `-vv`, or look in the journal:
+
+```bash
+journalctl --user -u voxtype --since "15 minutes ago" | grep -i calendar
+```
+
+- **"No calendar command"**: `[meeting.calendar] command` is empty and the Omarchy Next Meeting widget is not on your bar. Set the command.
+- **"ran past 3 s"**: the calendar answered too slowly. Raise `[meeting.calendar] timeout_secs`.
+- **"printed something other than the agenda JSON"**: run the command yourself (`bash -lc '<command>'`) and check it prints one JSON object and nothing else. A login profile that prints a greeting breaks it.
+- **"No calendar event within 10 min"**: the event was further from the start than the window. Raise `window_mins`, or set the title by hand with `voxtype meeting title latest "<title>"`.
 
 ## Systemd Service Issues
 

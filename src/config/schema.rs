@@ -2239,6 +2239,33 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Open the live meeting view in the Omarchy shell when a meeting starts.",
     ),
     spec(
+        "meeting.calendar.command",
+        "meeting.calendar",
+        "command",
+        KeyType::String,
+        "Meeting",
+        "Calendar command",
+        "Command printing the next meeting as JSON (the Omarchy Next Meeting plugin's format). Empty uses that plugin's command when it is on the bar.",
+    ),
+    spec(
+        "meeting.calendar.window_mins",
+        "meeting.calendar",
+        "window_mins",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Calendar window",
+        "Minutes either side of a meeting's start within which a calendar event names it.",
+    ),
+    spec(
+        "meeting.calendar.timeout_secs",
+        "meeting.calendar",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 60 },
+        "Meeting",
+        "Calendar timeout",
+        "Seconds to wait for the calendar command.",
+    ),
+    spec(
         "meeting.view_opacity",
         "meeting",
         "view_opacity",
@@ -3195,6 +3222,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         // Two places are all an opacity needs, and an f32 such as 0.8 would
         // otherwise read back as 0.800000011920929.
         "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
+        "meeting.calendar.command" => json!(cfg.meeting.calendar.command),
+        "meeting.calendar.window_mins" => json!(cfg.meeting.calendar.window_mins),
+        "meeting.calendar.timeout_secs" => json!(cfg.meeting.calendar.timeout_secs),
         "meeting.auto_label_from_title" => json!(cfg.meeting.auto_label_from_title),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),

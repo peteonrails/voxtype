@@ -144,6 +144,13 @@ pub trait Diarizer: Send + Sync {
         Vec::new()
     }
 
+    /// Merge speakers that turned out to be one voice, returning
+    /// `(merged, kept)` pairs for the meeting to rename in what it has
+    /// already labelled. Called after every chunk; most backends never merge.
+    fn merge_similar_speakers(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        Vec::new()
+    }
+
     /// Get the backend name
     fn name(&self) -> &'static str;
 }
