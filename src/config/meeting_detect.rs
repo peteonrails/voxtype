@@ -29,6 +29,47 @@ pub struct MeetingDetectConfig {
     /// The call apps to watch. Replaces the built-in list when set.
     #[serde(default = "default_apps")]
     pub apps: Vec<CallAppPattern>,
+
+    /// What happens when a detected call ends while a meeting records:
+    /// "stop" stops it after `stop_grace_secs` (with a Keep recording
+    /// button), "ask" offers to stop it, "keep" leaves it running. A meeting
+    /// started by hand with no detected call is never stopped.
+    #[serde(default = "default_on_call_end")]
+    pub on_call_end: String,
+
+    /// Seconds between "Call ended" and the automatic stop, for Keep
+    /// recording.
+    #[serde(default = "default_stop_grace_secs")]
+    pub stop_grace_secs: u32,
+}
+
+/// `on_call_end`, parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallEnd {
+    Stop,
+    Ask,
+    Keep,
+}
+
+pub const CALL_END_CHOICES: &[&str] = &["stop", "ask", "keep"];
+
+impl CallEnd {
+    /// Unknown values read as the default, stop.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ask" => Self::Ask,
+            "keep" => Self::Keep,
+            _ => Self::Stop,
+        }
+    }
+}
+
+fn default_on_call_end() -> String {
+    "stop".to_string()
+}
+
+fn default_stop_grace_secs() -> u32 {
+    20
 }
 
 /// One call app: which mic streams belong to it and, for apps that run in a
@@ -95,6 +136,8 @@ impl Default for MeetingDetectConfig {
             auto_record_apps: Vec::new(),
             debounce_secs: default_debounce_secs(),
             apps: default_apps(),
+            on_call_end: default_on_call_end(),
+            stop_grace_secs: default_stop_grace_secs(),
         }
     }
 }
@@ -102,6 +145,10 @@ impl Default for MeetingDetectConfig {
 impl MeetingDetectConfig {
     /// Whether detection is on, resolving an unset `enabled` against the
     /// desktop: on for Omarchy, off everywhere else.
+    pub fn call_end(&self) -> CallEnd {
+        CallEnd::parse(&self.on_call_end)
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled
             .unwrap_or_else(|| crate::setup::omarchy::Context::from_env().is_omarchy())
@@ -180,5 +227,18 @@ mod tests {
         assert!(!w.detect.is_enabled());
         let w: Wrap = toml::from_str("[detect]\nenabled = true").unwrap();
         assert!(w.detect.is_enabled());
+    }
+
+    #[test]
+    fn call_end_defaults_to_stop_after_20_seconds() {
+        let w: Wrap = toml::from_str("").unwrap();
+        assert_eq!(w.detect.call_end(), CallEnd::Stop);
+        assert_eq!(w.detect.stop_grace_secs, 20);
+        let w: Wrap =
+            toml::from_str("[detect]\non_call_end = \"ask\"\nstop_grace_secs = 5").unwrap();
+        assert_eq!(w.detect.call_end(), CallEnd::Ask);
+        assert_eq!(w.detect.stop_grace_secs, 5);
+        assert_eq!(CallEnd::parse("KEEP"), CallEnd::Keep);
+        assert_eq!(CallEnd::parse("bogus"), CallEnd::Stop);
     }
 }

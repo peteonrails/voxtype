@@ -61,7 +61,7 @@ fn zoom_prompts_with_the_meeting_window_title() {
     let p = prompts(&events);
     assert_eq!(p.len(), 1, "{events:?}");
     assert_eq!(p[0].app, "Zoom");
-    assert_eq!(p[0].title, "Zoom Meeting");
+    assert_eq!(p[0].title, "Zoom call", "a placeholder window title");
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn zoom_prompts_without_window_titles() {
     let events = settle(&mut d, &snap("pw-zoom.json", None), IDLE);
     let p = prompts(&events);
     assert_eq!(p.len(), 1);
-    assert_eq!(p[0].title, "Zoom");
+    assert_eq!(p[0].title, "Zoom call");
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn meet_in_chromium_prompts_titled_from_the_tab() {
     let p = prompts(&events);
     assert_eq!(p.len(), 1, "{events:?}");
     assert_eq!(p[0].app, "Google Meet");
-    assert_eq!(p[0].title, "Meet - abc-defg-hij");
+    assert_eq!(p[0].title, "Google Meet call", "a bare meeting code");
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn meet_in_firefox_prompts_titled_from_the_tab() {
     let p = prompts(&events);
     assert_eq!(p.len(), 1, "{events:?}");
     assert_eq!(p[0].app, "Google Meet");
-    assert_eq!(p[0].title, "Meet - abc-defg-hij");
+    assert_eq!(p[0].title, "Google Meet call", "a bare meeting code");
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn teams_prompts() {
     let p = prompts(&events);
     assert_eq!(p.len(), 1, "{events:?}");
     assert_eq!(p[0].app, "Microsoft Teams");
-    assert_eq!(p[0].title, "Weekly sync | Microsoft Teams");
+    assert_eq!(p[0].title, "Weekly sync");
 }
 
 #[test]
@@ -259,7 +259,7 @@ fn auto_record_apps_skip_the_prompt() {
     assert!(prompts(&events).is_empty());
     assert!(events
         .iter()
-        .any(|e| matches!(e, Event::AutoRecord(c) if c.title == "Zoom Meeting")));
+        .any(|e| matches!(e, Event::AutoRecord(c) if c.title == "Zoom call")));
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn report_explains_a_meet_call() {
     assert!(text.contains("windows: 4 from Hyprland"), "{text}");
     assert!(text.contains("another dictation app"), "{text}");
     assert!(
-        text.contains("would prompt: Record \"Meet - abc-defg-hij\"? (Google Meet)"),
+        text.contains("would prompt: Record \"Google Meet call\"? (Google Meet)"),
         "{text}"
     );
 }
@@ -382,4 +382,89 @@ fn report_says_why_nothing_prompts() {
     let text = report(&snap("pw-idle.json", None), IDLE, &config()).join("\n");
     assert!(text.contains("no prompt: no call detected"), "{text}");
     assert!(text.contains("unavailable"), "{text}");
+}
+
+#[test]
+fn placeholder_window_titles_become_call_titles() {
+    for (app, title, want) in [
+        (
+            "Zoom",
+            Some("Join from Zoom Workplace app - Zoom"),
+            "Zoom call",
+        ),
+        ("Zoom", Some("Zoom Meeting"), "Zoom call"),
+        ("Zoom", Some("Zoom Workplace"), "Zoom call"),
+        ("Zoom", Some("Zoom"), "Zoom call"),
+        ("Zoom", Some("Zoom Cloud Meetings"), "Zoom call"),
+        ("Zoom", None, "Zoom call"),
+        (
+            "Zoom (web)",
+            Some("Join from Zoom Workplace app - Zoom - Chromium"),
+            "Zoom call",
+        ),
+        (
+            "Google Meet",
+            Some("Meet - abc-defg-hij - Chromium"),
+            "Google Meet call",
+        ),
+        (
+            "Google Meet",
+            Some("Google Meet — Mozilla Firefox"),
+            "Google Meet call",
+        ),
+        ("Google Meet", Some("Meet"), "Google Meet call"),
+        ("Microsoft Teams", Some("Microsoft Teams"), "Teams call"),
+        (
+            "Microsoft Teams",
+            Some("Meeting | Microsoft Teams"),
+            "Teams call",
+        ),
+        (
+            "Microsoft Teams (web)",
+            Some("Calling | Microsoft Teams - Chromium"),
+            "Teams call",
+        ),
+        ("Microsoft Teams", None, "Teams call"),
+        ("Jitsi", None, "Jitsi call"),
+    ] {
+        assert_eq!(meeting_title(app, title), want, "{app} {title:?}");
+    }
+}
+
+#[test]
+fn real_meeting_names_are_kept() {
+    for (app, title, want) in [
+        (
+            "Google Meet",
+            Some("Meet - Weekly sync - Chromium"),
+            "Weekly sync",
+        ),
+        (
+            "Google Meet",
+            Some("(2) Meet - Design review — Mozilla Firefox"),
+            "Design review",
+        ),
+        (
+            "Microsoft Teams",
+            Some("Weekly sync | Microsoft Teams"),
+            "Weekly sync",
+        ),
+        (
+            "Microsoft Teams (web)",
+            Some("Budget review | Microsoft Teams - Chromium"),
+            "Budget review",
+        ),
+        (
+            "Zoom",
+            Some("Pete's Personal Meeting Room"),
+            "Pete's Personal Meeting Room",
+        ),
+        (
+            "Jitsi",
+            Some("Jitsi Meet - standup"),
+            "Jitsi Meet - standup",
+        ),
+    ] {
+        assert_eq!(meeting_title(app, title), want, "{app} {title:?}");
+    }
 }

@@ -228,3 +228,92 @@ async fn the_dismiss_button_starts_nothing() {
     };
     assert_eq!(args, None);
 }
+
+/// The automatic stop over the bus: the "Call ended" notice goes up, the
+/// fake server answers it with `answer`, then the grace period runs out.
+/// Returns what the server saw and the `voxtype` arguments run, if any.
+async fn auto_stop_answered_with(answer: &str) -> Option<(Vec<String>, Option<String>)> {
+    use voxtype::config::CallEnd;
+    use voxtype::meeting::detect::runner::CallEndPolicy;
+    let Some(bus) = PrivateBus::start() else {
+        eprintln!("skipping: dbus-daemon is not available");
+        return None;
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.Notifications")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/Notifications",
+            FakeServer {
+                answer: answer.to_string(),
+                log: log.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let client = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let (notifier, mut responses) = BusNotifier::connect(&client).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("args");
+    let control = CliMeetingControl {
+        exe: fake_voxtype(dir.path(), &out),
+        config_path: None,
+    };
+    let mut controller = Controller::new(notifier, control).with_call_end(CallEndPolicy {
+        mode: CallEnd::Stop,
+        grace: Duration::from_millis(300),
+    });
+    controller
+        .on_event(&Event::Ended {
+            call: Call {
+                app: "Zoom".into(),
+                title: "Zoom call".into(),
+                reason: "test".into(),
+                auto_record: false,
+            },
+            offer_stop: true,
+        })
+        .await;
+    let response = tokio::time::timeout(Duration::from_secs(5), responses.recv())
+        .await
+        .expect("the server's answer arrives")
+        .expect("response channel open");
+    controller.on_response(response).await;
+    if let Some(at) = controller.stop_due_at() {
+        tokio::time::sleep_until(at).await;
+        controller.fire_due_stop(true).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let seen = log.lock().unwrap().clone();
+    Some((seen, std::fs::read_to_string(&out).ok()))
+}
+
+#[tokio::test]
+async fn a_call_ending_stops_the_meeting_after_the_grace_period() {
+    let Some((seen, args)) = auto_stop_answered_with("closed").await else {
+        return;
+    };
+    assert_eq!(
+        seen[0],
+        "notify Call ended | Zoom released the microphone. Stopping the recording in 0 s. \
+         | keep,Keep recording"
+    );
+    assert_eq!(args.as_deref(), Some("meeting|stop|"));
+}
+
+#[tokio::test]
+async fn keep_recording_on_the_notice_cancels_the_stop() {
+    let Some((seen, args)) = auto_stop_answered_with("keep").await else {
+        return;
+    };
+    assert!(seen.contains(&"close 7".to_string()), "{seen:?}");
+    assert_eq!(args, None, "no stop");
+}
