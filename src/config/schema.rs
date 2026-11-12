@@ -2474,6 +2474,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Todoist project ID action items are added to. Empty is the Inbox.",
     ),
     spec(
+        "meeting.actions.todoist_token_file",
+        "meeting.actions",
+        "todoist_token_file",
+        KeyType::String,
+        "Meeting",
+        "Todoist token file",
+        "A file holding a Todoist personal API token, instead of connecting in a browser. The token never goes in config.toml.",
+    ),
+    spec(
         "meeting.share.command",
         "meeting.share",
         "command",
@@ -3232,6 +3241,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.actions.remind_in_mins" => json!(cfg.meeting.actions.remind_in_mins),
         "meeting.actions.todoist_project_id" => {
             opt_str(cfg.meeting.actions.todoist_project_id.as_ref())
+        }
+        "meeting.actions.todoist_token_file" => {
+            opt_str(cfg.meeting.actions.todoist_token_file.as_ref())
         }
         "meeting.share.timeout_secs" => json!(cfg.meeting.share.timeout_secs),
         "meeting.share.folder" => json!(cfg.meeting.share.folder),

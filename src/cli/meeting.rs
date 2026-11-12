@@ -871,6 +871,61 @@ pub enum MeetingAction {
         #[command(subcommand)]
         action: AssistantAction,
     },
+    /// Connect a Todoist account for `meeting actions --send todoist`
+    Todoist {
+        #[command(subcommand)]
+        action: TodoistAction,
+    },
+}
+
+/// `voxtype meeting todoist` actions
+#[derive(Subcommand)]
+pub enum TodoistAction {
+    /// Connect your Todoist account in the browser
+    ///
+    /// Opens Todoist's consent page and waits for you to approve. Voxtype
+    /// asks only to add tasks (scope task:add): it cannot read your tasks
+    /// or projects. The access token is kept in
+    /// $XDG_STATE_HOME/voxtype/todoist.json, readable only by you, and
+    /// never in config.toml.
+    ///
+    /// The browser returns to http://localhost on one of ports 47815 to
+    /// 47819. On a machine without a browser, set
+    /// [meeting.actions] todoist_token_file to a file holding a personal API
+    /// token instead.
+    ///
+    /// --json prints one JSON object per line: {"event":"authorize","url":...}
+    /// once the consent page is open, then {"event":"connected",...} or
+    /// {"event":"error","message":...}.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting todoist connect\n  \
+        voxtype meeting todoist connect --no-browser\n  \
+        voxtype meeting todoist status")]
+    Connect {
+        /// Seconds to wait for you to approve
+        #[arg(long, default_value = "300", value_name = "SECS")]
+        timeout: u64,
+
+        /// Print the address to open instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+
+        /// Print JSON events, one per line
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget the Todoist connection on this machine
+    Disconnect {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show whether Todoist is connected
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `voxtype meeting assistant` actions

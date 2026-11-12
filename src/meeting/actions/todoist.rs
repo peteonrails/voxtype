@@ -53,6 +53,8 @@ pub trait TodoistClient {
 /// What `todoist.json` holds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tokens {
+    /// Empty while voxtype is registered with Todoist but not connected
+    #[serde(default)]
     pub access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
@@ -64,6 +66,15 @@ pub struct Tokens {
     pub client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// The loopback addresses `client_id` was registered with
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirect_uris: Vec<String>,
+}
+
+impl Tokens {
+    pub fn connected(&self) -> bool {
+        !self.access_token.trim().is_empty()
+    }
 }
 
 /// `todoist.json`, readable by the user alone.
@@ -132,11 +143,32 @@ impl TokenStore {
     }
 }
 
-/// Todoist's REST API, with the token from a [`TokenStore`].
+/// Todoist's REST API, with the token from a [`TokenStore`], or from a
+/// file holding a personal API token (`[meeting.actions]
+/// todoist_token_file`), for a machine with no browser.
 pub struct HttpTodoist {
     pub base: String,
     pub store: TokenStore,
+    pub token_file: Option<PathBuf>,
     agent: ureq::Agent,
+}
+
+/// The personal API token in `path`, trimmed.
+pub fn read_token_file(path: &Path) -> Result<String, TodoistError> {
+    let token = std::fs::read_to_string(path)
+        .map_err(|e| TodoistError::Store {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(TodoistError::Store {
+            path: path.display().to_string(),
+            message: "the file is empty".into(),
+        });
+    }
+    Ok(token)
 }
 
 impl HttpTodoist {
@@ -144,15 +176,29 @@ impl HttpTodoist {
         Self {
             base: base.into(),
             store,
+            token_file: None,
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(20))
                 .build(),
         }
     }
 
+    /// Use the personal API token in `path` instead of the stored tokens.
+    pub fn with_token_file(mut self, path: Option<PathBuf>) -> Self {
+        self.token_file = path;
+        self
+    }
+
     /// The access token, refreshed first when it has expired and can be.
     fn token(&self) -> Result<String, TodoistError> {
-        let tokens = self.store.load()?.ok_or(TodoistError::NotConnected)?;
+        if let Some(path) = &self.token_file {
+            return read_token_file(path);
+        }
+        let tokens = self
+            .store
+            .load()?
+            .filter(Tokens::connected)
+            .ok_or(TodoistError::NotConnected)?;
         let expired = tokens
             .expires_at
             .is_some_and(|at| at <= chrono::Utc::now().timestamp() + 60);
@@ -197,6 +243,7 @@ impl HttpTodoist {
             expires_at: reply.expires_in.map(|s| chrono::Utc::now().timestamp() + s),
             client_id: old.client_id.clone(),
             scope: reply.scope.or_else(|| old.scope.clone()),
+            redirect_uris: old.redirect_uris.clone(),
         };
         self.store.save(&tokens)?;
         Ok(reply.access_token)
@@ -292,6 +339,7 @@ mod tests {
             expires_at: Some(42),
             client_id: Some("tdd_x".into()),
             scope: None,
+            redirect_uris: vec![],
         };
         store.save(&tokens).unwrap();
         let mode = std::fs::metadata(&store.path).unwrap().permissions().mode();
@@ -412,6 +460,30 @@ mod tests {
     }
 
     #[test]
+    fn a_personal_token_file_is_used_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("todoist-token");
+        std::fs::write(&file, "  personal123\n").unwrap();
+        let (base, server) = serve_once(200, r#"{"id": "1"}"#);
+        // No stored tokens at all: the file is enough.
+        let client = HttpTodoist::new(base, TokenStore::new(dir.path().join("todoist.json")))
+            .with_token_file(Some(file.clone()));
+        client
+            .add_task(&NewTask {
+                content: "x".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(server
+            .join()
+            .unwrap()
+            .contains("Authorization: Bearer personal123"));
+        std::fs::write(&file, "\n").unwrap();
+        let err = read_token_file(&file).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
     fn an_expired_token_is_refreshed_and_the_rotated_one_saved() {
         let dir = tempfile::tempdir().unwrap();
         let store = TokenStore::new(dir.path().join("todoist.json"));
@@ -422,6 +494,7 @@ mod tests {
                 expires_at: Some(1),
                 client_id: Some("tdd_client".into()),
                 scope: Some("task:add".into()),
+                redirect_uris: vec![],
             })
             .unwrap();
         let (base, server) = serve_once(

@@ -1208,6 +1208,12 @@ pub(crate) async fn run_meeting_command(
         MeetingAction::Assistant { action } => {
             super::meeting_assistant::run_assistant(config, action)?;
         }
+        MeetingAction::Todoist { action } => {
+            if let Err(e) = run_todoist(config, action) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
@@ -1529,6 +1535,157 @@ fn format_ms(ms: u64) -> String {
     }
 }
 
+/// `[meeting.actions] todoist_token_file`, with a leading ~/ expanded.
+fn todoist_token_file(config: &config::Config) -> Option<PathBuf> {
+    let raw = config.meeting.actions.todoist_token_file.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(match raw.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+        None => PathBuf::from(raw),
+    })
+}
+
+/// `voxtype meeting todoist connect|disconnect|status`.
+fn run_todoist(config: &config::Config, action: voxtype::TodoistAction) -> anyhow::Result<()> {
+    use meeting::actions::{oauth, todoist};
+    use voxtype::TodoistAction;
+    let store = todoist::TokenStore::new(todoist::TokenStore::default_path());
+    let token_file = todoist_token_file(config);
+    match action {
+        TodoistAction::Status { json } => {
+            let saved = store.load()?.filter(todoist::Tokens::connected);
+            let method = if token_file.is_some() {
+                Some("token_file")
+            } else if saved.is_some() {
+                Some("oauth")
+            } else {
+                None
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "connected": method.is_some(),
+                        "method": method,
+                        "scope": saved.as_ref().and_then(|t| t.scope.clone()),
+                        "expires_at": saved.as_ref().and_then(|t| t.expires_at),
+                        "path": token_file.clone().unwrap_or(store.path.clone()),
+                    }))?
+                );
+            } else {
+                match (method, &token_file) {
+                    (Some("token_file"), Some(file)) => println!(
+                        "Todoist: using the personal API token in {} ([meeting.actions] todoist_token_file).",
+                        file.display()
+                    ),
+                    (Some(_), _) => println!(
+                        "Todoist: connected ({}). Tokens are in {}.",
+                        saved
+                            .as_ref()
+                            .and_then(|t| t.scope.clone())
+                            .unwrap_or_else(|| oauth::SCOPE.to_string()),
+                        store.path.display()
+                    ),
+                    _ => println!(
+                        "Todoist: not connected. Connect with:\n  voxtype meeting todoist connect"
+                    ),
+                }
+            }
+        }
+        TodoistAction::Disconnect { json } => {
+            let removed = store.clear()?;
+            if json {
+                println!("{}", serde_json::json!({ "disconnected": removed }));
+            } else if removed {
+                println!("Disconnected Todoist on this machine. To revoke voxtype's access entirely, remove it under Settings > Integrations in Todoist.");
+            } else {
+                println!("Todoist was not connected.");
+            }
+            if token_file.is_some() && !json {
+                println!("[meeting.actions] todoist_token_file is still set, so its token is still used.");
+            }
+        }
+        TodoistAction::Connect {
+            timeout,
+            no_browser,
+            json,
+        } => {
+            let open = |url: &str| {
+                if no_browser {
+                    return;
+                }
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(url)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            };
+            let request = oauth::Connect {
+                endpoints: oauth::Endpoints::from_env(),
+                store: &store,
+                ports: &oauth::PORTS,
+                timeout: std::time::Duration::from_secs(timeout.max(1)),
+                open: &open,
+            };
+            let result = oauth::connect(&request, &mut |progress| match progress {
+                oauth::Progress::Authorize { url, port } => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({"event": "authorize", "url": url, "port": port})
+                        );
+                    } else {
+                        if no_browser {
+                            println!(
+                                "Open this address in a browser to connect Voxtype to Todoist:"
+                            );
+                        } else {
+                            println!(
+                                "Opening Todoist in your browser. If it does not open, visit:"
+                            );
+                        }
+                        println!("  {url}");
+                        println!(
+                            "Waiting for you to approve (up to {} min)...",
+                            timeout.div_ceil(60)
+                        );
+                    }
+                }
+            });
+            match result {
+                Ok(tokens) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "connected",
+                                "scope": tokens.scope,
+                                "expires_at": tokens.expires_at,
+                            })
+                        );
+                    } else {
+                        println!("Connected to Todoist. Send a meeting's action items with:\n  voxtype meeting actions latest --send todoist");
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({"event": "error", "message": e.to_string()})
+                        );
+                        std::process::exit(1);
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `voxtype meeting actions`, after config has filled in the defaults.
 struct ActionsRequest {
     meeting_id: String,
@@ -1552,7 +1709,8 @@ fn run_actions(
     let listing = actions::list(&storage, &id, config.meeting.my_name.as_deref())?;
     let reminders = Reminders::default();
     let store = todoist::TokenStore::new(todoist::TokenStore::default_path());
-    let connected = matches!(store.load(), Ok(Some(_)));
+    let token_file = todoist_token_file(config);
+    let connected = token_file.is_some() || matches!(store.load(), Ok(Some(t)) if t.connected());
     let short = &listing.meeting_id[..8];
 
     let selection = Selection {
@@ -1679,7 +1837,11 @@ fn run_actions(
             if !connected {
                 anyhow::bail!("{}", todoist::TodoistError::NotConnected);
             }
-            client = todoist::HttpTodoist::new(todoist::API_BASE, store);
+            client = todoist::HttpTodoist::new(
+                meeting::actions::oauth::Endpoints::from_env().api,
+                store,
+            )
+            .with_token_file(token_file);
             senders.todoist = Some(&client);
         }
         Target::Reminder => {

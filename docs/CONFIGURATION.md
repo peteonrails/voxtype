@@ -4150,6 +4150,18 @@ voxtype config set meeting.actions.remind_in_mins 30
 
 The Todoist project action items are added to, by ID. The ID is the last part of the project's URL in Todoist's web app. `--project` overrides it for one send. The Todoist connection itself is not a setting: `voxtype meeting todoist connect` stores its token in `~/.local/state/voxtype/todoist.json`.
 
+### todoist_token_file
+
+**Type:** String
+**Default:** none
+**Required:** No
+
+A file holding a Todoist personal API token, used instead of `voxtype meeting todoist connect` on a machine without a browser. Voxtype reads the token from the file each time it sends; the token itself never goes in `config.toml`. Keep the file readable only by you (`chmod 600`). A leading `~/` is expanded.
+
+```bash
+voxtype config set meeting.actions.todoist_token_file ~/.config/voxtype/todoist-token
+```
+
 ---
 
 ## [meeting.assistant]

@@ -770,7 +770,23 @@ A deadline is only kept when someone said it, and voxtype turns what was said in
 
 Every item is sent unless you narrow it with `--pick` (item numbers from the list, such as `1,3` or `2-4`) or `--mine`. Each send is remembered per item, so sending again skips what already went and never makes a second task; `--resend` sends it again anyway. An item that fails is reported and can simply be sent again. Items come from the summary, so a meeting without one has none: summarize it first with `voxtype meeting summarize`.
 
-**Todoist.** Each item becomes a task in your Inbox, or in `[meeting.actions] todoist_project_id` (or `--project`). The task is the item's text, with the owner added when it is someone else's, due on the resolved day (and time, when one was said). Its description names the meeting, the date and the moment the item came up, and the command that opens the meeting. Connect your Todoist account once with `voxtype meeting todoist connect`; voxtype keeps the access token in `~/.local/state/voxtype/todoist.json`, readable only by you, and never in `config.toml`.
+**Todoist.** Each item becomes a task in your Inbox, or in `[meeting.actions] todoist_project_id` (or `--project`). The task is the item's text, with the owner added when it is someone else's, due on the resolved day (and time, when one was said). Its description names the meeting, the date and the moment the item came up, and the command that opens the meeting. Connect your Todoist account once:
+
+```bash
+voxtype meeting todoist connect      # Approve in the browser
+voxtype meeting todoist status       # Connected?
+voxtype meeting todoist disconnect   # Forget the connection on this machine
+```
+
+`connect` opens Todoist's consent page in your browser and waits (up to five minutes) for you to approve; `--no-browser` prints the address instead. Voxtype asks only to add tasks: it cannot read your tasks, projects or anything else in your account. The browser comes back to `http://localhost` on one of ports 47815 to 47819, so one of them must be free. There is no client secret: voxtype registers itself with Todoist the first time and proves each sign-in with PKCE, and it keeps the client ID and tokens in `~/.local/state/voxtype/todoist.json`, readable only by you, never in `config.toml`. Tokens renew themselves; `disconnect` removes them here, and Todoist's Settings > Integrations removes voxtype's access altogether.
+
+On a machine without a browser, use a personal API token instead (Todoist Settings > Integrations > Developer). Put it in a file only you can read and point voxtype at the file; the token itself never goes in `config.toml`:
+
+```bash
+install -m 600 /dev/null ~/.config/voxtype/todoist-token
+$EDITOR ~/.config/voxtype/todoist-token
+voxtype config set meeting.actions.todoist_token_file ~/.config/voxtype/todoist-token
+```
 
 **Omarchy reminders.** On Omarchy, `--send reminder` sets an `omarchy-reminder` notification for each item. It goes off after `[meeting.actions] remind_in_mins` (60 by default, or `--in`), or at the time said when that is later today ("by 3pm"). Omarchy's reminders are timed notifications, not a task list, so they suit "remind me about this later today"; Todoist is the place to keep tasks. Without `omarchy-reminder` installed, this option is not offered.
 

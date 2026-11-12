@@ -16,7 +16,7 @@ mod setup;
 pub use commands::Commands;
 pub use config::ConfigAction;
 pub use info::InfoAction;
-pub use meeting::{AssistantAction, MeetingAction};
+pub use meeting::{AssistantAction, MeetingAction, TodoistAction};
 pub use record::{OutputModeOverride, RecordAction};
 pub use root::Cli;
 pub use setup::{CompositorType, SetupAction};

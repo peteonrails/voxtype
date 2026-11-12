@@ -243,6 +243,7 @@ what is wrong instead of showing an empty pane:
 - [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [No Meeting Window Appears](#no-meeting-window-appears)
+- [Action Items: Todoist and Reminders](#action-items-todoist-and-reminders)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1855,6 +1856,18 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 
 ---
+
+## Action Items: Todoist and Reminders
+
+**`meeting actions` shows nothing.** Action items come from the summary. A meeting without one has none; run `voxtype meeting summarize latest` (or `--regenerate` for an older summary).
+
+**`todoist connect` says every port is in use.** Todoist's answer comes back to `http://localhost` on port 47815, 47816, 47817, 47818 or 47819. Find what holds them with `ss -ltnp | grep 4781`, free one, and connect again.
+
+**The browser shows a Todoist error about the redirect address, or `connect` says Todoist would not accept a local redirect address.** Todoist did not accept voxtype's `http://localhost` return address. Please report it on GitHub with the message. Meanwhile, a personal API token works: see `todoist_token_file` in [CONFIGURATION.md](CONFIGURATION.md#todoist_token_file).
+
+**Sending says Todoist refused the connection.** The access was revoked in Todoist or the tokens no longer renew. Run `voxtype meeting todoist connect` again.
+
+**`--send reminder` is not available.** Reminders use `omarchy-reminder`, which comes with Omarchy. Elsewhere, send to Todoist instead.
 
 ## Systemd Service Issues
 
