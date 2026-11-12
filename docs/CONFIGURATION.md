@@ -4124,6 +4124,8 @@ Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browse
 enabled = true
 auto_record_apps = []
 debounce_secs = 5
+on_call_end = "stop"
+stop_grace_secs = 20
 ```
 
 ### enabled
@@ -4153,6 +4155,22 @@ auto_record_apps = ["Zoom"]
 **Required:** No
 
 How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+
+### on_call_end
+
+**Type:** String (`"stop"`, `"ask"`, `"keep"`)
+**Default:** `"stop"`
+**Required:** No
+
+What happens when a detected call ends while a meeting records. `"stop"` shows **Call ended** with **Keep recording** and stops the meeting after `stop_grace_secs` unless you keep it; the stop runs the summary at stop as usual. `"ask"` offers **Stop meeting** and **Keep recording** and waits for you. `"keep"` leaves the meeting recording. A meeting started by hand with no detected call is never stopped. Changing it needs a daemon restart.
+
+### stop_grace_secs
+
+**Type:** Integer (0 to 600)
+**Default:** `20`
+**Required:** No
+
+Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call app takes the microphone again in that time, the stop is called off.
 
 ### apps
 
