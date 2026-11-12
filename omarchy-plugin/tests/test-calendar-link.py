@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The calendar link row in the Settings panel, offscreen.
 
-The row (CalendarLinkRow) sits on the Meeting section right above the
-meeting.calendar.* keys. Its link is a secret: the panel must hand it to
-`voxtype meeting calendar set-ics -` on stdin, never in argv (which `ps`
+The schema's `secrets` list the calendar's iCal link (meeting.calendar.ics_link)
+with the commands that set, clear and read it; the panel shows it as a row
+(SecretRow) on the Meeting section right above the meeting.calendar.* keys.
+It must hand the link to the set_command on stdin, never in argv (which `ps`
 shows), and must never show it again once saved. Every scenario checks the
 fake CLI's argv log for the link; the set and fail scenarios also check that
 it arrived on stdin.
@@ -20,11 +21,12 @@ Scenarios:
   keys     the keyboard cursor stops on the row; Enter puts it in the field,
            Escape gives the keys back without closing the panel
   search   searching for "ical" finds the row
-  old-cli  a CLI without `meeting calendar` shows no row
-  real     against a real voxtype (REAL_VOXTYPE, run only when set): the
-           `meeting calendar` commands go to the real binary, which fetches
-           a feed from a local HTTP server, so the store, the status and the
-           stdin hand-off are all real
+  old-cli  a schema without `secrets` shows no row
+  real     against a real voxtype (REAL_VOXTYPE, run only when set):
+           `config schema` and `meeting calendar` go to the real binary,
+           which fetches a feed from a local HTTP server, so the schema's
+           secret entry, the store, the status and the stdin hand-off are
+           all real
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -103,14 +105,15 @@ def run(scenario, shell, evidence):
     with h.Run(shell, state) as r:
         env = {}
         if scenario == "real":
-            # `meeting calendar` goes to the real binary; everything else
-            # stays with the fake (the schema gets its calendar keys).
+            # `meeting calendar` and `config schema` (its `secrets`) go to the
+            # real binary; the other readers stay with the fake.
             real = os.environ["REAL_VOXTYPE"]
             feed = FeedServer()
             secret = feed.base + "/calendar/ical/pete/private-0123456789abcdef/basic.ics"
             shim = r.root / "voxtype-shim"
             shim.write_text("#!/bin/sh\n"
-                            "if [ \"$1\" = meeting ] && [ \"$2\" = calendar ]; then\n"
+                            "if { [ \"$1\" = meeting ] && [ \"$2\" = calendar ]; } || "
+                            "{ [ \"$1\" = config ] && [ \"$2\" = schema ]; }; then\n"
                             "  printf '%s\\n' \"$*\" >> " + str(r.root / "real-argv.txt") + "\n"
                             "  exec " + real + " \"$@\"\nfi\n"
                             "exec " + str(r.fake) + " \"$@\"\n")

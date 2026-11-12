@@ -320,7 +320,7 @@ voxtype meeting calendar status           # where titles come from, the next eve
 voxtype meeting calendar clear            # forget the link and what was fetched
 ```
 
-In Omarchy you can also set it from Settings: the Meeting section has a **Calendar (iCal link)** row above the calendar settings. Paste the link and press Set; the field is masked and empties once the link is saved, and the row then shows the server, when it was last fetched, the next event and any fetch error, with Clear to forget the link. "Where to find the link" shows the steps below.
+In Omarchy you can also set it from Settings: the Meeting section has a **Calendar (iCal link)** row above the calendar settings. Paste the link and press Set; the field is masked and empties once the link is saved, and the row then shows the server, when it was last fetched, the next event and any fetch error, with Clear to forget the link. "Where to find it" shows the steps below.
 
 `-` reads the link from the terminal, which keeps it out of your shell history; `set-ics <link>` works too. `set-ics` fetches the link once to check it, and refuses one that does not return a calendar (`--no-check` saves it anyway). `voxtype meeting calendar set-ics --help` says where each service keeps the link:
 

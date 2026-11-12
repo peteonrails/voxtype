@@ -18,13 +18,16 @@ Item {
     when: false
     property bool started: false
     property string failure: ""
-    property int calendarLoads: 0
+    // Status answers, and schemas read: old-cli has no status to wait for.
+    property int statusLoads: 0
+    property int schemaLoads: 0
     property string evidence: __EVIDENCE__
     property int shots: 0
 
     Connections {
       target: panel.cliTest
-      function onCalendarStatusLoaded(status) { tc.calendarLoads++ }
+      function onSecretStatusLoaded(key, status) { tc.statusLoads++ }
+      function onSchemaLoaded(schema) { tc.schemaLoads++ }
     }
 
     readonly property string scenario: __SCENARIO__
@@ -37,7 +40,8 @@ Item {
       running: !tc.started
       repeat: true
       onTriggered: {
-        if (!panel.opened || panel.keys.length === 0 || tc.calendarLoads === 0) return
+        if (!panel.opened || panel.keys.length === 0) return
+        if (tc.scenario === "old-cli" ? tc.schemaLoads === 0 : tc.statusLoads === 0) return
         if (panel.activeSection !== "Meeting") return
         tc.started = true
         try {
@@ -106,7 +110,7 @@ Item {
     function form() { return panel.formTest }
     function el(name) { return find(form(), name) }
     function txt(name) { var e = el(name); return e && shown(e) ? String(e.text) : "" }
-    function field() { return el("calendarLinkField") }
+    function field() { return el("secretField") }
 
     // Every visible Text in the form: the link must never be one of them.
     function visibleTexts() {
@@ -150,6 +154,14 @@ Item {
       check(f.echoMode === TextInput.Password, "the field is masked")
     }
 
+    // Scrolls the secret row into view, as a user would: the real schema's
+    // Meeting section is long enough to push it below the fold, where a
+    // click lands nowhere.
+    function reveal() {
+      form().scrollTo(rowIndexOf("meeting.calendar.ics_link") + form().leadingRows)
+      wait(200)
+    }
+
     function rowIndexOf(key) {
       var keys = form().visibleKeys
       for (var i = 0; i < keys.length; i++) if (String(keys[i].key) === key) return i
@@ -159,115 +171,116 @@ Item {
     // ------------------------------------------------------------ scenarios
 
     function driveSet() {
-      waitFor(function() { return shown(el("calendarLinkLabel")) }, "the row on the Meeting section")
-      var at = rowIndexOf("__calendar_link")
+      waitFor(function() { return shown(el("secretLabel")) }, "the row on the Meeting section")
+      var at = rowIndexOf("meeting.calendar.ics_link")
       check(at === rowIndexOf("meeting.calendar.command") - 1 && at > 0,
             "right above the calendar keys: " + at + " vs " + rowIndexOf("meeting.calendar.command"))
-      check(txt("calendarLinkStatus").indexOf("No link set. Meetings that start without a title") === 0,
-            "status: " + txt("calendarLinkStatus"))
-      check(!shown(el("calendarLinkClear")), "no Clear without a link")
-      check(!el("calendarLinkSet").enabled, "Set waits for a link")
+      check(txt("secretStatus").indexOf("No link set. Meetings that start without a title") === 0,
+            "status: " + txt("secretStatus"))
+      check(!shown(el("secretClear")), "no Clear without a link")
+      check(!el("secretSet").enabled, "Set waits for a link")
       // The help, folded until asked for.
-      check(!shown(el("calendarLinkHelp")), "help folded")
-      click(el("calendarLinkHelpToggle"), "Where to find the link")
-      waitFor(function() { return txt("calendarLinkHelp").indexOf("Secret address in iCal format") !== -1 },
-              "help shown: " + txt("calendarLinkHelp"))
+      check(!shown(el("secretHelp")), "help folded")
+      click(el("secretHelpToggle"), "Where to find it")
+      waitFor(function() { return txt("secretHelp").indexOf("Secret address in iCal format") !== -1 },
+              "help shown: " + txt("secretHelp"))
       shot("empty")
 
       // A link the CLI refuses stays in the field to be corrected.
       typeLink("calendar.example.com/feed")
-      click(el("calendarLinkSet"), "Set")
-      waitFor(function() { return txt("calendarLinkError") !== "" }, "refused")
-      check(txt("calendarLinkError") === "That is not a calendar link: it must start with https://, http:// or webcal://",
-            "the CLI's reason, without its prefix: " + txt("calendarLinkError"))
+      click(el("secretSet"), "Set")
+      waitFor(function() { return txt("secretError") !== "" }, "refused")
+      check(txt("secretError") === "That is not a calendar link: it must start with https://, http:// or webcal://",
+            "the CLI's reason, without its prefix: " + txt("secretError"))
       check(String(field().text) === "calendar.example.com/feed", "kept to correct")
 
       // The real one. Enter in the field sets it too.
       typeLink(tc.secret)
       noSecretShown("while typing")
       keyClick(Qt.Key_Return)
-      waitFor(function() { return txt("calendarLinkNotice") !== "" }, "saved", 6000)
-      check(txt("calendarLinkNotice") === "Linked to calendar.google.com: 2 events in the next 48 hours.",
-            "notice: " + txt("calendarLinkNotice"))
+      waitFor(function() { return txt("secretNotice") !== "" }, "saved", 6000)
+      check(txt("secretNotice") === "Linked to calendar.google.com: 2 events in the next 48 hours.",
+            "notice: " + txt("secretNotice"))
       check(String(field().text) === "", "the field is emptied once saved")
-      check(txt("calendarLinkError") === "", "the error is gone")
-      waitFor(function() { return txt("calendarLinkStatus").indexOf("Linked to calendar.google.com. Fetched at ") === 0 },
-              "status from the CLI: " + txt("calendarLinkStatus"))
-      check(txt("calendarLinkStatus").indexOf("Next: Design review, ") !== -1, "the next event: " + txt("calendarLinkStatus"))
-      check(String(el("calendarLinkSet").text) === "Replace", "Set becomes Replace: " + el("calendarLinkSet").text)
+      check(txt("secretError") === "", "the error is gone")
+      waitFor(function() { return txt("secretStatus").indexOf("Linked to calendar.google.com. Fetched at ") === 0 },
+              "status from the CLI: " + txt("secretStatus"))
+      check(txt("secretStatus").indexOf("Next: Design review, ") !== -1, "the next event: " + txt("secretStatus"))
+      check(String(el("secretSet").text) === "Replace", "Set becomes Replace: " + el("secretSet").text)
       check(String(field().placeholderText).indexOf("Saved (calendar.google.com)") === 0,
             "placeholder: " + field().placeholderText)
       noSecretShown("after saving")
       shot("saved")
 
-      click(el("calendarLinkClear"), "Clear")
-      waitFor(function() { return txt("calendarLinkNotice") === "Calendar link removed." }, "cleared: " + txt("calendarLinkNotice"))
-      waitFor(function() { return txt("calendarLinkStatus").indexOf("No link set.") === 0 }, "status after clear")
-      check(!shown(el("calendarLinkClear")), "Clear goes with the link")
+      click(el("secretClear"), "Clear")
+      waitFor(function() { return txt("secretNotice") === "Removed." }, "cleared: " + txt("secretNotice"))
+      waitFor(function() { return txt("secretStatus").indexOf("No link set.") === 0 }, "status after clear")
+      check(!shown(el("secretClear")), "Clear goes with the link")
     }
 
     // Against a real voxtype, whose calendar store starts empty and whose
     // feed is a local server with one event an hour from now.
     function driveReal() {
-      waitFor(function() { return shown(el("calendarLinkLabel")) }, "the row on the Meeting section")
-      check(txt("calendarLinkStatus").indexOf("No link set. Meetings that start without a title") === 0,
-            "status from the real CLI: " + txt("calendarLinkStatus"))
-      click(el("calendarLinkHelpToggle"), "Where to find the link")
-      waitFor(function() { return txt("calendarLinkHelp").indexOf("Google Calendar") !== -1 }, "the real help text")
+      waitFor(function() { return shown(el("secretLabel")) }, "the row on the Meeting section")
+      reveal()
+      check(txt("secretStatus").indexOf("No link set. Meetings that start without a title") === 0,
+            "status from the real CLI: " + txt("secretStatus"))
+      click(el("secretHelpToggle"), "Where to find it")
+      waitFor(function() { return txt("secretHelp").indexOf("Google Calendar") !== -1 }, "the real help text")
       typeLink("calendar.example.com/feed")
-      click(el("calendarLinkSet"), "Set")
-      waitFor(function() { return txt("calendarLinkError") !== "" }, "refused", 8000)
-      check(txt("calendarLinkError") === "That is not a calendar link: it must start with https://, http:// or webcal://",
-            "the real CLI's reason: " + txt("calendarLinkError"))
+      click(el("secretSet"), "Set")
+      waitFor(function() { return txt("secretError") !== "" }, "refused", 8000)
+      check(txt("secretError") === "That is not a calendar link: it must start with https://, http:// or webcal://",
+            "the real CLI's reason: " + txt("secretError"))
       typeLink(tc.secret)
       keyClick(Qt.Key_Return)
-      waitFor(function() { return txt("calendarLinkNotice") !== "" || (txt("calendarLinkError") !== "" && String(field().text) === tc.secret && el("calendarLinkSet").enabled) }, "saved", 15000)
-      check(txt("calendarLinkNotice") === "Linked to " + tc.linkHost + ": 1 event in the next 48 hours.",
-            "notice: " + txt("calendarLinkNotice") + " / error: " + txt("calendarLinkError"))
+      waitFor(function() { return txt("secretNotice") !== "" || (txt("secretError") !== "" && String(field().text) === tc.secret && el("secretSet").enabled) }, "saved", 15000)
+      check(txt("secretNotice") === "Linked to " + tc.linkHost + ": 1 event in the next 48 hours.",
+            "notice: " + txt("secretNotice") + " / error: " + txt("secretError"))
       check(String(field().text) === "", "the field is emptied once saved")
-      waitFor(function() { return txt("calendarLinkStatus").indexOf("Linked to " + tc.linkHost + ". Fetched at ") === 0 },
-              "the real status: " + txt("calendarLinkStatus"))
-      check(txt("calendarLinkStatus").indexOf("Next: Design review, ") !== -1, "the next event: " + txt("calendarLinkStatus"))
+      waitFor(function() { return txt("secretStatus").indexOf("Linked to " + tc.linkHost + ". Fetched at ") === 0 },
+              "the real status: " + txt("secretStatus"))
+      check(txt("secretStatus").indexOf("Next: Design review, ") !== -1, "the next event: " + txt("secretStatus"))
       noSecretShown("after saving")
       shot("real-saved")
-      click(el("calendarLinkClear"), "Clear")
-      waitFor(function() { return txt("calendarLinkStatus").indexOf("No link set.") === 0 }, "cleared: " + txt("calendarLinkStatus"), 8000)
+      click(el("secretClear"), "Clear")
+      waitFor(function() { return txt("secretStatus").indexOf("No link set.") === 0 }, "cleared: " + txt("secretStatus"), 8000)
     }
 
     function driveFail() {
-      waitFor(function() { return shown(el("calendarLinkLabel")) }, "the row")
-      check(txt("calendarLinkStatus") === "No link set. The Next Meeting widget on the bar names untitled meetings.",
-            "the plugin names meetings: " + txt("calendarLinkStatus"))
+      waitFor(function() { return shown(el("secretLabel")) }, "the row")
+      check(txt("secretStatus") === "No link set. The Next Meeting widget on the bar names untitled meetings.",
+            "the plugin names meetings: " + txt("secretStatus"))
       typeLink(tc.secret)
-      click(el("calendarLinkSet"), "Set")
-      waitFor(function() { return txt("calendarLinkError") !== "" }, "refused", 6000)
-      check(txt("calendarLinkError").indexOf("The calendar server (calendar.google.com) answered 404") === 0,
-            "the CLI's line: " + txt("calendarLinkError"))
+      click(el("secretSet"), "Set")
+      waitFor(function() { return txt("secretError") !== "" }, "refused", 6000)
+      check(txt("secretError").indexOf("The calendar server (calendar.google.com) answered 404") === 0,
+            "the CLI's line: " + txt("secretError"))
       check(String(field().text) === tc.secret, "kept to correct")
-      check(txt("calendarLinkNotice") === "", "no notice")
-      check(!shown(el("calendarLinkClear")), "still no link")
+      check(txt("secretNotice") === "", "no notice")
+      check(!shown(el("secretClear")), "still no link")
       noSecretShown("after a refusal")
       shot("refused")
     }
 
     function driveSaved() {
-      waitFor(function() { return shown(el("calendarLinkLabel")) }, "the row")
-      check(txt("calendarLinkStatus").indexOf("Linked to outlook.office365.com. Fetched at ") === 0,
-            "status: " + txt("calendarLinkStatus"))
-      check(txt("calendarLinkStatus").indexOf("Nothing in the next 48 hours.") !== -1, "no events: " + txt("calendarLinkStatus"))
-      check(txt("calendarLinkError") === "Last fetch failed: The calendar server (outlook.office365.com) did not answer.",
-            "last error: " + txt("calendarLinkError"))
-      check(String(el("calendarLinkSet").text) === "Replace", "Replace")
-      check(shown(el("calendarLinkClear")), "Clear")
+      waitFor(function() { return shown(el("secretLabel")) }, "the row")
+      check(txt("secretStatus").indexOf("Linked to outlook.office365.com. Fetched at ") === 0,
+            "status: " + txt("secretStatus"))
+      check(txt("secretStatus").indexOf("Nothing in the next 48 hours.") !== -1, "no events: " + txt("secretStatus"))
+      check(txt("secretError") === "Last fetch failed: The calendar server (outlook.office365.com) did not answer.",
+            "last error: " + txt("secretError"))
+      check(String(el("secretSet").text) === "Replace", "Replace")
+      check(shown(el("secretClear")), "Clear")
       shot("last-error")
-      click(el("calendarLinkClear"), "Clear")
-      waitFor(function() { return txt("calendarLinkStatus").indexOf("No link set.") === 0 }, "cleared")
-      check(txt("calendarLinkError") === "", "the old error goes with the link: " + txt("calendarLinkError"))
+      click(el("secretClear"), "Clear")
+      waitFor(function() { return txt("secretStatus").indexOf("No link set.") === 0 }, "cleared")
+      check(txt("secretError") === "", "the old error goes with the link: " + txt("secretError"))
     }
 
     function driveKeys() {
-      waitFor(function() { return shown(el("calendarLinkLabel")) }, "the row")
-      var at = rowIndexOf("__calendar_link") + form().leadingRows
+      waitFor(function() { return shown(el("secretLabel")) }, "the row")
+      var at = rowIndexOf("meeting.calendar.ics_link") + form().leadingRows
       form().clearHighlight()
       for (var i = 0; i <= at; i++) form().moveHighlight(1)
       check(form().highlightIndex === at, "the cursor reaches the row: " + form().highlightIndex)
@@ -286,18 +299,18 @@ Item {
     }
 
     function driveSearch() {
-      waitFor(function() { return shown(el("calendarLinkLabel")) }, "the row")
+      waitFor(function() { return shown(el("secretLabel")) }, "the row")
       panel.searchText = "ical"
-      waitFor(function() { return form().searching && shown(el("calendarLinkLabel")) }, "found by searching for ical")
+      waitFor(function() { return form().searching && shown(el("secretLabel")) }, "found by searching for ical")
       panel.searchText = "opacity"
-      waitFor(function() { return !shown(el("calendarLinkLabel")) }, "not for other searches")
+      waitFor(function() { return !shown(el("secretLabel")) }, "not for other searches")
       panel.searchText = ""
     }
 
     function driveOldCli() {
       waitFor(function() { return rowIndexOf("meeting.calendar.command") !== -1 }, "the calendar keys")
       wait(300)
-      check(rowIndexOf("__calendar_link") === -1 && el("calendarLinkLabel") === null,
+      check(rowIndexOf("meeting.calendar.ics_link") === -1 && el("secretLabel") === null,
             "a CLI without `meeting calendar` shows no link row")
     }
 

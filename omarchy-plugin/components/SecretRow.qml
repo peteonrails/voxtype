@@ -3,50 +3,64 @@ import qs.Commons
 import qs.Commons as ShellTheme
 import qs.Ui
 
-// The calendar's private iCal link, which names meetings that start without
-// a title. It is not a config key: `voxtype meeting calendar set-ics` keeps
-// it in voxtype's state directory, and nothing ever prints it back.
+// One entry of the schema's `secrets` list: a value voxtype keeps outside
+// config.toml and never prints back, today the calendar's private iCal link.
 //
-// The field is masked and is emptied once the link is saved, so the link is
-// on screen only while it is being pasted. The panel hands it to the CLI on
-// stdin, never in argv (which `ps` shows). What is shown afterwards comes from
-// `meeting calendar status --json`: the host, when it was fetched, the last
-// error and the next event.
+// The field is masked and is emptied once the value is saved, so it is on
+// screen only while it is being pasted. The panel hands it to the entry's
+// set_command on stdin, never in argv (which `ps` shows). Afterwards the row
+// shows what the entry and its status_command report: for the calendar link,
+// the host, when it was fetched, the next event and the last error.
 Item {
   id: root
 
-  // `meeting calendar status --json`, or null when it could not be read.
+  // The schema's entry: {key, label, description, help, set, host,
+  // last_error, set_command, clear_command, status_command}.
+  property var spec: null
+  // The status_command's answer, or null.
   property var status: null
-  // "set", "clear" or "" while nothing runs.
+  // "set", "clear" or "" while nothing runs for this entry.
   property string busy: ""
-  // The last Set/Clear failure (one line naming only the host), and what the
-  // last Set reported.
+  // The last Set/Clear failure (one line naming no secret), and what the last
+  // Set or Clear reported.
   property string errorText: ""
   property string noticeText: ""
+  // Bumped by the panel each time the value is saved: the field is emptied so
+  // it is not kept on screen. A refused value stays, to be corrected.
+  property int savedCount: 0
 
   property bool highlighted: false
 
-  signal setRequested(string link)
+  signal setRequested(string value)
   signal clearRequested()
   signal editorFocusChanged(bool active)
   signal editorEscaped()
 
-  readonly property var link: root.status && root.status.calendar_link ? root.status.calendar_link : null
-  readonly property bool linkSet: root.link !== null && root.link.set === true
-  readonly property string host: root.linkSet && root.link.host ? String(root.link.host) : ""
-  readonly property string source: root.status && root.status.source ? String(root.status.source) : ""
-  readonly property string helpText: root.status && root.status.link_help ? String(root.status.link_help) : ""
-  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
+  onSavedCountChanged: field.text = ""
 
   // For the keyboard cursor: Enter on this row goes to the field.
   function activate() {
     field.forceActiveFocus()
   }
 
-  // Bumped by the panel each time a link is saved: the field is emptied so
-  // the link is not kept on screen. A refused link stays, to be corrected.
-  property int savedCount: 0
-  onSavedCountChanged: field.text = ""
+  // The calendar's status_command answer carries more than the entry: when
+  // it was fetched, the next event, and what names meetings without a link.
+  readonly property var link: root.status && root.status.calendar_link ? root.status.calendar_link : null
+  readonly property bool valueSet: root.link !== null ? root.link.set === true : (root.spec !== null && root.spec.set === true)
+  readonly property string host: {
+    var h = root.link !== null ? root.link.host : (root.spec ? root.spec.host : null)
+    return root.valueSet && h ? String(h) : ""
+  }
+  readonly property string lastError: {
+    if (!root.valueSet) return ""
+    var e = root.link !== null ? root.link.last_error : (root.spec ? root.spec.last_error : null)
+    return e ? String(e) : ""
+  }
+  readonly property string label: root.spec && root.spec.label ? String(root.spec.label) : (root.spec ? String(root.spec.key) : "")
+  readonly property string description: root.spec && root.spec.description ? String(root.spec.description) : ""
+  readonly property string helpText: root.spec && root.spec.help ? String(root.spec.help) : ""
+  readonly property bool canClear: root.spec !== null && root.spec.clear_command !== undefined && root.spec.clear_command !== null
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   function clockTime(date) {
     return Qt.formatTime(date, "hh:mm")
@@ -60,29 +74,31 @@ Item {
   }
 
   readonly property string statusLine: {
-    if (root.status === null) return ""
-    if (root.linkSet) {
-      var parts = ["Linked to " + (root.host || "your calendar") + "."]
-      var fetched = root.link.fetched_at
-      if (fetched !== null && fetched !== undefined)
-        parts.push("Fetched at " + root.clockTime(new Date(Number(fetched) * 1000)) + ".")
-      else
-        parts.push("Not fetched yet.")
-      var next = root.link.next
-      if (next && next.title) {
-        var start = new Date(String(next.start))
-        parts.push("Next: " + String(next.title) + (isNaN(start.getTime()) ? "" : ", " + root.dayAndTime(start)) + ".")
-      } else if (root.link.events === 0) {
-        parts.push("Nothing in the next 48 hours.")
+    if (root.spec === null) return ""
+    if (root.valueSet) {
+      var parts = [root.host !== "" ? "Linked to " + root.host + "." : "Saved."]
+      if (root.link !== null) {
+        var fetched = root.link.fetched_at
+        if (fetched !== null && fetched !== undefined)
+          parts.push("Fetched at " + root.clockTime(new Date(Number(fetched) * 1000)) + ".")
+        else
+          parts.push("Not fetched yet.")
+        var next = root.link.next
+        if (next && next.title) {
+          var start = new Date(String(next.start))
+          parts.push("Next: " + String(next.title) + (isNaN(start.getTime()) ? "" : ", " + root.dayAndTime(start)) + ".")
+        } else if (root.link.events === 0) {
+          parts.push("Nothing in the next 48 hours.")
+        }
       }
       return parts.join(" ")
     }
-    if (root.source === "command") return "No link set. The calendar command below names untitled meetings."
-    if (root.source === "plugin") return "No link set. The Next Meeting widget on the bar names untitled meetings."
+    if (root.link === null) return "Not set."
+    var source = root.status.source ? String(root.status.source) : ""
+    if (source === "command") return "No link set. The calendar command below names untitled meetings."
+    if (source === "plugin") return "No link set. The Next Meeting widget on the bar names untitled meetings."
     return "No link set. Meetings that start without a title keep their app's name, such as \"Zoom call\"."
   }
-
-  readonly property string lastError: root.linkSet && root.link.last_error ? String(root.link.last_error) : ""
 
   property bool showHelp: false
 
@@ -105,16 +121,18 @@ Item {
       spacing: Style.spacing.sm
 
       Text {
-        objectName: "calendarLinkLabel"
-        text: "Calendar (iCal link)"
+        objectName: "secretLabel"
+        text: root.label
         color: ShellTheme.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
 
       Text {
+        objectName: "secretDescription"
         width: parent.width
-        text: "Meetings that start without a title take it from your calendar. Paste the calendar's private iCal address; it is stored by voxtype and never shown again."
+        text: (root.description !== "" ? root.description + " " : "")
+          + "Voxtype keeps it outside config.toml and never shows it again."
         color: root.dim
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -128,7 +146,7 @@ Item {
 
         TextField {
           id: field
-          objectName: "calendarLinkField"
+          objectName: "secretField"
           anchors.left: parent.left
           anchors.right: setButton.left
           anchors.rightMargin: Style.spacing.controlGap
@@ -136,9 +154,9 @@ Item {
           password: true
           hasCursor: root.highlighted
           enabled: root.busy === ""
-          placeholderText: root.linkSet
-            ? "Saved (" + (root.host || "link") + "). Paste a new link to replace it"
-            : "https://calendar.google.com/calendar/ical/…/basic.ics"
+          placeholderText: root.valueSet
+            ? "Saved" + (root.host !== "" ? " (" + root.host + ")" : "") + ". Paste a new one to replace it"
+            : "Paste it here"
           onActiveFocusChanged: root.editorFocusChanged(activeFocus)
           onAccepted: setButton.clicked()
           Keys.onEscapePressed: function(event) {
@@ -150,11 +168,11 @@ Item {
 
         Button {
           id: setButton
-          objectName: "calendarLinkSet"
+          objectName: "secretSet"
           anchors.right: clearButton.visible ? clearButton.left : parent.right
           anchors.rightMargin: clearButton.visible ? Style.spacing.controlGap : 0
           anchors.verticalCenter: parent.verticalCenter
-          text: root.busy === "set" ? "Checking…" : (root.linkSet ? "Replace" : "Set")
+          text: root.busy === "set" ? "Checking…" : (root.valueSet ? "Replace" : "Set")
           iconText: ""
           bordered: true
           enabled: root.busy === "" && field.text.trim() !== ""
@@ -167,10 +185,10 @@ Item {
 
         Button {
           id: clearButton
-          objectName: "calendarLinkClear"
+          objectName: "secretClear"
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
-          visible: root.linkSet
+          visible: root.valueSet && root.canClear
           text: root.busy === "clear" ? "Clearing…" : "Clear"
           iconText: ""
           bordered: true
@@ -184,7 +202,7 @@ Item {
       }
 
       Text {
-        objectName: "calendarLinkNotice"
+        objectName: "secretNotice"
         width: parent.width
         visible: text !== ""
         text: root.noticeText
@@ -195,7 +213,7 @@ Item {
       }
 
       Text {
-        objectName: "calendarLinkStatus"
+        objectName: "secretStatus"
         width: parent.width
         visible: text !== ""
         text: root.statusLine
@@ -206,7 +224,7 @@ Item {
       }
 
       Text {
-        objectName: "calendarLinkError"
+        objectName: "secretError"
         width: parent.width
         visible: text !== ""
         text: root.errorText !== "" ? root.errorText
@@ -218,9 +236,9 @@ Item {
       }
 
       Text {
-        objectName: "calendarLinkHelpToggle"
+        objectName: "secretHelpToggle"
         visible: root.helpText !== ""
-        text: (root.showHelp ? "▾ " : "▸ ") + "Where to find the link"
+        text: (root.showHelp ? "▾ " : "▸ ") + "Where to find it"
         color: helpMouse.containsMouse ? ShellTheme.Color.foreground : root.dim
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -234,7 +252,7 @@ Item {
       }
 
       Text {
-        objectName: "calendarLinkHelp"
+        objectName: "secretHelp"
         width: parent.width
         visible: root.showHelp && root.helpText !== ""
         text: root.helpText

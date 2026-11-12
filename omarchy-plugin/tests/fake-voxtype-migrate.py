@@ -48,15 +48,15 @@ state["values"] for exactly those keys and reject anything else (exit 2);
 to `systemctl --user restart voxtype` (see fake-systemctl.py).
 
 state["calendar"] makes `meeting calendar` answer (detect-140's contract,
-0654756f), and adds the Meeting section's calendar keys to the schema, with a
-key either side. Absent, `meeting calendar` exits 2 like a CLI without it.
+0654756f), adds the Meeting section's calendar keys to the schema, with a
+key either side, and lists the iCal link in the schema's `secrets` (f2f27cc3). Absent, `meeting calendar` exits 2 like a CLI without it.
 It holds {"link": {"host", "events", "next", "last_error"} or None,
 "source_without_link": "command"|"plugin"|None}. `set-ics - --json` reads
 the link from stdin (an argv link is refused here, so a panel that passes it
 there fails) and records each one read in state["calendar_stdin"].
 state["calendar_set_fail"] is a stderr line to fail with (exit 1; the link
 is kept as it was). `clear --json` drops the link. state["calendar_keys"]
-adds the keys alone, as a schema that has them from a CLI that cannot answer.
+adds the keys alone, as a schema from a CLI without `secrets`.
 
 Accept behavior is scripted per attempt by state["accept_script"]: "fail",
 "slow" (one progress line, then wait to be cancelled) or "ok". After the script
@@ -205,10 +205,24 @@ def schema(state):
             meeting_key("meeting.calendar.timeout_secs", "int", "Calendar timeout", 5, min=1, max=60),
             meeting_key("meeting.view_opacity", "float", "View opacity", 0.8, min=0.2, max=1.0),
         ]
-    return {
+    doc = {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
         "engine": engine, "replacements": {}, "keys": keys,
     }
+    if state.get("calendar") is not None:
+        link = state["calendar"].get("link")
+        doc["secrets"] = [{
+            "key": "meeting.calendar.ics_link", "type": "secret", "section": "Meeting",
+            "label": "Calendar (iCal link)",
+            "description": "Your calendar's private iCal link. Meetings that start without a title you chose "
+                           "are named after the calendar event happening then.",
+            "help": LINK_HELP, "set": link is not None, "host": link.get("host") if link else None,
+            "last_error": link.get("last_error") if link else None,
+            "set_command": ["meeting", "calendar", "set-ics", "-", "--json"],
+            "clear_command": ["meeting", "calendar", "clear", "--json"],
+            "status_command": ["meeting", "calendar", "status", "--json"],
+        }]
+    return doc
 
 
 def models(state):

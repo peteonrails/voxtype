@@ -136,13 +136,22 @@ Item {
   // The `setup osd --status --json` object, or null (including a CLI that
   // predates --status, which means no offer).
   property var osdStatus: null
-  // `meeting calendar status --json`, or null (a CLI without it): the
-  // calendar link row. Its last Set/Clear failure, what the last Set reported,
-  // and a count of saves, each of which empties the row's field.
-  property var calendarStatus: null
-  property string calendarError: ""
-  property string calendarNotice: ""
-  property int calendarSaved: 0
+  // The schema's `secrets` (values kept outside config.toml, such as the
+  // calendar's iCal link), and per secret key: its status_command answer, the
+  // last Set/Clear failure, what the last one reported, and a count of saves
+  // (each empties the row's field).
+  property var secrets: []
+  property var secretStatus: ({})
+  property var secretErrors: ({})
+  property var secretNotices: ({})
+  property var secretSaves: ({})
+
+  function withEntry(map, key, value) {
+    var next = ({})
+    for (var k in map) next[k] = map[k]
+    next[key] = value
+    return next
+  }
   // "Not now" whose recording failed: hidden for as long as the shell keeps
   // this panel loaded, as for the plugin copy banner.
   property bool osdDismissedHere: false
@@ -285,8 +294,8 @@ Item {
     root.upgradeActionError = ""
     root.osdOfferError = ""
     root.osdStyleNotice = ""
-    root.calendarError = ""
-    root.calendarNotice = ""
+    root.secretErrors = ({})
+    root.secretNotices = ({})
     if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
     root.refreshAll()
@@ -318,7 +327,6 @@ Item {
     cli.fetchUpgrade()
     cli.fetchPluginLink()
     cli.fetchOsdStatus()
-    cli.fetchCalendarStatus()
   }
 
   // A binary that cannot be run cannot vouch for anything shown from its last
@@ -349,7 +357,8 @@ Item {
     root.upgradeStatus = null
     root.pluginLink = null
     root.osdStatus = null
-    root.calendarStatus = null
+    root.secrets = []
+    root.secretStatus = ({})
     root.infoErrors = ({})
   }
 
@@ -646,6 +655,17 @@ Item {
       normalized.push(spec)
     }
     root.keys = normalized
+    var secrets = []
+    var incomingSecrets = next.secrets && next.secrets.length !== undefined ? next.secrets : []
+    for (var si = 0; si < incomingSecrets.length; ++si) {
+      if (!incomingSecrets[si] || !incomingSecrets[si].key) continue
+      var secret = ({})
+      for (var sf in incomingSecrets[si]) secret[sf] = incomingSecrets[si][sf]
+      secret.section = canonicalSection(secret.section || "")
+      secrets.push(secret)
+    }
+    root.secrets = secrets
+    cli.fetchSecretStatuses(secrets)
     root.activeSection = canonicalSection(root.activeSection)
     root.engine = next.engine === undefined || next.engine === null ? "" : String(next.engine)
     root.voxtypeVersion = next.voxtype_version ? String(next.voxtype_version) : ""
@@ -751,19 +771,24 @@ Item {
     }
     onPluginLinkLoaded: function(status) { root.pluginLink = status }
     onOsdStatusLoaded: function(status) { root.osdStatus = status }
-    onCalendarStatusLoaded: function(status) { root.calendarStatus = status }
-    onCalendarActionFinished: function(action, ok, message, result) {
-      root.calendarError = ok ? "" : message
-      root.calendarNotice = ""
+    onSecretStatusLoaded: function(key, status) {
+      root.secretStatus = root.withEntry(root.secretStatus, key, status)
+    }
+    onSecretActionFinished: function(key, action, ok, message, result) {
+      root.secretErrors = root.withEntry(root.secretErrors, key, ok ? "" : message)
+      var notice = ""
       if (ok && action === "set") {
-        root.calendarSaved += 1
-        var host = result && result.host ? String(result.host) : "your calendar"
+        root.secretSaves = root.withEntry(root.secretSaves, key, (root.secretSaves[key] || 0) + 1)
+        var host = result && result.host ? String(result.host) : ""
         var n = result ? result.events : null
-        root.calendarNotice = "Linked to " + host + (n === null || n === undefined ? "." :
+        notice = host === "" ? "Saved." : "Linked to " + host + (n === null || n === undefined ? "." :
           ": " + n + (n === 1 ? " event" : " events") + " in the next 48 hours.")
       }
-      if (ok && action === "clear") root.calendarNotice = "Calendar link removed."
-      cli.fetchCalendarStatus()
+      if (ok && action === "clear") notice = "Removed."
+      root.secretNotices = root.withEntry(root.secretNotices, key, notice)
+      // The schema carries set/host/last_error; reading it again also reads
+      // every status_command again.
+      cli.fetchSchema()
     }
     onOsdActionFinished: function(action, ok, message) {
       if (action === "use-auto") {
@@ -1309,20 +1334,22 @@ Item {
             osdOfferError: root.osdOfferError
             onOsdSwitchRequested: root.switchToQuickshellOsd()
             onOsdNotNowRequested: { root.osdOfferError = ""; cli.dismissOsdOffer() }
-            calendarStatus: root.calendarStatus
-            calendarBusy: cli.calendarBusy
-            calendarError: root.calendarError
-            calendarNotice: root.calendarNotice
-            calendarSaved: root.calendarSaved
-            onCalendarSetRequested: function(link) {
-              root.calendarError = ""
-              root.calendarNotice = ""
-              cli.setCalendarLink(link)
+            secrets: root.secrets
+            secretStatus: root.secretStatus
+            secretBusyKey: cli.secretBusyKey
+            secretBusyAction: cli.secretBusyAction
+            secretErrors: root.secretErrors
+            secretNotices: root.secretNotices
+            secretSaves: root.secretSaves
+            onSecretSetRequested: function(spec, value) {
+              root.secretErrors = root.withEntry(root.secretErrors, String(spec.key), "")
+              root.secretNotices = root.withEntry(root.secretNotices, String(spec.key), "")
+              cli.setSecret(spec, value)
             }
-            onCalendarClearRequested: {
-              root.calendarError = ""
-              root.calendarNotice = ""
-              cli.clearCalendarLink()
+            onSecretClearRequested: function(spec) {
+              root.secretErrors = root.withEntry(root.secretErrors, String(spec.key), "")
+              root.secretNotices = root.withEntry(root.secretNotices, String(spec.key), "")
+              cli.clearSecret(spec)
             }
             rowNotes: ({ "osd.style": root.osdStyleHelp })
             rowNotices: ({ "osd.style": root.osdStyleNotice })
