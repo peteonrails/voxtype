@@ -711,7 +711,7 @@ def run(scenario, host, shell, evidence):
                 share_folder.mkdir(parents=True)
                 share_folder.chmod(0o500)
             seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", share_folder, command)
-            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
+            real_env = {"REAL_VOXTYPE": real, "REAL_SCENARIO": "1", "XDG_DATA_HOME": str(r.root / "xdg-data"),
                         "XDG_CONFIG_HOME": str(r.root / "xdg-config"), "REAL_SHARE_PATH": str(tools)}
         if scenario in ("waveform-real", "waveform-real-mixed"):
             real = os.environ["REAL_VOXTYPE"]
@@ -723,7 +723,7 @@ def run(scenario, host, shell, evidence):
                 write_tone_wav(folder / "loopback.wav", 60, [(9, 11), (35, 37)])
             else:
                 write_tone_wav(folder / "mixed.wav", 60, [(4, 6), (9, 11)])
-            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
+            real_env = {"REAL_VOXTYPE": real, "REAL_SCENARIO": "1", "XDG_DATA_HOME": str(r.root / "xdg-data"),
                         "XDG_CONFIG_HOME": str(r.root / "xdg-config")}
         todoist = None
         if scenario == "actions-real":
@@ -740,14 +740,14 @@ def run(scenario, host, shell, evidence):
                 (tools / prog).symlink_to(shutil.which(prog))
             seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", documents / "Voxtype")
             todoist = FakeTodoist()
-            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
+            real_env = {"REAL_VOXTYPE": real, "REAL_SCENARIO": "1", "XDG_DATA_HOME": str(r.root / "xdg-data"),
                         "XDG_CONFIG_HOME": str(r.root / "xdg-config"), "REAL_SHARE_PATH": str(tools),
                         "VOXTYPE_TODOIST_API": todoist.base, "VOXTYPE_TODOIST_APP": "https://app.todoist.invalid",
                         "FAKE_BROWSER_LOG": str(r.root / "browser.txt")}
         if scenario == "recovery-real":
             real = os.environ["REAL_VOXTYPE"]
             seed_interrupted(real, r.root / "xdg-data")
-            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data")}
+            real_env = {"REAL_VOXTYPE": real, "REAL_SCENARIO": "1", "XDG_DATA_HOME": str(r.root / "xdg-data")}
         server = subprocess.Popen([sys.executable, "-I", str(FAKE_SOCK), str(sock), str(ctl), str(srv_log),
                                    str(snapshot)])
         try:
