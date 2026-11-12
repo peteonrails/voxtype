@@ -179,6 +179,9 @@ enum WireEvent {
         meeting_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// The assistant backend that failed ("Claude", "Local (llama3)").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        backend: Option<String>,
     },
     SummaryReady {
         meeting_id: String,
@@ -345,6 +348,7 @@ impl MeetingEventHub {
             message: message.to_string(),
             meeting_id: None,
             code: None,
+            backend: None,
         });
     }
 
@@ -367,10 +371,12 @@ impl MeetingEventHub {
                 meeting_id,
                 code,
                 message,
+                backend,
             } => WireEvent::Error {
                 message,
                 meeting_id: Some(meeting_id),
                 code: Some(code.to_string()),
+                backend,
             },
         });
     }
@@ -590,6 +596,7 @@ mod tests {
             agent: "claude".into(),
             agent_name: "Claude".into(),
             path: Some(PathBuf::from("/x/summary.md")),
+            fell_back_from: None,
             summary: crate::meeting::data::MeetingSummary {
                 summary: "ok".into(),
                 key_points: vec![],
@@ -604,6 +611,7 @@ mod tests {
             meeting_id: "m1".into(),
             code: "agent_failed",
             message: "Summary failed: x".into(),
+            backend: Some("Claude".into()),
         });
 
         async fn next(
@@ -630,7 +638,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"event": "error", "message": "Summary failed: x",
-                               "meeting_id": "m1", "code": "agent_failed"})
+                               "meeting_id": "m1", "code": "agent_failed", "backend": "Claude"})
         );
         hub.cleanup();
     }

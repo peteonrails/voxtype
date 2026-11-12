@@ -7,8 +7,8 @@
 //! meeting folder.
 
 use super::{
-    build_context, choose_backend, meeting_folder, AssistantError, AssistantSettings, Backend,
-    Overrides,
+    build_context, choose_summary_backend, meeting_folder, AssistantError, AssistantSettings,
+    Backend, Overrides, SummaryBackend,
 };
 use crate::meeting::data::{MeetingData, MeetingId, MeetingSummary};
 use crate::meeting::storage::{MeetingStorage, StorageConfig};
@@ -28,11 +28,67 @@ pub struct SummaryOutcome {
     /// `summary.md`, when the meeting has a folder.
     pub path: Option<PathBuf>,
     pub summary: MeetingSummary,
+    /// The agent that failed first, when the summary came from the local
+    /// model instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fell_back_from: Option<String>,
 }
 
-/// Does `[meeting.summary] backend` name one of the older summarizers?
-fn legacy_backend(settings: &AssistantSettings) -> bool {
-    matches!(settings.summary_backend.as_str(), "local" | "remote")
+/// Run one of the older `[meeting.summary]` summarizers.
+fn summarize_legacy(
+    settings: &AssistantSettings,
+    meeting: &MeetingData,
+    kind: &str,
+) -> Result<MeetingSummary, AssistantError> {
+    let mut config = settings.summary.clone();
+    config.backend = kind.to_string();
+    let summarizer = summary::create_summarizer(&config).ok_or_else(|| {
+        AssistantError::Local(format!(
+            "[meeting.summary] backend = \"{kind}\" is not fully configured (remote_endpoint is missing)"
+        ))
+    })?;
+    if meeting.transcript.segments.is_empty() {
+        return Err(AssistantError::EmptyTranscript);
+    }
+    summarizer
+        .summarize(meeting)
+        .map_err(|e| AssistantError::Local(e.to_string()))
+}
+
+/// Summarize with `backend`. An agent that fails may hand over to the local
+/// model, but only when `[meeting.summary] backend = "local"` says the user
+/// set it up, and never the other way: the local model failing never sends
+/// the transcript to an agent.
+fn run_summary(
+    settings: &AssistantSettings,
+    meeting: &MeetingData,
+    backend: &SummaryBackend,
+) -> Result<(MeetingSummary, SummaryBackend, Option<String>), AssistantError> {
+    match backend {
+        SummaryBackend::Legacy(kind) => {
+            summarize_legacy(settings, meeting, kind).map(|s| (s, backend.clone(), None))
+        }
+        SummaryBackend::Assistant(b) => match summarize_with(settings, meeting, b) {
+            Ok(s) => Ok((s, backend.clone(), None)),
+            Err(e @ (AssistantError::Agent { .. } | AssistantError::Timeout { .. }))
+                if matches!(b, Backend::Agent(_)) && settings.summary_backend == "local" =>
+            {
+                let local = SummaryBackend::Legacy("local".to_string());
+                tracing::warn!(
+                    "{e}; summarizing with {} instead",
+                    local.display_name(settings)
+                );
+                match summarize_legacy(settings, meeting, "local") {
+                    Ok(s) => Ok((s, local, Some(b.display_name()))),
+                    Err(local_err) => {
+                        tracing::warn!("The local model failed too: {local_err}");
+                        Err(e)
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        },
+    }
 }
 
 /// Summarize `meeting` with the assistant `backend`.
@@ -66,38 +122,18 @@ pub fn summarize_meeting(
         .load_meeting_data(&meeting_id)
         .map_err(|e| AssistantError::Storage(format!("Failed to load meeting: {e}")))?;
 
-    let (summary, agent, agent_name) =
-        if legacy_backend(settings) && overrides.agent.is_none() && !overrides.local {
-            let summarizer = summary::create_summarizer(&settings.summary).ok_or_else(|| {
-                AssistantError::Local(format!(
-                    "[meeting.summary] backend = \"{}\" is not fully configured",
-                    settings.summary_backend
-                ))
-            })?;
-            if meeting.transcript.segments.is_empty() {
-                return Err(AssistantError::EmptyTranscript);
-            }
-            let s = summarizer
-                .summarize(&meeting)
-                .map_err(|e| AssistantError::Local(e.to_string()))?;
-            (
-                s,
-                summarizer.name().to_string(),
-                summarizer.name().to_string(),
-            )
-        } else {
-            let backend = choose_backend(settings, overrides)?;
-            let s = summarize_with(settings, &meeting, &backend)?;
-            (s, backend.id(), backend.display_name())
-        };
+    let backend = choose_summary_backend(settings, overrides)?;
+    let (summary, used, fell_back_from) = run_summary(settings, &meeting, &backend)?;
+    let agent_name = used.display_name(settings);
 
     let path = save(&storage, &meeting, &meeting_id, &summary, &agent_name)?;
     Ok(SummaryOutcome {
         meeting_id: meeting_id.to_string(),
-        agent,
+        agent: used.id(),
         agent_name,
         path,
         summary,
+        fell_back_from,
     })
 }
 
@@ -147,6 +183,9 @@ pub enum SummaryEvent {
         meeting_id: String,
         code: &'static str,
         message: String,
+        /// The backend that failed, as the UI names it ("Claude",
+        /// "Local (llama3:latest)"), when one was chosen.
+        backend: Option<String>,
     },
 }
 
@@ -191,6 +230,9 @@ impl AutoSummary {
         });
         tracing::info!("Summarizing meeting {}", id);
         let settings = self.settings;
+        let backend = choose_summary_backend(&settings, &Overrides::default())
+            .ok()
+            .map(|b| b.display_name(&settings));
         let storage = self.storage;
         let run_id = id.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -208,6 +250,7 @@ impl AutoSummary {
                     meeting_id: id,
                     code: e.code(),
                     message: format!("Summary failed: {e}"),
+                    backend,
                 });
             }
             Err(e) => {
@@ -216,6 +259,7 @@ impl AutoSummary {
                     meeting_id: id,
                     code: "internal",
                     message: format!("Summary failed: {e}"),
+                    backend,
                 });
             }
         }
@@ -225,7 +269,7 @@ impl AutoSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::Sandbox;
+    use super::super::testing::{fake_ollama, Sandbox};
     use super::*;
 
     const REPLY: &str = r#"{"overview": "Steve and Pete agreed to ship Friday.",
@@ -298,6 +342,214 @@ mod tests {
         assert_eq!(
             meta["summary"]["summary"],
             "Steve and Pete agreed to ship Friday."
+        );
+    }
+
+    /// A summary as Ollama's /api/generate returns it, whole or streamed.
+    fn ollama_reply() -> String {
+        serde_json::json!({"response": REPLY, "done": true}).to_string()
+    }
+
+    fn summarize(
+        settings: &AssistantSettings,
+        sb: &Sandbox,
+    ) -> Result<SummaryOutcome, AssistantError> {
+        summarize_meeting(
+            settings,
+            &sb.storage_config(),
+            "latest",
+            &Overrides::default(),
+        )
+    }
+
+    /// Pete's 1.3.0 config: `[meeting.summary] backend = "local"` from
+    /// before the assistant, and Claude allowed since. Claude summarizes,
+    /// as `assistant status` says; Ollama is never called (its URL is a
+    /// closed port, so calling it would fail the summary).
+    #[test]
+    fn legacy_local_with_an_allowed_agent_uses_the_agent() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], REPLY);
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let mut settings = sb.settings();
+        settings.summary_backend = "local".into();
+
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(
+            (outcome.agent.as_str(), outcome.agent_name.as_str()),
+            ("claude", "Claude")
+        );
+        assert_eq!(sb.claude_calls(), 1);
+
+        let status = super::super::status_json(&settings);
+        assert_eq!(status["backend_name"], "Claude");
+        assert_eq!(status["summary_backend"], "agent");
+        assert_eq!(status["summary_backend_name"], "Claude");
+        assert!(status["summary_note"].is_null());
+        assert!(matches!(
+            super::super::choose_backend(&settings, &Overrides::default()),
+            Ok(Backend::Agent(_))
+        ));
+    }
+
+    #[test]
+    fn local_only_uses_the_local_model_even_with_an_allowed_agent() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let (url, h) = fake_ollama("200 OK", ollama_reply());
+        let mut settings = sb.settings();
+        settings.summary_backend = "local".into();
+        settings.local_only = true;
+        settings.summary.ollama_url = url;
+
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(outcome.agent, "local:llama3.2");
+        assert_eq!(outcome.agent_name, "Local (llama3.2)");
+        assert_eq!(sb.claude_calls(), 0);
+        assert!(h.join().unwrap().contains("/api/generate"));
+
+        let status = super::super::status_json(&settings);
+        assert_eq!(status["summary_backend"], "local");
+        assert_eq!(status["summary_backend_name"], "Local (llama3.2)");
+        assert_eq!(status["backend_name"], "Local (llama3.2)");
+    }
+
+    /// Someone who set up Ollama summaries and never allowed an agent keeps
+    /// them, for summaries and now for questions too, instead of being asked
+    /// to send transcripts to an agent they did not pick.
+    #[test]
+    fn legacy_local_without_consent_stays_local() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let (url, h) = fake_ollama("200 OK", ollama_reply());
+        let mut settings = sb.settings();
+        settings.summary_backend = "local".into();
+        settings.summary.ollama_url = url;
+
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(outcome.agent, "ollama");
+        assert_eq!(outcome.agent_name, "Local (llama3.2)");
+        assert_eq!(
+            outcome.summary.summary,
+            "Steve and Pete agreed to ship Friday."
+        );
+        assert_eq!(sb.claude_calls(), 0);
+        h.join().unwrap();
+        assert!(matches!(
+            super::super::choose_backend(&settings, &Overrides::default()),
+            Ok(Backend::Local {
+                fallback: false,
+                ..
+            })
+        ));
+        let status = super::super::status_json(&settings);
+        assert_eq!(status["summary_backend_name"], "Local (llama3.2)");
+        assert_eq!(status["backend_name"], "Local (llama3.2)");
+    }
+
+    /// The failure Pete hit, now in plain words with Ollama's own reason.
+    #[test]
+    fn an_ollama_failure_says_which_backend_and_why() {
+        let sb = Sandbox::new();
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let (url, _h) = fake_ollama(
+            "500 Internal Server Error",
+            r#"{"error":"mkdir /opt/models/manifests-v2: permission denied"}"#.to_string(),
+        );
+        let host = url.trim_start_matches("http://").to_string();
+        let mut settings = sb.settings();
+        settings.summary_backend = "local".into();
+        settings.summary.ollama_url = url;
+        settings.summary.ollama_model = "llama3:latest".into();
+
+        let err = summarize(&settings, &sb).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Ollama (llama3:latest at {host}) returned an error: mkdir /opt/models/manifests-v2: permission denied"
+            )
+        );
+        assert_eq!(err.code(), "local_failed");
+    }
+
+    /// The local model failing never sends the transcript to an agent.
+    #[test]
+    fn a_local_failure_never_falls_back_to_an_agent() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], REPLY);
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let mut settings = sb.settings();
+        settings.local_only = true;
+        let err = summarize(&settings, &sb).unwrap_err();
+        assert_eq!(err.code(), "local_failed");
+        assert_eq!(sb.claude_calls(), 0);
+    }
+
+    #[test]
+    fn a_failed_agent_hands_over_to_a_configured_local_model_that_works() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        std::fs::write(sb.out().join("claude.fail"), "").unwrap();
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let (url, h) = fake_ollama("200 OK", ollama_reply());
+        let mut settings = sb.settings();
+        settings.summary_backend = "local".into();
+        settings.summary.ollama_url = url;
+
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(outcome.agent_name, "Local (llama3.2)");
+        assert_eq!(outcome.fell_back_from.as_deref(), Some("Claude"));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_failed_agent_is_reported_when_local_is_not_configured_or_fails() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        std::fs::write(sb.out().join("claude.fail"), "").unwrap();
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+
+        // No local model set up: the default summary backend.
+        let err = summarize(&sb.settings(), &sb).unwrap_err();
+        assert_eq!(err.code(), "agent_failed");
+        assert!(err.to_string().starts_with("Claude failed: "), "{err}");
+
+        // Set up, but not answering: still Claude's error.
+        let mut settings = sb.settings();
+        settings.summary_backend = "local".into();
+        let err = summarize(&settings, &sb).unwrap_err();
+        assert_eq!(err.code(), "agent_failed");
+        assert!(err.to_string().contains("Not logged in"), "{err}");
+    }
+
+    /// The only way questions and summaries still part: an older remote
+    /// summarizer with no agent allowed. Status says so.
+    #[test]
+    fn status_says_when_summaries_and_questions_differ() {
+        let sb = Sandbox::new();
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let mut settings = sb.settings();
+        settings.summary_backend = "remote".into();
+        settings.summary.remote_endpoint = Some("https://summaries.example.com/v1/sum".into());
+        let status = super::super::status_json(&settings);
+        assert_eq!(status["summary_backend"], "remote");
+        assert_eq!(
+            status["summary_backend_name"],
+            "Remote (summaries.example.com)"
+        );
+        assert_eq!(status["backend_name"], "Local (llama3.2)");
+        assert_eq!(
+            status["summary_note"],
+            "Summaries use Remote (summaries.example.com) ([meeting.summary] backend = \"remote\"); questions use Local (llama3.2)."
         );
     }
 
