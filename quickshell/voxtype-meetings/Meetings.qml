@@ -229,9 +229,19 @@ Item {
     onActionFinished: function(action, ok, message) {
       if (!ok) root.actionError = message
     }
-    onRetitleFinished: function(extra, ok, message) {
-      if (!ok && extra && extra.meeting === feed.meetingId) feed.title = extra.before
-      if (ok) root.refreshList()
+    onRetitleFinished: function(extra, ok, message, result) {
+      var here = extra && extra.meeting === feed.meetingId
+      if (!ok) {
+        if (here) feed.title = extra.before
+        return
+      }
+      // The title as stored (one line, whitespace collapsed), not as typed.
+      if (here && result && result.title) feed.title = String(result.title)
+      // A finished meeting's two-person title names its speakers in the
+      // store, with no event to say so: read it again.
+      if (here && result && result.labelled && result.labelled.length > 0 && !feed.active)
+        storedProc.load(feed.meetingId, true)
+      root.refreshList()
     }
     // The line was moved on screen before the CLI ran: keep it if it took
     // (with the daemon's version of the segment when --json gave one), put it
@@ -650,8 +660,11 @@ Item {
     id: storedProc
     property string out: ""
     property string err: ""
-    function load(id) {
+    // Read again in place (`again`): same tab, no Ask hand-off.
+    property bool again: false
+    function load(id, again) {
       if (storedProc.running) return
+      storedProc.again = again === true
       storedProc.out = ""
       storedProc.err = ""
       storedProc.launch([root.bin, "meeting", "show", id, "--json"])
@@ -667,6 +680,7 @@ Item {
         return
       }
       if (data.metadata && data.metadata.summary) assistant.setStoredSummary(feed.meetingId, data.metadata.summary)
+      if (storedProc.again) return
       if (root.pendingAskId !== "") {
         assistant.showAsk(root.pendingAskId)
         root.pendingAskId = ""

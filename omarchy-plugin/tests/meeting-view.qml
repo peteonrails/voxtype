@@ -149,6 +149,8 @@ Item {
           else if (s === "title-external") tc.driveTitleExternal()
           else if (s === "title-past") tc.driveTitlePast()
           else if (s === "title-fail") tc.driveTitleFail()
+          else if (s === "title-labelled") tc.driveTitleLabelled()
+          else if (s === "title-real") tc.driveTitleReal()
           else if (s === "live-labels") tc.driveLiveLabels()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
@@ -1972,6 +1974,49 @@ Item {
       waitFor(idleCli, "stored")
       click(find(view(), "backButton"), "back")
       waitFor(function() { return String(find(find(view(), "meetingRow_1"), "meetingRowTitle").text) === "1:1 with Sam and Dana" }, "the list follows", 6000)
+    }
+
+    // "Pete <> Sam" names a finished meeting's speakers in the store, with
+    // no event to say so: the view reads the meeting again, on the same tab.
+    function driveTitleLabelled() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_1")) }, "the list")
+      click(find(view(), "meetingRow_1"), "1:1 with Sam")
+      waitFor(function() { return txt("meetingTitle") === "1:1 with Sam" && lines().length === 3 }, "opened")
+      check(speakerOf("Busy, but good.") !== "Sam", "not named yet: " + speakerOf("Busy, but good."))
+      var f = editTitle()
+      f.text = "Pete <> Sam"
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return speakerOf("Busy, but good.") === "Sam" && speakerOf("How was the week?") === "Pete" },
+              "named from the title: " + speakerOf("Busy, but good.") + ", " + speakerOf("How was the week?"))
+      check(txt("meetingTitle") === "Pete <> Sam", "title: " + txt("meetingTitle"))
+      check(view().currentTab === "transcript" && lines().length === 3, "read again in place: " + view().currentTab)
+      waitFor(idleCli, "stored")
+      shot("title-labelled")
+    }
+
+    // Against a real voxtype and a real meetings store (REAL_VOXTYPE).
+    function driveTitleReal() {
+      openView()
+      waitFor(function() {
+        var row = find(view(), "meetingRow_0")
+        return shown(row) && String(find(row, "meetingRowTitle").text) === "Zoom call"
+      }, "the real store's list")
+      check(!shown(find(view(), "meetingRow_1")), "one meeting in the store")
+      click(find(view(), "meetingRow_0"), "Zoom call")
+      waitFor(function() { return txt("meetingTitle") === "Zoom call" && lines().length === 2 }, "opened from the store")
+      var f = editTitle()
+      f.text = "  Weekly   sync  with Dana "
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return txt("meetingTitle") === "Weekly sync with Dana" }, "the title as stored: " + txt("meetingTitle"))
+      waitFor(idleCli, "stored")
+      check(view().actionError === "", "no error: " + view().actionError)
+      shot("title-real")
+      click(find(view(), "backButton"), "back")
+      waitFor(function() {
+        var row = find(view(), "meetingRow_0")
+        return shown(row) && String(find(row, "meetingRowTitle").text) === "Weekly sync with Dana"
+      }, "the list reads the store again", 6000)
     }
 
     function driveTitleFail() {
