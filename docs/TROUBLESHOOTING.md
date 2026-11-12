@@ -191,6 +191,29 @@ graphical frontend is installed, install a supported terminal or run
   availability, input devices, OSD styles) is left empty rather than showing old
   entries. Run the same command with `--json` in a terminal for the full error.
 
+## Meeting view
+
+The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says
+what is wrong instead of showing an empty pane:
+
+- **"Voxtype is not running"**: the daemon is down. Start it with
+  `systemctl --user start voxtype`. Past meetings still list and open.
+- **"Voxtype is running without its meeting socket"**: the daemon answers but
+  does not publish `$XDG_RUNTIME_DIR/voxtype/meeting.sock`, usually because it
+  is older than 1.3.0. Update voxtype and `systemctl --user restart voxtype`.
+- **"Could not run voxtype. Is voxtype installed and on PATH?"**: the shell
+  cannot start the voxtype command. In the Omarchy plugin, check `dev.json` as
+  for the Settings panel above.
+- **"This voxtype is too old for …"**: the command for notes, Ask, summaries or
+  moving lines does not exist in the installed voxtype. Update it, then reopen
+  the view (and restart the shell after an install, so it loads the new view).
+- **"No agent or local model was found"** on the Ask or Summary tab: questions
+  and summaries need Claude Code or Codex on `PATH`, or Ollama for a local
+  model. `voxtype meeting assistant status` shows what was found and why an
+  agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
+  agent menu shows it disabled, with the reason.
+- **"Copying needs wl-copy"**: install `wl-clipboard`.
+
 ## Table of Contents
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
@@ -209,6 +232,7 @@ graphical frontend is installed, install a supported terminal or run
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
+- [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
@@ -472,6 +496,18 @@ systemctl --user restart pipewire pipewire-pulse
 # Or for PulseAudio:
 systemctl --user restart pulseaudio
 ```
+
+### "No sound server answered within 5 s"
+
+Voxtype asked the audio system for the microphone and got no reply. This happens when PipeWire or PulseAudio is wedged (its socket exists but it does not answer), or in a sandbox, container or clean chroot with no sound server. Recording, `voxtype info devices` and the Settings panel's device list stop waiting after 5 seconds and report this instead of hanging.
+
+```bash
+systemctl --user status pipewire pipewire-pulse wireplumber
+systemctl --user restart pipewire pipewire-pulse wireplumber
+voxtype info devices
+```
+
+If `info devices` lists your microphone again, recording works too; the daemon does not need a restart.
 
 ### "Audio format not supported"
 
@@ -1612,6 +1648,79 @@ No result is shown for cancelled recordings, accidental taps, or
 
 ---
 
+## Meeting Audio and Post-Meeting Command
+
+### Meeting audio is saved as WAV instead of Opus
+
+With `[meeting] retain_audio = true`, voxtype encodes the audio with
+`ffmpeg`. When `ffmpeg` is not on the daemon's `PATH`, or was built without
+libopus, the daemon logs one of these and keeps `mic.wav`, `loopback.wav` and
+`mixed.wav` instead (about 115 MB per hour per file, against about 10 MB for
+Opus):
+
+```
+ffmpeg not found; keeping meeting audio as WAV ...
+/usr/bin/ffmpeg has no libopus encoder; keeping meeting audio as WAV ...
+```
+
+Install `ffmpeg` (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`,
+`sudo dnf install ffmpeg-free`) and check it has the encoder:
+
+```bash
+ffmpeg -hide_banner -encoders | grep libopus
+```
+
+Then restart the daemon (`systemctl --user restart voxtype`); the check runs
+once per daemon. Meetings already saved as WAV stay WAV. To convert one:
+
+```bash
+cd ~/.local/share/voxtype/meetings/<meeting>
+for t in mic loopback mixed; do
+  [ -f $t.wav ] && ffmpeg -i $t.wav -c:a libopus -b:a 24k $t.opus && rm $t.wav
+done
+```
+
+`meeting.json` lists whichever files are there the next time it is rewritten.
+
+### `meeting play` fails or plays nothing
+
+- **"needs ffmpeg and one of pw-play (PipeWire), paplay (PulseAudio) or
+  aplay (ALSA)"**: install what the message names as missing. `pw-play`
+  comes with PipeWire (`pipewire` or `pipewire-bin`), `paplay` with
+  `pulseaudio-utils` or `libpulse`, `aplay` with `alsa-utils`.
+- **"This meeting was recorded without keeping audio"**: the meeting was
+  recorded with `retain_audio` off. Turn it on for future meetings; there is
+  nothing to play for this one.
+- **It says it is playing but you hear nothing**: playback goes to your
+  default output. Check it with `wpctl status` (PipeWire) or
+  `pactl get-default-sink`, and look at
+  `$XDG_RUNTIME_DIR/voxtype/meeting_playback.log` for errors from ffmpeg or
+  the player.
+
+### The post-meeting command did not run, or did not finish
+
+`post_meeting_command` runs in the background once the meeting's folder is
+final, and its outcome is in the daemon log:
+
+```bash
+journalctl --user -u voxtype | grep post_meeting_command
+```
+
+- **"failed ... (exit status: 127)"**: the shell could not find the program.
+  The daemon's `PATH` under systemd is shorter than your terminal's; use an
+  absolute path.
+- **"ran past 300s and was killed"**: raise `post_meeting_timeout_secs`, or
+  have the command start its long work with `systemd-run --user` so it is no
+  longer the command's child.
+- **Nothing logged**: check that `post_meeting_command` is under `[meeting]`
+  and the daemon was restarted after you set it (`voxtype config` shows it).
+
+The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
+`VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
+terminal: anything that prompts for input fails.
+
+---
+
 ## Meeting Assistant: Summaries Don't Appear
 
 Start with what the assistant sees:
@@ -1637,9 +1746,9 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 
 **Codex worked, then fails with an authentication error.** In the jail codex can read `~/.codex/auth.json` but not rewrite it, so it cannot save a refreshed login token there. Run `codex` once in a terminal to refresh the login, then retry.
 
-**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude` and `codex` can be run without tools that reach your files, so voxtype skips other agents and uses `claude` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
+**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude`, `codex` (jailed) and `pi` can be run without tools that reach your files or the network, so voxtype skips other agents and uses `claude` or `pi` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
 
-**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code or Codex, or start Ollama and `ollama pull llama3.2`.
+**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
 
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 

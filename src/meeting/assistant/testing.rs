@@ -61,10 +61,7 @@ impl Sandbox {
     }
 
     fn script(&self, name: &str, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let p = self.bin().join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&self.bin().join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     /// A fake `claude` that records argv and stdin (one file per call,
@@ -131,6 +128,22 @@ echo 'STDIN<<'; cat; echo '>>'
                 sentinel = sentinel.display(),
                 meetings = self.dir.path().join("meetings").display(),
                 out = self.out().display(),
+            ),
+        );
+    }
+
+    /// A fake `pi` that records its argv and the prompt it was handed with
+    /// `@file`, and prints `out/pi.reply`.
+    pub fn fake_pi(&self) {
+        let out = self.out();
+        self.script(
+            "pi",
+            &format!(
+                r#"out='{out}'
+printf '%s\n' "$@" > "$out/pi.argv"
+for a in "$@"; do case "$a" in @*) cat "${{a#@}}" > "$out/pi.prompt";; esac; done
+cat "$out/pi.reply""#,
+                out = out.display()
             ),
         );
     }
@@ -258,4 +271,49 @@ echo 'STDIN<<'; cat; echo '>>'
     pub fn folder<'a>(&self, meeting: &'a MeetingData) -> &'a Path {
         meeting.metadata.storage_path.as_deref().unwrap()
     }
+}
+
+/// A fake Ollama that answers one request with `status` and `body`, and
+/// hands back the request it got.
+pub fn fake_ollama(
+    status: &'static str,
+    body: String,
+) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let h = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut buf = vec![0u8; 65536];
+        let mut req = Vec::new();
+        loop {
+            let n = s.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req);
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let len = text[..head_end]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if req.len() >= head_end + 4 + len {
+                    break;
+                }
+            }
+        }
+        write!(
+            s,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        String::from_utf8_lossy(&req).into_owned()
+    });
+    (url, h)
 }

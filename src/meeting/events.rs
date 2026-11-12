@@ -127,11 +127,18 @@ impl MeetingHudState {
         }
     }
 
-    /// Replace the backlog's copy of a segment that changed after it was sent.
+    /// Replace the backlog's copy of a segment that changed after it was
+    /// sent, or put back one that was deleted and is now restored.
     pub fn update_segment(&mut self, segment: &TranscriptSegment) {
-        if let Some(existing) = self.segments.iter_mut().find(|s| s.id == segment.id) {
-            *existing = segment.clone();
+        match self.segments.iter_mut().find(|s| s.id == segment.id) {
+            Some(existing) => *existing = segment.clone(),
+            None => self.push_segments(std::slice::from_ref(segment)),
         }
+    }
+
+    /// Drop a deleted segment from the backlog.
+    pub fn remove_segment(&mut self, segment_id: u32) {
+        self.segments.retain(|s| s.id != segment_id);
     }
 }
 
@@ -163,6 +170,10 @@ enum WireEvent {
     SegmentUpdated {
         segment: TranscriptSegment,
     },
+    SegmentDeleted {
+        meeting_id: String,
+        segment_id: u32,
+    },
     NotesUpdated {
         meeting_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,12 +184,21 @@ enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         meeting_id: Option<String>,
     },
+    Playback {
+        meeting_id: String,
+        track: String,
+        state: String,
+        from_ms: u64,
+    },
     Error {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         meeting_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// The assistant backend that failed ("Claude", "Local (llama3)").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        backend: Option<String>,
     },
     SummaryReady {
         meeting_id: String,
@@ -323,6 +343,15 @@ impl MeetingEventHub {
         });
     }
 
+    /// Broadcast a `segment_deleted` event: a segment already sent was
+    /// deleted with `meeting delete-line`.
+    pub fn publish_segment_deleted(&self, meeting_id: &str, segment_id: u32) {
+        self.publish(WireEvent::SegmentDeleted {
+            meeting_id: meeting_id.to_string(),
+            segment_id,
+        });
+    }
+
     /// Broadcast a `notes_updated` event: the meeting's notes.md changed.
     pub fn publish_notes_updated(&self, notes: &crate::meeting::notes::MeetingNotes) {
         self.publish(WireEvent::NotesUpdated {
@@ -339,12 +368,29 @@ impl MeetingEventHub {
         });
     }
 
+    /// Broadcast a `playback` event: `meeting play` started or stopped
+    /// playing a meeting's audio. Nothing is sent before the first playback.
+    pub fn publish_playback(&self, playback: &crate::meeting::playback::PlaybackStatus) {
+        let (Some(meeting_id), Some(track), Some(from_ms)) =
+            (&playback.meeting_id, playback.track, playback.from_ms)
+        else {
+            return;
+        };
+        self.publish(WireEvent::Playback {
+            meeting_id: meeting_id.clone(),
+            track: track.to_string(),
+            state: playback.state.clone(),
+            from_ms,
+        });
+    }
+
     /// Broadcast an `error` event.
     pub fn publish_error(&self, message: &str) {
         self.publish(WireEvent::Error {
             message: message.to_string(),
             meeting_id: None,
             code: None,
+            backend: None,
         });
     }
 
@@ -367,10 +413,12 @@ impl MeetingEventHub {
                 meeting_id,
                 code,
                 message,
+                backend,
             } => WireEvent::Error {
                 message,
                 meeting_id: Some(meeting_id),
                 code: Some(code.to_string()),
+                backend,
             },
         });
     }
@@ -590,6 +638,7 @@ mod tests {
             agent: "claude".into(),
             agent_name: "Claude".into(),
             path: Some(PathBuf::from("/x/summary.md")),
+            fell_back_from: None,
             summary: crate::meeting::data::MeetingSummary {
                 summary: "ok".into(),
                 key_points: vec![],
@@ -604,6 +653,7 @@ mod tests {
             meeting_id: "m1".into(),
             code: "agent_failed",
             message: "Summary failed: x".into(),
+            backend: Some("Claude".into()),
         });
 
         async fn next(
@@ -630,7 +680,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"event": "error", "message": "Summary failed: x",
-                               "meeting_id": "m1", "code": "agent_failed"})
+                               "meeting_id": "m1", "code": "agent_failed", "backend": "Claude"})
         );
         hub.cleanup();
     }
@@ -768,6 +818,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playback_changes_reach_subscribers() {
+        use crate::meeting::playback::{PlaybackStatus, Track};
+        let (_tmp, path) = temp_socket_dir();
+        let hub = MeetingEventHub::start(path.clone())
+            .await
+            .expect("start hub");
+
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        let _hello = read_line(&mut client).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut playback = PlaybackStatus {
+            state: "stopped".to_string(),
+            meeting_id: None,
+            track: None,
+            from_ms: None,
+            pid: None,
+            started_at: None,
+            position_ms: None,
+        };
+        // Nothing has played yet: nothing to say.
+        hub.publish_playback(&playback);
+        playback.state = "playing".to_string();
+        playback.meeting_id = Some("abc-123".to_string());
+        playback.track = Some(Track::Mixed);
+        playback.from_ms = Some(61_250);
+        hub.publish_playback(&playback);
+
+        let value = read_line(&mut client).await;
+        assert_eq!(
+            value,
+            serde_json::json!({"event": "playback", "meeting_id": "abc-123",
+                "track": "mixed", "state": "playing", "from_ms": 61_250})
+        );
+
+        hub.cleanup();
+    }
+
+    #[tokio::test]
     async fn publish_segments_reaches_connected_subscriber() {
         let (_tmp, path) = temp_socket_dir();
         let hub = MeetingEventHub::start(path.clone())
@@ -814,6 +903,13 @@ mod tests {
         assert_eq!(value["segment"]["annotation"]["text"], "check this");
         assert_eq!(value["segment"]["annotation"]["highlight"], true);
 
+        hub.publish_segment_deleted("abc", 28);
+        let value = read_line(&mut client).await;
+        assert_eq!(
+            value,
+            serde_json::json!({"event": "segment_deleted", "meeting_id": "abc", "segment_id": 28})
+        );
+
         let updated_at = chrono::DateTime::parse_from_rfc3339("2026-11-11T20:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -829,6 +925,24 @@ mod tests {
         );
 
         hub.cleanup();
+    }
+
+    #[test]
+    fn hud_backlog_drops_a_deleted_line_and_takes_it_back_in_order() {
+        let seg =
+            |id: u32, start: u64| TranscriptSegment::new(id, start, start + 500, String::new(), 0);
+        let mut hud = MeetingHudState::idle();
+        hud.push_segments(&[seg(0, 0), seg(1, 1_000), seg(2, 2_000)]);
+        hud.remove_segment(1);
+        assert_eq!(
+            hud.segments.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        hud.update_segment(&seg(1, 1_000));
+        assert_eq!(
+            hud.segments.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]

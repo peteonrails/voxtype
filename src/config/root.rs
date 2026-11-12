@@ -240,9 +240,12 @@ impl Config {
         }
     }
 
-    /// Clone this config with engine-specific overrides for meeting (long-form)
-    /// transcription. Currently:
+    /// Clone this config for meeting (long-form) transcription: the
+    /// `meeting start` choices in `start`, then engine-specific adjustments.
     ///
+    /// - **Engine, model, language** from `start`. A model alone selects its
+    ///   own engine; an engine alone keeps that engine's configured model. A
+    ///   language is refused for a checkpoint that takes none.
     /// - **Soniox:** forces `async_api = true`. Meetings feed fixed-size audio
     ///   chunks (30s default) to `Transcriber::transcribe()` — the realtime WS
     ///   would open a fresh socket per chunk, pay connect latency, and bill by
@@ -252,9 +255,70 @@ impl Config {
     ///
     /// The dictation path still reads the raw config, so a user who set
     /// `async_api = false` (the default) keeps live-partial WS dictation while
-    /// meetings transparently use the async API.
-    pub fn with_meeting_mode_overrides(&self) -> Self {
+    /// meetings transparently use the async API. Whether the engine and model
+    /// are compiled in and installed is checked by the caller.
+    pub fn with_meeting_mode_overrides(
+        &self,
+        start: &super::MeetingStartOptions,
+    ) -> Result<Self, String> {
         let mut cfg = self.clone();
+
+        let engine = match start.engine.as_deref() {
+            Some(name) => Some(crate::config_set::parse_engine(name).ok_or_else(|| {
+                format!(
+                    "Unknown engine '{}'. Engines: {}",
+                    name,
+                    crate::config_set::ENGINE_NAMES.join(", ")
+                )
+            })?),
+            None => None,
+        };
+        match (start.model.as_deref(), engine) {
+            (Some(model), engine) => {
+                let resolved = crate::model_catalog::resolve_model(model).ok_or_else(|| {
+                    format!(
+                        "Unknown model '{}'. Run `voxtype info models` to list available models.",
+                        model
+                    )
+                })?;
+                let model_engine: TranscriptionEngine = resolved
+                    .engine
+                    .parse()
+                    .map_err(|_| format!("Model '{}' belongs to an unknown engine", model))?;
+                if let Some(engine) = engine.filter(|e| *e != model_engine) {
+                    return Err(format!(
+                        "Model '{}' is a {} model, not a {} model",
+                        model,
+                        model_engine.name(),
+                        engine.name()
+                    ));
+                }
+                cfg = crate::model_catalog::override_config(&cfg, model_engine, &resolved.model);
+            }
+            (None, Some(engine)) => cfg.engine = engine,
+            (None, None) => {}
+        }
+
+        if let Some(language) = start.language.as_deref() {
+            let menu = crate::language_selection::LanguageMenu::for_config(&cfg);
+            let offered = menu.choices.iter().any(|(code, _)| *code == language);
+            if !offered && menu.current != language {
+                return Err(format!(
+                    "Language '{}' is not available for {}: {}",
+                    language, menu.context, menu.explanation
+                ));
+            }
+            match cfg.engine {
+                TranscriptionEngine::Whisper => {
+                    cfg.whisper.language = super::LanguageConfig::Single(language.to_string())
+                }
+                TranscriptionEngine::Cohere => {
+                    cfg.cohere.get_or_insert_with(Default::default).language = language.to_string()
+                }
+                _ => {}
+            }
+        }
+
         if matches!(cfg.engine, TranscriptionEngine::Soniox) {
             if let Some(ref mut sx) = cfg.soniox {
                 if !sx.async_api {
@@ -265,7 +329,7 @@ impl Config {
                 }
             }
         }
-        cfg
+        Ok(cfg)
     }
 
     /// System-wide config path used as a fallback when no user config exists.
@@ -731,7 +795,9 @@ mod tests {
             }),
             ..Config::default()
         };
-        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        let meeting_cfg = cfg
+            .with_meeting_mode_overrides(&super::super::MeetingStartOptions::default())
+            .unwrap();
         assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
         // Original config untouched — dictation path keeps realtime.
         assert!(!cfg.soniox.as_ref().unwrap().async_api);
@@ -748,14 +814,18 @@ mod tests {
             }),
             ..Config::default()
         };
-        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        let meeting_cfg = cfg
+            .with_meeting_mode_overrides(&super::super::MeetingStartOptions::default())
+            .unwrap();
         assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
     }
 
     #[test]
     fn meeting_mode_is_noop_for_non_soniox_engines() {
         let cfg = Config::default(); // engine = Whisper
-        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        let meeting_cfg = cfg
+            .with_meeting_mode_overrides(&super::super::MeetingStartOptions::default())
+            .unwrap();
         assert_eq!(meeting_cfg.engine, cfg.engine);
         assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
     }

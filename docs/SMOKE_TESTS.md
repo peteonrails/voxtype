@@ -93,7 +93,7 @@ verification.
 
 | Test | What it covers |
 |------|----------------|
-| [Meeting Mode](smoke_tests/meeting-mode.md) | Lifecycle, list, show, export, delete, speaker labels, AI summary, error handling, dual audio, diarization backends |
+| [Meeting Mode](smoke_tests/meeting-mode.md) | A 15-minute pass for 1.3.0: the detection prompt on a Meet call, recording into the live view, minimize and move, renaming, moving, editing and deleting lines, notes, Ask, stopping and the summary, past meetings, export, kept audio and playback, the tray offer on a fresh config, and the standalone Quickshell host |
 
 ## v0.7.6 release verification
 

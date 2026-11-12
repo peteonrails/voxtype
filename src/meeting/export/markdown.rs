@@ -38,6 +38,9 @@ impl Exporter for MarkdownExporter {
                     output.push_str(&format!("- **Duration:** {}m {}s\n", mins, secs));
                 }
             }
+            if let Some(ref url) = meeting.metadata.url {
+                output.push_str(&format!("- **Link:** {}\n", url));
+            }
             output.push_str(&format!(
                 "- **Word Count:** {}\n",
                 meeting.transcript.word_count()

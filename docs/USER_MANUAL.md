@@ -179,6 +179,23 @@ control, **Start Recording** / **Stop Recording**, and **Cancel** is available w
 recording or transcribing. Starting another recording is disabled during inference.
 The tray uses the existing daemon control protocol, not a second recording daemon.
 
+Below the dictation entries are the meeting controls. With `[meeting] enabled = true`
+the tray offers **Start Meeting**, which runs `voxtype meeting start` with the default
+title. While a meeting records, it offers **Stop Meeting** and **Pause Meeting**
+(**Resume Meeting** while paused), and shows a greyed **Finishing Meeting...** while the
+last chunks are transcribed. The entries follow meetings started anywhere, including
+`voxtype meeting start` and the detection prompt. Start Meeting is greyed out while you
+are dictating.
+
+While meeting mode is off, the tray shows **Turn on meetings...** instead. Choosing it
+runs `voxtype config set meeting.enabled true` and restarts the voxtype service so the
+setting takes effect. At most once a day on daemon start, a notification makes the same
+offer with **Turn on**, **Not now** and **No, don't ask again**; the last hides the offer
+for good and shows a greyed **Start Meeting (meeting mode is off)**. Set
+`[meeting] offer_enable = false` to turn the offer off.
+
+The **Voxtype Meetings** entry in the application launcher opens `voxtype meeting view`.
+
 The tray and desktop entry share `voxtype-configure-launcher`: it prefers the
 available integrated Quickshell frontend, then a separately installed graphical
 settings desktop entry, then the terminal TUI. The current source ships no GTK
@@ -561,8 +578,10 @@ different user-owned directory. Writing outside of `$HOME` is refused
 unless `--force` is also passed.
 
 The command prints Hyprland, Sway, and River keybinding examples that
-toggle the Wave 2 engine-picker and meeting-controls panels via flag
-files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
+toggle the engine picker and the meeting view via flag files under
+`$XDG_RUNTIME_DIR/voxtype/`. The meeting view is the same one the Omarchy
+plugin shows (see [Live Meeting View](MEETING_MODE.md#live-meeting-view));
+it also opens when a meeting starts and on `voxtype meeting view`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
@@ -695,6 +714,7 @@ Continuous meeting transcription with chunked processing and speaker diarization
 ```bash
 voxtype meeting start                  # Start a meeting
 voxtype meeting start --title "Title"  # Start with a title
+voxtype meeting start --model large-v3-turbo --language de --url https://meet.example.com/x
 voxtype meeting stop                   # Stop the meeting
 voxtype meeting pause                  # Pause recording
 voxtype meeting resume                 # Resume recording
@@ -2748,6 +2768,10 @@ voxtype meeting reassign latest 28 --reset
 voxtype meeting notes latest --append "Ask Dana about travel"
 voxtype meeting annotate latest 28 "Check this number" --highlight
 
+# Correct or hide a line (id from show --json); --reset / --restore undo
+voxtype meeting edit latest 28 "We ship on Friday."
+voxtype meeting delete-line latest 31
+
 # AI summarization (your coding agent, or Ollama)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json
@@ -2775,8 +2799,9 @@ Meeting mode is disabled by default. Enable it in `~/.config/voxtype/config.toml
 enabled = true
 chunk_duration_secs = 30         # Audio chunk size for processing
 storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
-retain_audio = false             # Keep raw audio files after transcription
+retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the meeting folder
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
+show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)

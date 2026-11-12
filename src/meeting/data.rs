@@ -104,6 +104,15 @@ pub struct TranscriptSegment {
     /// (`meeting annotate`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<SegmentAnnotation>,
+    /// The text as transcribed, when the user corrected it with
+    /// `meeting edit`; `text` then holds the correction
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
+    /// Hidden with `meeting delete-line`. Deleted lines stay in
+    /// transcript.json so they can be restored, and are left out of
+    /// everything that reads a meeting through voxtype.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
     /// Confidence score (0.0 - 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -124,6 +133,8 @@ impl TranscriptSegment {
             speaker_label: None,
             original_speaker: None,
             annotation: None,
+            original_text: None,
+            deleted: false,
             confidence: None,
             chunk_id,
         }
@@ -465,6 +476,34 @@ impl Transcript {
         }
     }
 
+    /// Apply the user's corrections: `edits` maps a segment ID to its new
+    /// text. A line without an edit goes back to what was transcribed.
+    pub fn apply_text_edits(&mut self, edits: &std::collections::HashMap<u32, String>) {
+        for segment in &mut self.segments {
+            if let Some(original) = segment.original_text.take() {
+                segment.text = original;
+            }
+            if let Some(edit) = edits.get(&segment.id) {
+                if *edit != segment.text {
+                    segment.original_text =
+                        Some(std::mem::replace(&mut segment.text, edit.clone()));
+                }
+            }
+        }
+    }
+
+    /// Mark the lines the user deleted; every other line is not deleted.
+    pub fn apply_deletions(&mut self, deleted: &std::collections::HashSet<u32>) {
+        for segment in &mut self.segments {
+            segment.deleted = deleted.contains(&segment.id);
+        }
+    }
+
+    /// Drop deleted lines, for anything that shows or reads the meeting.
+    pub fn remove_deleted(&mut self) {
+        self.segments.retain(|s| !s.deleted);
+    }
+
     /// Rename a speaker ID across the transcript, including lines moved to
     /// or away from it by hand.
     pub fn rename_speaker(&mut self, from: &str, to: &str) -> usize {
@@ -543,6 +582,9 @@ pub struct MeetingMetadata {
     /// Whisper model used
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The call's link, from `meeting start --url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Summary (Phase 5)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<MeetingSummary>,
@@ -565,6 +607,7 @@ impl MeetingMetadata {
             storage_path: None,
             audio_retained: false,
             model: None,
+            url: None,
             summary: None,
             synced_at: None,
         }
@@ -1307,6 +1350,54 @@ mod tests {
         assert_eq!(t.segments[1].annotation, None);
         let json = serde_json::to_value(&t.segments[1]).unwrap();
         assert!(json.get("annotation").is_none());
+    }
+
+    #[test]
+    fn text_edits_replace_a_line_and_remember_the_transcription() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        let mut edits = std::collections::HashMap::new();
+        edits.insert(1, "corrected".to_string());
+
+        t.apply_text_edits(&edits);
+        t.apply_text_edits(&edits);
+        assert_eq!(t.segments[1].text, "corrected");
+        assert_eq!(t.segments[1].original_text.as_deref(), Some("x"));
+        assert_eq!(t.segments[0].original_text, None);
+
+        t.apply_text_edits(&std::collections::HashMap::new());
+        assert_eq!(t.segments[1].text, "x");
+        assert_eq!(t.segments[1].original_text, None);
+
+        // An edit that matches the transcription is no edit.
+        edits.insert(1, "x".to_string());
+        t.apply_text_edits(&edits);
+        assert_eq!(t.segments[1].original_text, None);
+    }
+
+    #[test]
+    fn deletions_mark_lines_and_remove_deleted_drops_them() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        t.apply_deletions(&[1].into_iter().collect());
+        assert!(t.segments[1].deleted);
+        assert_eq!(
+            serde_json::to_value(&t.segments[1]).unwrap()["deleted"],
+            true
+        );
+        assert!(serde_json::to_value(&t.segments[0])
+            .unwrap()
+            .get("deleted")
+            .is_none());
+
+        let mut shown = t.clone();
+        shown.remove_deleted();
+        assert_eq!(shown.segments.len(), 1);
+
+        t.apply_deletions(&std::collections::HashSet::new());
+        assert!(!t.segments[1].deleted);
     }
 
     #[test]

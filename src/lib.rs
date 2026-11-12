@@ -83,6 +83,7 @@ pub mod hotkey;
 pub mod hotkey_macos;
 pub mod language_selection;
 pub mod meeting;
+pub mod meeting_offer;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 pub mod model_catalog;
@@ -95,6 +96,8 @@ pub mod output;
 pub mod setup;
 pub mod state;
 pub mod status_json;
+#[cfg(all(test, unix))]
+pub(crate) mod test_support;
 pub mod text;
 pub mod transcribe;
 #[cfg(target_os = "linux")]
