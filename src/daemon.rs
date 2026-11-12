@@ -1195,6 +1195,9 @@ pub struct Daemon {
     meeting_gtcrn: bool,
     // PipeWire's echo canceller, while a meeting on speakers runs
     meeting_echo_canceller: Option<audio::echo_cancel::EchoCanceller>,
+    // Watches the first seconds of the cancelled mic for a canceller that
+    // delivers nothing; set while that is still open
+    meeting_aec_liveness: Option<audio::echo_cancel::LivenessCheck>,
     // Media players that were paused when recording started (for resume on stop)
     paused_media_players: Vec<String>,
     // Audio streams that were ducked when recording started (for restore on recording stop)
@@ -1372,6 +1375,7 @@ impl Daemon {
             speech_enhancer: None,
             meeting_gtcrn: false,
             meeting_echo_canceller: None,
+            meeting_aec_liveness: None,
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
@@ -3059,19 +3063,14 @@ impl Daemon {
         // the diarizer, and `meeting start` has already returned, so anyone
         // who starts talking then lost the opening of the meeting. The
         // capture buffers what arrives meanwhile, and the first chunk holds it.
-        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
-            "disabled" | "" => None,
-            other => Some(other),
-        };
-        let mut meeting_audio_config = self.config.audio.clone();
-        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
-        if !matches!(meeting_mic_device, "default" | "") {
+        let loopback_device = self.meeting_loopback_device();
+        let meeting_audio_config = self.meeting_mic_config();
+        if meeting_audio_config.device != self.config.audio.device {
             tracing::info!(
                 "Meeting mic override: {} (dictation uses {})",
-                meeting_mic_device,
+                meeting_audio_config.device,
                 self.config.audio.device
             );
-            meeting_audio_config.device = self.config.meeting.audio.mic_device.clone();
         }
         // On speakers the mic is recorded from PipeWire's echo canceller,
         // so it starts first; anything that goes wrong falls back to GTCRN.
@@ -3086,7 +3085,7 @@ impl Daemon {
         if let Some(ref aec) = echo_canceller {
             match audio::DualCapture::with_mic_source(
                 aec.source(),
-                loopback_device,
+                loopback_device.as_deref(),
                 audio::echo_cancel::MIC_DELAY_MS,
             ) {
                 Ok(mut capture) => match capture.start().await {
@@ -3106,13 +3105,15 @@ impl Daemon {
         }
         let mut capture = match aec_capture {
             Some(capture) => capture,
-            None => match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
-                Ok(capture) => capture,
-                Err(e) => {
-                    tracing::error!("Failed to create meeting audio capture: {}", e);
-                    return Err(crate::error::VoxtypeError::Audio(e));
+            None => {
+                match audio::DualCapture::new(&meeting_audio_config, loopback_device.as_deref()) {
+                    Ok(capture) => capture,
+                    Err(e) => {
+                        tracing::error!("Failed to create meeting audio capture: {}", e);
+                        return Err(crate::error::VoxtypeError::Audio(e));
+                    }
                 }
-            },
+            }
         };
         if echo_canceller.is_none() {
             if let Err(e) = capture.start().await {
@@ -3156,46 +3157,11 @@ impl Daemon {
                         tracing::info!("Meeting started: {}", meeting_id);
                         self.meeting_audio_capture = Some(capture);
 
-                        // Load GTCRN speech enhancer for echo cancellation
-                        #[cfg(feature = "onnx-common")]
-                        if self.speech_enhancer.is_none()
-                            && echo_path == audio::echo_cancel::EchoPath::Gtcrn
-                        {
-                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
-                            if model_path.exists() {
-                                match audio::enhance::GtcrnEnhancer::load(&model_path) {
-                                    Ok(enhancer) => {
-                                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
-                                        tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to load GTCRN enhancer, continuing without: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(
-                                    "GTCRN model not found at {:?}, skipping speech enhancement",
-                                    model_path
-                                );
-                            }
-                        }
-
-                        // What the meeting really uses: GTCRN only if its
-                        // model loaded (and this build has it).
-                        #[cfg(feature = "onnx-common")]
-                        let gtcrn_loaded = self.speech_enhancer.is_some();
-                        #[cfg(not(feature = "onnx-common"))]
-                        let gtcrn_loaded = false;
-                        let used = match echo_path {
-                            audio::echo_cancel::EchoPath::Gtcrn if !gtcrn_loaded => {
-                                audio::echo_cancel::EchoPath::None
-                            }
-                            path => path,
-                        };
+                        let used = self.meeting_echo_path_in_use(echo_path);
                         self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
+                        self.meeting_aec_liveness = echo_canceller
+                            .is_some()
+                            .then(|| audio::echo_cancel::LivenessCheck::new(16000));
                         self.meeting_echo_canceller = echo_canceller.take();
                         tracing::info!("Meeting {} echo handling: {}", meeting_id, used.as_str());
                         daemon.record_echo_cancel(used.as_str());
@@ -3256,6 +3222,7 @@ impl Daemon {
             if let Some(mut canceller) = self.meeting_echo_canceller.take() {
                 canceller.stop();
             }
+            self.meeting_aec_liveness = None;
             self.meeting_gtcrn = false;
 
             // The tail flush below is where real wall-clock time is spent
@@ -3527,6 +3494,126 @@ impl Daemon {
         self.meeting_daemon
             .as_ref()
             .is_some_and(|d| d.state().is_active())
+    }
+
+    /// The meeting's loopback device, or `None` when it is off.
+    fn meeting_loopback_device(&self) -> Option<String> {
+        match self.config.meeting.audio.loopback_device.as_str() {
+            "disabled" | "" => None,
+            other => Some(other.to_string()),
+        }
+    }
+
+    /// Dictation's audio config with the meeting's mic, when it has its own.
+    fn meeting_mic_config(&self) -> crate::config::AudioConfig {
+        let mut config = self.config.audio.clone();
+        if !matches!(
+            self.config.meeting.audio.mic_device.as_str(),
+            "default" | ""
+        ) {
+            config.device = self.config.meeting.audio.mic_device.clone();
+        }
+        config
+    }
+
+    /// The echo handling a meeting gets for `path`, loading GTCRN when it
+    /// is the one: none if its model is missing or this build lacks it.
+    fn meeting_echo_path_in_use(
+        &mut self,
+        path: audio::echo_cancel::EchoPath,
+    ) -> audio::echo_cancel::EchoPath {
+        // Load GTCRN speech enhancer for echo cancellation
+        #[cfg(feature = "onnx-common")]
+        if self.speech_enhancer.is_none() && path == audio::echo_cancel::EchoPath::Gtcrn {
+            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
+            if model_path.exists() {
+                match audio::enhance::GtcrnEnhancer::load(&model_path) {
+                    Ok(enhancer) => {
+                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
+                        tracing::info!(
+                            "GTCRN speech enhancer loaded for meeting echo cancellation"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    "GTCRN model not found at {:?}, skipping speech enhancement",
+                    model_path
+                );
+            }
+        }
+
+        // What the meeting really uses: GTCRN only if its
+        // model loaded (and this build has it).
+        #[cfg(feature = "onnx-common")]
+        let gtcrn_loaded = self.speech_enhancer.is_some();
+        #[cfg(not(feature = "onnx-common"))]
+        let gtcrn_loaded = false;
+        match path {
+            audio::echo_cancel::EchoPath::Gtcrn if !gtcrn_loaded => {
+                audio::echo_cancel::EchoPath::None
+            }
+            path => path,
+        }
+    }
+
+    /// The echo canceller has delivered only digital silence since the
+    /// meeting started: it is not hearing the mic, and every line of yours
+    /// would be lost. Record the mic directly instead, with GTCRN, as a
+    /// meeting does when the canceller cannot start.
+    async fn leave_silent_echo_canceller(&mut self) {
+        let rms = self
+            .meeting_aec_liveness
+            .take()
+            .map(|check| check.rms())
+            .unwrap_or_default();
+        tracing::warn!(
+            "The echo canceller's mic has been silent for {}s ({:.1e} RMS): it is not hearing \
+             the mic. Recording the mic directly with GTCRN instead",
+            audio::echo_cancel::LIVENESS_SECS,
+            rms
+        );
+        let loopback_device = self.meeting_loopback_device();
+        let mut direct =
+            match audio::DualCapture::new(&self.meeting_mic_config(), loopback_device.as_deref()) {
+                Ok(capture) => capture,
+                Err(e) => {
+                    tracing::error!(
+                        "Cannot record the mic directly ({}); keeping the canceller",
+                        e
+                    );
+                    return;
+                }
+            };
+        if let Err(e) = direct.start().await {
+            tracing::error!(
+                "Cannot record the mic directly ({}); keeping the canceller",
+                e
+            );
+            return;
+        }
+        if let Some(mut capture) = self.meeting_audio_capture.replace(direct) {
+            if let Ok(rest) = capture.stop().await {
+                self.meeting_mic_buffer.extend(rest.mic);
+                self.meeting_loopback_buffer.extend(rest.loopback);
+            }
+        }
+        if let Some(mut canceller) = self.meeting_echo_canceller.take() {
+            canceller.stop();
+        }
+        let used = self.meeting_echo_path_in_use(audio::echo_cancel::EchoPath::Gtcrn);
+        self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
+        tracing::info!("Meeting echo handling: {}", used.as_str());
+        if let Some(ref daemon) = self.meeting_daemon {
+            daemon.record_echo_cancel(used.as_str());
+        }
+        self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+        }
     }
 
     /// Get the chunk duration for meeting mode
@@ -5781,8 +5868,21 @@ impl Daemon {
                     // Get samples from dual audio capture
                     if let Some(ref mut capture) = self.meeting_audio_capture {
                         let dual_samples = capture.get_samples().await;
+                        let liveness = self
+                            .meeting_aec_liveness
+                            .as_mut()
+                            .map(|check| check.feed(&dual_samples.mic));
                         self.meeting_mic_buffer.extend(dual_samples.mic);
                         self.meeting_loopback_buffer.extend(dual_samples.loopback);
+                        match liveness {
+                            Some(audio::echo_cancel::Liveness::Alive) => {
+                                self.meeting_aec_liveness = None;
+                            }
+                            Some(audio::echo_cancel::Liveness::Silent) => {
+                                self.leave_silent_echo_canceller().await;
+                            }
+                            _ => {}
+                        }
 
                         self.process_buffered_meeting_audio(false).await;
                     }

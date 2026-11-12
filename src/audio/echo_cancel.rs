@@ -39,6 +39,69 @@ const READY_TIMEOUT: Duration = Duration::from_secs(3);
 /// from the start of the mic so the two tracks share a timeline.
 pub const MIC_DELAY_MS: u32 = 37;
 
+/// The cancelled mic's level below which it carries nothing: about -100
+/// dBFS. A working canceller on a real mic delivers the room's noise floor
+/// after its noise suppression, well above this; one whose capture is not
+/// getting the mic delivers digital silence.
+pub const SILENT_RMS: f32 = 1e-5;
+/// How much of the cancelled mic is checked before trusting it.
+pub const LIVENESS_SECS: u32 = 3;
+
+/// What the start of the cancelled mic says about the canceller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// Not enough audio yet
+    Pending,
+    /// It carries sound
+    Alive,
+    /// [`LIVENESS_SECS`] of digital silence: the canceller is not hearing
+    /// the mic, and the meeting would record nothing of you
+    Silent,
+}
+
+/// Watches the first [`LIVENESS_SECS`] of the cancelled mic.
+#[derive(Debug, Clone)]
+pub struct LivenessCheck {
+    window: usize,
+    seen: usize,
+    energy: f64,
+}
+
+impl LivenessCheck {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            window: (sample_rate * LIVENESS_SECS) as usize,
+            seen: 0,
+            energy: 0.0,
+        }
+    }
+
+    /// Add the next samples of the cancelled mic. Alive as soon as the
+    /// window could no longer average below [`SILENT_RMS`]; Silent only once
+    /// the whole window has come in under it.
+    pub fn feed(&mut self, samples: &[f32]) -> Liveness {
+        let take = samples.len().min(self.window - self.seen.min(self.window));
+        self.energy += samples[..take]
+            .iter()
+            .map(|&s| f64::from(s) * f64::from(s))
+            .sum::<f64>();
+        self.seen += take;
+        let floor = f64::from(SILENT_RMS).powi(2) * self.window as f64;
+        if self.energy >= floor {
+            Liveness::Alive
+        } else if self.seen >= self.window {
+            Liveness::Silent
+        } else {
+            Liveness::Pending
+        }
+    }
+
+    /// The RMS of what has come in so far.
+    pub fn rms(&self) -> f32 {
+        (self.energy / self.seen.max(1) as f64).sqrt() as f32
+    }
+}
+
 /// `[meeting.audio] echo_cancel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -1135,6 +1198,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         aec.stop();
+    }
+
+    #[test]
+    fn a_canceller_delivering_digital_silence_is_caught_after_three_seconds() {
+        let mut check = LivenessCheck::new(16000);
+        // What a canceller that never hears the mic delivers.
+        let dead = vec![1e-6f32; 1600];
+        for _ in 0..29 {
+            assert_eq!(check.feed(&dead), Liveness::Pending);
+        }
+        assert_eq!(check.feed(&dead), Liveness::Silent);
+        assert!(check.rms() < SILENT_RMS);
+        // Exact zeros too, and in uneven pieces.
+        let mut check = LivenessCheck::new(16000);
+        assert_eq!(check.feed(&vec![0.0; 47_999]), Liveness::Pending);
+        assert_eq!(check.feed(&[0.0; 5]), Liveness::Silent);
+    }
+
+    #[test]
+    fn a_quiet_room_or_a_late_first_word_is_alive() {
+        // A quiet room after the canceller's noise suppression, which takes
+        // about 18 dB off a mic's hiss: -90 dBFS here, from a mic at about
+        // -72 dBFS. Webcam and laptop mics are louder than that.
+        let mut check = LivenessCheck::new(16000);
+        let hiss: Vec<f32> = (0..16000)
+            .map(|i| if i % 2 == 0 { 3e-5 } else { -3e-5 })
+            .collect();
+        assert_eq!(check.feed(&hiss[..4000]), Liveness::Pending);
+        assert_eq!(check.feed(&hiss), Liveness::Alive);
+
+        // Silence, then a word in the last half second.
+        let mut check = LivenessCheck::new(16000);
+        assert_eq!(check.feed(&vec![0.0; 40_000]), Liveness::Pending);
+        assert_eq!(check.feed(&vec![0.01; 1000]), Liveness::Alive);
+
+        // Speech after the window does not count: the verdict is already in.
+        let mut check = LivenessCheck::new(16000);
+        assert_eq!(check.feed(&vec![0.0; 48_000]), Liveness::Silent);
+        assert_eq!(check.feed(&vec![0.1; 16_000]), Liveness::Silent);
     }
 
     #[test]
