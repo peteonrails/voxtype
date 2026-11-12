@@ -1112,6 +1112,14 @@ journalctl --user -u ydotool
 ydotool type "test"
 ```
 
+#### Clipboard helper exits before accepting text
+
+If `wl-copy` or another output helper exits before reading its input, the daemon
+reports the broken pipe as an output error and tries the configured fallbacks.
+It no longer exits silently from SIGPIPE. Check the helper's installation and
+session environment if output still fails. This does not change the configured
+output order or make an unavailable clipboard service work.
+
 #### 2. Fallback to clipboard not working
 ```bash
 # Test wl-copy
