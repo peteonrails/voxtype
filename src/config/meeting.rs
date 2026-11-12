@@ -20,6 +20,9 @@ pub struct MeetingStartOptions {
     /// The call's link, stored with the meeting
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The title is the call window's, which the calendar's replaces
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_from_window: bool,
 }
 
 /// Meeting transcription configuration

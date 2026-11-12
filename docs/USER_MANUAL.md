@@ -2792,6 +2792,13 @@ voxtype meeting export <id> --output transcript.md     # Write to file
 voxtype meeting export <id> --timestamps --speakers    # Include timestamps and speaker labels
 voxtype meeting export <id> --metadata                 # Include metadata header
 
+# Retitle a meeting, during or after it
+voxtype meeting title latest "Pete <> Chad Bi-Weekly"
+
+# Name untitled meetings from your calendar's private iCal link
+voxtype meeting calendar set-ics -                     # paste the link
+voxtype meeting calendar status
+
 # Speaker labeling (replace auto-generated IDs with names)
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label <id> 0 "Bob"

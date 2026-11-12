@@ -198,7 +198,7 @@ async fn record_on_the_notification_starts_the_meeting() {
     assert!(seen.contains(&"close 7".to_string()), "{seen:?}");
     assert_eq!(
         args.as_deref(),
-        Some("meeting|start|--title|Meet - abc-defg-hij|")
+        Some("meeting|start|--window-title|Meet - abc-defg-hij|")
     );
 }
 
@@ -209,7 +209,7 @@ async fn clicking_the_notification_body_starts_the_meeting() {
     };
     assert_eq!(
         args.as_deref(),
-        Some("meeting|start|--title|Meet - abc-defg-hij|")
+        Some("meeting|start|--window-title|Meet - abc-defg-hij|")
     );
 }
 
