@@ -615,12 +615,19 @@ def play(state, args):
         print(state["play_error"], file=sys.stderr)
         return 1
     meeting = resolve(state, args[0])
-    seg_id = args[args.index("--segment") + 1]
     track = args[args.index("--track") + 1] if "--track" in args else "mixed"
-    seg = next((s for s in segments_of(state, meeting) or [] if str(s["id"]) == seg_id), None)
-    if seg is None:
-        print("Error: no segment %s in meeting %s" % (seg_id, meeting), file=sys.stderr)
-        return 1
+    if "--at" in args:
+        # Seconds (95), mm:ss or hh:mm:ss, as the real --at.
+        secs = 0
+        for part in args[args.index("--at") + 1].split(":"):
+            secs = secs * 60 + int(part)
+        seg = {"start_ms": secs * 1000}
+    else:
+        seg_id = args[args.index("--segment") + 1]
+        seg = next((s for s in segments_of(state, meeting) or [] if str(s["id"]) == seg_id), None)
+        if seg is None:
+            print("Error: no segment %s in meeting %s" % (seg_id, meeting), file=sys.stderr)
+            return 1
     p = {"state": "playing", "meeting_id": meeting, "track": track, "from_ms": seg["start_ms"], "pid": 4242,
          "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "_t0": time.time()}
     with open(play_path(), "w") as f:
@@ -678,6 +685,188 @@ def show(state, args_meeting):
     return 0
 
 
+def search(state, args):
+    """meeting search QUERY [--limit N] --json: every word in one line, as the
+    real index does, over the past meetings' lines and titles; best (earliest
+    meeting first here) results in the real shape. state["search_delay"]
+    slows it, to see the view's Searching... state."""
+    rest = []
+    i = 0
+    limit = 20
+    while i < len(args):
+        if args[i] == "--limit":
+            limit = int(args[i + 1])
+            i += 2
+            continue
+        if args[i] not in ("--json", "--"):
+            rest.append(args[i])
+        i += 1
+    words = " ".join(rest).lower().replace('"', " ").replace("*", " ").split()
+    if not words:
+        print("Error: search needs at least one word", file=sys.stderr)
+        return 1
+    time.sleep(state.get("search_delay", 0))
+
+    def hit(text):
+        low = text.lower()
+        if not all(w in low for w in words):
+            return None
+        marks = []
+        for w in words:
+            at = low.find(w)
+            while at != -1:
+                marks.append([at, at + len(w)])
+                at = low.find(w, at + len(w))
+        marks.sort()
+        snippet = ""
+        pos = 0
+        for a, b in marks:
+            snippet += text[pos:a] + "\u00ab" + text[a:b] + "\u00bb"
+            pos = b
+        return text, marks, snippet + text[pos:]
+
+    results = []
+    for m in sorted(state.get("meetings", []), key=lambda m: m["started_at"], reverse=True):
+        base = {"meeting_id": m["id"], "title": m.get("title") or m["started_at"], "date": m["started_at"]}
+        h = hit(m.get("title") or "")
+        if h:
+            results.append(dict(base, kind="title", segment_id=None, start_ms=None, speaker=None,
+                                snippet=h[2], snippet_plain=h[0], highlights=h[1], rank=-2.0))
+        for seg in segments_of(state, m["id"]) or []:
+            h = hit(seg["text"])
+            if h:
+                results.append(dict(base, kind="segment", segment_id=seg["id"], start_ms=seg["start_ms"],
+                                    speaker=seg.get("speaker_label") or seg.get("speaker_id"),
+                                    snippet=h[2], snippet_plain=h[0], highlights=h[1], rank=-1.0))
+    print(json.dumps({"query": " ".join(rest), "speaker": None, "since": None, "results": results[:limit]}))
+    return 0
+
+
+def recover(state, args):
+    """meeting recover --json | --finish M --json | --discard M
+
+    The meetings voxtype stopped in the middle of: state["recoverable"], in
+    the real shape. --finish closes one (status completed) and prints its
+    metadata; --discard deletes it. state["recover_missing"] answers as a
+    voxtype without the command; state["recover_error"] fails --finish."""
+    if state.get("recover_missing"):
+        print("error: unrecognized subcommand 'recover'", file=sys.stderr)
+        return 2
+    rec = state.setdefault("recoverable", [])
+    if "--finish" in args or "--discard" in args:
+        finishing = "--finish" in args
+        mid = args[args.index("--finish" if finishing else "--discard") + 1]
+        if finishing and state.get("recover_error"):
+            print("Error: " + state["recover_error"], file=sys.stderr)
+            return 1
+        if not any(r["id"] == mid for r in rec):
+            print("Error: %s is not an unfinished meeting" % mid, file=sys.stderr)
+            return 1
+        state["recoverable"] = [r for r in rec if r["id"] != mid]
+        if finishing:
+            meta = None
+            for m in state.get("meetings", []):
+                if m["id"] == mid:
+                    m.update(status="completed", duration_secs=1260, ended_at="2026-11-11T09:21:00Z")
+                    meta = m
+            save(state)
+            print(json.dumps(meta or {"id": mid, "status": "completed"}))
+        else:
+            state["meetings"] = [m for m in state.get("meetings", []) if m["id"] != mid]
+            save(state)
+            print("Discarded meeting " + mid)
+        return 0
+    print(json.dumps(rec))
+    return 0
+
+
+def delete_meeting(state, args):
+    """meeting delete M --force"""
+    before = len(state.get("meetings", []))
+    state["meetings"] = [m for m in state.get("meetings", []) if m["id"] != args[0]]
+    if len(state["meetings"]) == before:
+        print("Error: Meeting not found: " + args[0], file=sys.stderr)
+        return 1
+    save(state)
+    print("Deleted meeting " + args[0])
+    return 0
+
+
+def waveform(state, args):
+    """meeting waveform M --buckets N --json: PROPOSED, not in a released
+    voxtype. Peaks per bucket from the meeting's lines (loud where someone
+    speaks, -100 between). state["waveform_missing"] answers as a voxtype
+    without it; a meeting without kept audio is refused like play."""
+    if state.get("waveform_missing"):
+        print("error: unrecognized subcommand 'waveform'", file=sys.stderr)
+        return 2
+    if state.get("audio_retained") is False:
+        print("Error: This meeting was recorded without keeping audio.", file=sys.stderr)
+        return 1
+    meeting = resolve(state, args[0])
+    n = int(args[args.index("--buckets") + 1]) if "--buckets" in args else 160
+    segs = segments_of(state, meeting) or []
+    duration = max([s["end_ms"] for s in segs] + [60000]) + 5000
+    bucket = duration / n
+    mic, loop = [], []
+    for i in range(n):
+        t = i * bucket
+        live = [s for s in segs if s["start_ms"] <= t < s["end_ms"] + 2000]
+        mic.append(-12.0 if any(s["source"] == "microphone" for s in live) else -100.0)
+        loop.append(-15.0 if any(s["source"] == "loopback" for s in live) else -100.0)
+    print(json.dumps({"meeting_id": meeting, "duration_ms": int(duration), "bucket_ms": int(bucket),
+                      "mic": mic, "loopback": loop}))
+    return 0
+
+
+def soundcheck(state, args):
+    """meeting soundcheck [--seconds N] [--json] | --stop
+
+    Prints the real NDJSON: soundcheck running, levels about ten a second,
+    soundcheck stopped. Time runs at state["sc_time_scale"] (default 0.1, so
+    30 s take 3). state: sc_echo, sc_no_loopback, sc_error (stopped with
+    reason error, exit 1), sc_meeting_after (seconds of fake time before a
+    meeting takes the mic: reason meeting, exit 1). --stop writes a flag the
+    running check sees and ends with reason stopped. Opens no audio."""
+    flag = os.path.join(os.environ["FAKE_MEETING_DATA"], "soundcheck.stop")
+    if "--stop" in args:
+        open(flag, "w").close()
+        return 0
+    seconds = int(args[args.index("--seconds") + 1]) if "--seconds" in args else 30
+    if os.path.exists(flag):
+        os.remove(flag)
+    if state.get("sc_error"):
+        print("Opening the meeting audio...", file=sys.stderr)
+        emit({"event": "soundcheck", "state": "stopped", "reason": "error", "message": state["sc_error"]})
+        return 1
+    loopback = not state.get("sc_no_loopback")
+    emit({"event": "soundcheck", "state": "running", "seconds": seconds,
+          "echo_cancel": state.get("sc_echo", "webrtc"),
+          "mic": "voxtype_meeting_aec_source", "loopback": loopback})
+    scale = state.get("sc_time_scale", 0.1)
+    meeting_after = state.get("sc_meeting_after")
+    t = 0
+    while True:
+        time.sleep(0.1)
+        t += 100
+        fake_s = t / 1000.0 / scale
+        if os.path.exists(flag):
+            os.remove(flag)
+            emit({"event": "soundcheck", "state": "stopped", "reason": "stopped"})
+            return 0
+        if meeting_after is not None and fake_s >= meeting_after:
+            emit({"event": "soundcheck", "state": "stopped", "reason": "meeting"})
+            return 1
+        if fake_s >= seconds:
+            emit({"event": "soundcheck", "state": "stopped", "reason": "done"})
+            return 0
+        phase = (t // 100) % 10
+        mic = -45.0 + phase * 3.0
+        emit({"event": "levels", "meeting_id": None, "soundcheck": True, "t_ms": t,
+              "mic": mic, "mic_peak": mic + 4.0,
+              "loopback": (-20.0 if loopback else None), "loopback_peak": (-12.0 if loopback else None)})
+
+
 def main():
     args = sys.argv[1:]
     log = os.environ.get("FAKE_VOXTYPE_LOG")
@@ -712,7 +901,8 @@ def main():
         return 1
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
-            "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line"):
+            "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
+            "soundcheck", "search", "waveform", "recover"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -760,6 +950,16 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "waveform":
+        return waveform(state, args[2:])
+    elif action == "recover":
+        return recover(state, args[2:])
+    elif action == "delete" and "--force" in args:
+        return delete_meeting(state, args[2:])
+    elif action == "search":
+        return search(state, args[2:])
+    elif action == "soundcheck":
+        return soundcheck(state, args[2:])
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))

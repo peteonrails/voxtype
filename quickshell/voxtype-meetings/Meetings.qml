@@ -103,6 +103,7 @@ Item {
     listProc.out = ""
     listProc.err = ""
     listProc.launch([root.bin, "meeting", "list", "--json", "--limit", String(root.listLimit)])
+    root.refreshRecoverable()
   }
 
   function loadMoreMeetings() {
@@ -113,6 +114,8 @@ Item {
   // A past meeting, shown the way an ended one is.
   function openPast(meetingId) {
     root.actionError = ""
+    root.pendingJumpSeg = -1
+    root.pendingJumpMs = -1
     storedProc.load(meetingId)
   }
 
@@ -150,6 +153,136 @@ Item {
       root.pastMeetings = parsed
     }
     onFailedToStart: root.listError = MT.missingCli(root.bin)
+  }
+
+  // ------------------------------------------------------------ recovery
+
+  // Meetings left unfinished when voxtype stopped during them
+  // (`voxtype meeting recover`):
+  //
+  //   voxtype meeting recover --json
+  //     [{"id", "title", "started_at", "last_chunk_ms", "has_audio",
+  //       "untranscribed_chunks"}]
+  //   voxtype meeting recover --finish <id> --json   closes it, transcribing
+  //                                                 what was left; prints the
+  //                                                 metadata
+  //   voxtype meeting recover --discard <id>         deletes it
+  //   socket: {"event": "recoverable", "meetings": [...]} after hello
+  //
+  // The daemon's startup pass marks these "interrupted", so they are found
+  // from recover, not from a status. A voxtype without `recover` (its
+  // daemon completes them when it starts) falls back to the list: anything
+  // still active or paused that is not the meeting recording.
+  property var recoverable: []
+  // null: not asked yet; false: this voxtype has no `meeting recover`.
+  property var recoverSupported: null
+  readonly property var staleMeetings: {
+    var out = []
+    var src = root.recoverSupported === false ? root.pastMeetings : root.recoverable
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i]
+      if (root.recoverSupported === false) {
+        var st = String(m.status || "")
+        if (st !== "active" && st !== "paused") continue
+      }
+      if (feed.active && String(m.id) === feed.meetingId) continue
+      out.push(m)
+    }
+    return out
+  }
+  property string recoveryError: ""
+  // The meeting a Finish or Discard is running for.
+  property string recoveryBusy: ""
+
+  function refreshRecoverable() {
+    if (recoverListProc.running || recoverListProc.startPending) return
+    recoverListProc.out = ""
+    recoverListProc.err = ""
+    recoverListProc.launch([root.bin, "meeting", "recover", "--json"])
+  }
+
+  function finishStale(id) {
+    if (root.recoveryBusy !== "") return
+    root.recoveryError = ""
+    if (root.recoverSupported === false) {
+      root.recoveryError = root.finishLaterText()
+      return
+    }
+    root.recoveryBusy = id
+    recoveryProc.kind = "finish"
+    recoveryProc.err = ""
+    recoveryProc.launch([root.bin, "meeting", "recover", "--finish", id, "--json"])
+  }
+
+  function discardStale(id) {
+    if (root.recoveryBusy !== "") return
+    root.recoveryError = ""
+    root.recoveryBusy = id
+    recoveryProc.kind = "discard"
+    recoveryProc.err = ""
+    recoveryProc.launch(root.recoverSupported === false
+      ? [root.bin, "meeting", "delete", id, "--force"]
+      : [root.bin, "meeting", "recover", "--discard", id])
+  }
+
+  function finishLaterText() {
+    return "This voxtype cannot finish a recording from here. It finishes it the next time it starts: "
+      + (root.daemonRunning || feed.connected ? "systemctl --user restart voxtype" : "systemctl --user start voxtype") + "."
+  }
+
+  Connections {
+    target: feed
+    function onRecoverable(meetings) {
+      root.recoverSupported = true
+      root.recoverable = meetings
+    }
+  }
+
+  MeetingProcess {
+    id: recoverListProc
+    property string out: ""
+    property string err: ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: recoverListProc.out = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: recoverListProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (code !== 0) {
+        if (/unrecognized subcommand/i.test(recoverListProc.err)) root.recoverSupported = false
+        return
+      }
+      var data = null
+      try { data = JSON.parse(recoverListProc.out) } catch (e) {}
+      if (!data || data.length === undefined) return
+      root.recoverSupported = true
+      root.recoverable = data
+    }
+  }
+
+  MeetingProcess {
+    id: recoveryProc
+    property string kind: ""
+    property string err: ""
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: recoveryProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      root.recoveryBusy = ""
+      if (code === 0) {
+        root.refreshList()
+        root.refreshRecoverable()
+        return
+      }
+      if (/unrecognized subcommand|unexpected argument/i.test(recoveryProc.err)) {
+        root.recoverSupported = false
+        if (recoveryProc.kind === "finish") {
+          root.recoveryError = root.finishLaterText()
+          return
+        }
+      }
+      root.recoveryError = MT.cliProblem(recoveryProc.err, "finishing a recording")
+        || "voxtype meeting recover exited " + code
+    }
+    onFailedToStart: {
+      root.recoveryBusy = ""
+      root.recoveryError = MT.missingCli(root.bin)
+    }
   }
 
   // ------------------------------------------------------------ daemon
@@ -234,6 +367,7 @@ Item {
     // back if not.
     onReassignFinished: function(extra, ok, message, segment) {
       if (!ok) {
+        if (extra && extra.snapshot) root.dropChangeFor("reassign", extra.snapshot.segId)
         feed.restoreSnapshot(extra ? extra.snapshot : null)
         return
       }
@@ -242,6 +376,7 @@ Item {
     onSegmentActionFinished: function(action, extra, ok, message, segment) {
       if (action === "edit") {
         if (!ok && extra && feed.textOf(extra.segId) !== null) {
+          root.dropChangeFor("edit", extra.segId)
           feed.setText(extra.segId, extra.before)
           feed.setOriginalText(extra.segId, extra.original)
         } else if (ok && segment) {
@@ -288,6 +423,9 @@ Item {
     var snap = feed.snapshot(segId)
     if (!snap) return
     root.actionError = ""
+    if (!root.undoing && key !== snap.speaker)
+      root.noteChange({ kind: "reassign", segId: segId, snap: snap,
+                        label: "Line moved to " + feed.displayName(key) + "." })
     feed.applyReassign(segId, key)
     meetingCli.reassign(feed.meetingId, segId, speaker, { snapshot: snap })
   }
@@ -317,6 +455,7 @@ Item {
     var next = String(text).trim()
     if (before === null || next === "" || next === before) return
     root.actionError = ""
+    if (!root.undoing) root.noteChange({ kind: "edit", segId: segId, before: before, original: original, label: "Line edited." })
     feed.setText(segId, next)
     // The first correction keeps what was transcribed.
     if (original === "") feed.setOriginalText(segId, before)
@@ -341,6 +480,7 @@ Item {
   readonly property int undoMs: 5000
 
   function deleteLine(segId) {
+    root.dropChange()
     root.commitDelete()
     var row = feed.removeRow(segId)
     if (!row) return
@@ -365,14 +505,106 @@ Item {
 
   Timer { id: undoTimer; interval: root.undoMs; onTriggered: root.commitDelete() }
 
+  // Undo for the last edit or move. Their command has already run, so Undo
+  // runs the opposite one: `edit --reset` or the earlier text, `reassign
+  // --reset` or the earlier speaker. One undo at a time, shared with delete.
+  property var lastChange: null
+  property bool undoing: false
+  readonly property string changeLabel: root.lastChange ? root.lastChange.label : ""
+
+  function noteChange(change) {
+    root.commitDelete()
+    change.meeting = feed.meetingId
+    root.lastChange = change
+    changeTimer.restart()
+  }
+
+  function dropChange() {
+    changeTimer.stop()
+    root.lastChange = null
+  }
+
+  // A change the CLI refused was put back already: nothing to undo.
+  function dropChangeFor(kind, segId) {
+    if (root.lastChange && root.lastChange.kind === kind && root.lastChange.segId === segId) root.dropChange()
+  }
+
+  function undoChange() {
+    var c = root.lastChange
+    root.dropChange()
+    if (!c || c.meeting !== feed.meetingId) return
+    root.undoing = true
+    if (c.kind === "edit") {
+      if (c.original === "") root.resetText(c.segId)
+      else root.editText(c.segId, c.before)
+    } else if (c.kind === "reassign") {
+      if (c.snap.originalSpeaker === "") root.restoreSpeaker(c.segId)
+      else root.reassign(c.segId, c.snap.speaker, c.snap.speaker)
+    }
+    root.undoing = false
+  }
+
+  Timer { id: changeTimer; interval: root.undoMs; onTriggered: root.lastChange = null }
+
   Connections {
     target: feed
-    function onMeetingIdChanged() { if (root.pendingDelete && root.pendingDelete.meeting !== feed.meetingId) root.commitDelete() }
+    function onMeetingIdChanged() {
+      if (root.pendingDelete && root.pendingDelete.meeting !== feed.meetingId) root.commitDelete()
+      if (root.lastChange && root.lastChange.meeting !== feed.meetingId) root.dropChange()
+    }
   }
 
   // ------------------------------------------------------------ playback
 
   readonly property alias playback: playback
+  // ------------------------------------------------------------ sound check
+
+  readonly property alias search: search
+  MeetingSearch {
+    id: search
+    bin: root.bin
+  }
+
+  // A search result opened: the meeting, then its line once it is loaded.
+  property real pendingJumpMs: -1
+  property int pendingJumpSeg: -1
+  function openResult(meetingId, segmentId, startMs) {
+    root.actionError = ""
+    if (meetingId === feed.meetingId && feed.hasMeeting) {
+      if ((segmentId >= 0 || startMs >= 0) && root.window) root.window.view.jumpToSegment(segmentId, startMs)
+      return
+    }
+    root.pendingJumpSeg = segmentId
+    root.pendingJumpMs = startMs
+    storedProc.load(meetingId)
+  }
+
+  // The finished meeting's kept audio as a waveform (`meeting waveform`).
+  readonly property alias waveform: waveform
+  MeetingWaveform {
+    id: waveform
+    bin: root.bin
+  }
+  function syncWaveform() {
+    if (feed.ended && feed.meetingId !== "" && assistant.audioRetained !== false) waveform.load(feed.meetingId)
+    else waveform.clear()
+  }
+  Connections {
+    target: feed
+    function onEndedChanged() { root.syncWaveform() }
+    function onMeetingIdChanged() { root.syncWaveform() }
+  }
+  Connections {
+    target: assistant
+    function onAudioRetainedChanged() { root.syncWaveform() }
+  }
+
+  readonly property alias soundcheck: soundcheck
+  MeetingSoundCheck {
+    id: soundcheck
+    bin: root.bin
+  }
+
   MeetingPlayback {
     id: playback
     bin: root.bin
@@ -513,6 +745,8 @@ Item {
     // A finished meeting stays on screen until the view is closed.
     if (!root.shown) {
       if (playback.playing) playback.stop()
+      // Closing the view ends a check it started; nobody is watching it.
+      soundcheck.reset()
       root.commitDelete()
       feed.clearEnded()
       placement.minimized = false
@@ -649,6 +883,13 @@ Item {
         return
       }
       root.showTab("transcript")
+      if ((root.pendingJumpSeg >= 0 || root.pendingJumpMs >= 0) && root.window) {
+        var seg = root.pendingJumpSeg
+        var ms = root.pendingJumpMs
+        Qt.callLater(function() { if (root.window) root.window.view.jumpToSegment(seg, ms) })
+      }
+      root.pendingJumpSeg = -1
+      root.pendingJumpMs = -1
     }
   }
 
@@ -681,15 +922,25 @@ Item {
       view.restingOpacity = Qt.binding(function() { return root.viewOpacity })
       view.feed = feed
       view.assistant = assistant
+      view.soundcheck = soundcheck
+      view.waveform = waveform
+      view.playPositionMs = Qt.binding(function() {
+        return playback.playing && playback.meetingId === feed.meetingId ? playback.positionMs : -1
+      })
+      view.search = search
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })
       view.pastMeetings = Qt.binding(function() { return root.pastMeetings })
+      view.staleMeetings = Qt.binding(function() { return root.staleMeetings })
+      view.recoveryError = Qt.binding(function() { return root.recoveryError })
+      view.recoveryBusy = Qt.binding(function() { return root.recoveryBusy })
       view.listLoading = Qt.binding(function() { return root.listLoading })
       view.listError = Qt.binding(function() { return root.listError })
       view.listHasMore = Qt.binding(function() { return root.listHasMore })
       view.daemonRunning = Qt.binding(function() { return root.daemonRunning })
       view.pendingDelete = Qt.binding(function() { return root.pendingDelete !== null })
+      view.changeLabel = Qt.binding(function() { return root.changeLabel })
       view.lastExport = Qt.binding(function() { return root.lastExport })
       view.speakerHintDismissed = Qt.binding(function() { return root.speakerHintDismissed })
       view.playingHere = Qt.binding(function() { return playback.playing && playback.meetingId === feed.meetingId })
@@ -718,6 +969,9 @@ Item {
     function onAnnotateRequested(segId, text, highlight) { root.annotate(segId, text, highlight) }
     function onSettingsRequested() { root.settingsRequested() }
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
+    function onFinishStaleRequested(meetingId) { root.finishStale(meetingId) }
+    function onDiscardStaleRequested(meetingId) { root.discardStale(meetingId) }
+    function onSearchResultRequested(meetingId, segmentId, startMs) { root.openResult(meetingId, segmentId, startMs) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }
     function onMinimizeRequested() { root.minimize() }
@@ -729,6 +983,8 @@ Item {
     function onStopPlaybackRequested() { playback.stop() }
     function onDeleteLineRequested(segId) { root.deleteLine(segId) }
     function onUndoDeleteRequested() { root.undoDelete() }
+    function onUndoChangeRequested() { root.undoChange() }
+    function onPlayAtRequested(ms) { if (feed.meetingId !== "") playback.playAt(feed.meetingId, ms, "mixed") }
     function onExportRequested(format) { root.exportMeeting(format) }
     function onOpenFolderRequested(path) { root.openFolder(path) }
     function onExportNoticeDismissed() { root.lastExport = null }

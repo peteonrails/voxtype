@@ -66,6 +66,16 @@ Item {
     flashTimer.restart()
   }
 
+  // To one line by its id (a search result), or by time if it is gone.
+  function jumpToSegment(segId, ms) {
+    var row = root.feed ? root.feed.rowIndex(segId) : -1
+    if (row < 0) { root.jumpTo(ms); return }
+    transcript.follow = false
+    transcript.positionViewAtIndex(row, ListView.Center)
+    root.flashSegId = segId
+    flashTimer.restart()
+  }
+
   property int flashSegId: -1
   Timer { id: flashTimer; interval: 1600; onTriggered: root.flashSegId = -1 }
 
@@ -353,10 +363,25 @@ Item {
             x: root.theme.md
             width: 40
             text: root.clock(line.startMs)
-            color: root.theme.dim
+            // Over the time, read from the line's own hover area: anything
+            // here that took hover would take the line's actions with it.
+            readonly property bool hot: root.canPlay && lineHover.containsMouse
+              && lineHover.mouseX >= stamp.x && lineHover.mouseX < stamp.x + stamp.contentWidth + 4
+              && lineHover.mouseY < stamp.y + stamp.height
+            color: stamp.hot ? root.theme.accent : root.theme.dim
             font.family: root.theme.fontFamily
             font.pixelSize: root.theme.caption
+            font.underline: stamp.hot
             topPadding: 2
+            // The time seeks: plays the kept audio from this line, or moves
+            // a playback that is running here.
+            MouseArea {
+              objectName: "lineSeek"
+              anchors.fill: parent
+              enabled: root.canPlay
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.playRequested(line.segId)
+            }
           }
 
           Column {

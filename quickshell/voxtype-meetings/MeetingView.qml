@@ -26,6 +26,62 @@ Item {
   property var placement: null
   property var feed: null
   property var assistant: null
+  // MeetingSoundCheck, from the controller.
+  property var soundcheck: null
+  // MeetingWaveform, and where playback is in this meeting (-1: not here).
+  property var waveform: null
+  property real playPositionMs: -1
+  signal playAtRequested(real ms)
+  // The last edit or move, while it can be undone ("Line edited.").
+  property string changeLabel: ""
+  signal undoChangeRequested()
+  // Unfinished recordings (see Meetings.staleMeetings), and Finish/Discard.
+  property var staleMeetings: []
+  property string recoveryError: ""
+  property string recoveryBusy: ""
+  signal finishStaleRequested(string meetingId)
+  signal discardStaleRequested(string meetingId)
+  // MeetingSearch, from the controller.
+  property var search: null
+  signal searchResultRequested(string meetingId, int segmentId, real startMs)
+  // The idle screen shows the sound check instead of the meetings list.
+  property bool soundCheckOpen: false
+  onHasMeetingChanged: if (root.hasMeeting) root.soundCheckOpen = false
+
+  function openSoundCheck() {
+    if (!root.soundcheck) return
+    root.soundCheckOpen = true
+    if (!root.soundcheck.running) root.soundcheck.start()
+  }
+
+  // What happened to an unfinished meeting, and what Finish or Discard
+  // does with it. `last_chunk_ms`, `has_audio` and `untranscribed_chunks`
+  // come from `meeting recover`; a voxtype without it has none of them.
+  function recoveryText(m, confirming) {
+    var t = (m.title ? String(m.title) : "A meeting")
+    var when = root.recoveryWhen(m.started_at)
+    if (when !== "") t += ", started " + when + ","
+    if (m.last_chunk_ms !== undefined && m.last_chunk_ms !== null)
+      t += " stopped " + root.clock(m.last_chunk_ms) + " in,"
+    t += " did not finish, most likely because voxtype stopped during it. "
+    if (confirming) return t + "Discarding deletes its transcript and any kept audio."
+    var left = Number(m.untranscribed_chunks) || 0
+    if (left > 0 && m.has_audio === true)
+      return t + "Finish transcribes the " + (left === 1 ? "part" : left + " parts") + " not transcribed yet and closes it."
+    if (left > 0 && m.has_audio === false)
+      return t + "Finish closes it with what was transcribed; the last " + (left === 1 ? "part was" : left + " parts were") + " not kept."
+    return t + "Finish keeps what was recorded and closes it."
+  }
+
+  function recoveryWhen(iso) {
+    var t = Date.parse(String(iso || "").replace(/(\.\d{3})\d+/, "$1"))
+    return isNaN(t) ? "" : Qt.formatDateTime(new Date(t), "ddd d MMM, hh:mm")
+  }
+
+  function closeSoundCheck() {
+    if (root.soundcheck) root.soundcheck.reset()
+    root.soundCheckOpen = false
+  }
   // The action running now, from MeetingCli.busy.
   property string busy: ""
   property string actionError: ""
@@ -183,6 +239,11 @@ Item {
   function jumpTo(ms) {
     root.tab = "transcript"
     Qt.callLater(function() { transcriptPane.jumpTo(ms) })
+  }
+
+  function jumpToSegment(segId, ms) {
+    root.tab = "transcript"
+    Qt.callLater(function() { transcriptPane.jumpToSegment(segId, ms) })
   }
 
   // Ticks once a second while it matters, so elapsed and "ago" stay current.
@@ -649,6 +710,18 @@ Item {
         }
       }
 
+      // A finished meeting with its audio kept: the whole meeting as a
+      // waveform; a click plays from there.
+      WaveformPlayer {
+        objectName: "waveform"
+        Layout.fillWidth: true
+        visible: root.ended && root.waveform !== null && root.waveform.available
+        theme: root.theme
+        wave: root.waveform
+        positionMs: root.playPositionMs
+        onSeekRequested: function(ms) { root.playAtRequested(ms) }
+      }
+
       // Listening, paused or finalizing, between chunks.
       RowLayout {
         objectName: "listeningIndicator"
@@ -689,6 +762,51 @@ Item {
           font.pixelSize: root.theme.bodySmall
           elide: root.ended ? Text.ElideNone : Text.ElideRight
           wrapMode: root.ended ? Text.WordWrap : Text.NoWrap
+        }
+
+        // Live levels, once the daemon sends them: you, and the call when
+        // the meeting records it. They fall to empty while paused.
+        Row {
+          objectName: "liveMeters"
+          visible: root.feed !== null && root.feed.levelsAt > 0 && root.status !== "finalizing"
+          spacing: root.theme.md
+          Text {
+            text: "You"
+            anchors.verticalCenter: parent.verticalCenter
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.caption
+          }
+          LevelMeter {
+            objectName: "liveMicMeter"
+            anchors.verticalCenter: parent.verticalCenter
+            width: 44
+            implicitHeight: 5
+            theme: root.theme
+            db: root.feed ? root.feed.micDb : null
+            peakDb: root.feed ? root.feed.micPeakDb : null
+            at: root.feed ? root.feed.levelsAt : 0
+          }
+          Text {
+            visible: root.feed !== null && root.feed.loopbackSeen
+            text: "Call"
+            anchors.verticalCenter: parent.verticalCenter
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.caption
+          }
+          LevelMeter {
+            objectName: "liveCallMeter"
+            visible: root.feed !== null && root.feed.loopbackSeen
+            anchors.verticalCenter: parent.verticalCenter
+            width: 44
+            implicitHeight: 5
+            theme: root.theme
+            color: root.theme.alpha(root.theme.fg, 0.75)
+            db: root.feed ? root.feed.loopbackDb : null
+            peakDb: root.feed ? root.feed.loopbackPeakDb : null
+            at: root.feed ? root.feed.levelsAt : 0
+          }
         }
       }
 
@@ -938,6 +1056,101 @@ Item {
           wrapMode: Text.WordWrap
         }
 
+        Repeater {
+          model: root.staleMeetings
+          delegate: Rectangle {
+            id: stale
+            required property var modelData
+            required property int index
+            objectName: "recoveryCard_" + index
+            readonly property string meetingId: String(modelData.id)
+            readonly property bool busy: root.recoveryBusy === stale.meetingId
+            property bool confirming: false
+            Layout.fillWidth: true
+            implicitHeight: staleColumn.implicitHeight + root.theme.padX * 2
+            radius: Math.min(root.theme.radius, 6)
+            color: root.theme.alpha(root.theme.accent, 0.10)
+            border.width: 1
+            border.color: root.theme.alpha(root.theme.accent, 0.5)
+
+            Column {
+              id: staleColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: root.theme.padX
+              spacing: root.theme.md
+
+              Text {
+                width: parent.width
+                text: "Unfinished recording found"
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.body
+                font.bold: true
+              }
+              Text {
+                objectName: "recoveryText"
+                width: parent.width
+                text: root.recoveryText(stale.modelData, stale.confirming)
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Flow {
+                width: parent.width
+                spacing: root.theme.gap
+                MeetingButton {
+                  objectName: "recoveryFinish"
+                  theme: root.theme
+                  visible: !stale.confirming
+                  enabled: root.recoveryBusy === ""
+                  text: stale.busy ? "Finishing…" : "Finish it"
+                  bordered: true
+                  onClicked: root.finishStaleRequested(stale.meetingId)
+                }
+                MeetingButton {
+                  objectName: "recoveryDiscard"
+                  theme: root.theme
+                  visible: !stale.confirming
+                  enabled: root.recoveryBusy === ""
+                  text: "Discard"
+                  bordered: true
+                  onClicked: stale.confirming = true
+                }
+                MeetingButton {
+                  objectName: "recoveryDiscardConfirm"
+                  theme: root.theme
+                  visible: stale.confirming
+                  enabled: root.recoveryBusy === ""
+                  text: stale.busy ? "Discarding…" : "Discard for good"
+                  bordered: true
+                  onClicked: root.discardStaleRequested(stale.meetingId)
+                }
+                MeetingButton {
+                  objectName: "recoveryKeep"
+                  theme: root.theme
+                  visible: stale.confirming
+                  text: "Keep it"
+                  onClicked: stale.confirming = false
+                }
+              }
+            }
+          }
+        }
+
+        Text {
+          objectName: "recoveryError"
+          Layout.fillWidth: true
+          visible: root.recoveryError !== ""
+          text: root.recoveryError
+          color: root.theme.urgent
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
         RowLayout {
           Layout.fillWidth: true
           spacing: root.theme.gap
@@ -966,22 +1179,43 @@ Item {
           }
         }
 
+        MeetingButton {
+          objectName: "soundCheckButton"
+          theme: root.theme
+          visible: !root.soundCheckOpen && root.soundcheck !== null
+          text: "Sound check…"
+          onClicked: root.openSoundCheck()
+        }
+
         Rectangle {
           Layout.fillWidth: true
           implicitHeight: 1
           color: root.theme.alpha(root.theme.fg, 0.12)
         }
 
+        SoundCheckPane {
+          objectName: "soundCheckPane"
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          visible: root.soundCheckOpen
+          theme: root.theme
+          check: root.soundcheck
+          onCloseRequested: root.closeSoundCheck()
+        }
+
         MeetingList {
           objectName: "meetingListPane"
           Layout.fillWidth: true
           Layout.fillHeight: true
+          visible: !root.soundCheckOpen
           theme: root.theme
           meetings: root.pastMeetings
           loading: root.listLoading
           error: root.listError
           hasMore: root.listHasMore
+          search: root.search
           onOpenRequested: function(meetingId) { root.openMeetingRequested(meetingId) }
+          onResultRequested: function(meetingId, segmentId, startMs) { root.searchResultRequested(meetingId, segmentId, startMs) }
           onMoreRequested: root.moreMeetingsRequested()
         }
       }
@@ -1008,7 +1242,7 @@ Item {
   // A deleted line can be had back for a few seconds; then it is gone.
   Rectangle {
     objectName: "undoBar"
-    visible: root.pendingDelete && root.hasMeeting
+    visible: (root.pendingDelete || root.changeLabel !== "") && root.hasMeeting
     z: 8
     anchors.horizontalCenter: parent.horizontalCenter
     anchors.bottom: parent.bottom
@@ -1026,7 +1260,8 @@ Item {
       spacing: root.theme.gap
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        text: "Line deleted."
+        objectName: "undoText"
+        text: root.pendingDelete ? "Line deleted." : root.changeLabel
         color: root.theme.fg
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
@@ -1036,7 +1271,7 @@ Item {
         theme: root.theme
         text: "Undo"
         bordered: true
-        onClicked: root.undoDeleteRequested()
+        onClicked: root.pendingDelete ? root.undoDeleteRequested() : root.undoChangeRequested()
       }
     }
   }

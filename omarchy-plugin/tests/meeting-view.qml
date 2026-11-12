@@ -144,6 +144,20 @@ Item {
           else if (s === "export") tc.driveExport()
           else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
+          else if (s === "soundcheck") tc.driveSoundCheck()
+          else if (s === "levels") tc.driveLevels()
+          else if (s === "recovery") tc.driveRecovery()
+          else if (s === "undo-edit") tc.driveUndoEdit()
+          else if (s === "undo-reassign") tc.driveUndoReassign()
+          else if (s === "seek") tc.driveSeek()
+          else if (s === "waveform") tc.driveWaveform()
+          else if (s === "waveform-missing") tc.driveWaveformMissing()
+          else if (s === "recovery-old") tc.driveRecoveryOld()
+          else if (s === "recovery-socket") tc.driveRecoverySocket()
+          else if (s === "search") tc.driveSearch()
+          else if (s === "search-old") tc.driveSearchOld()
+          else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
+          else if (s === "soundcheck-error") tc.driveSoundCheckError()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
           else if (s === "summary-stale") tc.driveSummaryStale()
@@ -1666,6 +1680,7 @@ Item {
       mouseMove(item, 30, 4)
       waitFor(function() { return shown(find(item, "lineEditButton")) }, "hover actions")
       check(!shown(find(item, "linePlayButton")), "no ▶ without audio")
+      check(!find(item, "lineSeek").enabled, "the time is not a link without audio")
       check(shown(find(view(), "audioHintSettings")) === host.omarchy, "Settings link where the host has Settings")
       shot("audio-not-kept")
       click(find(view(), "audioHintDismiss"), "dismiss")
@@ -1813,6 +1828,298 @@ Item {
       checkErrorCard("Summary failed: no backend answered.", "")
       check(feed().lastError === "", "not repeated in the banner: " + feed().lastError)
       shot("summary-stale")
+    }
+
+    // ------------------------------------------------------------ sound check
+
+    function meterFill(name) { return find(find(view(), name), "meterFill").width }
+
+    function openSoundCheck() {
+      openView()
+      waitFor(function() { return shown(find(view(), "idleState")) }, "idle state")
+      check(shown(find(view(), "meetingListPane")), "the list first")
+      click(find(view(), "soundCheckButton"), "Sound check")
+      waitFor(function() { return shown(find(view(), "soundCheckPane")) }, "sound check pane")
+      check(!shown(find(view(), "meetingListPane")), "the pane replaces the list")
+    }
+
+    function editLine(i, text) {
+      lineAction(i, "lineEditButton")
+      var field = find(lineItem(i), "lineEditField")
+      waitFor(function() { return field.visible && field.activeFocus }, "editor on line " + i)
+      field.text = text
+      keyClick(Qt.Key_Return)
+      waitFor(idleCli, "edit finished")
+    }
+
+    function driveUndoEdit() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      editLine(1, "Yes, very loud and clear.")
+      waitFor(function() { return shown(find(view(), "undoBar")) }, "the undo bar")
+      check(txt("undoText") === "Line edited.", "says: " + txt("undoText"))
+      shot("undo-edit")
+      click(find(view(), "undoButton"), "Undo")
+      check(lines()[1][2] === "Yes, loud and clear.", "back at once: " + lines()[1][2])
+      check(!shown(find(view(), "undoBar")), "bar gone after Undo")
+      waitFor(idleCli, "reset finished")
+      wait(300)
+      check(lines()[1][2] === "Yes, loud and clear." && !shown(find(lineItem(1), "lineEdited")), "the transcribed text, not marked edited")
+      // A second correction undoes to the first one, not to the original.
+      editLine(3, "It went amber.")
+      editLine(3, "It went red.")
+      click(find(view(), "undoButton"), "Undo")
+      waitFor(idleCli, "undo finished")
+      wait(300)
+      check(lines()[3][2] === "It went amber." && shown(find(lineItem(3), "lineEdited")), "the earlier correction: " + lines()[3][2])
+      // Nothing to undo once it ran; the window passes without one.
+      check(!shown(find(view(), "undoBar")), "no bar after the undo")
+    }
+
+    function driveUndoReassign() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      openChooser(1)
+      pick("You")
+      waitFor(idleCli, "move finished")
+      waitFor(function() { return shown(find(view(), "undoBar")) }, "the undo bar")
+      check(txt("undoText") === "Line moved to You.", "says: " + txt("undoText"))
+      click(find(view(), "undoButton"), "Undo")
+      waitFor(idleCli, "undo finished")
+      wait(300)
+      check(lines()[1][1] === "Remote" && moved(1) === "", "back on Remote, not marked moved: " + lines()[1][1] + " " + moved(1))
+      // A refused move goes back by itself and leaves nothing to undo.
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ fail: { reassign: "Error: segment 4 is locked." } })])
+      openChooser(3)
+      pick("You")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      waitFor(function() { return lines()[3][1] === "Remote" }, "put back")
+      check(!shown(find(view(), "undoBar")), "nothing to undo")
+    }
+
+    function driveWaveform() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(!shown(find(view(), "waveform")), "no waveform while recording")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      waitFor(function() { return shown(find(view(), "waveform")) }, "the waveform", 6000)
+      check(view().waveform.mic.length === 160 && view().waveform.loopback !== null, "both tracks, 160 buckets")
+      var strip = find(view(), "waveformArea")
+      // Laid out first: a strip still at width 0 puts every point at 0:00.
+      waitFor(function() { return strip.width > 100 }, "the strip laid out")
+      wait(100)
+      // Twenty seconds in, a little past so rounding cannot land on 0:19.
+      var x = (20.4 * 1000) / view().waveform.durationMs * strip.width
+      // Enter, then move: a single synthetic move onto a just-shown item
+      // does not always register as hover.
+      mouseMove(strip, Math.max(1, x - 6), strip.height / 2)
+      wait(80)
+      mouseMove(strip, x, strip.height / 2)
+      waitFor(function() { return shown(find(view(), "waveformHoverTime")) && txt("waveformHoverTime") === "0:20" }, "hover time: " + txt("waveformHoverTime"))
+      mouseClick(strip, x, strip.height / 2)
+      waitFor(function() { return shown(find(view(), "transportStop")) && shown(find(view(), "waveformPlayhead")) }, "playing from there")
+      var x0 = find(view(), "waveformPlayhead").x
+      waitFor(function() { return find(view(), "waveformPlayhead").x > x0 }, "the playhead moves", 4000)
+      mouseMove(view(), -40, -40)
+      shot("waveform")
+      click(find(view(), "transportStop"), "Stop audio")
+      waitFor(function() { return !shown(find(view(), "waveformPlayhead")) }, "playhead gone")
+    }
+
+    function driveWaveformMissing() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      wait(1500)
+      check(!shown(find(view(), "waveform")), "no strip")
+      check(!shown(find(view(), "actionError")), "nothing reported")
+    }
+
+    function driveSeek() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var stamp = find(lineItem(2), "lineSeek")
+      check(stamp.enabled, "the time is a link")
+      click(stamp, "line 3's time")
+      waitFor(function() { return shown(find(view(), "transportStop")) && playing(2) }, "plays from line 3")
+      shot("seek")
+      click(find(lineItem(0), "lineSeek"), "line 1's time")
+      waitFor(function() { return playing(0) && !playing(2) }, "moved to line 1", 5000)
+      click(find(view(), "transportStop"), "Stop")
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "stopped")
+    }
+
+    function driveRecovery() {
+      openView()
+      waitFor(function() { return shown(find(view(), "recoveryCard_1")) }, "two unfinished recordings")
+      var first = find(view(), "recoveryCard_0")
+      var text = String(find(first, "recoveryText").text)
+      check(text.indexOf("Planning, started ") === 0 && text.indexOf("stopped 12:40 in") !== -1, "names it: " + text)
+      check(text.indexOf("Finish transcribes the 2 parts not transcribed yet") !== -1, "what Finish does: " + text)
+      var second = String(find(find(view(), "recoveryCard_1"), "recoveryText").text)
+      check(second.indexOf("the last part was not kept") !== -1, "no audio for the rest: " + second)
+      shot("recovery")
+      click(find(first, "recoveryFinish"), "Finish it")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_1")) && shown(find(view(), "recoveryCard_0")) }, "one left", 6000)
+      var card = find(view(), "recoveryCard_0")
+      check(String(find(card, "recoveryText").text).indexOf("Vendor call") === 0, "the other one: " + find(card, "recoveryText").text)
+      click(find(card, "recoveryDiscard"), "Discard")
+      waitFor(function() { return shown(find(card, "recoveryDiscardConfirm")) }, "asks first")
+      check(String(find(card, "recoveryText").text).indexOf("Discarding deletes") !== -1, "says what goes")
+      click(find(card, "recoveryKeep"), "Keep it")
+      waitFor(function() { return shown(find(card, "recoveryFinish")) }, "backed out")
+      click(find(card, "recoveryDiscard"), "Discard again")
+      click(find(card, "recoveryDiscardConfirm"), "Discard for good")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "no unfinished recordings left", 6000)
+      check(!shown(find(view(), "recoveryError")), "no error")
+    }
+
+    function driveRecoverySocket() {
+      openView()
+      waitFor(function() { return feed().connected && shown(find(view(), "idleState")) }, "idle")
+      wait(500)
+      check(!shown(find(view(), "recoveryCard_0")), "none at first")
+      ctl({ cmd: "recoverable", meetings: [{ id: "c3000000-0000-4000-8000-000000000003", title: "Planning",
+            started_at: "2026-11-11T09:00:00Z", last_chunk_ms: 61000, has_audio: true, untranscribed_chunks: 0 }] })
+      waitFor(function() { return shown(find(view(), "recoveryCard_0")) }, "the daemon's event brings the card")
+      check(String(find(find(view(), "recoveryCard_0"), "recoveryText").text).indexOf("stopped 1:01 in") !== -1, "from the event")
+      ctl({ cmd: "recoverable", meetings: [] })
+      waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "and takes it away")
+    }
+
+    function driveRecoveryOld() {
+      openView()
+      waitFor(function() { return shown(find(view(), "recoveryCard_0")) }, "the card, from the list's status")
+      check(!shown(find(view(), "recoveryCard_1")), "only the one left active")
+      var card = find(view(), "recoveryCard_0")
+      click(find(card, "recoveryFinish"), "Finish it")
+      waitFor(function() { return shown(find(view(), "recoveryError")) }, "the explanation", 6000)
+      check(txt("recoveryError").indexOf("finishes it the next time it starts") !== -1, "says when: " + txt("recoveryError"))
+      check(shown(find(view(), "recoveryCard_0")), "still listed")
+      shot("recovery-old")
+      click(find(card, "recoveryDiscard"), "Discard")
+      click(find(card, "recoveryDiscardConfirm"), "Discard for good")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "deleted the old way", 6000)
+    }
+
+    function searchFor(text) {
+      var field = find(view(), "meetingSearchField")
+      click(field, "search box")
+      field.text = text
+    }
+
+    function driveSearch() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_0")) }, "the list")
+      searchFor("empty state")
+      waitFor(function() { return txt("searchStatus") === "Searching…" && shown(find(view(), "searchStatus")) }, "Searching…: " + txt("searchStatus"))
+      check(!shown(find(view(), "meetingList")), "results replace the list")
+      waitFor(function() { return shown(find(view(), "searchResult_0")) }, "a result", 6000)
+      var r = find(view(), "searchResult_0")
+      check(String(find(r, "searchResultTitle").text) === "Design review", "title: " + find(r, "searchResultTitle").text)
+      check(/ · 1:01 · Remote 2$/.test(String(find(r, "searchResultWhere").text)), "where: " + find(r, "searchResultWhere").text)
+      var snip = String(find(r, "searchResultSnippet").text)
+      check(snip.indexOf("<b>") !== -1 && snip.indexOf(">empty</font></b>") !== -1 && snip.indexOf(">state</font></b>") !== -1, "highlighted: " + snip)
+      check(find(view(), "searchResults").count === 1, "one line has both words: " + find(view(), "searchResults").count)
+      shot("search")
+      click(r, "the result")
+      waitFor(function() { return txt("meetingTitle") === "Design review" && view().currentTab === "transcript" }, "the meeting opened")
+      waitFor(function() { return find(view(), "transcriptPane").flashSegId === 2 }, "on the line: " + find(view(), "transcriptPane").flashSegId)
+      click(find(view(), "backButton"), "back")
+      waitFor(function() { return shown(find(view(), "searchResult_0")) }, "the search kept on Back")
+      check(String(find(view(), "meetingSearchField").text) === "empty state", "query kept")
+      // Escape clears it, back to the list.
+      var field = find(view(), "meetingSearchField")
+      click(field, "search box")
+      keyClick(Qt.Key_Escape)
+      waitFor(function() { return shown(find(view(), "meetingList")) && !shown(find(view(), "searchResults")) }, "the list again")
+      check(host.viewOpen(), "Escape in the box does not close the view")
+      searchFor("zebra")
+      waitFor(function() { return txt("searchStatus") === "No meetings match \u201czebra\u201d." }, "no match: " + txt("searchStatus"), 6000)
+      searchFor("1:1")
+      waitFor(function() { return shown(find(view(), "searchResult_0")) }, "title match", 6000)
+      check(/ · in the title$/.test(String(find(find(view(), "searchResult_0"), "searchResultWhere").text)), "in the title")
+    }
+
+    function driveSearchOld() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_0")) }, "the list")
+      searchFor("layout")
+      waitFor(function() { return txt("searchStatus").indexOf("This voxtype is too old for searching meetings") === 0 }, "too old: " + txt("searchStatus"), 6000)
+      shot("search-old")
+    }
+
+    function driveLevels() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(!shown(find(view(), "liveMeters")), "no meters before any levels")
+      for (var i = 0; i < 4; i++) {
+        ctl({ cmd: "levels", t_ms: 100 * i, mic: -30, mic_peak: -24, loopback: null, loopback_peak: null })
+        wait(100)
+      }
+      waitFor(function() { return shown(find(view(), "liveMeters")) && meterFill("liveMicMeter") > 0 }, "mic meter")
+      check(!shown(find(view(), "liveCallMeter")), "no call meter while loopback is null")
+      // A sound check's levels and another meeting's are not this meeting's.
+      var mic = feed().micDb
+      ctl({ cmd: "levels", soundcheck: true, mic: -5, mic_peak: -2, loopback: -5, loopback_peak: -2 })
+      ctl({ cmd: "levels", meeting_id: "00000000-0000-4000-8000-000000000000", mic: -5, mic_peak: -2, loopback: -5, loopback_peak: -2 })
+      wait(300)
+      check(feed().micDb === mic && !feed().loopbackSeen, "ignored: " + feed().micDb + " " + feed().loopbackSeen)
+      for (var j = 0; j < 6; j++) {
+        ctl({ cmd: "levels", t_ms: 500 + 100 * j, mic: -20, mic_peak: -12, loopback: -18, loopback_peak: -9 })
+        wait(100)
+      }
+      waitFor(function() { return shown(find(view(), "liveCallMeter")) && meterFill("liveCallMeter") > 0 }, "call meter")
+      shot("levels")
+      // Levels stop (paused, or the daemon went quiet): the bars fall.
+      waitFor(function() { return meterFill("liveMicMeter") === 0 && meterFill("liveCallMeter") === 0 }, "meters fall", 2000)
+      check(shown(find(view(), "liveMeters")), "meters stay, empty")
+    }
+
+    function driveSoundCheck() {
+      openSoundCheck()
+      waitFor(function() { return txt("soundCheckStatus").indexOf("s left") !== -1 }, "running: " + txt("soundCheckStatus"))
+      check(txt("soundCheckMic") === "voxtype_meeting_aec_source", "mic: " + txt("soundCheckMic"))
+      check(txt("soundCheckEcho").indexOf("WebRTC") !== -1, "echo: " + txt("soundCheckEcho"))
+      waitFor(function() { return meterFill("soundCheckMicMeter") > 0 && meterFill("soundCheckLoopbackMeter") > 0 }, "both meters move")
+      check(!shown(find(view(), "soundCheckNoLoopback")), "call audio captured")
+      check(shown(find(view(), "soundCheckStop")), "Stop offered")
+      wait(300)
+      shot("soundcheck")
+      click(find(view(), "soundCheckStop"), "Stop")
+      waitFor(function() { return txt("soundCheckStatus") === "Stopped." }, "stopped: " + txt("soundCheckStatus"))
+      waitFor(function() { return meterFill("soundCheckMicMeter") === 0 && meterFill("soundCheckLoopbackMeter") === 0 }, "meters fall", 2000)
+      check(String(find(view(), "soundCheckStart").text) === "Check again", "Check again offered")
+      click(find(view(), "soundCheckStart"), "Check again")
+      waitFor(function() { return txt("soundCheckStatus").indexOf("s left") !== -1 }, "running again")
+      waitFor(function() { return txt("soundCheckStatus").indexOf("Done.") === 0 }, "ran to its end: " + txt("soundCheckStatus"), 8000)
+      shot("soundcheck-done")
+      click(find(view(), "soundCheckClose"), "back to the meetings")
+      waitFor(function() { return shown(find(view(), "meetingListPane")) && !shown(find(view(), "soundCheckPane")) }, "list again")
+    }
+
+    function driveSoundCheckNoLoopback() {
+      openSoundCheck()
+      waitFor(function() { return txt("soundCheckStatus").indexOf("s left") !== -1 }, "running")
+      waitFor(function() { return meterFill("soundCheckMicMeter") > 0 }, "mic meter moves")
+      check(shown(find(view(), "soundCheckNoLoopback")) && !shown(find(view(), "soundCheckLoopbackMeter")), "no call audio said so")
+      check(txt("soundCheckEcho").indexOf("No echo cancellation") === 0, "echo: " + txt("soundCheckEcho"))
+      shot("soundcheck-no-loopback")
+      // Leaving the panel while it runs stops the check.
+      click(find(view(), "soundCheckClose"), "back while running")
+      waitFor(function() { return shown(find(view(), "meetingListPane")) }, "list again")
+      waitFor(function() { return view().soundcheck.checkState === "stopped" && view().soundcheck.reason === "stopped" }, "stopped by leaving: " + view().soundcheck.reason, 4000)
+    }
+
+    function driveSoundCheckError() {
+      openSoundCheck()
+      waitFor(function() { return view().soundcheck.checkState === "stopped" }, "failed")
+      check(txt("soundCheckStatus") === "Audio connection failed: no such device 'usb-mic'", "message: " + txt("soundCheckStatus"))
+      check(shown(find(view(), "soundCheckStart")) && !shown(find(view(), "soundCheckStop")), "can try again")
+      check(meterFill("soundCheckMicMeter") === 0, "no level shown")
+      shot("soundcheck-error")
     }
 
     function driveScroll() {
