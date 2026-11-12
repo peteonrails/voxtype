@@ -147,6 +147,8 @@ Item {
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
           else if (s === "summary-stale") tc.driveSummaryStale()
+          else if (s === "notice") tc.driveNotice(true)
+          else if (s === "notice-acked") tc.driveNotice(false)
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -310,6 +312,57 @@ Item {
     }
 
     // ------------------------------------------------------------ scenarios
+
+    // The recording-consent notice. `pending`: the daemon says it has not
+    // been acknowledged (recording_notice true on hello and status).
+    function driveNotice(pending) {
+      var wording = "Laws on recording and transcribing conversations differ by place, and some require "
+          + "everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them "
+          + "know you're using a meeting assistant."
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var card = find(view(), "recordingNotice")
+      check(card !== null, "notice card exists")
+      if (pending) {
+        waitFor(function() { return shown(card) }, "notice shown on a running meeting")
+        check(txt("recordingNoticeText") === wording, "wording: " + txt("recordingNoticeText"))
+        check(shown(find(view(), "recordingNoticeAck")) && find(view(), "recordingNoticeAck").text === "Got it",
+              "Got it button")
+        // At the top of the card: above the tabs and the transcript.
+        var tabs = find(view(), "tabBar")
+        check(card.mapToItem(view(), 0, 0).y < tabs.mapToItem(view(), 0, 0).y, "above the tabs")
+        shot("notice")
+      } else {
+        wait(400)
+        check(!shown(card), "an acknowledged notice is never shown")
+      }
+
+      // Ended: no notice, whatever its state.
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended: " + txt("meetingState"))
+      check(!shown(card), "no notice on an ended meeting")
+
+      // A meeting that starts with the view open.
+      find(view(), "endedTitleField").text = "Second"
+      click(find(view(), "endedStartButton"), "Start meeting")
+      waitFor(function() { return feed().status === "recording" && txt("meetingTitle") === "Second" },
+              "new meeting: " + txt("meetingTitle"))
+      if (!pending) {
+        wait(400)
+        check(!shown(card), "still never shown at a start")
+        return
+      }
+      waitFor(function() { return shown(card) }, "notice shown at a start")
+
+      // Got it: hidden at once, `meeting notice --ack` runs, and the daemon's
+      // status confirms it for every view.
+      click(find(view(), "recordingNoticeAck"), "Got it")
+      check(!shown(card), "hidden at once")
+      waitFor(function() { return feed().recordingNotice === false }, "daemon confirmed the acknowledgement")
+      wait(300)
+      check(!shown(card), "stays hidden")
+      shot("notice-acked")
+    }
 
     function driveLive() {
       openView()
