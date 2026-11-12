@@ -30,14 +30,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Check if this is the worker command (needs stderr-only logging)
     let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
-    // Import and retranscribe print their own progress, and with --json
-    // their stdout is NDJSON, so logs go to stderr and only warnings show
-    // unless -v asks for more.
+    // Import, retranscribe and the sound check print their own progress or
+    // meters, and with --json their stdout is NDJSON, so logs go to stderr
+    // and only warnings show unless -v asks for more. A sound check with no
+    // daemon running opens the audio itself, and its info lines (the echo
+    // canceller, the loopback source) landed in the NDJSON.
     let is_import = matches!(
         cli.command,
         Some(Commands::Meeting {
             action: voxtype::MeetingAction::Import { .. }
                 | voxtype::MeetingAction::Retranscribe { .. }
+                | voxtype::MeetingAction::Soundcheck { .. }
         })
     );
 
