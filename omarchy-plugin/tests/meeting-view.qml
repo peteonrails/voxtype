@@ -671,12 +671,18 @@ Item {
       click(find(view(), "stopButton"), "Stop")
       waitFor(function() { return txt("meetingState") === "Ended" }, "Ended: " + txt("meetingState"))
       check(lines().length === 4 && txt("meetingTitle") === "Standup", "transcript and title kept")
-      check(txt("meetingEndedAt").indexOf("ended at ") === 0, "end time: " + txt("meetingEndedAt"))
+      check(/^at \d\d:\d\d$/.test(txt("meetingEndedAt")), "end time: " + txt("meetingEndedAt"))
       check(/^1:0\d$/.test(txt("meetingElapsed")), "length: " + txt("meetingElapsed"))
       check(!shown(find(view(), "pauseButton")) && !shown(find(view(), "stopButton")), "no Pause or Stop")
       check(shown(find(view(), "endedStartButton")) && find(view(), "endedStartButton").enabled, "Start meeting offered")
       check(!shown(find(view(), "idleState")), "not the idle screen")
+      // One how-to, in the Transcript tab; none in the header.
+      check(!shown(find(view(), "listeningIndicator")), "no second hint under the header")
+      check(shown(find(view(), "speakerHint")), "the speaker how-to")
       shot("ended")
+      click(find(view(), "speakerHintDismiss"), "dismiss the how-to")
+      waitFor(function() { return !shown(find(view(), "speakerHint")) }, "how-to dismissed")
+      check(view().speakerHintDismissed === true, "remembered by the controller for the session")
 
       // Fixing a line after the call. No socket echo: only --json answers.
       openChooser(1)
@@ -1416,10 +1422,12 @@ Item {
       var menu = find(view(), "moreMenu")
       click(find(view(), "moreButton"), "More")
       waitFor(function() { return menu.visible && find(menu, "openMeetingFolder").enabled }, "More menu with the folder")
-      check(!shown(find(menu, "exportOption_srt")) && !shown(find(menu, "exportOption_vtt")), "no SRT or VTT: the CLI refuses them")
-      click(find(menu, "exportOption_json"), "JSON")
+      var formats = ["markdown", "text", "json", "srt", "vtt"]
+      for (var f = 0; f < formats.length; f++)
+        check(shown(find(menu, "exportOption_" + formats[f])), formats[f] + " offered")
+      click(find(menu, "exportOption_srt"), "SRT")
       waitFor(function() { return shown(find(view(), "exportNotice")) }, "export notice", 8000)
-      check(txt("exportNoticeText") === "Exported to " + __DOCUMENTS__ + "/Voxtype/2026-11-10 Design review.json", "notice: " + txt("exportNoticeText"))
+      check(txt("exportNoticeText") === "Exported to " + __DOCUMENTS__ + "/Voxtype/2026-11-10 Design review.srt", "notice: " + txt("exportNoticeText"))
       click(find(view(), "moreButton"), "More again")
       waitFor(function() { return menu.visible }, "menu")
       click(find(menu, "openMeetingFolder"), "Open meeting folder")
@@ -1569,7 +1577,10 @@ Item {
       wait(500)
       shot("translucent", true)
       // Over the card: opaque at once.
-      mouseMove(view(), 100, 300)
+      // On the meeting's state line: card, but nothing typeable (speaker
+      // names and chips ask for the keyboard, since they rename).
+      var spot = find(view(), "meetingState").mapToItem(view(), 4, 4)
+      mouseMove(view(), spot.x, spot.y)
       waitFor(function() { return view().engaged && view().cardAlpha === 1.0 }, "opaque on hover")
       check(host.ctrl().window.keyboardPolicy === "none", "hovering the card asks for no keyboard")
       // Away again: still opaque for a moment, then back.
