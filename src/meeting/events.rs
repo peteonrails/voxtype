@@ -205,6 +205,11 @@ enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         backend: Option<String>,
     },
+    /// Meetings the daemon never finished (it crashed or was killed while
+    /// they recorded), for a recovery card. Empty once none are left.
+    Recoverable {
+        meetings: Vec<crate::meeting::recover::RecoverableMeeting>,
+    },
     SummaryReady {
         meeting_id: String,
         agent: String,
@@ -263,8 +268,27 @@ struct HubInner {
     /// Current `hello` line, shared with the accept loop so every newly
     /// accepted connection reads the live snapshot without round-tripping
     /// through the daemon. Independent of `state` so it survives a
-    /// watchdog respawn untouched.
+    /// watchdog respawn untouched. It is the greeting's lines together.
     hello: Arc<RwLock<String>>,
+    greeting: std::sync::Mutex<Greeting>,
+}
+
+/// What a new subscriber is sent first: the `hello` snapshot, then the
+/// `recoverable` meetings while there are any, so a panel that connects
+/// late still shows its recovery card.
+#[derive(Default)]
+struct Greeting {
+    hello: String,
+    recoverable: String,
+}
+
+impl HubInner {
+    fn set_greeting(&self, change: impl FnOnce(&mut Greeting)) {
+        let mut greeting = self.greeting.lock().expect("meeting hub greeting lock");
+        change(&mut greeting);
+        *self.hello.write().expect("meeting hub hello lock") =
+            format!("{}{}", greeting.hello, greeting.recoverable);
+    }
 }
 
 impl HubInner {
@@ -287,9 +311,8 @@ impl MeetingEventHub {
             std::fs::create_dir_all(parent)?;
         }
 
-        let hello = Arc::new(RwLock::new(
-            WireEvent::hello(&MeetingHudState::idle()).to_line(),
-        ));
+        let idle = WireEvent::hello(&MeetingHudState::idle()).to_line();
+        let hello = Arc::new(RwLock::new(idle.clone()));
         let (state, accept_h, broadcast_h) = bind_and_spawn(&socket_path, hello.clone())?;
         tracing::info!("Meeting event socket listening at {:?}", socket_path);
 
@@ -297,6 +320,10 @@ impl MeetingEventHub {
             state: RwLock::new(state),
             socket_path: socket_path.clone(),
             hello,
+            greeting: std::sync::Mutex::new(Greeting {
+                hello: idle,
+                recoverable: String::new(),
+            }),
         });
 
         spawn_watchdog(inner.clone(), accept_h, broadcast_h);
@@ -321,7 +348,25 @@ impl MeetingEventHub {
     /// to see the change.
     pub fn update_snapshot(&self, state: &MeetingHudState) {
         let line = WireEvent::hello(state).to_line();
-        *self.inner.hello.write().expect("meeting hub hello lock") = line;
+        self.inner.set_greeting(|g| g.hello = line);
+    }
+
+    /// Announce the meetings the daemon never finished. New subscribers get
+    /// the list right after `hello` while it is not empty; an empty list is
+    /// sent to those connected, so a recovery card can go away.
+    pub fn publish_recoverable(&self, meetings: &[crate::meeting::recover::RecoverableMeeting]) {
+        let event = WireEvent::Recoverable {
+            meetings: meetings.to_vec(),
+        };
+        let line = event.to_line();
+        self.inner.set_greeting(|g| {
+            g.recoverable = if meetings.is_empty() {
+                String::new()
+            } else {
+                line
+            }
+        });
+        self.publish(event);
     }
 
     /// Broadcast a `segments` event to currently-connected subscribers.

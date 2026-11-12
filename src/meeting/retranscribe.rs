@@ -84,7 +84,7 @@ pub fn map_segments(old: &[TranscriptSegment], new: &[TranscriptSegment]) -> Has
 /// The retained audio to transcribe, as one source: the mic and loopback
 /// tracks side by side when both were kept, the mic alone for a mic-only
 /// meeting, otherwise the mixed track with no sides.
-fn retained_source(ff: &Ffmpeg, dir: &std::path::Path) -> Result<Source, ImportError> {
+pub(crate) fn retained_source(ff: &Ffmpeg, dir: &std::path::Path) -> Result<Source, ImportError> {
     let files: HashMap<&str, String> = retained_audio::retained_files(dir).into_iter().collect();
     let (inputs, channels) = match (
         files.get(retained_audio::MIC),
@@ -104,6 +104,7 @@ fn retained_source(ff: &Ffmpeg, dir: &std::path::Path) -> Result<Source, ImportE
         inputs,
         channels,
         duration_ms,
+        start_ms: 0,
     })
 }
 

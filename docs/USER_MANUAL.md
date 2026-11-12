@@ -2822,6 +2822,11 @@ voxtype meeting assistant allow claude
 # Delete a meeting
 voxtype meeting delete <id>
 voxtype meeting delete <id> --force   # Skip confirmation
+
+# Finish or discard a meeting the daemon never finished (it crashed or was killed)
+voxtype meeting recover
+voxtype meeting recover --finish <id>
+voxtype meeting recover --discard <id>
 ```
 
 ### Configuration

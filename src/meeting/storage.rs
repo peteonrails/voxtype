@@ -406,28 +406,32 @@ impl MeetingStorage {
         Ok(())
     }
 
-    /// Mark any active/paused meetings as completed.
-    /// Called on daemon startup to clean up meetings orphaned by a previous crash or restart.
-    pub fn complete_stale_meetings(&self) -> Result<u32, StorageError> {
+    /// Mark active and paused meetings as interrupted: the daemon is
+    /// starting, so whatever was recording when it last stopped never
+    /// finished. Their folders stay as they are for `meeting recover`.
+    /// Returns how many there were.
+    pub fn interrupt_stale_meetings(&self) -> Result<u32, StorageError> {
         let stale: Vec<String> = self
             .conn
             .prepare("SELECT id FROM meetings WHERE status IN ('active', 'paused')")?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
-        let now = Utc::now().timestamp();
         let count = self.conn.execute(
-            r#"
-            UPDATE meetings SET
-                status = 'completed',
-                ended_at = ?1,
-                duration_secs = (?1 - started_at)
-            WHERE status IN ('active', 'paused')
-            "#,
-            params![now],
+            "UPDATE meetings SET status = 'interrupted' WHERE status IN ('active', 'paused')",
+            [],
         )?;
-        // Their manifests still say "active"; the audio a crash left
-        // behind is already playable, so the manifest is all that is stale.
         for id in stale.iter().filter_map(|id| MeetingId::parse(id).ok()) {
+            if let Ok(Some(mut metadata)) = self.get_meeting(&id) {
+                metadata.status = MeetingStatus::Interrupted;
+                if let Some(ref dir) = metadata.storage_path {
+                    // metadata.json, like meeting.json, says what the folder holds.
+                    let mut with_summary = metadata.clone();
+                    with_summary.summary = self.get_summary(&id)?;
+                    if let Ok(json) = serde_json::to_string_pretty(&with_summary) {
+                        let _ = std::fs::write(dir.join("metadata.json"), json);
+                    }
+                }
+            }
             self.refresh_manifest(&id);
         }
         Ok(count as u32)
@@ -1724,12 +1728,13 @@ fn resolve_speaker_keys(transcript: &Transcript, speaker: &str) -> Vec<String> {
 }
 
 // Helper functions for status serialization
-fn status_to_string(status: MeetingStatus) -> &'static str {
+pub(crate) fn status_to_string(status: MeetingStatus) -> &'static str {
     match status {
         MeetingStatus::Active => "active",
         MeetingStatus::Paused => "paused",
         MeetingStatus::Completed => "completed",
         MeetingStatus::Cancelled => "cancelled",
+        MeetingStatus::Interrupted => "interrupted",
     }
 }
 
@@ -1739,6 +1744,7 @@ fn string_to_status(s: &str) -> MeetingStatus {
         "paused" => MeetingStatus::Paused,
         "completed" => MeetingStatus::Completed,
         "cancelled" => MeetingStatus::Cancelled,
+        "interrupted" => MeetingStatus::Interrupted,
         _ => MeetingStatus::Active,
     }
 }
@@ -2133,6 +2139,10 @@ mod tests {
 
     #[test]
     fn test_status_unknown_defaults_to_active() {
+        assert_eq!(
+            string_to_status(status_to_string(MeetingStatus::Interrupted)),
+            MeetingStatus::Interrupted
+        );
         assert_eq!(string_to_status("unknown"), MeetingStatus::Active);
         assert_eq!(string_to_status(""), MeetingStatus::Active);
     }

@@ -29,6 +29,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
   - [Exporting Transcripts](#exporting-transcripts)
   - [Deleting Meetings](#deleting-meetings)
+  - [Recovering an Interrupted Meeting](#recovering-an-interrupted-meeting)
 - [Meeting Audio](#meeting-audio)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
@@ -540,6 +541,25 @@ voxtype meeting delete <meeting-id> --force
 ```
 
 Permanently deletes the meeting: its record, its folder and everything in it, audio included. Without `--force` it refuses and deletes nothing.
+
+### Recovering an Interrupted Meeting
+
+A meeting is saved while it records: the transcript after every chunk, and the audio as it arrives when `retain_audio` is on. If the daemon crashes, is killed, or the computer loses power mid-meeting, all of that is still in the meeting's folder, but the meeting never ends: it has no end time, no summary, and `post_meeting_command` never ran. The next time the daemon starts it marks such meetings `interrupted`, and the meeting view offers to finish them.
+
+From the command line:
+
+```bash
+# List meetings that never finished
+voxtype meeting recover
+
+# Finish one from what is on disk
+voxtype meeting recover --finish 3f2a
+
+# Or delete it and its folder
+voxtype meeting recover --discard 3f2a
+```
+
+Finishing first transcribes any audio the daemon kept but had not transcribed yet, usually the last chunk, with the engine and model the meeting used. Then it ends the meeting when it last wrote to its folder, which is about when the daemon stopped, and does what stopping it would have: it writes `transcript.md`, writes the summary under the usual rules (see [AI Summarization](#ai-summarization)), and runs `post_meeting_command`. Without `retain_audio`, whatever was said after the last transcribed chunk, up to 30 seconds by default, is lost with the daemon. The meeting being recorded right now is never listed, finished or discarded.
 
 ---
 

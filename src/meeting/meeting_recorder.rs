@@ -81,6 +81,7 @@ fn audio_source(dir: &Path, format: &str, duration_ms: u64) -> Option<Source> {
             inputs: vec![a, b],
             channels: Channels::Mapped(vec![Side::Mic, Side::Loopback]),
             duration_ms,
+            start_ms: 0,
         })
     };
     pair(
@@ -98,6 +99,7 @@ fn audio_source(dir: &Path, format: &str, duration_ms: u64) -> Option<Source> {
                 Channels::Mono
             },
             duration_ms,
+            start_ms: 0,
         })
     })
 }
