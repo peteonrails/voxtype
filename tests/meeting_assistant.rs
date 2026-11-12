@@ -121,6 +121,7 @@ open_command = "env | grep ^VOXTYPE_ | sort > '{}/opened'"
             storage_path: self.p("meetings"),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         })
         .unwrap();
         let mut metadata = MeetingMetadata::new(Some("Release sync".into()));

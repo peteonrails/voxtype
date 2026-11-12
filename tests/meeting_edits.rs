@@ -30,6 +30,7 @@ impl Scratch {
             storage_path: self.path("data/voxtype/meetings"),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         })
         .unwrap()
     }

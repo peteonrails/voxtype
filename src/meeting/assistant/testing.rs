@@ -186,6 +186,7 @@ cat "$out/pi.reply""#,
             storage_path: self.dir.path().join("meetings"),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         }
     }
 

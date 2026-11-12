@@ -31,9 +31,11 @@ pub mod events;
 pub mod export;
 pub mod hook;
 pub mod manifest;
+pub mod my_name;
 pub mod notes;
 pub mod playback;
 pub mod retained_audio;
+pub mod search;
 pub mod start;
 pub mod state;
 pub mod status_notice;
@@ -893,6 +895,7 @@ mod tests {
                 storage_path: dir.path().to_path_buf(),
                 retain_audio: false,
                 max_meetings: 0,
+                my_name: None,
             },
             ..Default::default()
         };
@@ -1065,6 +1068,7 @@ mod tests {
                 storage_path: dir.path().to_path_buf(),
                 retain_audio: false,
                 max_meetings: 0,
+                my_name: None,
             },
             ..Default::default()
         };
@@ -1780,6 +1784,7 @@ mod tests {
                 storage_path: dir.path().to_path_buf(),
                 retain_audio: false,
                 max_meetings: 0,
+                my_name: None,
             },
             ..Default::default()
         }

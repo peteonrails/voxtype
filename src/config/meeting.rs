@@ -39,6 +39,12 @@ pub struct MeetingConfig {
     #[serde(default = "default_status_notifications")]
     pub status_notifications: String,
 
+    /// Your name, shown instead of "You" for your side of a meeting: in the
+    /// meeting view, exports, summaries and search. A display label only;
+    /// labels set with `meeting label` still win. Unset shows "You".
+    #[serde(default)]
+    pub my_name: Option<String>,
+
     /// Duration of each audio chunk in seconds
     #[serde(default = "default_chunk_duration")]
     pub chunk_duration_secs: u32,
@@ -390,6 +396,7 @@ impl Default for MeetingConfig {
             enabled: false,
             offer_enable: true,
             status_notifications: default_status_notifications(),
+            my_name: None,
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,

@@ -1377,6 +1377,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
     ),
     spec(
+        "meeting.my_name",
+        "meeting",
+        "my_name",
+        KeyType::String,
+        "Meeting",
+        "Your name",
+        "Shown instead of \"You\" for your side of a meeting, in the view, exports, summaries and search.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -3020,6 +3029,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.enabled" => json!(cfg.meeting.enabled),
         "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
         "meeting.status_notifications" => json!(cfg.meeting.status_notifications),
+        "meeting.my_name" => opt_str(cfg.meeting.my_name.as_ref()),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),

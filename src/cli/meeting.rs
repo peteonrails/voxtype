@@ -373,6 +373,56 @@ pub enum MeetingAction {
         json: bool,
     },
 
+    /// Search across meetings
+    ///
+    /// Full-text search over every meeting's transcript lines as they are
+    /// displayed (speaker names, moved lines and text corrections applied;
+    /// deleted lines left out), and over titles, notes and summaries. Every
+    /// word must appear. Put a phrase in double quotes (inside single quotes
+    /// for the shell) to keep it together, and end a word with * to match
+    /// words starting with it. Best matches come first. Meetings recorded
+    /// before search existed are indexed the first time you search.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting search budget\n  \
+        voxtype meeting search budget review --speaker Dana\n  \
+        voxtype meeting search '\"next quarter\"' --since 2026-11-01\n  \
+        voxtype meeting search deploy* --limit 5 --json")]
+    Search {
+        /// Words to find
+        #[arg(required = true, num_args = 1.., value_name = "QUERY")]
+        query: Vec<String>,
+
+        /// Show at most this many matches
+        #[arg(long, short, default_value = "20")]
+        limit: u32,
+
+        /// Only lines spoken by this speaker, as shown in the transcript
+        /// (case-insensitive). Your `[meeting] my_name` also finds "You".
+        #[arg(long, value_name = "NAME")]
+        speaker: Option<String>,
+
+        /// Only meetings started on or after this date (2026-11-01) or time
+        /// (2026-11-01T09:00:00Z)
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the name meetings use for you, or a suggestion for it
+    ///
+    /// Meetings show your side as "You" unless `[meeting] my_name` is set.
+    /// This prints the setting and, when it is unset, the full name on your
+    /// account as a suggestion. It never sets anything.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting my-name\n  \
+        voxtype config set meeting.my_name \"Pete\"")]
+    MyName {
+        /// Output as JSON: {"my_name": ..., "suggestion": ...}
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the live meeting view
     ///
     /// Asks whichever meeting view is running to open: the Voxtype plugin in

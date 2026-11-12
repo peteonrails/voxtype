@@ -534,6 +534,7 @@ wc -c | tr -d ' ' > {log}.tmp && mv {log}.tmp {log}.bytes"#
             storage_path: dir.path().to_path_buf(),
             retain_audio: true,
             max_meetings: 0,
+            my_name: None,
         })
         .unwrap();
         let metadata = MeetingMetadata::new(Some("Play".to_string()));

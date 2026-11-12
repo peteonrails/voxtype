@@ -800,6 +800,7 @@ fn cleanup_stale_meetings(config: &Config) {
         storage_path,
         retain_audio: config.meeting.retain_audio,
         max_meetings: 0,
+        my_name: config.meeting.my_name.clone(),
     };
 
     match meeting::MeetingStorage::open(storage_config) {
@@ -2922,6 +2923,16 @@ impl Daemon {
 
     /// Add a processed chunk to the HUD snapshot and stream it on meeting.sock.
     fn publish_meeting_chunk(&mut self, chunk_id: u32, segments: &[meeting::TranscriptSegment]) {
+        // The live view shows [meeting] my_name for "You", like the saved
+        // transcript does; a display label only, never saved.
+        let mut shown = meeting::Transcript {
+            segments: segments.to_vec(),
+            total_chunks: 0,
+        };
+        if let Some(name) = self.config.meeting.my_name.as_deref() {
+            shown.apply_my_name(name);
+        }
+        let segments = &shown.segments[..];
         self.meeting_hud.push_segments(segments);
         self.meeting_hud.chunk_count = chunk_id + 1;
         if let Some(ref hub) = self.meeting_event_hub {
@@ -3039,6 +3050,7 @@ impl Daemon {
                 },
                 retain_audio: self.config.meeting.retain_audio,
                 max_meetings: 0,
+                my_name: self.config.meeting.my_name.clone(),
             },
             retain_audio: self.config.meeting.retain_audio,
             max_duration_mins: self.config.meeting.max_duration_mins,
