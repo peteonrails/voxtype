@@ -3674,7 +3674,7 @@ impl Daemon {
         let used = self.meeting_echo_path_in_use(audio::echo_cancel::EchoPath::Gtcrn);
         self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
         tracing::info!("Meeting echo handling: {}", used.as_str());
-        if let Some(ref daemon) = self.meeting_daemon {
+        if let Some(ref mut daemon) = self.meeting_daemon {
             daemon.record_echo_cancel(used.as_str());
         }
         self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
