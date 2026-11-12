@@ -5,6 +5,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 ## Table of Contents
 
 - [When to Use Meeting Mode](#when-to-use-meeting-mode)
+- [Recording Consent](#recording-consent)
 - [Quick Start](#quick-start)
 - [Recording a Meeting](#recording-a-meeting)
   - [Starting a Meeting](#starting-a-meeting)
@@ -62,6 +63,28 @@ Use meeting mode when you need a transcript of a longer recording session. Good 
 - Brainstorming sessions
 
 For short dictation (a sentence or two at a time), stick with the normal push-to-talk workflow.
+
+---
+
+## Recording Consent
+
+Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.
+
+You are responsible for following the rules that apply to you.
+
+Until you acknowledge this, voxtype reminds you:
+
+- `voxtype meeting start` prints it on stderr, starting with `Note:`. It never waits for an answer, and stdout stays the same for scripts.
+- The meeting view shows it at the top of a running meeting, with **Got it**.
+- The call-detection prompt always adds "Let the others know you're transcribing."
+
+```bash
+voxtype meeting notice          # show it, and whether you acknowledged it
+voxtype meeting notice --ack    # acknowledge it; the reminders stop
+voxtype meeting notice --json   # {"notice", "acknowledged", "acknowledged_at"}
+```
+
+**Got it** in the view does the same as `--ack`. The acknowledgement is kept in `~/.local/state/voxtype/recording-notice.json`.
 
 ---
 
@@ -233,7 +256,7 @@ The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INT
 
 ## Meeting Detection
 
-Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?" with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
 
 Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
 

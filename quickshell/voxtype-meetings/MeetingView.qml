@@ -152,6 +152,11 @@ Item {
   signal errorDismissed()
   property bool speakerHintDismissed: false
   signal speakerHintDismissRequested()
+  // The recording-consent notice: shown on a live meeting until acknowledged.
+  readonly property string recordingNoticeText: "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant."
+  property bool noticeDismissed: false
+  readonly property bool showRecordingNotice: root.live && !root.noticeDismissed && root.feed !== null && root.feed.recordingNotice
+  signal noticeAcknowledged()
 
   readonly property string status: feed ? feed.status : ""
   readonly property bool connected: feed ? feed.connected : false
@@ -761,6 +766,43 @@ Item {
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
         wrapMode: Text.WordWrap
+      }
+
+      Rectangle {
+        objectName: "recordingNotice"
+        Layout.fillWidth: true
+        visible: root.showRecordingNotice
+        implicitHeight: noticeText.implicitHeight + root.theme.padX * 2
+        radius: Math.min(root.theme.radius, 6)
+        color: root.theme.alpha(root.theme.accent, 0.12)
+        border.width: 1
+        border.color: root.theme.alpha(root.theme.accent, 0.45)
+
+        Text {
+          id: noticeText
+          objectName: "recordingNoticeText"
+          anchors.left: parent.left
+          anchors.right: noticeAck.left
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: root.theme.padX
+          anchors.rightMargin: root.theme.gap
+          text: root.recordingNoticeText
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        MeetingButton {
+          id: noticeAck
+          objectName: "recordingNoticeAck"
+          theme: root.theme
+          anchors.right: parent.right
+          anchors.rightMargin: root.theme.sm
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Got it"
+          onClicked: root.noticeAcknowledged()
+        }
       }
 
       Rectangle {

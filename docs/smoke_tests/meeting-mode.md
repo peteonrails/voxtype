@@ -48,7 +48,8 @@ Open a Meet call in Chromium, keep its tab active, and join.
 Expected:
 
 - About 5 seconds after joining, one notification: **Google Meet call
-  detected**, body `Record "Meet - <code>" as a meeting?`, with **Record** and
+  detected**, body `Record "Meet - <code>" as a meeting?` and a second line
+  `Let the others know you're transcribing.`, with **Record** and
   **Dismiss**.
 - No prompt during the lobby's mic preview is acceptable, but at most one
   prompt for the call.
@@ -67,6 +68,12 @@ Expected:
   and **Stop**.
 - Your typing still goes to the Meet chat: the card did not take focus.
 - No "Meeting Started" notification, because the view is showing it.
+- Unless you acknowledged it before, a card at the top of the view says
+  "Laws on recording and transcribing conversations differ by place, …"
+  with **Got it**. **Got it** hides it, and
+  `voxtype meeting notice --json | jq .acknowledged` then prints `true`.
+  (To see it again on a test machine:
+  `rm ~/.local/state/voxtype/recording-notice.json`.)
 - `voxtype meeting status --json` shows `"status": "recording"` and the ID.
 
 Talk, and have the other side talk. Within about 30 seconds:

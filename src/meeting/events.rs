@@ -25,9 +25,9 @@
 //! exist and a third would be worse).
 //!
 //! ```text
-//! {"event":"hello","status":"recording","meeting_id":"...","title":"...","started_at":"...","chunk_count":7,"diarization":{"enabled":true,"backend":"simple"},"segments":[...]}
+//! {"event":"hello","status":"recording","meeting_id":"...","title":"...","started_at":"...","chunk_count":7,"diarization":{"enabled":true,"backend":"simple"},"segments":[...],"recording_notice":false}
 //! {"event":"segments","chunk_id":8,"segments":[...]}
-//! {"event":"status","status":"paused"}
+//! {"event":"status","status":"paused","recording_notice":false}
 //! {"event":"error","message":"..."}
 //! ```
 //!
@@ -35,7 +35,7 @@
 //! finished, naming it, without changing the `hello` snapshot:
 //!
 //! ```text
-//! {"event":"status","status":"summarizing","meeting_id":"..."}
+//! {"event":"status","status":"summarizing","meeting_id":"...","recording_notice":false}
 //! {"event":"summary_ready","meeting_id":"...","agent":"claude","agent_name":"Claude","path":".../summary.md","summary":{...}}
 //! {"event":"error","message":"Summary failed: ...","meeting_id":"...","code":"consent_required"}
 //! ```
@@ -94,6 +94,9 @@ pub struct MeetingHudState {
     /// The meeting's echo handling: `webrtc`, `gtcrn` or `none`
     pub echo_cancel: Option<String>,
     pub segments: Vec<TranscriptSegment>,
+    /// The recording-consent notice has not been acknowledged yet
+    /// (`voxtype meeting notice --ack`), so views should show it.
+    pub recording_notice: bool,
 }
 
 impl MeetingHudState {
@@ -162,6 +165,7 @@ enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         echo_cancel: Option<String>,
         segments: Vec<TranscriptSegment>,
+        recording_notice: bool,
     },
     Segments {
         chunk_id: u32,
@@ -187,6 +191,7 @@ enum WireEvent {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         meeting_id: Option<String>,
+        recording_notice: bool,
     },
     ImportProgress(crate::meeting::import::Progress),
     Playback {
@@ -226,6 +231,7 @@ impl WireEvent {
             diarization: state.diarization.clone(),
             echo_cancel: state.echo_cancel.clone(),
             segments: state.segments.clone(),
+            recording_notice: state.recording_notice,
         }
     }
 
@@ -265,6 +271,8 @@ struct HubInner {
     /// through the daemon. Independent of `state` so it survives a
     /// watchdog respawn untouched.
     hello: Arc<RwLock<String>>,
+    /// The snapshot's `recording_notice`, repeated on every `status` event.
+    recording_notice: std::sync::atomic::AtomicBool,
 }
 
 impl HubInner {
@@ -297,6 +305,7 @@ impl MeetingEventHub {
             state: RwLock::new(state),
             socket_path: socket_path.clone(),
             hello,
+            recording_notice: std::sync::atomic::AtomicBool::new(false),
         });
 
         spawn_watchdog(inner.clone(), accept_h, broadcast_h);
@@ -320,8 +329,19 @@ impl MeetingEventHub {
     /// [`MeetingEventHub::publish_segments`] when live subscribers also need
     /// to see the change.
     pub fn update_snapshot(&self, state: &MeetingHudState) {
+        self.inner
+            .recording_notice
+            .store(state.recording_notice, std::sync::atomic::Ordering::Relaxed);
         let line = WireEvent::hello(state).to_line();
         *self.inner.hello.write().expect("meeting hub hello lock") = line;
+    }
+
+    /// Whether the recording-consent notice is still unacknowledged, as the
+    /// last snapshot said.
+    fn recording_notice(&self) -> bool {
+        self.inner
+            .recording_notice
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Broadcast a `segments` event to currently-connected subscribers.
@@ -371,6 +391,7 @@ impl MeetingEventHub {
         self.publish(WireEvent::Status {
             status: status.to_string(),
             meeting_id: None,
+            recording_notice: self.recording_notice(),
         });
     }
 
@@ -413,6 +434,7 @@ impl MeetingEventHub {
             SummaryEvent::Summarizing { meeting_id } => WireEvent::Status {
                 status: "summarizing".to_string(),
                 meeting_id: Some(meeting_id),
+                recording_notice: self.recording_notice(),
             },
             SummaryEvent::Ready(outcome) => WireEvent::SummaryReady {
                 meeting_id: outcome.meeting_id,
@@ -681,7 +703,7 @@ mod tests {
         let v = next(&mut lines).await;
         assert_eq!(
             v,
-            serde_json::json!({"event": "status", "status": "summarizing", "meeting_id": "m1"})
+            serde_json::json!({"event": "status", "status": "summarizing", "meeting_id": "m1", "recording_notice": false})
         );
         let v = next(&mut lines).await;
         assert_eq!(v["event"], "summary_ready");
@@ -803,6 +825,41 @@ mod tests {
         assert_eq!(value["chunk_count"], 3);
         assert_eq!(value["diarization"]["enabled"], true);
         assert_eq!(value["diarization"]["backend"], "simple");
+
+        hub.cleanup();
+    }
+
+    #[tokio::test]
+    async fn hello_and_status_carry_the_recording_notice() {
+        let (_tmp, path) = temp_socket_dir();
+        let hub = MeetingEventHub::start(path.clone())
+            .await
+            .expect("start hub");
+
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        let hello = read_line(&mut client).await;
+        assert_eq!(hello["recording_notice"], false, "idle default: {hello}");
+
+        let mut state = MeetingHudState::idle();
+        state.status = "recording".to_string();
+        state.recording_notice = true;
+        hub.update_snapshot(&state);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        hub.publish_status("recording");
+        let status = read_line(&mut client).await;
+        assert_eq!(status["event"], "status");
+        assert_eq!(status["recording_notice"], true, "{status}");
+
+        let mut fresh = UnixStream::connect(&path).await.expect("connect");
+        let hello = read_line(&mut fresh).await;
+        assert_eq!(hello["recording_notice"], true, "{hello}");
+
+        // Acknowledged: the next status says so to everyone connected.
+        state.recording_notice = false;
+        hub.update_snapshot(&state);
+        hub.publish_status("recording");
+        let status = read_line(&mut client).await;
+        assert_eq!(status["recording_notice"], false, "{status}");
 
         hub.cleanup();
     }

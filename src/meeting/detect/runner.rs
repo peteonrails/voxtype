@@ -86,10 +86,13 @@ pub struct Controller<N: Notifier, M: MeetingControl> {
     open: HashMap<u32, Asking>,
 }
 
+/// The prompt's reminder that voxtype tells no one else.
+pub const CONSENT_LINE: &str = "Let the others know you're transcribing.";
+
 pub fn record_notice(call: &Call) -> Notice {
     Notice {
         summary: format!("{} call detected", call.app),
-        body: format!("Record \"{}\" as a meeting?", call.title),
+        body: format!("Record \"{}\" as a meeting?\n{}", call.title, CONSENT_LINE),
         actions: vec![
             (notify::ACTION_DEFAULT.into(), "Record".into()),
             (notify::ACTION_RECORD.into(), "Record".into()),
@@ -599,7 +602,7 @@ mod tests {
         assert_eq!(
             log.take(),
             vec![
-                "show 1 Record \"Meet - abc-defg-hij\" as a meeting? [default,record,dismiss]",
+                "show 1 Record \"Meet - abc-defg-hij\" as a meeting?\nLet the others know you're transcribing. [default,record,dismiss]",
                 "start Meet - abc-defg-hij",
                 "close 1",
             ]
@@ -666,7 +669,7 @@ mod tests {
         assert_eq!(
             log.take(),
             vec![
-                "show 1 Record \"Zoom Meeting\" as a meeting? [default,record,dismiss]",
+                "show 1 Record \"Zoom Meeting\" as a meeting?\nLet the others know you're transcribing. [default,record,dismiss]",
                 "close 1",
                 "show 2 Zoom released the microphone. Stop the meeting recording? [stop,keep]",
                 "stop",

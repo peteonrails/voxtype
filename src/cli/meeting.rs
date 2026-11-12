@@ -267,6 +267,26 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show the recording-consent notice, or acknowledge it
+    ///
+    /// Laws on recording and transcribing conversations differ by place, and
+    /// some require everyone on the call to agree. Voxtype doesn't tell the
+    /// other people for you. Until you acknowledge this, `meeting start`
+    /// prints it on stderr and the meeting views show it. --ack records that
+    /// you have read it.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting notice\n  \
+        voxtype meeting notice --ack\n  \
+        voxtype meeting notice --json")]
+    Notice {
+        /// Record that you have read the notice, so it is no longer shown
+        #[arg(long)]
+        ack: bool,
+
+        /// Output as JSON: {"notice", "acknowledged", "acknowledged_at"}
+        #[arg(long)]
+        json: bool,
+    },
     /// Read or write a meeting's notes
     ///
     /// Free-text notes kept in notes.md in the meeting's folder. With no

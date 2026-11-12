@@ -192,8 +192,8 @@ async fn record_on_the_notification_starts_the_meeting() {
     };
     assert_eq!(
         seen[0],
-        "notify Google Meet call detected | Record \"Meet - abc-defg-hij\" as a meeting? \
-         | default,Record,record,Record,dismiss,Dismiss"
+        "notify Google Meet call detected | Record \"Meet - abc-defg-hij\" as a meeting?\nLet the others know \
+         you're transcribing. | default,Record,record,Record,dismiss,Dismiss"
     );
     assert!(seen.contains(&"close 7".to_string()), "{seen:?}");
     assert_eq!(

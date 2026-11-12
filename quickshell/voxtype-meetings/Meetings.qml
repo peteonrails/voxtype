@@ -413,6 +413,8 @@ Item {
   property var lastExport: null
   // The Transcript tab's speaker how-to, dismissed for this session.
   property bool speakerHintDismissed: false
+  // "Got it" on the recording-consent notice, until the daemon confirms.
+  property bool noticeDismissed: false
 
   function exportName(format) {
     var started = Date.parse(String(feed.startedAt || "").replace(/(\.\d{3})\d+/, "$1"))
@@ -692,6 +694,7 @@ Item {
       view.pendingDelete = Qt.binding(function() { return root.pendingDelete !== null })
       view.lastExport = Qt.binding(function() { return root.lastExport })
       view.speakerHintDismissed = Qt.binding(function() { return root.speakerHintDismissed })
+      view.noticeDismissed = Qt.binding(function() { return root.noticeDismissed })
       view.playingHere = Qt.binding(function() { return playback.playing && playback.meetingId === feed.meetingId })
       view.playTrack = Qt.binding(function() { return playback.track })
       view.playingSegId = Qt.binding(function() { return root.playingSegId })
@@ -735,5 +738,10 @@ Item {
     function onCloseRequested() { root.closeRequested() }
     function onErrorDismissed() { root.actionError = "" }
     function onSpeakerHintDismissRequested() { root.speakerHintDismissed = true }
+    function onNoticeAcknowledged() {
+      // Hide it at once; the daemon's next status confirms it for every view.
+      root.noticeDismissed = true
+      meetingCli.ackNotice()
+    }
   }
 }
