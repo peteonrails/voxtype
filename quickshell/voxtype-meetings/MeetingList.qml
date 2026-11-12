@@ -49,7 +49,9 @@ Item {
 
   function duration(m) {
     if (m.duration_secs === undefined || m.duration_secs === null)
-      return String(m.status) === "active" || String(m.status) === "paused" ? "in progress" : ""
+      // The list shows only with no meeting on screen, so an active one here
+      // is a recording a crash left unfinished.
+      return String(m.status) === "active" || String(m.status) === "paused" ? "unfinished" : ""
     var mins = Math.round(Number(m.duration_secs) / 60)
     if (mins < 1) return "under a minute"
     if (mins < 60) return mins + " min"

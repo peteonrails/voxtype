@@ -733,6 +733,40 @@ def search(state, args):
     return 0
 
 
+def finish(state, args):
+    """meeting finish M [--json]: complete one meeting left active by a
+    crash. Proposed, not in a released voxtype: state["finish_missing"]
+    answers as a voxtype without it; state["finish_error"] fails."""
+    if state.get("finish_missing"):
+        print("error: unrecognized subcommand 'finish'", file=sys.stderr)
+        return 2
+    if state.get("finish_error"):
+        print("Error: " + state["finish_error"], file=sys.stderr)
+        return 1
+    for m in state.get("meetings", []):
+        if m["id"] == args[0]:
+            m["status"] = "completed"
+            m["duration_secs"] = 1260
+            m["ended_at"] = "2026-11-11T09:21:00Z"
+            save(state)
+            print(json.dumps(m) if "--json" in args else "Finished meeting " + m["id"])
+            return 0
+    print("Error: Meeting not found: " + args[0], file=sys.stderr)
+    return 1
+
+
+def delete_meeting(state, args):
+    """meeting delete M --force"""
+    before = len(state.get("meetings", []))
+    state["meetings"] = [m for m in state.get("meetings", []) if m["id"] != args[0]]
+    if len(state["meetings"]) == before:
+        print("Error: Meeting not found: " + args[0], file=sys.stderr)
+        return 1
+    save(state)
+    print("Deleted meeting " + args[0])
+    return 0
+
+
 def soundcheck(state, args):
     """meeting soundcheck [--seconds N] [--json] | --stop
 
@@ -857,6 +891,10 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "finish":
+        return finish(state, args[2:])
+    elif action == "delete" and "--force" in args:
+        return delete_meeting(state, args[2:])
     elif action == "search":
         return search(state, args[2:])
     elif action == "soundcheck":

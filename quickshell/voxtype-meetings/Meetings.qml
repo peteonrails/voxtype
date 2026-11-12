@@ -153,6 +153,72 @@ Item {
     onFailedToStart: root.listError = MT.missingCli(root.bin)
   }
 
+  // ------------------------------------------------------------ recovery
+
+  // Meetings the list still calls active or paused that are not the one
+  // recording: left unfinished when voxtype stopped during them. The daemon
+  // completes these when it starts (storage's complete_stale_meetings), so
+  // they show while it is down, or before it has started again.
+  readonly property var staleMeetings: {
+    var out = []
+    for (var i = 0; i < root.pastMeetings.length; i++) {
+      var m = root.pastMeetings[i]
+      var st = String(m.status || "")
+      if (st !== "active" && st !== "paused") continue
+      if (feed.active && String(m.id) === feed.meetingId) continue
+      out.push(m)
+    }
+    return out
+  }
+  property string recoveryError: ""
+  // The meeting a Finish or Discard is running for.
+  property string recoveryBusy: ""
+
+  // `voxtype meeting finish <id> --json`: completes that one meeting the way
+  // the daemon's start does, transcribing what the crash left if the audio
+  // was kept. A voxtype without it finishes them only when it starts.
+  function finishStale(id) {
+    if (root.recoveryBusy !== "") return
+    root.recoveryError = ""
+    root.recoveryBusy = id
+    recoveryProc.kind = "finish"
+    recoveryProc.err = ""
+    recoveryProc.launch([root.bin, "meeting", "finish", id, "--json"])
+  }
+
+  function discardStale(id) {
+    if (root.recoveryBusy !== "") return
+    root.recoveryError = ""
+    root.recoveryBusy = id
+    recoveryProc.kind = "discard"
+    recoveryProc.err = ""
+    recoveryProc.launch([root.bin, "meeting", "delete", id, "--force"])
+  }
+
+  MeetingProcess {
+    id: recoveryProc
+    property string kind: ""
+    property string err: ""
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: recoveryProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      root.recoveryBusy = ""
+      if (code === 0) {
+        root.refreshList()
+        return
+      }
+      if (recoveryProc.kind === "finish" && /unrecognized subcommand/i.test(recoveryProc.err))
+        root.recoveryError = "This voxtype cannot finish a recording from here. It finishes it the next time it starts: "
+          + (root.daemonRunning || feed.connected ? "systemctl --user restart voxtype" : "systemctl --user start voxtype") + "."
+      else
+        root.recoveryError = MT.cliProblem(recoveryProc.err, "finishing a recording")
+          || "voxtype meeting " + recoveryProc.kind + " exited " + code
+    }
+    onFailedToStart: {
+      root.recoveryBusy = ""
+      root.recoveryError = MT.missingCli(root.bin)
+    }
+  }
+
   // ------------------------------------------------------------ daemon
 
   // While meeting.sock cannot be reached: is the daemon down, or running
@@ -721,6 +787,9 @@ Item {
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })
       view.pastMeetings = Qt.binding(function() { return root.pastMeetings })
+      view.staleMeetings = Qt.binding(function() { return root.staleMeetings })
+      view.recoveryError = Qt.binding(function() { return root.recoveryError })
+      view.recoveryBusy = Qt.binding(function() { return root.recoveryBusy })
       view.listLoading = Qt.binding(function() { return root.listLoading })
       view.listError = Qt.binding(function() { return root.listError })
       view.listHasMore = Qt.binding(function() { return root.listHasMore })
@@ -754,6 +823,8 @@ Item {
     function onAnnotateRequested(segId, text, highlight) { root.annotate(segId, text, highlight) }
     function onSettingsRequested() { root.settingsRequested() }
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
+    function onFinishStaleRequested(meetingId) { root.finishStale(meetingId) }
+    function onDiscardStaleRequested(meetingId) { root.discardStale(meetingId) }
     function onSearchResultRequested(meetingId, startMs) { root.openResult(meetingId, startMs) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }

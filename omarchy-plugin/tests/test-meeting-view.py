@@ -114,6 +114,12 @@ Scenarios:
               meeting on the line, the query kept on Back, Escape back to the
               list, no matches, a title match
   search-old  a voxtype without `meeting search` is called too old
+  recovery    a meeting the list still calls active, with none recording:
+              the "Unfinished recording found" card; Finish runs
+              `meeting finish` and the card goes; Discard asks first, Keep
+              it backs out, Discard for good runs `meeting delete --force`
+  recovery-old  a voxtype without `meeting finish` says the meeting finishes
+              when voxtype next starts
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -148,7 +154,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
-             "levels", "search", "search-old")
+             "levels", "search", "search-old", "recovery", "recovery-old")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -316,6 +322,7 @@ STATE = {
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
     "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
     "search": {"search_delay": 0.6},
+    "recovery-old": {"finish_missing": True},
     "search-old": {"old": True},
     "soundcheck-error": {"sc_error": "Audio connection failed: no such device 'usb-mic'"},
     "summary-local-error": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE],
@@ -382,6 +389,16 @@ def past_meetings(data, scenario):
         seg(1, 9, "Busy, but good.", "loopback", "Remote"),
         seg(2, 30, "Any blockers?", "microphone", "You"),
     ])
+    if scenario.startswith("recovery"):
+        # Left active by a crash: no end, no duration.
+        for mid, title, started in ((STALE[0], "Planning", "2026-11-11T09:00:00Z"),
+                                    (STALE[1], "Vendor call", "2026-11-11T08:00:00Z")):
+            if scenario == "recovery-old" and mid == STALE[1]:
+                continue
+            add(mid, title, started, 20, [seg(0, 1, "Let's plan the week.", "microphone", "You")])
+            for e in entries:
+                if e["id"] == mid:
+                    e.update(status="active", duration_secs=None, ended_at=None)
     if scenario == "list":
         for i in range(58):
             day = 7 - i // 10
@@ -391,7 +408,9 @@ def past_meetings(data, scenario):
 
 
 PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-                  "list-old", "export-past", "search", "search-old"}
+                  "list-old", "export-past", "search", "search-old", "recovery", "recovery-old"}
+
+STALE = ["c3000000-0000-4000-8000-000000000003", "c3000000-0000-4000-8000-000000000004"]
 
 
 def run(scenario, host, shell, evidence):
@@ -646,6 +665,11 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [q("empty state"), q("zebra"), q("1:1")], "meeting commands")
     elif scenario == "search-old":
         expect(meeting, [["meeting", "search", "layout", "--limit", "30", "--json"]], "meeting commands")
+    elif scenario == "recovery":
+        expect(meeting, [["meeting", "finish", STALE[0], "--json"],
+                         ["meeting", "delete", STALE[1], "--force"]], "meeting commands")
+    elif scenario == "recovery-old":
+        expect(meeting, [["meeting", "finish", STALE[0], "--json"]], "meeting commands")
     elif scenario == "levels":
         expect(meeting, [], "meeting commands")
     elif scenario == "soundcheck-error":

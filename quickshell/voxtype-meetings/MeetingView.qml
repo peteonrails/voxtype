@@ -28,6 +28,12 @@ Item {
   property var assistant: null
   // MeetingSoundCheck, from the controller.
   property var soundcheck: null
+  // Unfinished recordings (see Meetings.staleMeetings), and Finish/Discard.
+  property var staleMeetings: []
+  property string recoveryError: ""
+  property string recoveryBusy: ""
+  signal finishStaleRequested(string meetingId)
+  signal discardStaleRequested(string meetingId)
   // MeetingSearch, from the controller.
   property var search: null
   signal searchResultRequested(string meetingId, real startMs)
@@ -39,6 +45,11 @@ Item {
     if (!root.soundcheck) return
     root.soundCheckOpen = true
     if (!root.soundcheck.running) root.soundcheck.start()
+  }
+
+  function recoveryWhen(iso) {
+    var t = Date.parse(String(iso || "").replace(/(\.\d{3})\d+/, "$1"))
+    return isNaN(t) ? "" : Qt.formatDateTime(new Date(t), "ddd d MMM, hh:mm")
   }
 
   function closeSoundCheck() {
@@ -997,6 +1008,105 @@ Item {
               + "After updating, restart it: systemctl --user restart voxtype. Past meetings are still here."
             : "Start it with systemctl --user start voxtype (or voxtype daemon). This view connects as soon as it is running. Past meetings are still here."
           color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        Repeater {
+          model: root.staleMeetings
+          delegate: Rectangle {
+            id: stale
+            required property var modelData
+            required property int index
+            objectName: "recoveryCard_" + index
+            readonly property string meetingId: String(modelData.id)
+            readonly property bool busy: root.recoveryBusy === stale.meetingId
+            property bool confirming: false
+            Layout.fillWidth: true
+            implicitHeight: staleColumn.implicitHeight + root.theme.padX * 2
+            radius: Math.min(root.theme.radius, 6)
+            color: root.theme.alpha(root.theme.accent, 0.10)
+            border.width: 1
+            border.color: root.theme.alpha(root.theme.accent, 0.5)
+
+            Column {
+              id: staleColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: root.theme.padX
+              spacing: root.theme.md
+
+              Text {
+                width: parent.width
+                text: "Unfinished recording found"
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.body
+                font.bold: true
+              }
+              Text {
+                objectName: "recoveryText"
+                width: parent.width
+                text: (stale.modelData.title ? String(stale.modelData.title) : "A meeting")
+                  + (root.recoveryWhen(stale.modelData.started_at) !== "" ? ", started " + root.recoveryWhen(stale.modelData.started_at) : "")
+                  + ", did not finish, most likely because voxtype stopped during it. "
+                  + (stale.confirming ? "Discarding deletes its transcript and any kept audio."
+                                      : "Finish keeps what was recorded and closes it.")
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Flow {
+                width: parent.width
+                spacing: root.theme.gap
+                MeetingButton {
+                  objectName: "recoveryFinish"
+                  theme: root.theme
+                  visible: !stale.confirming
+                  enabled: root.recoveryBusy === ""
+                  text: stale.busy ? "Finishing…" : "Finish it"
+                  bordered: true
+                  onClicked: root.finishStaleRequested(stale.meetingId)
+                }
+                MeetingButton {
+                  objectName: "recoveryDiscard"
+                  theme: root.theme
+                  visible: !stale.confirming
+                  enabled: root.recoveryBusy === ""
+                  text: "Discard"
+                  bordered: true
+                  onClicked: stale.confirming = true
+                }
+                MeetingButton {
+                  objectName: "recoveryDiscardConfirm"
+                  theme: root.theme
+                  visible: stale.confirming
+                  enabled: root.recoveryBusy === ""
+                  text: stale.busy ? "Discarding…" : "Discard for good"
+                  bordered: true
+                  onClicked: root.discardStaleRequested(stale.meetingId)
+                }
+                MeetingButton {
+                  objectName: "recoveryKeep"
+                  theme: root.theme
+                  visible: stale.confirming
+                  text: "Keep it"
+                  onClicked: stale.confirming = false
+                }
+              }
+            }
+          }
+        }
+
+        Text {
+          objectName: "recoveryError"
+          Layout.fillWidth: true
+          visible: root.recoveryError !== ""
+          text: root.recoveryError
+          color: root.theme.urgent
           font.family: root.theme.fontFamily
           font.pixelSize: root.theme.bodySmall
           wrapMode: Text.WordWrap

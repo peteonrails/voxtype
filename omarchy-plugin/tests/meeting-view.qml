@@ -145,6 +145,8 @@ Item {
           else if (s === "summary-error") tc.driveSummaryError()
           else if (s === "soundcheck") tc.driveSoundCheck()
           else if (s === "levels") tc.driveLevels()
+          else if (s === "recovery") tc.driveRecovery()
+          else if (s === "recovery-old") tc.driveRecoveryOld()
           else if (s === "search") tc.driveSearch()
           else if (s === "search-old") tc.driveSearchOld()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
@@ -1831,6 +1833,37 @@ Item {
       click(find(view(), "soundCheckButton"), "Sound check")
       waitFor(function() { return shown(find(view(), "soundCheckPane")) }, "sound check pane")
       check(!shown(find(view(), "meetingListPane")), "the pane replaces the list")
+    }
+
+    function driveRecovery() {
+      openView()
+      waitFor(function() { return shown(find(view(), "recoveryCard_1")) }, "two unfinished recordings")
+      var first = find(view(), "recoveryCard_0")
+      check(String(find(first, "recoveryText").text).indexOf("Planning, started ") === 0, "names it: " + find(first, "recoveryText").text)
+      shot("recovery")
+      click(find(first, "recoveryFinish"), "Finish it")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_1")) && shown(find(view(), "recoveryCard_0")) }, "one left", 6000)
+      var second = find(view(), "recoveryCard_0")
+      check(String(find(second, "recoveryText").text).indexOf("Vendor call") === 0, "the other one: " + find(second, "recoveryText").text)
+      click(find(second, "recoveryDiscard"), "Discard")
+      waitFor(function() { return shown(find(second, "recoveryDiscardConfirm")) }, "asks first")
+      check(String(find(second, "recoveryText").text).indexOf("Discarding deletes") !== -1, "says what goes")
+      click(find(second, "recoveryKeep"), "Keep it")
+      waitFor(function() { return shown(find(second, "recoveryFinish")) }, "backed out")
+      click(find(second, "recoveryDiscard"), "Discard again")
+      click(find(second, "recoveryDiscardConfirm"), "Discard for good")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "no unfinished recordings left", 6000)
+      check(!shown(find(view(), "recoveryError")), "no error")
+    }
+
+    function driveRecoveryOld() {
+      openView()
+      waitFor(function() { return shown(find(view(), "recoveryCard_0")) }, "the card")
+      click(find(find(view(), "recoveryCard_0"), "recoveryFinish"), "Finish it")
+      waitFor(function() { return shown(find(view(), "recoveryError")) }, "the explanation", 6000)
+      check(txt("recoveryError").indexOf("finishes it the next time it starts") !== -1, "says when: " + txt("recoveryError"))
+      check(shown(find(view(), "recoveryCard_0")), "still listed")
+      shot("recovery-old")
     }
 
     function searchFor(text) {
