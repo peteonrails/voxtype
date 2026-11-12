@@ -45,6 +45,10 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    notice is unacknowledged) and, as the
                                    daemon does after `meeting notice --ack`,
                                    repeat the current status carrying it
+  {"cmd": "announcement", "state": S, "app"?, "detail"?, "text": T}
+                                   the recording announcement's outcome, kept
+                                   for hello (until idle) and broadcast as an
+                                   announcement event
   {"cmd": "title", "title": T, "meeting_id"?}
                                    a rename, announced as title_changed
   {"cmd": "drop"}                  close every connection, keep listening
@@ -98,6 +102,7 @@ class Server:
                            "title": self.state.get("title"), "started_at": self.state.get("started_at")}
         self.state = {"status": "idle", "meeting_id": None, "title": None, "started_at": None,
                       "chunk_count": 0, "diarization": {"enabled": False}, "segments": []}
+        self.announcement = None
         self.labels = {}
 
     def up(self):
@@ -139,6 +144,8 @@ class Server:
         for key in ("meeting_id", "title", "started_at"):
             if self.state.get(key):
                 ev[key] = self.state[key]
+        if self.announcement:
+            ev["announcement"] = self.announcement
         return ev
 
     def send(self, conn, ev):
@@ -264,6 +271,9 @@ class Server:
         elif kind == "playback":
             self.broadcast({"event": "playback", "meeting_id": cmd["meeting_id"], "track": cmd["track"],
                             "state": cmd["state"], "from_ms": cmd["from_ms"]})
+        elif kind == "announcement":
+            self.announcement = {k: cmd[k] for k in ("state", "app", "detail", "text") if k in cmd}
+            self.broadcast(dict(self.announcement, event="announcement", meeting_id=self.state["meeting_id"]))
         elif kind == "notice":
             self.notice = bool(cmd.get("pending"))
             self.broadcast({"event": "status", "status": self.state["status"], "recording_notice": self.notice})

@@ -48,6 +48,10 @@ Item {
   // The daemon's `recording_notice`: the recording-consent notice has not
   // been acknowledged yet. Absent (an older daemon) reads as false.
   property bool recordingNotice: false
+  // The recording announcement's outcome ({state, app, detail, text}) when
+  // the meeting announces; null otherwise. state is "waiting", "call",
+  // "local" or "failed".
+  property var announcement: null
 
   // speaker key → human name, from segments' speaker_label and from renames
   // made here. Replaced (never mutated) so bindings see each change.
@@ -469,7 +473,10 @@ Item {
     // of the segment_updated contract used it.
     var kind = String(ev.event || ev.type || "")
     if (kind === "hello" || kind === "status") root.recordingNotice = ev.recording_notice === true
-    if (kind === "hello") {
+    if (kind === "hello") root.announcement = ev.announcement ? ev.announcement : null
+    if (kind === "announcement") {
+      root.announcement = ev
+    } else if (kind === "hello") {
       root.handleHello(ev)
     } else if (kind === "segments") {
       var list = ev.segments && ev.segments.length !== undefined ? ev.segments : []
@@ -504,6 +511,7 @@ Item {
         return
       }
       if (next === "idle") {
+        root.announcement = null
         // The meeting is over (the daemon's next hello is empty), but its
         // lines stay on screen to be fixed.
         if (root.active) root.endMeeting()

@@ -187,6 +187,11 @@ Item {
   property bool noticeDismissed: false
   readonly property bool showRecordingNotice: root.live && !root.noticeDismissed && root.feed !== null && root.feed.recordingNotice
   signal noticeAcknowledged()
+  // The recording announcement, while the meeting runs. Played only on the
+  // speakers (or not at all) reads as a warning: the call did not hear it.
+  readonly property var announcement: root.live && root.feed !== null ? root.feed.announcement : null
+  readonly property bool announcementMissedCall: root.announcement !== null
+      && (root.announcement.state === "local" || root.announcement.state === "failed")
 
   readonly property string status: feed ? feed.status : ""
   readonly property bool connected: feed ? feed.connected : false
@@ -893,6 +898,17 @@ Item {
           text: "Got it"
           onClicked: root.noticeAcknowledged()
         }
+      }
+
+      Text {
+        objectName: "announcementStatus"
+        Layout.fillWidth: true
+        visible: root.announcement !== null
+        text: root.announcement ? "Announcement: " + String(root.announcement.text || root.announcement.state) : ""
+        color: root.announcementMissedCall ? root.theme.urgent : root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+        wrapMode: Text.WordWrap
       }
 
       Rectangle {
