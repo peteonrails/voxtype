@@ -28,6 +28,9 @@ Item {
   property var assistant: null
   // MeetingSoundCheck, from the controller.
   property var soundcheck: null
+  // The last edit or move, while it can be undone ("Line edited.").
+  property string changeLabel: ""
+  signal undoChangeRequested()
   // Unfinished recordings (see Meetings.staleMeetings), and Finish/Discard.
   property var staleMeetings: []
   property string recoveryError: ""
@@ -1203,7 +1206,7 @@ Item {
   // A deleted line can be had back for a few seconds; then it is gone.
   Rectangle {
     objectName: "undoBar"
-    visible: root.pendingDelete && root.hasMeeting
+    visible: (root.pendingDelete || root.changeLabel !== "") && root.hasMeeting
     z: 8
     anchors.horizontalCenter: parent.horizontalCenter
     anchors.bottom: parent.bottom
@@ -1221,7 +1224,8 @@ Item {
       spacing: root.theme.gap
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        text: "Line deleted."
+        objectName: "undoText"
+        text: root.pendingDelete ? "Line deleted." : root.changeLabel
         color: root.theme.fg
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
@@ -1231,7 +1235,7 @@ Item {
         theme: root.theme
         text: "Undo"
         bordered: true
-        onClicked: root.undoDeleteRequested()
+        onClicked: root.pendingDelete ? root.undoDeleteRequested() : root.undoChangeRequested()
       }
     }
   }

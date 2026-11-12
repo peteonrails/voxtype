@@ -146,6 +146,9 @@ Item {
           else if (s === "soundcheck") tc.driveSoundCheck()
           else if (s === "levels") tc.driveLevels()
           else if (s === "recovery") tc.driveRecovery()
+          else if (s === "undo-edit") tc.driveUndoEdit()
+          else if (s === "undo-reassign") tc.driveUndoReassign()
+          else if (s === "seek") tc.driveSeek()
           else if (s === "recovery-old") tc.driveRecoveryOld()
           else if (s === "search") tc.driveSearch()
           else if (s === "search-old") tc.driveSearchOld()
@@ -1673,6 +1676,7 @@ Item {
       mouseMove(item, 30, 4)
       waitFor(function() { return shown(find(item, "lineEditButton")) }, "hover actions")
       check(!shown(find(item, "linePlayButton")), "no ▶ without audio")
+      check(!find(item, "lineSeek").enabled, "the time is not a link without audio")
       check(shown(find(view(), "audioHintSettings")) === host.omarchy, "Settings link where the host has Settings")
       shot("audio-not-kept")
       click(find(view(), "audioHintDismiss"), "dismiss")
@@ -1833,6 +1837,74 @@ Item {
       click(find(view(), "soundCheckButton"), "Sound check")
       waitFor(function() { return shown(find(view(), "soundCheckPane")) }, "sound check pane")
       check(!shown(find(view(), "meetingListPane")), "the pane replaces the list")
+    }
+
+    function editLine(i, text) {
+      lineAction(i, "lineEditButton")
+      var field = find(lineItem(i), "lineEditField")
+      waitFor(function() { return field.visible && field.activeFocus }, "editor on line " + i)
+      field.text = text
+      keyClick(Qt.Key_Return)
+      waitFor(idleCli, "edit finished")
+    }
+
+    function driveUndoEdit() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      editLine(1, "Yes, very loud and clear.")
+      waitFor(function() { return shown(find(view(), "undoBar")) }, "the undo bar")
+      check(txt("undoText") === "Line edited.", "says: " + txt("undoText"))
+      shot("undo-edit")
+      click(find(view(), "undoButton"), "Undo")
+      check(lines()[1][2] === "Yes, loud and clear.", "back at once: " + lines()[1][2])
+      check(!shown(find(view(), "undoBar")), "bar gone after Undo")
+      waitFor(idleCli, "reset finished")
+      wait(300)
+      check(lines()[1][2] === "Yes, loud and clear." && !shown(find(lineItem(1), "lineEdited")), "the transcribed text, not marked edited")
+      // A second correction undoes to the first one, not to the original.
+      editLine(3, "It went amber.")
+      editLine(3, "It went red.")
+      click(find(view(), "undoButton"), "Undo")
+      waitFor(idleCli, "undo finished")
+      wait(300)
+      check(lines()[3][2] === "It went amber." && shown(find(lineItem(3), "lineEdited")), "the earlier correction: " + lines()[3][2])
+      // Nothing to undo once it ran; the window passes without one.
+      check(!shown(find(view(), "undoBar")), "no bar after the undo")
+    }
+
+    function driveUndoReassign() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      openChooser(1)
+      pick("You")
+      waitFor(idleCli, "move finished")
+      waitFor(function() { return shown(find(view(), "undoBar")) }, "the undo bar")
+      check(txt("undoText") === "Line moved to You.", "says: " + txt("undoText"))
+      click(find(view(), "undoButton"), "Undo")
+      waitFor(idleCli, "undo finished")
+      wait(300)
+      check(lines()[1][1] === "Remote" && moved(1) === "", "back on Remote, not marked moved: " + lines()[1][1] + " " + moved(1))
+      // A refused move goes back by itself and leaves nothing to undo.
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ fail: { reassign: "Error: segment 4 is locked." } })])
+      openChooser(3)
+      pick("You")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      waitFor(function() { return lines()[3][1] === "Remote" }, "put back")
+      check(!shown(find(view(), "undoBar")), "nothing to undo")
+    }
+
+    function driveSeek() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var stamp = find(lineItem(2), "lineSeek")
+      check(stamp.enabled, "the time is a link")
+      click(stamp, "line 3's time")
+      waitFor(function() { return shown(find(view(), "transportStop")) && playing(2) }, "plays from line 3")
+      shot("seek")
+      click(find(lineItem(0), "lineSeek"), "line 1's time")
+      waitFor(function() { return playing(0) && !playing(2) }, "moved to line 1", 5000)
+      click(find(view(), "transportStop"), "Stop")
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "stopped")
     }
 
     function driveRecovery() {

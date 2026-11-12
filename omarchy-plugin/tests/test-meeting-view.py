@@ -120,6 +120,12 @@ Scenarios:
               it backs out, Discard for good runs `meeting delete --force`
   recovery-old  a voxtype without `meeting finish` says the meeting finishes
               when voxtype next starts
+  undo-edit   Undo after an edit: `edit --reset` for a first correction, the
+              earlier text for a later one; the bar leaves after its window
+  undo-reassign  Undo after moving a line: `reassign --reset`; a refused move
+              leaves nothing to undo
+  seek        a line's time plays the kept audio from that line, and moves a
+              running playback; without kept audio it is not a link
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -154,7 +160,8 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
-             "levels", "search", "search-old", "recovery", "recovery-old")
+             "levels", "search", "search-old", "recovery", "recovery-old",
+             "undo-edit", "undo-reassign", "seek")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -286,6 +293,9 @@ INITIAL = {
     "play-errors": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
     "levels": lambda: [running_meeting()],
+    "undo-edit": lambda: [running_meeting()],
+    "undo-reassign": lambda: [running_meeting()],
+    "seek": lambda: [running_meeting()],
     "summary-local-error": lambda: [running_meeting()],
     "summary-error-cli": lambda: [running_meeting()],
     "summary-stale": lambda: [running_meeting()],
@@ -323,6 +333,7 @@ STATE = {
     "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
     "search": {"search_delay": 0.6},
     "recovery-old": {"finish_missing": True},
+    "seek": {"play_speed": 10},
     "search-old": {"old": True},
     "soundcheck-error": {"sc_error": "Audio connection failed: no such device 'usb-mic'"},
     "summary-local-error": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE],
@@ -665,6 +676,19 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [q("empty state"), q("zebra"), q("1:1")], "meeting commands")
     elif scenario == "search-old":
         expect(meeting, [["meeting", "search", "layout", "--limit", "30", "--json"]], "meeting commands")
+    elif scenario == "undo-edit":
+        def ed(seg, *rest):
+            return ["meeting", "edit", MEETING_ID, seg] + list(rest) + ["--json"]
+        expect(meeting, [ed("2", "Yes, very loud and clear."), ed("2", "--reset"),
+                         ed("4", "It went amber."), ed("4", "It went red."), ed("4", "It went amber.")],
+               "meeting commands")
+    elif scenario == "undo-reassign":
+        expect(meeting, [reassign("2", "You"), ["meeting", "reassign", MEETING_ID, "2", "--reset", "--json"],
+                         reassign("4", "You")], "meeting commands")
+    elif scenario == "seek":
+        def play_from(seg):
+            return ["meeting", "play", MEETING_ID, "--segment", seg, "--track", "mixed", "--json"]
+        expect(meeting, [play_from("3"), play_from("1"), ["meeting", "play", "--stop", "--json"]], "meeting commands")
     elif scenario == "recovery":
         expect(meeting, [["meeting", "finish", STALE[0], "--json"],
                          ["meeting", "delete", STALE[1], "--force"]], "meeting commands")

@@ -301,6 +301,7 @@ Item {
     // back if not.
     onReassignFinished: function(extra, ok, message, segment) {
       if (!ok) {
+        if (extra && extra.snapshot) root.dropChangeFor("reassign", extra.snapshot.segId)
         feed.restoreSnapshot(extra ? extra.snapshot : null)
         return
       }
@@ -309,6 +310,7 @@ Item {
     onSegmentActionFinished: function(action, extra, ok, message, segment) {
       if (action === "edit") {
         if (!ok && extra && feed.textOf(extra.segId) !== null) {
+          root.dropChangeFor("edit", extra.segId)
           feed.setText(extra.segId, extra.before)
           feed.setOriginalText(extra.segId, extra.original)
         } else if (ok && segment) {
@@ -355,6 +357,9 @@ Item {
     var snap = feed.snapshot(segId)
     if (!snap) return
     root.actionError = ""
+    if (!root.undoing && key !== snap.speaker)
+      root.noteChange({ kind: "reassign", segId: segId, snap: snap,
+                        label: "Line moved to " + feed.displayName(key) + "." })
     feed.applyReassign(segId, key)
     meetingCli.reassign(feed.meetingId, segId, speaker, { snapshot: snap })
   }
@@ -384,6 +389,7 @@ Item {
     var next = String(text).trim()
     if (before === null || next === "" || next === before) return
     root.actionError = ""
+    if (!root.undoing) root.noteChange({ kind: "edit", segId: segId, before: before, original: original, label: "Line edited." })
     feed.setText(segId, next)
     // The first correction keeps what was transcribed.
     if (original === "") feed.setOriginalText(segId, before)
@@ -408,6 +414,7 @@ Item {
   readonly property int undoMs: 5000
 
   function deleteLine(segId) {
+    root.dropChange()
     root.commitDelete()
     var row = feed.removeRow(segId)
     if (!row) return
@@ -432,9 +439,53 @@ Item {
 
   Timer { id: undoTimer; interval: root.undoMs; onTriggered: root.commitDelete() }
 
+  // Undo for the last edit or move. Their command has already run, so Undo
+  // runs the opposite one: `edit --reset` or the earlier text, `reassign
+  // --reset` or the earlier speaker. One undo at a time, shared with delete.
+  property var lastChange: null
+  property bool undoing: false
+  readonly property string changeLabel: root.lastChange ? root.lastChange.label : ""
+
+  function noteChange(change) {
+    root.commitDelete()
+    change.meeting = feed.meetingId
+    root.lastChange = change
+    changeTimer.restart()
+  }
+
+  function dropChange() {
+    changeTimer.stop()
+    root.lastChange = null
+  }
+
+  // A change the CLI refused was put back already: nothing to undo.
+  function dropChangeFor(kind, segId) {
+    if (root.lastChange && root.lastChange.kind === kind && root.lastChange.segId === segId) root.dropChange()
+  }
+
+  function undoChange() {
+    var c = root.lastChange
+    root.dropChange()
+    if (!c || c.meeting !== feed.meetingId) return
+    root.undoing = true
+    if (c.kind === "edit") {
+      if (c.original === "") root.resetText(c.segId)
+      else root.editText(c.segId, c.before)
+    } else if (c.kind === "reassign") {
+      if (c.snap.originalSpeaker === "") root.restoreSpeaker(c.segId)
+      else root.reassign(c.segId, c.snap.speaker, c.snap.speaker)
+    }
+    root.undoing = false
+  }
+
+  Timer { id: changeTimer; interval: root.undoMs; onTriggered: root.lastChange = null }
+
   Connections {
     target: feed
-    function onMeetingIdChanged() { if (root.pendingDelete && root.pendingDelete.meeting !== feed.meetingId) root.commitDelete() }
+    function onMeetingIdChanged() {
+      if (root.pendingDelete && root.pendingDelete.meeting !== feed.meetingId) root.commitDelete()
+      if (root.lastChange && root.lastChange.meeting !== feed.meetingId) root.dropChange()
+    }
   }
 
   // ------------------------------------------------------------ playback
@@ -795,6 +846,7 @@ Item {
       view.listHasMore = Qt.binding(function() { return root.listHasMore })
       view.daemonRunning = Qt.binding(function() { return root.daemonRunning })
       view.pendingDelete = Qt.binding(function() { return root.pendingDelete !== null })
+      view.changeLabel = Qt.binding(function() { return root.changeLabel })
       view.lastExport = Qt.binding(function() { return root.lastExport })
       view.speakerHintDismissed = Qt.binding(function() { return root.speakerHintDismissed })
       view.playingHere = Qt.binding(function() { return playback.playing && playback.meetingId === feed.meetingId })
@@ -837,6 +889,7 @@ Item {
     function onStopPlaybackRequested() { playback.stop() }
     function onDeleteLineRequested(segId) { root.deleteLine(segId) }
     function onUndoDeleteRequested() { root.undoDelete() }
+    function onUndoChangeRequested() { root.undoChange() }
     function onExportRequested(format) { root.exportMeeting(format) }
     function onOpenFolderRequested(path) { root.openFolder(path) }
     function onExportNoticeDismissed() { root.lastExport = null }
