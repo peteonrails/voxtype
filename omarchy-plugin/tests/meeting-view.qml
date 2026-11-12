@@ -160,6 +160,9 @@ Item {
           else if (s === "share") tc.driveShare()
           else if (s === "share-unavailable") tc.driveShareUnavailable()
           else if (s === "share-old") tc.driveShareOld()
+          else if (s === "actions") tc.driveActions()
+          else if (s === "actions-connect") tc.driveActionsConnect()
+          else if (s === "actions-old") tc.driveActionsOld()
           else if (s === "share-real") tc.driveShareReal()
           else if (s === "share-real-unavailable") tc.driveShareRealUnavailable()
           else if (s === "search") tc.driveSearch()
@@ -1011,7 +1014,11 @@ Item {
       shot("summarizing")
       waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary ready: " + txt("summaryText"), 8000)
       var md = txt("summaryText")
-      check(md.indexOf("**Pete**: Cut the tag") !== -1, "action item with owner: " + md)
+      // Action items are rows of their own (`meeting actions`), in place of
+      // the summary's list.
+      waitFor(function() { return shown(find(view(), "actionRow_0")) }, "action item rows")
+      check(String(find(find(view(), "actionRow_0"), "actionText").text) === "Cut the tag", "the action item")
+      check(txt("summaryText").indexOf("Action items") === -1, "not listed twice")
       check(/<a href="#t=35000"[^>]*>0:35<\/a> Release status/.test(md), "chapter linked: " + md)
       waitFor(function() { return txt("meetingState") === "Ended" }, "Ended after summary_ready")
       shot("summary")
@@ -2186,6 +2193,77 @@ Item {
       check(txt("shareStatus").indexOf("Could not write ") === 0 && txt("shareStatus").indexOf("Permission denied") !== -1,
             "the CLI's reason, without its prefix: " + txt("shareStatus"))
       shot("share-real-refused")
+    }
+
+    // Stop with an auto-summary, then the Summary tab.
+    function summaryReady() {
+      ctl({ cmd: "autosummary", summary: {
+        summary: "A short standup about the release.", decisions: ["Ship today."],
+        action_items: [{ description: "Cut the tag", assignee: "Pete", completed: false },
+                       { description: "Update the release notes", assignee: "Dana", completed: false }], key_points: [],
+        chapters: [] } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary ready", 10000)
+    }
+    function actionRow(i) { return find(view(), "actionRow_" + i) }
+
+    function driveActions() {
+      summaryReady()
+      waitFor(function() { return shown(actionRow(1)) }, "two action items", 6000)
+      check(txt("actionsCount") === "2 of 2 ticked", "all ticked: " + txt("actionsCount"))
+      var first = actionRow(0)
+      check(String(find(first, "actionText").text) === "Cut the tag", "text")
+      check(shown(find(first, "actionOwner")), "the owner chip")
+      check(String(find(first, "actionDue").text) === "due Fri Nov 13" && !shown(find(actionRow(1), "actionDue")), "due only when said")
+      check(String(find(first, "actionTime").text) === "0:35", "time: " + find(first, "actionTime").text)
+      check(txt("summaryText").indexOf("Action items") === -1, "the summary's own list gives way to the rows")
+      check(shown(find(view(), "actionsTodoist")) && !shown(find(view(), "actionsConnect")) && shown(find(view(), "actionsRemind")), "the buttons")
+      shot("actions")
+      // Only the ticked rows go.
+      click(find(actionRow(1), "actionTick"), "untick the second")
+      check(txt("actionsCount") === "1 of 2 ticked", "count: " + txt("actionsCount"))
+      click(find(view(), "actionsTodoist"), "Send to Todoist")
+      waitFor(function() { return txt("actionsNotice") === "1 item sent to Todoist." }, "sent: " + txt("actionsNotice"), 6000)
+      waitFor(function() { return String(find(actionRow(0), "actionSent").text) === "✓ Todoist" && !shown(find(actionRow(1), "actionSent")) }, "✓ on the sent row")
+      // A resend of everything adds only what is new.
+      click(find(actionRow(1), "actionTick"), "tick it again")
+      click(find(view(), "actionsTodoist"), "Send to Todoist again")
+      waitFor(function() { return txt("actionsNotice") === "1 item sent to Todoist, 1 already in Todoist." }, "no duplicate: " + txt("actionsNotice"), 6000)
+      click(find(view(), "actionsRemind"), "Remind me…")
+      waitFor(function() { return shown(find(view(), "remind_15m")) }, "the delays")
+      click(find(view(), "remind_15m"), "In 15 min")
+      waitFor(function() { return txt("actionsNotice") === "2 reminders set." }, "reminders: " + txt("actionsNotice"), 6000)
+      waitFor(function() { return String(find(actionRow(0), "actionSent").text) === "✓ Todoist, reminder" }, "both marks")
+      shot("actions-sent")
+      // The time jumps to the line.
+      var t = find(actionRow(0), "actionTime")
+      mouseClick(t, 2, 2)
+      waitFor(function() { return view().currentTab === "transcript" && find(view(), "transcriptPane").flashSegId === 4 }, "jumped to 0:35")
+    }
+
+    function driveActionsConnect() {
+      summaryReady()
+      waitFor(function() { return shown(actionRow(1)) }, "the action items", 6000)
+      check(!shown(find(view(), "actionsTodoist")) && shown(find(view(), "actionsConnect")), "Connect first")
+      check(!shown(find(view(), "actionsRemind")), "no reminder app, no Remind me")
+      click(find(view(), "actionsConnect"), "Connect Todoist…")
+      waitFor(function() { return txt("actionsConnect") === "Waiting for the browser…" && txt("actionsNotice").indexOf("browser") !== -1 }, "waits on the browser")
+      shot("actions-connecting")
+      waitFor(function() { return shown(find(view(), "actionsTodoist")) && txt("actionsNotice") === "Todoist connected." }, "connected", 6000)
+      sh(["sh", "-c", 'python3 - "$1" <<\'PY\'\nimport json,sys\np=sys.argv[1]\ns=json.load(open(p))\ns["actions_send_fail"]="Todoist refused the task (401): the access was revoked. Connect Todoist again."\njson.dump(s,open(p,"w"))\nPY', "_", __STATE__])
+      click(find(view(), "actionsTodoist"), "Send to Todoist")
+      waitFor(function() { return txt("actionsError").indexOf("Todoist refused the task (401)") === 0 }, "refusal: " + txt("actionsError"), 6000)
+      check(find(view(), "actionsError").color === view().theme.urgent, "in the urgent colour")
+      shot("actions-refused")
+    }
+
+    function driveActionsOld() {
+      summaryReady()
+      wait(800)
+      check(!shown(find(view(), "actionsPanel")), "no panel")
+      check(txt("summaryText").indexOf("## Action items") !== -1, "the summary keeps its own list")
     }
 
     function driveShareOld() {

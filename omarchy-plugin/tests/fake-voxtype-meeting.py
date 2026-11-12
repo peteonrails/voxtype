@@ -879,6 +879,59 @@ def share(state, args):
     return 0
 
 
+DEFAULT_ACTIONS = [
+    {"id": "a1", "text": "Cut the tag", "owner": "Pete", "due": "Fri Nov 13", "source_ms": 35000, "sent": {}},
+    {"id": "a2", "text": "Update the release notes", "owner": "Dana", "due": None, "source_ms": 9000, "sent": {}},
+]
+
+
+def actions(state, args):
+    """meeting actions M --json | M --send todoist|reminder [--in D] (--all|--pick IDS) --json
+    | --connect todoist --json
+
+    PROVISIONAL shape until detect-140's contract: {items, todoist: {connected},
+    reminder: {available}}; a send answers {results: [{id, status:
+    sent|already_sent|failed, reason?}]} and never sends an item twice.
+    state: actions_todoist, actions_reminder, actions_connect_fail,
+    actions_send_fail (stderr, exit 1)."""
+    if "--connect" in args:
+        time.sleep(0.8)
+        if state.get("actions_connect_fail"):
+            print("Error: " + state["actions_connect_fail"], file=sys.stderr)
+            return 1
+        state["actions_todoist"] = True
+        save(state)
+        print(json.dumps({"connected": True, "service": "todoist"}))
+        return 0
+    meeting = resolve(state, args[0])
+    items = state.setdefault("actions", json.loads(json.dumps(DEFAULT_ACTIONS)))
+    if "--send" in args:
+        dest = args[args.index("--send") + 1]
+        if state.get("actions_send_fail"):
+            print("Error: " + state["actions_send_fail"], file=sys.stderr)
+            return 1
+        if "--all" in args:
+            picked = [i["id"] for i in items]
+        else:
+            picked = [a for a in args[args.index("--pick") + 1:] if not a.startswith("--")]
+        results = []
+        for item in items:
+            if item["id"] not in picked:
+                continue
+            if item["sent"].get(dest):
+                results.append({"id": item["id"], "status": "already_sent"})
+            else:
+                item["sent"][dest] = {"at": "2026-11-12T17:00:00Z"}
+                results.append({"id": item["id"], "status": "sent"})
+        save(state)
+        print(json.dumps({"meeting_id": meeting, "to": dest, "results": results}))
+        return 0
+    print(json.dumps({"meeting_id": meeting, "items": items,
+                      "todoist": {"connected": bool(state.get("actions_todoist"))},
+                      "reminder": {"available": bool(state.get("actions_reminder"))}}))
+    return 0
+
+
 def soundcheck(state, args):
     """meeting soundcheck [--seconds N] [--json] | --stop
 
@@ -962,7 +1015,7 @@ def main():
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
             "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
-            "soundcheck", "search", "waveform", "recover", "share"):
+            "soundcheck", "search", "waveform", "recover", "share", "actions"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -1016,6 +1069,8 @@ def main():
         return recover(state, args[2:])
     elif action == "delete" and "--force" in args:
         return delete_meeting(state, args[2:])
+    elif action == "actions":
+        return actions(state, args[2:])
     elif action == "share":
         return share(state, args[2:])
     elif action == "search":

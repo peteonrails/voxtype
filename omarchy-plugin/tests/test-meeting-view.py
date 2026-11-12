@@ -161,6 +161,14 @@ Scenarios:
   share-real-unavailable  the real voxtype with no wl-copy or xdg-open on
               its PATH and a share command configured: greyed Copy and
               Email, the command run for real, a refused save shown
+  actions     the Summary tab's action items: rows all ticked, owner, due,
+              the time jumping to the line, the summary's own list hidden;
+              Send to Todoist for the ticked rows, a resend not duplicating
+              (✓ on sent rows), Remind me... with a delay
+  actions-connect  not connected: Connect Todoist... waits on the browser,
+              then Send appears; no reminder app, no Remind me; a refused
+              send shown in the urgent colour
+  actions-old a voxtype without `meeting actions` keeps the summary as it was
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -200,6 +208,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
+             "actions", "actions-connect", "actions-old",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -399,6 +408,9 @@ INITIAL = {
     "share": lambda: [running_meeting()],
     "share-unavailable": lambda: [running_meeting()],
     "share-old": lambda: [running_meeting()],
+    "actions": lambda: [running_meeting()],
+    "actions-connect": lambda: [running_meeting()],
+    "actions-old": lambda: [running_meeting()],
     "share-real": lambda: [running_meeting()],
     "share-real-unavailable": lambda: [running_meeting()],
     "undo-edit": lambda: [running_meeting()],
@@ -450,6 +462,9 @@ STATE = {
                           "share_command": "post-standup --channel team",
                           "share_fail": {"file": "Documents/Voxtype is not writable. Check its permissions."}},
     "share-old": {"old": True},
+    "actions": {"actions_todoist": True, "actions_reminder": True},
+    "actions-connect": {"actions_reminder": False},
+    "actions-old": {"old": True},
     "recovery-socket": {"recover_array": True},
     "recovery": {"recover_summary": {"state": "failed", "message": "the local model answered 500"},
                  "recoverable": [
@@ -728,7 +743,8 @@ def read_only(argv):
     if argv == ["meeting", "my-name", "--json"]:
         return True
     if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"] \
-            or argv == ["meeting", "recover", "--json"]:
+            or argv == ["meeting", "recover", "--json"] \
+            or (argv[:2] == ["meeting", "actions"] and len(argv) == 4 and argv[3] == "--json"):
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -899,6 +915,17 @@ def check_calls(scenario, calls, runtime_notes=""):
         sh = ["meeting", "share", MEETING_ID]
         expect(meeting, [sh + ["--preview", "--json"], sh + ["--to", "command", "--json"], sh + ["--to", "file", "--json"]],
                "meeting commands")
+    elif scenario == "actions":
+        ac = ["meeting", "actions", MEETING_ID]
+        expect(meeting, [["meeting", "stop"], ac + ["--send", "todoist", "--pick", "a1", "--json"],
+                         ac + ["--send", "todoist", "--all", "--json"],
+                         ac + ["--send", "reminder", "--in", "15m", "--all", "--json"]], "meeting commands")
+    elif scenario == "actions-connect":
+        ac = ["meeting", "actions", MEETING_ID]
+        expect(meeting, [["meeting", "stop"], ["meeting", "actions", "--connect", "todoist", "--json"],
+                         ac + ["--send", "todoist", "--all", "--json"]], "meeting commands")
+    elif scenario == "actions-old":
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
     elif scenario == "share-real":
         sh = ["meeting", "share", MEETING_ID]
         expect(meeting, [sh + ["--preview", "--json"], sh + ["--preview", "--json", "--transcript"],

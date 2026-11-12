@@ -142,6 +142,8 @@ Item {
 
   // MeetingShare, from the controller.
   property var share: null
+  // MeetingActions, from the controller.
+  property var actions: null
   function openShare() {
     if (!root.share || !root.feed || root.feed.meetingId === "") return
     root.share.open(root.feed.meetingId)
@@ -1054,6 +1056,7 @@ Item {
           feed: root.feed
           copiedKey: root.copiedKey
           canOpenSettings: root.canOpenSettings
+          actions: root.actions
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
           onCopyRequested: function(text, key) { root.copyRequested(text, key) }
