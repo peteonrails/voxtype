@@ -92,6 +92,8 @@ pub struct MeetingHudState {
     pub started_at: Option<DateTime<Utc>>,
     pub chunk_count: u32,
     pub diarization: DiarizationInfo,
+    /// The meeting's echo handling: `webrtc`, `gtcrn` or `none`
+    pub echo_cancel: Option<String>,
     pub segments: Vec<TranscriptSegment>,
 }
 
@@ -158,6 +160,8 @@ enum WireEvent {
         started_at: Option<DateTime<Utc>>,
         chunk_count: u32,
         diarization: DiarizationInfo,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        echo_cancel: Option<String>,
         segments: Vec<TranscriptSegment>,
     },
     Segments {
@@ -223,6 +227,7 @@ impl WireEvent {
             started_at: state.started_at,
             chunk_count: state.chunk_count,
             diarization: state.diarization.clone(),
+            echo_cancel: state.echo_cancel.clone(),
             segments: state.segments.clone(),
         }
     }

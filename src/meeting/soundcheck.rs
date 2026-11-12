@@ -61,7 +61,11 @@ pub async fn open_capture(config: &Config) -> Result<MeetingCapture, AudioError>
     .unwrap_or((EchoPath::Gtcrn, None));
 
     if let Some(ref aec) = canceller {
-        match DualCapture::with_mic_source(aec.source(), loopback_device.as_deref()) {
+        match DualCapture::with_mic_source(
+            aec.source(),
+            loopback_device.as_deref(),
+            echo_cancel::MIC_DELAY_MS,
+        ) {
             Ok(mut capture) => match capture.start().await {
                 Ok(()) => {
                     let mic = aec.source().to_string();
@@ -106,7 +110,7 @@ pub struct SoundcheckEvent {
     /// While running: seconds left.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<u64>,
-    /// While running: `aec`, `gtcrn` or `off`, as a meeting would use.
+    /// While running: `webrtc`, `gtcrn` or `none`, as a meeting would use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub echo_path: Option<String>,
     /// While running: what the microphone is recorded from.

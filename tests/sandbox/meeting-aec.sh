@@ -10,16 +10,17 @@
 # remote side speaking while you are silent). "speakers" is the default sink
 # and leaks into the mic at 0.12 gain with 30 ms of latency, as a laptop
 # speaker does. Each mode records an echo-only meeting and a call:
-#   - aec: the remote sentences must not reach the mic track, and the echo
-#     energy on the kept mic audio must drop by at least 20 dB against off
-#   - off: the control, where they do
+#   - webrtc: the remote sentences must not reach the mic track, and the
+#     echo energy on the kept mic audio must drop by at least 20 dB against
+#     disabled
+#   - disabled: the control, where they do
 # then a meeting on the canceller is killed with SIGKILL, and the canceller
 # must be gone. The loopback track is off, so transcript dedup (which also
 # strips exact echoes) cannot hide the echo from the control.
 set -u
 BIN=$1; YOU=$2; REMOTE=$3
 [ -e /dev/snd ] && { echo "refusing: /dev/snd is visible, run this in an isolated session"; exit 2; }
-OUT=$(mktemp -d); export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$OUT/run}; mkdir -p $XDG_RUNTIME_DIR
+OUT=${VOXTYPE_TEST_OUT:-$(mktemp -d)}; mkdir -p $OUT; export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$OUT/run}; mkdir -p $XDG_RUNTIME_DIR
 export XDG_CONFIG_HOME=$OUT/config XDG_DATA_HOME=$OUT/data XDG_STATE_HOME=$OUT/state
 mkdir -p $XDG_CONFIG_HOME/voxtype $XDG_DATA_HOME/voxtype/models
 ln -sf "${VOXTYPE_TEST_MODEL:-$HOME/.local/share/voxtype/models/ggml-base.en.bin}" $XDG_DATA_HOME/voxtype/models/ggml-base.en.bin
@@ -37,7 +38,7 @@ sleep 1
 SI=$(pactl -f json list sink-inputs | python3 -c "import json,sys; print(next(i['index'] for i in json.load(sys.stdin) if str(i.get('owner_module'))=='$ECHO'))")
 pactl set-sink-input-volume $SI 0.12
 
-daemon() { # $1 = echo_cancel
+daemon() { # $1 = echo_cancel, $2 = mic_device (default "default")
   cat > $XDG_CONFIG_HOME/voxtype/config.toml <<CFG
 engine = "whisper"
 [whisper]
@@ -52,6 +53,7 @@ chunk_duration_secs = 10
 retain_audio = true
 [meeting.audio]
 echo_cancel = "$1"
+mic_device = "${2:-default}"
 # No loopback track: transcript dedup strips mic lines the loopback also
 # holds, and with this test's perfect-copy echo it would hide the echo
 # from the control. Without it the test measures the canceller alone.
@@ -66,6 +68,7 @@ state() { for i in $(seq 1 120); do grep -q "$1" $XDG_RUNTIME_DIR/voxtype/meetin
 meeting() { # $1 = title, $2 = "call" or "echo"
   $BIN meeting start --title "$1" >/dev/null; state recording; sleep 1
   STATUS=$($BIN meeting status --json)
+  HELLO=$(timeout 2 socat -u UNIX-CONNECT:$XDG_RUNTIME_DIR/voxtype/meeting.sock - 2>/dev/null | head -1)
   paplay -d speakers "$REMOTE" & local p=$!
   [ "$2" = call ] && paplay -d micsink "$YOU"
   wait $p; sleep 2
@@ -88,25 +91,49 @@ you=set(re.findall(r'[a-z]+', sys.argv[3].lower()))
 print(len((remote - you) & mine))" "$REMOTE_TEXT" "$1" "$YOU_TEXT"; }
 YOU_TEXT=$($BIN -q transcribe "$YOU" 2>/dev/null | tail -1)
 
-for mode in aec off; do
+for mode in webrtc disabled; do
   daemon $mode
   meeting "echo $mode" echo; DB[$mode]=$(mic_db 2>/dev/null || echo 0)
   meeting "call $mode" call
   M=$(python3 -c "import json; print(json.load(open('$(folder)/meeting.json'))['echo_cancel'])")
   S=$(echo "$STATUS" | python3 -c "import json,sys; print(json.load(sys.stdin)['echo_cancel'])")
+  H=$(echo "$HELLO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('echo_cancel'))")
   TEXT=$(mic_text); LEAK=$(remote_words "$TEXT")
-  echo "$mode: meeting.json echo_cancel=$M, status echo_cancel=$S, echo-only mic ${DB[$mode]} dBFS, remote-only words on the mic track: $LEAK"
+  echo "$mode: meeting.json echo_cancel=$M, status echo_cancel=$S, hello echo_cancel=$H, echo-only mic ${DB[$mode]} dBFS, remote-only words on the mic track: $LEAK"
   echo "  mic track: $TEXT"
-  [ "$M" = "$mode" ] || fail "$mode: meeting.json says $M"
-  [ "$S" = "$mode" ] || fail "$mode: meeting status --json says $S"
-  [ $mode = aec ] && [ "$LEAK" -gt 1 ] && fail "aec: $LEAK remote words reached the mic track"
-  [ $mode = off ] && [ "$LEAK" -lt 5 ] && fail "off: the control shows no echo ($LEAK words); the test proves nothing"
+  want=$([ $mode = webrtc ] && echo webrtc || echo none)
+  [ "$M" = "$want" ] || fail "$mode: meeting.json says $M"
+  [ "$S" = "$want" ] || fail "$mode: meeting status --json says $S"
+  [ "$H" = "$want" ] || fail "$mode: meeting.sock hello says $H"
+  [ $mode = webrtc ] && [ "$LEAK" -gt 1 ] && fail "webrtc: $LEAK remote words reached the mic track"
+  [ $mode = disabled ] && [ "$LEAK" -lt 5 ] && fail "disabled: the control shows no echo ($LEAK words); the test proves nothing"
   kill $DPID; wait $DPID 2>/dev/null
 done
-python3 -c "import sys; d=float(sys.argv[2])-float(sys.argv[1]); print('echo reduction on the kept mic track: %.1f dB' % d); sys.exit(0 if d >= 20 else 1)" "${DB[aec]}" "${DB[off]}" || fail "echo reduction under 20 dB"
+python3 -c "import sys; d=float(sys.argv[2])-float(sys.argv[1]); print('echo reduction on the kept mic track: %.1f dB' % d); sys.exit(0 if d >= 20 else 1)" "${DB[webrtc]}" "${DB[disabled]}" || fail "echo reduction under 20 dB"
+
+# Two cases where auto must leave the canceller off, saying why. (The
+# unmapped mic is not a real device either, so that meeting may not start
+# at all; what counts is that the canceller never did.)
+skipped() { # $1 = what, $2 = expected log reason
+  $BIN meeting start --title "$1" >/dev/null; sleep 4
+  local up=$(pactl list short sources | grep -c voxtype_meeting_aec_source)
+  $BIN meeting stop >/dev/null 2>&1; state idle
+  [ "$up" = 0 ] || fail "$1: the canceller ran"
+  grep -q "$2" $OUT/daemon.log || fail "$1: no log line saying '$2'"
+  echo "$1: no canceller, log says '$2'"
+}
+daemon auto "hw:CARD=Nope,DEV=0"
+skipped "unmapped mic_device" "is not a PipeWire source"
+kill $DPID; wait $DPID 2>/dev/null
+SYS=$(pactl load-module module-echo-cancel aec_method=webrtc source_master=mic sink_master=speakers source_name=users_own_aec sink_name=users_own_aec_sink)
+pactl set-default-source users_own_aec
+daemon auto
+skipped "a system echo canceller as default source" "already an echo canceller"
+kill $DPID; wait $DPID 2>/dev/null
+pactl set-default-source mic; pactl unload-module $SYS
 
 echo "crash: kill -9 the daemon while a meeting runs on the canceller"
-daemon aec
+daemon webrtc
 $BIN meeting start --title crash >/dev/null; state recording; sleep 1
 pactl list short sources | grep -q voxtype_meeting_aec_source || fail "the canceller's source is not up"
 kill -9 $DPID; sleep 2

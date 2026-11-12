@@ -3864,18 +3864,18 @@ pactl list short sources | grep monitor
 
 ### echo_cancel
 
-**Type:** String (`"auto"`, `"aec"`, `"gtcrn"`, `"off"`)
+**Type:** String (`"auto"`, `"webrtc"`, `"gtcrn"`, `"disabled"`)
 **Default:** `"auto"`
 **Required:** No
 
 How a meeting removes what the speakers play from the microphone, so it is not transcribed as You.
 
-- `"auto"` - When the default output is speakers, run PipeWire's WebRTC echo canceller for the length of the meeting and record the mic from it. With headphones, a headset or Bluetooth audio, or when the canceller cannot start, use GTCRN neural speech enhancement instead (its model, about 523 KB, is downloaded on the first `voxtype meeting start`).
-- `"aec"` - The WebRTC canceller whatever the output; GTCRN if it cannot start.
+- `"auto"` - Run PipeWire's WebRTC echo canceller for the length of the meeting and record the mic from it, unless the default output is headphones, a headset or Bluetooth audio. Then, or when the canceller cannot start, use GTCRN neural speech enhancement instead (its model, about 523 KB, is downloaded on the first `voxtype meeting start`).
+- `"webrtc"` - The WebRTC canceller whatever the output; GTCRN if it cannot start.
 - `"gtcrn"` - GTCRN only, the behaviour before 1.3.0.
-- `"off"` - Neither. `"disabled"` is the same, and stays accepted.
+- `"disabled"` - Neither.
 
-The canceller needs PipeWire with its echo-cancel module and WebRTC plugin, plus `pactl` and `parec`, and changes nothing in PipeWire's configuration: it runs only while a meeting does. A phrase-level transcript dedup pass runs in every mode. See [Meeting Mode](MEETING_MODE.md#echo-cancellation).
+The canceller needs PipeWire with its echo-cancel module and WebRTC plugin, plus `pactl` and `parec`, and changes nothing in PipeWire's configuration: it runs only while a meeting does. It is skipped when your default microphone is already an echo canceller, and when `mic_device` names a device that is not a PipeWire source. A phrase-level transcript dedup pass runs in every mode. See [Meeting Mode](MEETING_MODE.md#echo-cancellation).
 
 ```toml
 [meeting.audio]
@@ -3927,7 +3927,7 @@ For quiet USB/XLR mics, try `0.001`.
 ```toml
 [meeting.audio]
 loopback_device = "auto"
-echo_cancel = "auto"  # WebRTC echo cancellation on speakers, else GTCRN; transcript dedup always runs
+echo_cancel = "auto"  # WebRTC canceller on speakers, GTCRN on headphones
 echo_guard = true  # Keep the call heard through speakers out of your lines
 echo_fuzzy_max_words = 4
 vad_threshold = 0.001  # Optional: quiet mic tuning
@@ -5042,13 +5042,21 @@ The following configuration options are deprecated but still supported for backw
 |-------------------|-------------|-------|
 | `wtype_delay_ms` | `pre_type_delay_ms` | Renamed for clarity (applies to all output drivers, not just wtype) |
 | `--wtype-delay` CLI flag | `--pre-type-delay` | CLI equivalent of the above |
-## Atomic generic GGUF selection
+## Atomic model selection
 
-`voxtype config select-model gguf MODEL [--language CODE]` selects an installed
-generic GGUF checkpoint without downloading or restarting. Catalog checkpoints
-set the canonical architecture; custom checkpoints require an existing explicit
+`voxtype config select-model ENGINE MODEL` sets `engine` and `ENGINE.model`
+together in one validated write, without downloading or restarting. It accepts
+every engine `config set engine` does (whisper, parakeet, moonshine,
+sensevoice, paraformer, dolphin, omnilingual, cohere, gguf and openvino). The
+model must already be installed, and the engine must be compiled into the
+running binary; otherwise the command exits 2 and the config file is left
+byte-identical. The Omarchy Settings panel's **Use** button runs it.
+
+For the generic `gguf` engine, `--language CODE` sets the language hint (it is
+refused for every other engine). Catalog checkpoints set the canonical
+architecture; custom checkpoints require an existing explicit
 `gguf.architecture`. Omitting `--language` preserves a compatible saved hint;
 incompatible hints fail without modifying the file. Model paths are preserved
 literally and resolved like the worker: an existing current-directory path wins,
-otherwise the models directory is searched. This additive command currently
-accepts only engine `gguf`; existing `config set` contracts are unchanged.
+otherwise the models directory is searched. Existing `config set` contracts are
+unchanged.

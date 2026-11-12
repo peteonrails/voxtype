@@ -529,9 +529,6 @@ pub fn meeting_config_for(config: &Config, diarization: Option<&str>) -> Meeting
         retain_audio: false,
         max_duration_mins: 0,
         vad_threshold: config.meeting.audio.vad_threshold,
-        // An imported recording with both tracks gets the same echo guard
-        // as a live meeting.
-        echo_rules: (&config.meeting.audio).into(),
         diarization: d
             .enabled
             .then(|| crate::meeting::diarization::DiarizationConfig {
@@ -545,6 +542,7 @@ pub fn meeting_config_for(config: &Config, diarization: Option<&str>) -> Meeting
                 vad_hop_secs: d.vad_hop_secs,
                 vad_rms_floor: d.vad_rms_floor,
             }),
+        echo_rules: (&config.meeting.audio).into(),
     }
 }
 

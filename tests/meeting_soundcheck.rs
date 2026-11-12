@@ -2,7 +2,7 @@
 //! the audio tools faked: `parec` plays a sine (0.1 for the echo
 //! canceller's mic source, 0.5 for the loopback), `pactl` lists the
 //! canceller's source as ready, and `pipewire` only waits. So the check
-//! opens the meeting audio exactly as a meeting with `echo_cancel = "aec"`
+//! opens the meeting audio exactly as a meeting with `echo_cancel = "webrtc"`
 //! would, and the levels are known: -23.0 dBFS on the mic, -9.0 on the
 //! loopback.
 
@@ -64,7 +64,7 @@ while True:
         std::fs::write(
             config.join("config.toml"),
             "[hotkey]\nenabled = false\n\n[osd]\nenabled = false\n\n[whisper]\non_demand_loading = true\n\n\
-             [meeting]\nenabled = true\n\n[meeting.audio]\nloopback_device = \"fake.monitor\"\necho_cancel = \"aec\"\n",
+             [meeting]\nenabled = true\n\n[meeting.audio]\nloopback_device = \"fake.monitor\"\necho_cancel = \"webrtc\"\n",
         )
         .unwrap();
         std::fs::create_dir_all(w.p("run/voxtype")).unwrap();
@@ -121,7 +121,7 @@ fn assert_two_second_check(events: &[serde_json::Value]) {
     assert_eq!(first["event"], "soundcheck");
     assert_eq!(first["state"], "running");
     assert_eq!(first["seconds"], 2);
-    assert_eq!(first["echo_path"], "aec");
+    assert_eq!(first["echo_path"], "webrtc");
     assert_eq!(first["mic"], "voxtype_meeting_aec_source");
     assert_eq!(first["loopback"], true);
 

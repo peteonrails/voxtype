@@ -786,23 +786,25 @@ Set `loopback_device = "disabled"` if you only want to capture your own micropho
 
 On speakers, your microphone hears everything the speakers play: the other side of the call, and anything else, such as a video playing during the meeting. Without echo cancellation that audio is transcribed as You.
 
-With `echo_cancel = "auto"` (the default), a meeting whose output is speakers runs PipeWire's echo canceller (the WebRTC engine) for as long as the meeting runs. The canceller listens to what your default output plays and removes it from the microphone before voxtype transcribes it, whatever is playing, not only the call. Your own voice comes through. With headphones or a headset there is no echo to remove, so voxtype skips the canceller and uses GTCRN, its speech enhancer, as before.
+With `echo_cancel = "auto"` (the default), a meeting runs PipeWire's echo canceller (the WebRTC engine) for as long as the meeting runs, unless the output is headphones. The canceller listens to what your default output plays and removes it from the microphone before voxtype transcribes it, whatever is playing, not only the call. Your own voice comes through. With headphones or a headset there is no echo to remove, so voxtype skips the canceller and uses GTCRN, its speech enhancer, as before.
 
-- **What counts as headphones:** the default output's active port is Headphones, Headset or Handset, or the device says it is headphones or a headset, or it is Bluetooth (unless it is a Bluetooth speaker). Everything else, including HDMI, line out and anything voxtype cannot identify, counts as speakers.
-- **Nothing in your PipeWire configuration changes.** The canceller is a small `pipewire` process voxtype starts when the meeting starts and stops when it stops. If voxtype crashes, the canceller stops with it. While it runs, a source called "Voxtype meeting mic (echo cancelled)" shows in your mixer; it never becomes your default.
+- **What counts as headphones:** the default output's active port is Headphones, Headset or Handset, or the device says it is headphones or a headset, or it is Bluetooth (unless it is a Bluetooth speaker). Everything else, including HDMI, line out, S/PDIF and anything voxtype cannot identify, gets the canceller.
+- **Nothing in your PipeWire configuration changes.** The canceller is a small `pipewire` process voxtype starts when the meeting starts and stops when it stops. If voxtype crashes, the canceller stops with it. While it runs, a source called "Voxtype meeting echo canceller" shows in your mixer; it never becomes your default.
+- **If you already run an echo canceller** as your default microphone (PipeWire's `echo-cancel` module, set up yourself), voxtype records from it and does not add a second one.
 - **If the canceller cannot start** (PipeWire is missing its echo-cancel module or the WebRTC plugin, or it is too old), the meeting logs one warning and uses GTCRN. The meeting never fails because of it.
+- **The two tracks stay in step.** The canceller hands the mic over about 37 ms late; voxtype drops that much from the start of the mic so the mic and the other side line up in the transcript and the kept audio.
 - **It works on the meeting mic only.** Dictation is not affected.
 
-`voxtype meeting status --json` and the meeting's `meeting.json` say which one a meeting used: `aec`, `gtcrn` or `off`.
+`voxtype meeting status --json`, the meeting's `meeting.json` and the meeting socket's `hello` say which one a meeting used: `webrtc`, `gtcrn` or `none`.
 
 | `echo_cancel` | What it does |
 |---------------|--------------|
-| `auto` (default) | The canceller on speakers, GTCRN with headphones |
-| `aec` | The canceller whatever the output; GTCRN if it cannot start |
+| `auto` (default) | The canceller unless the output is headphones, then GTCRN |
+| `webrtc` | The canceller whatever the output; GTCRN if it cannot start |
 | `gtcrn` | GTCRN only, as before 1.3.0 |
-| `off` (or `disabled`) | Neither |
+| `disabled` | Neither |
 
-With `auto`, setting `mic_device` to a specific device also means GTCRN, because that is an ALSA device name the canceller cannot record from. Use `echo_cancel = "aec"` with a PipeWire source name (`pactl list short sources`) as `mic_device` to have both.
+**A specific microphone.** With `mic_device` set to something other than `default`, the canceller records that microphone if the name is a PipeWire source (as `pactl list short sources` lists it). An ALSA device name is not one, so the meeting uses GTCRN instead and says so in the log.
 
 The transcript dedup, which removes mic lines that also appear on the loopback track, and the echo guard below run whichever echo handling a meeting uses.
 

@@ -687,8 +687,9 @@ install -Dm755 packaging/scripts/voxtype-configure-launcher \
 install -Dm644 packaging/voxtype-configure.desktop \
     "$STAGING/usr/share/applications/voxtype-configure.desktop"
 
-# Voxtype Meetings launcher entry (`voxtype meeting view`), and the voxtype
-# icon it names, which until now only `voxtype setup` installed per user.
+# Voxtype Meetings launcher entry (`voxtype meeting view`), and voxtype's own
+# icon: named by both desktop entries' Icon=voxtype and passed to notify-send
+# as --icon=voxtype, so neither depends on an icon theme.
 install -Dm644 packaging/voxtype-meetings.desktop \
     "$STAGING/usr/share/applications/voxtype-meetings.desktop"
 install -Dm644 assets/icon.svg \
