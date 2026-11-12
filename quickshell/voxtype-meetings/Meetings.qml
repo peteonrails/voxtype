@@ -113,6 +113,7 @@ Item {
   // A past meeting, shown the way an ended one is.
   function openPast(meetingId) {
     root.actionError = ""
+    root.pendingJumpMs = -1
     storedProc.load(meetingId)
   }
 
@@ -374,6 +375,24 @@ Item {
 
   readonly property alias playback: playback
   // ------------------------------------------------------------ sound check
+
+  readonly property alias search: search
+  MeetingSearch {
+    id: search
+    bin: root.bin
+  }
+
+  // A search result opened: the meeting, then its line once it is loaded.
+  property real pendingJumpMs: -1
+  function openResult(meetingId, startMs) {
+    root.actionError = ""
+    if (meetingId === feed.meetingId && feed.hasMeeting) {
+      if (startMs >= 0 && root.window) root.window.view.jumpTo(startMs)
+      return
+    }
+    root.pendingJumpMs = startMs
+    storedProc.load(meetingId)
+  }
 
   readonly property alias soundcheck: soundcheck
   MeetingSoundCheck {
@@ -659,6 +678,11 @@ Item {
         return
       }
       root.showTab("transcript")
+      if (root.pendingJumpMs >= 0 && root.window) {
+        var ms = root.pendingJumpMs
+        Qt.callLater(function() { if (root.window) root.window.view.jumpTo(ms) })
+      }
+      root.pendingJumpMs = -1
     }
   }
 
@@ -692,6 +716,7 @@ Item {
       view.feed = feed
       view.assistant = assistant
       view.soundcheck = soundcheck
+      view.search = search
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })
@@ -729,6 +754,7 @@ Item {
     function onAnnotateRequested(segId, text, highlight) { root.annotate(segId, text, highlight) }
     function onSettingsRequested() { root.settingsRequested() }
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
+    function onSearchResultRequested(meetingId, startMs) { root.openResult(meetingId, startMs) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }
     function onMinimizeRequested() { root.minimize() }

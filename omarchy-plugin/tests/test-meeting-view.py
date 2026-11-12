@@ -109,6 +109,11 @@ Scenarios:
               first, the call meter only once loopback carries a number, a
               sound check's or another meeting's levels ignored, and the bars
               fall when levels stop
+  search      the search box on the list: Searching..., results with the
+              time, speaker and highlighted match, a result opening its
+              meeting on the line, the query kept on Back, Escape back to the
+              list, no matches, a title match
+  search-old  a voxtype without `meeting search` is called too old
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -143,7 +148,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
-             "levels")
+             "levels", "search", "search-old")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -310,6 +315,8 @@ STATE = {
                                   "Turn on meeting.retain_audio for future meetings."},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
     "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
+    "search": {"search_delay": 0.6},
+    "search-old": {"old": True},
     "soundcheck-error": {"sc_error": "Audio connection failed: no such device 'usb-mic'"},
     "summary-local-error": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE],
                                           "summary_backend": "local", "summary_backend_name": "Local (llama3.2)"}},
@@ -384,7 +391,7 @@ def past_meetings(data, scenario):
 
 
 PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-                  "list-old", "export-past"}
+                  "list-old", "export-past", "search", "search-old"}
 
 
 def run(scenario, host, shell, evidence):
@@ -633,6 +640,12 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "soundcheck-no-loopback":
         expect(meeting, [["meeting", "soundcheck", "--seconds", "30", "--json"],
                          ["meeting", "soundcheck", "--stop"]], "meeting commands")
+    elif scenario == "search":
+        def q(text):
+            return ["meeting", "search", text, "--limit", "30", "--json"]
+        expect(meeting, [q("empty state"), q("zebra"), q("1:1")], "meeting commands")
+    elif scenario == "search-old":
+        expect(meeting, [["meeting", "search", "layout", "--limit", "30", "--json"]], "meeting commands")
     elif scenario == "levels":
         expect(meeting, [], "meeting commands")
     elif scenario == "soundcheck-error":

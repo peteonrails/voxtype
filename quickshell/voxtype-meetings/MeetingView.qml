@@ -28,6 +28,9 @@ Item {
   property var assistant: null
   // MeetingSoundCheck, from the controller.
   property var soundcheck: null
+  // MeetingSearch, from the controller.
+  property var search: null
+  signal searchResultRequested(string meetingId, real startMs)
   // The idle screen shows the sound check instead of the meetings list.
   property bool soundCheckOpen: false
   onHasMeetingChanged: if (root.hasMeeting) root.soundCheckOpen = false
@@ -1061,7 +1064,9 @@ Item {
           loading: root.listLoading
           error: root.listError
           hasMore: root.listHasMore
+          search: root.search
           onOpenRequested: function(meetingId) { root.openMeetingRequested(meetingId) }
+          onResultRequested: function(meetingId, startMs) { root.searchResultRequested(meetingId, startMs) }
           onMoreRequested: root.moreMeetingsRequested()
         }
       }

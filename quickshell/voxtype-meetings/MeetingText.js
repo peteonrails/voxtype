@@ -58,3 +58,34 @@ function linkMs(link) {
   var m = /^#t=(\d+)$/.exec(String(link))
   return m ? Number(m[1]) : -1
 }
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+}
+
+// A search snippet as rich text: `plain` with each [start, end) range of
+// `ranges` (offsets in code points, as `meeting search` gives them) in bold
+// and `color`. Everything else is escaped.
+function highlight(plain, ranges, color) {
+  var chars = Array.from(String(plain || ""))
+  var marks = (ranges || []).slice().sort(function(a, b) { return a[0] - b[0] })
+  var out = ""
+  var at = 0
+  for (var i = 0; i < marks.length; i++) {
+    var s = Math.max(at, Math.min(chars.length, Number(marks[i][0])))
+    var e = Math.max(s, Math.min(chars.length, Number(marks[i][1])))
+    out += escapeHtml(chars.slice(at, s).join(""))
+    if (e > s) out += '<b><font color="' + color + '">' + escapeHtml(chars.slice(s, e).join("")) + "</font></b>"
+    at = e
+  }
+  return out + escapeHtml(chars.slice(at).join(""))
+}
+
+// "m:ss" or "h:mm:ss" for a time in a meeting.
+function clockMs(ms) {
+  var s = Math.max(0, Math.floor(Number(ms) / 1000))
+  var h = Math.floor(s / 3600)
+  var m = Math.floor((s % 3600) / 60)
+  var sec = s % 60
+  return (h > 0 ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (sec < 10 ? "0" : "") + sec
+}

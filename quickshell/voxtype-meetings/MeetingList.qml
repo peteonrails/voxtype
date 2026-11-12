@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import Quickshell.Io
+import "MeetingText.js" as MT
 
 // Past meetings, newest first, for when no meeting is on screen: title, date
 // and time, length, speakers and a Summary badge. Clicking one opens it like
@@ -19,6 +20,11 @@ Item {
 
   signal openRequested(string meetingId)
   signal moreRequested()
+  // MeetingSearch, from the controller; null hides the search box.
+  property var search: null
+  readonly property bool searchOn: root.search !== null && root.search.query !== ""
+  // A search result: the meeting, and for a transcript line where it is.
+  signal resultRequested(string meetingId, real startMs)
 
   // Where the list was when older meetings were asked for: a longer list
   // replaces the model, which would otherwise jump back to the top.
@@ -73,17 +79,143 @@ Item {
 
     Text {
       Layout.fillWidth: true
-      text: "Recent meetings"
+      text: root.searchOn ? "Search results" : "Recent meetings"
       color: root.theme.fg
       font.family: root.theme.fontFamily
       font.pixelSize: root.theme.body
       font.bold: true
     }
 
+    MeetingTextField {
+      id: searchField
+      objectName: "meetingSearchField"
+      Layout.fillWidth: true
+      visible: root.search !== null
+      theme: root.theme
+      placeholderText: "Search meetings"
+      onTextChanged: searchDelay.restart()
+      onAccepted: { searchDelay.stop(); root.search.search(searchField.text) }
+      Keys.onEscapePressed: function(event) {
+        if (searchField.text === "") { event.accepted = false; return }
+        searchField.text = ""
+        event.accepted = true
+      }
+    }
+
+    Timer {
+      id: searchDelay
+      interval: 300
+      onTriggered: if (root.search) root.search.search(searchField.text)
+    }
+
+    Text {
+      objectName: "searchStatus"
+      Layout.fillWidth: true
+      visible: root.searchOn && text !== ""
+      text: {
+        if (!root.search) return ""
+        if (root.search.error !== "") return root.search.error
+        if (root.search.searching && root.search.results.length === 0) return "Searching…"
+        if (root.search.answered === root.search.query && root.search.results.length === 0)
+          return "No meetings match \u201c" + root.search.query + "\u201d."
+        return ""
+      }
+      color: root.search && root.search.error !== "" ? root.theme.urgent : root.theme.dim
+      font.family: root.theme.fontFamily
+      font.pixelSize: root.theme.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
+    ListView {
+      id: results
+      objectName: "searchResults"
+      Layout.fillWidth: true
+      Layout.fillHeight: true
+      visible: root.searchOn
+      clip: true
+      spacing: root.theme.xs
+      model: root.search ? root.search.results : []
+      boundsBehavior: Flickable.StopAtBounds
+
+      delegate: Rectangle {
+        id: hit
+        required property var modelData
+        required property int index
+        objectName: "searchResult_" + index
+        readonly property bool line: String(modelData.kind) === "segment"
+        readonly property string where: {
+          var parts = [root.when(modelData.date)]
+          if (hit.line) {
+            parts.push(MT.clockMs(modelData.start_ms))
+            if (modelData.speaker) parts.push(String(modelData.speaker))
+          } else {
+            parts.push(modelData.kind === "title" ? "in the title" : modelData.kind === "notes" ? "in your notes" : "in the summary")
+          }
+          return parts.join(" · ")
+        }
+
+        width: ListView.view.width
+        implicitHeight: hitColumn.implicitHeight + root.theme.md * 2
+        radius: Math.min(root.theme.radius, 6)
+        color: hitMouse.containsMouse ? root.theme.alpha(root.theme.fg, 0.08) : "transparent"
+
+        ColumnLayout {
+          id: hitColumn
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: root.theme.padX
+          anchors.rightMargin: root.theme.padX
+          spacing: root.theme.xxs
+
+          Text {
+            objectName: "searchResultTitle"
+            Layout.fillWidth: true
+            text: modelData.title ? String(modelData.title) : "Untitled meeting"
+            color: root.theme.fg
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.body
+            elide: Text.ElideRight
+          }
+          Text {
+            objectName: "searchResultWhere"
+            Layout.fillWidth: true
+            text: hit.where
+            color: root.theme.dim
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.caption
+            elide: Text.ElideRight
+          }
+          Text {
+            objectName: "searchResultSnippet"
+            Layout.fillWidth: true
+            textFormat: Text.StyledText
+            text: MT.highlight(modelData.snippet_plain !== undefined ? modelData.snippet_plain : modelData.snippet,
+                               modelData.snippet_plain !== undefined ? modelData.highlights : [], root.theme.accent)
+            color: root.theme.fg
+            font.family: root.theme.fontFamily
+            font.pixelSize: root.theme.bodySmall
+            wrapMode: Text.WordWrap
+            maximumLineCount: 3
+            elide: Text.ElideRight
+          }
+        }
+
+        MouseArea {
+          id: hitMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.resultRequested(String(hit.modelData.meeting_id),
+                                          hit.line && hit.modelData.start_ms !== null ? Number(hit.modelData.start_ms) : -1)
+        }
+      }
+    }
+
     Text {
       objectName: "meetingListError"
       Layout.fillWidth: true
-      visible: root.error !== ""
+      visible: !root.searchOn && root.error !== ""
       text: root.error
       color: root.theme.urgent
       font.family: root.theme.fontFamily
@@ -94,7 +226,7 @@ Item {
     Text {
       objectName: "meetingListEmpty"
       Layout.fillWidth: true
-      visible: !root.loading && root.error === "" && root.meetings.length === 0
+      visible: !root.searchOn && !root.loading && root.error === "" && root.meetings.length === 0
       text: "No meetings yet. Meetings you record appear here, newest first."
       color: root.theme.dim
       font.family: root.theme.fontFamily
@@ -107,6 +239,7 @@ Item {
       objectName: "meetingList"
       Layout.fillWidth: true
       Layout.fillHeight: true
+      visible: !root.searchOn
       clip: true
       spacing: root.theme.xs
       model: root.meetings

@@ -676,6 +676,63 @@ def show(state, args_meeting):
     return 0
 
 
+def search(state, args):
+    """meeting search QUERY [--limit N] --json: every word in one line, as the
+    real index does, over the past meetings' lines and titles; best (earliest
+    meeting first here) results in the real shape. state["search_delay"]
+    slows it, to see the view's Searching... state."""
+    rest = []
+    i = 0
+    limit = 20
+    while i < len(args):
+        if args[i] == "--limit":
+            limit = int(args[i + 1])
+            i += 2
+            continue
+        if args[i] != "--json":
+            rest.append(args[i])
+        i += 1
+    words = " ".join(rest).lower().replace('"', " ").replace("*", " ").split()
+    if not words:
+        print("Error: search needs at least one word", file=sys.stderr)
+        return 1
+    time.sleep(state.get("search_delay", 0))
+
+    def hit(text):
+        low = text.lower()
+        if not all(w in low for w in words):
+            return None
+        marks = []
+        for w in words:
+            at = low.find(w)
+            while at != -1:
+                marks.append([at, at + len(w)])
+                at = low.find(w, at + len(w))
+        marks.sort()
+        snippet = ""
+        pos = 0
+        for a, b in marks:
+            snippet += text[pos:a] + "\u00ab" + text[a:b] + "\u00bb"
+            pos = b
+        return text, marks, snippet + text[pos:]
+
+    results = []
+    for m in sorted(state.get("meetings", []), key=lambda m: m["started_at"], reverse=True):
+        base = {"meeting_id": m["id"], "title": m.get("title") or m["started_at"], "date": m["started_at"]}
+        h = hit(m.get("title") or "")
+        if h:
+            results.append(dict(base, kind="title", segment_id=None, start_ms=None, speaker=None,
+                                snippet=h[2], snippet_plain=h[0], highlights=h[1], rank=-2.0))
+        for seg in segments_of(state, m["id"]) or []:
+            h = hit(seg["text"])
+            if h:
+                results.append(dict(base, kind="segment", segment_id=seg["id"], start_ms=seg["start_ms"],
+                                    speaker=seg.get("speaker_label") or seg.get("speaker_id"),
+                                    snippet=h[2], snippet_plain=h[0], highlights=h[1], rank=-1.0))
+    print(json.dumps({"query": " ".join(rest), "speaker": None, "since": None, "results": results[:limit]}))
+    return 0
+
+
 def soundcheck(state, args):
     """meeting soundcheck [--seconds N] [--json] | --stop
 
@@ -752,7 +809,7 @@ def main():
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
             "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
-            "soundcheck"):
+            "soundcheck", "search"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -800,6 +857,8 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "search":
+        return search(state, args[2:])
     elif action == "soundcheck":
         return soundcheck(state, args[2:])
     elif action == "label" and len(args) == 5:

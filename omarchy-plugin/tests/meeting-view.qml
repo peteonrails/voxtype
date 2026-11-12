@@ -145,6 +145,8 @@ Item {
           else if (s === "summary-error") tc.driveSummaryError()
           else if (s === "soundcheck") tc.driveSoundCheck()
           else if (s === "levels") tc.driveLevels()
+          else if (s === "search") tc.driveSearch()
+          else if (s === "search-old") tc.driveSearchOld()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
           else if (s === "soundcheck-error") tc.driveSoundCheckError()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
@@ -1829,6 +1831,53 @@ Item {
       click(find(view(), "soundCheckButton"), "Sound check")
       waitFor(function() { return shown(find(view(), "soundCheckPane")) }, "sound check pane")
       check(!shown(find(view(), "meetingListPane")), "the pane replaces the list")
+    }
+
+    function searchFor(text) {
+      var field = find(view(), "meetingSearchField")
+      click(field, "search box")
+      field.text = text
+    }
+
+    function driveSearch() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_0")) }, "the list")
+      searchFor("empty state")
+      waitFor(function() { return txt("searchStatus") === "Searching…" && shown(find(view(), "searchStatus")) }, "Searching…: " + txt("searchStatus"))
+      check(!shown(find(view(), "meetingList")), "results replace the list")
+      waitFor(function() { return shown(find(view(), "searchResult_0")) }, "a result", 6000)
+      var r = find(view(), "searchResult_0")
+      check(String(find(r, "searchResultTitle").text) === "Design review", "title: " + find(r, "searchResultTitle").text)
+      check(/ · 1:01 · Remote 2$/.test(String(find(r, "searchResultWhere").text)), "where: " + find(r, "searchResultWhere").text)
+      var snip = String(find(r, "searchResultSnippet").text)
+      check(snip.indexOf("<b>") !== -1 && snip.indexOf(">empty</font></b>") !== -1 && snip.indexOf(">state</font></b>") !== -1, "highlighted: " + snip)
+      check(find(view(), "searchResults").count === 1, "one line has both words: " + find(view(), "searchResults").count)
+      shot("search")
+      click(r, "the result")
+      waitFor(function() { return txt("meetingTitle") === "Design review" && view().currentTab === "transcript" }, "the meeting opened")
+      waitFor(function() { return find(view(), "transcriptPane").flashSegId === 2 }, "on the line: " + find(view(), "transcriptPane").flashSegId)
+      click(find(view(), "backButton"), "back")
+      waitFor(function() { return shown(find(view(), "searchResult_0")) }, "the search kept on Back")
+      check(String(find(view(), "meetingSearchField").text) === "empty state", "query kept")
+      // Escape clears it, back to the list.
+      var field = find(view(), "meetingSearchField")
+      click(field, "search box")
+      keyClick(Qt.Key_Escape)
+      waitFor(function() { return shown(find(view(), "meetingList")) && !shown(find(view(), "searchResults")) }, "the list again")
+      check(host.viewOpen(), "Escape in the box does not close the view")
+      searchFor("zebra")
+      waitFor(function() { return txt("searchStatus") === "No meetings match \u201czebra\u201d." }, "no match: " + txt("searchStatus"), 6000)
+      searchFor("1:1")
+      waitFor(function() { return shown(find(view(), "searchResult_0")) }, "title match", 6000)
+      check(/ · in the title$/.test(String(find(find(view(), "searchResult_0"), "searchResultWhere").text)), "in the title")
+    }
+
+    function driveSearchOld() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_0")) }, "the list")
+      searchFor("layout")
+      waitFor(function() { return txt("searchStatus").indexOf("This voxtype is too old for searching meetings") === 0 }, "too old: " + txt("searchStatus"), 6000)
+      shot("search-old")
     }
 
     function driveLevels() {

@@ -204,6 +204,8 @@ When the meeting ends its transcript stays on screen marked **Ended**, with its 
 
 With no meeting in progress the view lists your recent meetings, newest first: title, date and time, length, how many speakers, and a **Summary** badge on those that have one, under **Start meeting** and an optional title. Pick one to open it the same way as an ended meeting, with its transcript, speakers and summary, and fix it the same way. A meeting with no summary yet has **Summarize** on its Summary tab. The list shows 50 meetings at first; **Show older meetings** loads more. A meeting that starts while you are reading an old one takes over the view, and once it ends it is at the top of the list.
 
+The box above the list searches every meeting (`voxtype meeting search`, see [Searching Meetings](#searching-meetings)): transcript lines as you see them, titles, notes and summaries. Each result shows the meeting, the time and speaker of the line, and the matching words highlighted; picking one opens the meeting on that line. **Back** returns to the results, and Escape in the box clears it.
+
 **Sound check…** under **Start meeting** checks the audio before a call: it runs `voxtype meeting soundcheck` for 30 seconds and shows a meter for your microphone and one for the call, the microphone it opened, and how echo is handled (PipeWire's WebRTC canceller, voxtype's GTCRN model, or none). Nothing is recorded. If no call audio is captured, the panel says so in place of the second meter. **Stop** ends it early, **Check again** runs it once more, and leaving the panel or closing the view stops it. A meeting that starts during the check takes the microphone, and the panel says so.
 
 Open it yourself, in whichever shell is running:
