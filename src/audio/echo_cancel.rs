@@ -389,6 +389,8 @@ pub fn begin(
 pub struct Tools {
     pub pipewire: PathBuf,
     pub pactl: PathBuf,
+    /// How long the canceller's source may take to appear.
+    pub ready_timeout: Duration,
 }
 
 impl Tools {
@@ -399,6 +401,7 @@ impl Tools {
         Some(Self {
             pipewire: which::which("pipewire").ok()?,
             pactl: which::which("pactl").ok()?,
+            ready_timeout: READY_TIMEOUT,
         })
     }
 }
@@ -484,7 +487,7 @@ impl EchoCanceller {
         let stdin = child.stdin.take();
         let mut canceller = Self { child, stdin, conf };
 
-        let deadline = Instant::now() + READY_TIMEOUT;
+        let deadline = Instant::now() + tools.ready_timeout;
         loop {
             if names(&tools.pactl, "sources")
                 .iter()
@@ -511,7 +514,7 @@ impl EchoCanceller {
                 canceller.stop();
                 return Err(format!(
                     "the echo canceller's source did not appear within {}s",
-                    READY_TIMEOUT.as_secs()
+                    tools.ready_timeout.as_secs()
                 ));
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -1008,8 +1011,10 @@ mod tests {
             crate::test_support::write_script(
                 &dir.path().join("pipewire"),
                 // Stays a shell (no exec) so its command line keeps "-c <conf>".
+                // The pid file is written once the TERM trap is in place, so
+                // a test that waits for it knows the fake is fully up.
                 &format!(
-                    "#!/bin/sh\necho $$ > {}\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep 600 &\nwait\n",
+                    "#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\necho $$ > {}\nsleep 600 &\nwait\n",
                     pid.display()
                 ),
             );
@@ -1028,12 +1033,15 @@ mod tests {
             Tools {
                 pipewire: self.dir.path().join("pipewire"),
                 pactl: self.dir.path().join("pactl"),
+                // Room for a fake to start on a machine running the whole
+                // suite in parallel.
+                ready_timeout: Duration::from_secs(30),
             }
         }
 
         fn canceller_pid(&self) -> i32 {
             let path = self.dir.path().join("canceller.pid");
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(30);
             loop {
                 if let Some(pid) = std::fs::read_to_string(&path)
                     .ok()
@@ -1058,7 +1066,10 @@ mod tests {
     }
 
     fn wait_gone(pid: i32) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous: it only costs time when the test is failing anyway, and a
+        // machine running the whole suite in parallel can take seconds to
+        // schedule a process's exit.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while running(pid) {
             assert!(Instant::now() < deadline, "canceller {pid} still running");
             std::thread::sleep(Duration::from_millis(20));
@@ -1107,13 +1118,22 @@ mod tests {
             .arg(&conf)
             .spawn()
             .unwrap();
-        let orphan_pid = orphan.id() as i32;
-        assert!(running(orphan_pid));
-        let _ = std::fs::remove_file(fakes.dir.path().join("canceller.pid"));
+        // Up and trapping TERM before anything looks for it; its pid file
+        // is then cleared so the fake pactl waits for the new canceller.
+        assert_eq!(fakes.canceller_pid(), orphan.id() as i32);
+        std::fs::remove_file(fakes.dir.path().join("canceller.pid")).unwrap();
 
         let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None).unwrap();
-        wait_gone(orphan_pid);
-        let _ = orphan.try_wait();
+        // Reaped rather than read from /proc, and with room for a machine
+        // under full test load to schedule the orphan's exit.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while orphan.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the stale canceller is still running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         aec.stop();
     }
 
@@ -1130,12 +1150,16 @@ mod tests {
 
         // Nothing appears at all.
         let fakes = Fakes::new("sources", "something_else");
+        let tools = Tools {
+            ready_timeout: READY_TIMEOUT,
+            ..fakes.tools()
+        };
         let started = Instant::now();
-        let err = EchoCanceller::start(&fakes.tools(), runtime.path(), None)
+        let err = EchoCanceller::start(&tools, runtime.path(), None)
             .err()
             .unwrap();
         assert!(err.contains("did not appear"), "{err}");
-        assert!(started.elapsed() < READY_TIMEOUT + Duration::from_secs(2));
+        assert!(started.elapsed() >= READY_TIMEOUT);
         wait_gone(fakes.canceller_pid());
     }
 }
