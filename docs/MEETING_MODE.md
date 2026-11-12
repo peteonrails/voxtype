@@ -252,7 +252,7 @@ Each key runs the matching `voxtype meeting` command, so it behaves exactly as t
 
 With no meeting running, `watch` lists recent meetings with their length, speaker count and whether they have a summary. Enter opens one (ended meetings still take `r`, `n` and `a`), Esc goes back, and a meeting that starts meanwhile appears at the top of the list. If the daemon restarts, the view says it is reconnecting and catches up when it is back.
 
-For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md)), reconnecting on its own; every connection starts with a `hello` snapshot.
+For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md#the-live-feed-meetingsock)), reconnecting on its own; every connection starts with a `hello` snapshot. `voxtype meeting watch --levels` prints the microphone and loopback levels instead, about ten times a second while a meeting records, for a level meter; add both flags for everything.
 
 ---
 

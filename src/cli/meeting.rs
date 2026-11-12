@@ -527,14 +527,25 @@ pub enum MeetingAction {
     ///
     /// --json prints the daemon's meeting.sock events as NDJSON instead,
     /// for scripts: one JSON object per line, starting with a `hello`
-    /// snapshot, and a new `hello` after the daemon restarts.
+    /// snapshot, and a new `hello` after the daemon restarts. Level events
+    /// are left out unless --levels is given too.
+    ///
+    /// --levels prints the per-track level events (about ten a second while
+    /// a meeting records) as NDJSON, for a level meter.
     #[command(after_help = "Examples:\n  \
         voxtype meeting watch\n  \
-        voxtype meeting watch --json | jq -c 'select(.event == \"segments\")'")]
+        voxtype meeting watch --json | jq -c 'select(.event == \"segments\")'\n  \
+        voxtype meeting watch --levels\n  \
+        voxtype meeting watch --json --levels")]
     Watch {
         /// Print the live events as NDJSON instead of drawing the screen
         #[arg(long)]
         json: bool,
+
+        /// Print the microphone and loopback level events as NDJSON (with
+        /// --json, alongside every other event)
+        #[arg(long)]
+        levels: bool,
     },
     /// Choose and allow the agent that answers questions and writes summaries
     #[command(after_help = "Examples:\n  \

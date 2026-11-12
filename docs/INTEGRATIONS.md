@@ -263,7 +263,9 @@ with or without a meeting. It is one-way: connect and read lines.
 socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/voxtype/meeting.sock"
 ```
 
-`voxtype meeting watch --json` relays the socket to stdout line for line,
+`voxtype meeting watch --json` relays the socket to stdout line for line
+(every event but `levels`; add `--levels` for those too, or use `--levels`
+alone for only them),
 waiting for the daemon if it is not running and reconnecting after it
 restarts, so a script or a QML `Process` can follow a meeting without a
 socket client of its own:
@@ -278,9 +280,10 @@ that falls behind is disconnected rather than allowed to slow the daemon.
 Reconnect and read a fresh `hello` when that happens, or when the daemon
 restarts.
 
-Events arrive about once per `chunk_duration_secs` (30 seconds by default),
-not per word: meetings are transcribed in chunks, not streamed. Show a
-"listening" state between updates.
+Transcript events arrive about once per `chunk_duration_secs` (30 seconds by
+default), not per word: meetings are transcribed in chunks, not streamed.
+Show a "listening" state between updates. Only `levels` is frequent, about
+ten a second while a meeting records.
 
 | Event | When |
 |-------|------|
@@ -293,6 +296,7 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
+| `levels` | About ten times a second while recording: each track's level |
 | `error` | Something failed |
 
 #### `hello`
@@ -405,6 +409,38 @@ when the daemon sends it, so changes in quick succession can arrive as one
 event with the latest state. It is sent whether or not a meeting is
 recording, and not at all while the daemon is down; ask
 `voxtype meeting play --status --json` when you need certainty.
+
+#### `levels`
+
+```json
+{"event": "levels", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "t_ms": 61200, "mic": -23.4, "mic_peak": -15.1, "loopback": -41.0, "loopback_peak": -33.2}
+```
+
+For a level meter per track. While a meeting records and is not paused,
+the daemon sends one every 100 ms with the level of the audio that arrived
+in those 100 ms. It reads them from the audio the meeting already captures,
+and it sends them only while at least one client is connected.
+
+| Field | Meaning |
+|-------|---------|
+| `mic`, `loopback` | RMS level of the window in dBFS, rounded to 0.1 dB: 0 is full scale, `-100` is silence. A speaking voice is typically -40 to -15 |
+| `mic_peak`, `loopback_peak` | The loudest sample of the window, in dBFS |
+| `t_ms` | Where the window ends on the meeting's timeline: microphone audio recorded so far, paused time left out, like `start_ms` on segments |
+
+A track field is `null` when the meeting records no loopback, or when no
+audio from that track arrived in the window (for example right after a
+start). There are no `levels` while paused, finalizing or idle, and they
+are not part of `hello`; a meter should fall to silence when they stop.
+They are best effort like every event: a client too slow for ten lines a
+second is disconnected, so read them promptly or use `--levels` from
+`voxtype meeting watch`, which reconnects.
+
+To drive a 0 to 1 meter, map dBFS linearly from -60 to 0:
+`max(0, min(1, (db + 60) / 60))`.
+
+```sh
+voxtype meeting watch --levels | jq -c '[.t_ms, .mic, .loopback]'
+```
 
 #### `error`
 

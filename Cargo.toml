@@ -310,6 +310,8 @@ clap_mangen = "0.2"
 
 [dev-dependencies]
 dirs = "5.0"
+# Paused clock for timer tests (meeting level events).
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = true

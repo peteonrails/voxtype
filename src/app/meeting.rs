@@ -846,8 +846,8 @@ pub(crate) async fn run_meeting_command(
             run_ask(config, &meeting_config, args).await?;
         }
 
-        MeetingAction::Watch { json } => {
-            super::meeting_watch::run_watch(json, &meeting_config).await?;
+        MeetingAction::Watch { json, levels } => {
+            super::meeting_watch::run_watch(json, levels, &meeting_config).await?;
         }
 
         MeetingAction::Assistant { action } => {

@@ -44,15 +44,18 @@ struct ParecLoopback {
     buffer: Arc<Mutex<Vec<f32>>>,
     /// Reader thread handle
     reader_thread: Option<std::thread::JoinHandle<()>>,
+    /// Fed by the reader thread, for meeting.sock's level events
+    meter: Arc<crate::meeting::levels::TrackMeter>,
 }
 
 impl ParecLoopback {
-    fn new(source: String) -> Self {
+    fn new(source: String, meter: Arc<crate::meeting::levels::TrackMeter>) -> Self {
         Self {
             source,
             child: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             reader_thread: None,
+            meter,
         }
     }
 
@@ -82,6 +85,7 @@ impl ParecLoopback {
 
         // Spawn reader thread
         let buffer = Arc::clone(&self.buffer);
+        let meter = Arc::clone(&self.meter);
         self.reader_thread = Some(std::thread::spawn(move || {
             use std::io::Read;
             let mut raw_buf = [0u8; 4096]; // 1024 f32 samples
@@ -104,6 +108,7 @@ impl ParecLoopback {
                                 samples.push(sample);
                             }
                         }
+                        meter.feed(&samples);
                         if let Ok(mut buf) = buffer.lock() {
                             buf.extend(samples);
                         }
@@ -152,6 +157,10 @@ pub struct DualCapture {
     loopback: Option<ParecLoopback>,
     /// Sample counter for timestamps
     sample_counter: u64,
+    /// Per-track levels for meeting.sock, fed as the audio arrives
+    meters: crate::meeting::levels::MeetingMeters,
+    /// Feeds the microphone meter from the capture's chunk stream
+    mic_meter_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DualCapture {
@@ -161,13 +170,18 @@ impl DualCapture {
         loopback_device: Option<&str>,
     ) -> Result<Self, AudioError> {
         let mic_capture = CpalCapture::new(mic_config)?;
+        let mut meters = crate::meeting::levels::MeetingMeters::new(true);
+        let loopback_meter = meters
+            .loopback
+            .clone()
+            .expect("created with a loopback meter");
 
         let loopback = match loopback_device {
             Some("disabled") | Some("") | None => None,
             Some("auto") => match Self::find_monitor_source() {
                 Some(source) => {
                     tracing::info!("Auto-detected loopback source: {}", source);
-                    Some(ParecLoopback::new(source))
+                    Some(ParecLoopback::new(source, loopback_meter))
                 }
                 None => {
                     tracing::warn!("No monitor source found, using mic only");
@@ -176,14 +190,19 @@ impl DualCapture {
             },
             Some(device) => {
                 tracing::info!("Using configured loopback source: {}", device);
-                Some(ParecLoopback::new(device.to_string()))
+                Some(ParecLoopback::new(device.to_string(), loopback_meter))
             }
         };
+        if loopback.is_none() {
+            meters.loopback = None;
+        }
 
         Ok(Self {
             mic_capture,
             loopback,
             sample_counter: 0,
+            meters,
+            mic_meter_task: None,
         })
     }
 
@@ -213,20 +232,39 @@ impl DualCapture {
 
     /// Start both captures
     pub async fn start(&mut self) -> Result<(), AudioError> {
-        let _mic_rx = self.mic_capture.start().await?;
+        let mut mic_rx = self.mic_capture.start().await?;
+        // The capture already sends each block it records on this channel
+        // (dropping blocks rather than waiting when it is full); reading it
+        // here gives the microphone meter the same audio, at no cost to the
+        // capture.
+        let mic_meter = self.meters.mic.clone();
+        self.mic_meter_task = Some(tokio::spawn(async move {
+            while let Some(block) = mic_rx.recv().await {
+                mic_meter.feed(&block);
+            }
+        }));
 
         if let Some(ref mut loopback) = self.loopback {
             if let Err(e) = loopback.start() {
                 tracing::warn!("Loopback capture failed, continuing with mic only: {}", e);
                 self.loopback = None;
+                self.meters.loopback = None;
             }
         }
 
         Ok(())
     }
 
+    /// The meters of this capture, for the level publisher.
+    pub fn meters(&self) -> crate::meeting::levels::MeetingMeters {
+        self.meters.clone()
+    }
+
     /// Stop both captures and return all samples
     pub async fn stop(&mut self) -> Result<DualSamples, AudioError> {
+        if let Some(task) = self.mic_meter_task.take() {
+            task.abort();
+        }
         let mic_samples = self.mic_capture.stop().await?;
 
         let loopback_samples = if let Some(ref mut loopback) = self.loopback {

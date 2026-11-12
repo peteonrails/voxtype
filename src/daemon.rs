@@ -1181,6 +1181,11 @@ pub struct Daemon {
     meeting_state_file_path: Option<PathBuf>,
     // Audio capture for meeting mode (dual: mic + loopback)
     meeting_audio_capture: Option<audio::DualCapture>,
+    /// The meeting.sock level publisher and its "recording, not paused" flag.
+    meeting_levels: Option<(
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     // Chunk buffers for meeting mode (separate mic and loopback)
     meeting_mic_buffer: Vec<f32>,
     meeting_loopback_buffer: Vec<f32>,
@@ -1359,6 +1364,7 @@ impl Daemon {
             meeting_daemon: None,
             meeting_state_file_path,
             meeting_audio_capture: None,
+            meeting_levels: None,
             meeting_mic_buffer: Vec::new(),
             meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
@@ -3108,6 +3114,7 @@ impl Daemon {
                         };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
+                        self.start_meeting_levels(capture.meters(), &id_str);
                         self.meeting_audio_capture = Some(capture);
 
                         // Load GTCRN speech enhancer for echo cancellation
@@ -3171,8 +3178,42 @@ impl Daemon {
         Ok(())
     }
 
+    /// Publish the meeting's per-track levels on meeting.sock about ten
+    /// times a second, while a client is connected. The publisher only reads
+    /// the meters; the capture feeds them and never waits on it.
+    fn start_meeting_levels(&mut self, meters: meeting::levels::MeetingMeters, meeting_id: &str) {
+        self.stop_meeting_levels();
+        let Some(hub) = self.meeting_event_hub.clone() else {
+            return;
+        };
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let clients = hub.clone();
+        let task = tokio::spawn(meeting::levels::run_publisher(
+            meters,
+            meeting_id.to_string(),
+            active.clone(),
+            move || clients.has_subscribers(),
+            move |levels| hub.publish_levels(levels),
+        ));
+        self.meeting_levels = Some((task, active));
+    }
+
+    fn stop_meeting_levels(&mut self) {
+        if let Some((task, _)) = self.meeting_levels.take() {
+            task.abort();
+        }
+    }
+
+    /// Hold level events back while the meeting is paused.
+    fn set_meeting_levels_active(&self, on: bool) {
+        if let Some((_, active)) = &self.meeting_levels {
+            active.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Stop the current meeting
     async fn stop_meeting(&mut self) -> Result<()> {
+        self.stop_meeting_levels();
         if self.meeting_daemon.is_some() {
             // Stop audio capture and keep any samples that arrived since the last poll.
             if let Some(mut capture) = self.meeting_audio_capture.take() {
@@ -3324,6 +3365,7 @@ impl Daemon {
         if let Some(ref mut daemon) = self.meeting_daemon {
             daemon.pause().await?;
             let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+            self.set_meeting_levels_active(false);
             self.update_meeting_state("paused", meeting_id.as_deref());
             tracing::info!("Meeting paused");
 
@@ -3345,6 +3387,7 @@ impl Daemon {
         if let Some(ref mut daemon) = self.meeting_daemon {
             daemon.resume().await?;
             let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+            self.set_meeting_levels_active(true);
             self.update_meeting_state("recording", meeting_id.as_deref());
             tracing::info!("Meeting resumed");
 

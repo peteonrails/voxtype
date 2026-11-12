@@ -30,6 +30,7 @@ pub mod diarization;
 pub mod events;
 pub mod export;
 pub mod hook;
+pub mod levels;
 pub mod manifest;
 pub mod notes;
 pub mod playback;
