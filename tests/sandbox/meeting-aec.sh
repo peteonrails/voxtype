@@ -132,6 +132,19 @@ skipped "a system echo canceller as default source" "already an echo canceller"
 kill $DPID; wait $DPID 2>/dev/null
 pactl set-default-source mic; pactl unload-module $SYS
 
+# A filter as the default source (as Camera Effects is on Pete's machine):
+# the canceller must record the mic under it, and still remove the echo.
+FX=$(pactl load-module module-remap-source master=mic source_name=fx_mic)
+pactl set-default-source fx_mic
+daemon webrtc
+meeting "filter webrtc" call
+grep -q "is a filter over mic" $OUT/daemon.log || fail "the filter default source was not unwrapped to mic"
+TEXT=$(mic_text); LEAK=$(remote_words "$TEXT")
+echo "filter default source: unwrapped to mic, remote-only words on the mic track: $LEAK"
+[ "$LEAK" -gt 1 ] && fail "filter: $LEAK remote words reached the mic track"
+kill $DPID; wait $DPID 2>/dev/null
+pactl set-default-source mic; pactl unload-module $FX
+
 echo "crash: kill -9 the daemon while a meeting runs on the canceller"
 daemon webrtc
 $BIN meeting start --title crash >/dev/null; state recording; sleep 1

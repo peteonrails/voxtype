@@ -1669,6 +1669,8 @@ The log line gives the reason when it is not `webrtc`:
 - **"the default source is already an echo canceller"**: you run your own echo canceller as the default microphone, and voxtype records from it rather than adding a second one. If echo still gets through, check that canceller's setup, or name your real microphone in `mic_device` to have voxtype's canceller instead.
 - **`none`**: `echo_cancel` is `disabled`, or it is `gtcrn` and the GTCRN model is missing.
 
+With a filter as your default microphone (Camera Effects, a noise-suppression chain), the log also says "The default source … is a filter over …": the canceller records the real microphone under the filter, so the filter's effects are not in the meeting's mic track. That is expected.
+
 The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
 
 ### Meeting audio is saved as WAV instead of Opus
