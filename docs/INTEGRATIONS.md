@@ -970,6 +970,38 @@ A failure exits 1 with the reason on stderr: the meeting kept no audio, the
 track is missing (a meeting without loopback has no `loopback` track), the
 segment is unknown, or `ffmpeg` or a player is not installed.
 
+### Drawing a waveform: `meeting waveform`
+
+For a player's scrub bar: the peak level of each time bucket of a meeting's
+kept audio, per track.
+
+```sh
+voxtype meeting waveform <meeting> [--buckets N] --json
+```
+
+```json
+{"duration_ms": 2843210, "bucket_ms": 2844, "mic": [-100.0, -41.3, -18.9, ...], "loopback": [-37.2, -12.4, ...], "mic_track": "mic"}
+```
+
+- `duration_ms` is the longer track's length, and `bucket_ms` the time each
+  value covers: the meeting split into at most `--buckets` (default 1000,
+  1 to 100000) buckets of a whole number of milliseconds. The last bucket
+  may be shorter. `mic` and `loopback` have the same number of values;
+  a shorter track is padded with silence.
+- Values are peak dBFS, rounded to 0.1, with -100 for silence (the floor
+  the live `levels` use).
+- `loopback` is `null` for a meeting recorded without loopback.
+  `mic_track` is `mic`, or `mixed` for a meeting that kept only both sides
+  together (an import without `--channels`): `mic` then holds the mixed
+  track.
+
+The audio is decoded with `ffmpeg`. The result is cached in the meeting
+folder as `waveform.json`, one entry per bucket count, so asking again is
+instant; it is recomputed when an audio file changes, which includes a
+meeting that is still recording. A meeting that kept no audio prints the
+reason on stderr and exits 2; other failures (no `ffmpeg`, an unreadable
+file) exit 1.
+
 ### Importing and transcribing again: `meeting import` and `meeting retranscribe`
 
 ```sh

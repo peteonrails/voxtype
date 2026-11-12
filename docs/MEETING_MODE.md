@@ -752,6 +752,8 @@ Only one playback runs at a time; starting another stops the one before. It play
 
 Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
 
+`voxtype meeting waveform latest` reports the peak level of each stretch of a meeting's kept audio, your side and the other side, the data a player draws its waveform from. `--json` gives the values (see [Integrations](INTEGRATIONS.md#drawing-a-waveform-meeting-waveform)) and `--buckets` how many stretches to split the meeting into. The result is kept in the meeting folder as `waveform.json`, so asking again is instant.
+
 ### Importing a Recording
 
 `voxtype meeting import` turns a recording made elsewhere (a phone memo, a call recorded by another app, a video) into a meeting like any other: transcript, speakers, exports, the kept audio, the summary at the end when auto-summary is on, and `post_meeting_command`. Anything ffmpeg reads works.

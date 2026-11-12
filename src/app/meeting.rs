@@ -1202,6 +1202,57 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Waveform {
+            meeting_id,
+            buckets,
+            json,
+        } => {
+            use meeting::waveform;
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let dir = storage
+                .get_meeting_path(&id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let ffmpeg = waveform::find_ffmpeg();
+            let result = tokio::task::spawn_blocking(move || {
+                waveform::load_or_compute(&dir, ffmpeg.as_deref(), buckets as usize)
+            })
+            .await?;
+            let wave = match result {
+                Ok(wave) => wave,
+                Err(e @ waveform::WaveformError::NoAudio) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if json {
+                println!("{}", serde_json::to_string(&wave)?);
+            } else {
+                let peak = |v: &[f32]| v.iter().copied().fold(waveform::SILENCE_DB, f32::max);
+                println!(
+                    "Meeting {}: {} in {} buckets of {} ms. Peak {:.1} dBFS on the {} track{}.",
+                    id,
+                    format_ms(wave.duration_ms),
+                    wave.mic.len(),
+                    wave.bucket_ms,
+                    peak(&wave.mic),
+                    wave.mic_track,
+                    wave.loopback
+                        .as_deref()
+                        .map(|l| format!(", {:.1} dBFS on the loopback", peak(l)))
+                        .unwrap_or_else(|| ", no loopback".to_string())
+                );
+                println!(
+                    "For the levels: voxtype meeting waveform {} --json",
+                    meeting_id
+                );
+            }
+        }
+
         MeetingAction::Summarize {
             meeting_id,
             format,

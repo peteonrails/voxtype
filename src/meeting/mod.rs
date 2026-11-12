@@ -55,6 +55,7 @@ pub mod title_labels;
 #[cfg(unix)]
 pub mod view;
 pub mod view_presence;
+pub mod waveform;
 
 pub use chunk::{ChunkBuffer, ChunkConfig, ChunkProcessor, ProcessedChunk, VoiceActivityDetector};
 pub use data::{
