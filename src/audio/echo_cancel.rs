@@ -123,6 +123,10 @@ pub struct Environment {
     pub mic: Mic,
     /// The default source is already an echo canceller the user runs
     pub system_canceller: bool,
+    /// The default source, when it is a filter over the microphone `mic`
+    /// names (Camera Effects, a noise-suppression chain): the canceller
+    /// records the microphone under it
+    pub wraps: Option<String>,
     /// pipewire, pactl and parec are installed
     pub available: bool,
 }
@@ -203,21 +207,79 @@ pub fn is_echo_canceller(source: &serde_json::Value) -> bool {
             .is_some_and(|g| g.starts_with("echo-cancel"))
 }
 
+/// The microphone under a filter source: a source that shares its
+/// `node.link-group` with a capture stream (a source output) recording
+/// another source, as Camera Effects' `camera-effects-mic` does with the
+/// webcam mic. Follows up to four filters, stopping at a source whose input
+/// is a monitor (a virtual mic fed from a sink) or voxtype's own canceller.
+/// `None` when `name` is not a filter, or is one straight over a monitor.
+pub fn filter_upstream(
+    name: &str,
+    sources: &[serde_json::Value],
+    outputs: &[serde_json::Value],
+) -> Option<String> {
+    let mut current = name.to_string();
+    for _ in 0..4 {
+        let source = sources
+            .iter()
+            .find(|s| s["name"].as_str() == Some(current.as_str()))?;
+        let Some(group) = source["properties"]["node.link-group"].as_str() else {
+            break;
+        };
+        let Some(upstream_index) = outputs
+            .iter()
+            .find(|o| o["properties"]["node.link-group"].as_str() == Some(group))
+            .and_then(|o| o["source"].as_u64())
+        else {
+            break;
+        };
+        let upstream = sources
+            .iter()
+            .find(|s| s["index"].as_u64() == Some(upstream_index))?["name"]
+            .as_str()?;
+        if upstream.ends_with(".monitor") || upstream == SOURCE_NODE {
+            break;
+        }
+        current = upstream.to_string();
+    }
+    (current != name).then_some(current)
+}
+
 /// Read the environment from `pactl` output: the default sink and source,
-/// and the sink and source lists as JSON. `mic_device` is
+/// and the sink, source and source-output lists as JSON. `mic_device` is
 /// `[meeting.audio] mic_device`.
 pub fn environment_from(
     default_sink: &str,
     default_source: &str,
     sinks_json: &str,
     sources_json: &str,
+    source_outputs_json: &str,
     mic_device: &str,
     available: bool,
 ) -> Environment {
     let sources: Vec<serde_json::Value> = serde_json::from_str(sources_json).unwrap_or_default();
+    let outputs: Vec<serde_json::Value> =
+        serde_json::from_str(source_outputs_json).unwrap_or_default();
+    let default_source = default_source.trim();
+    let system_canceller = sources
+        .iter()
+        .find(|s| s["name"].as_str() == Some(default_source))
+        .is_some_and(is_echo_canceller);
     let mic_device = mic_device.trim();
+    let mut wraps = None;
     let mic = if matches!(mic_device, "default" | "" | "pipewire" | "pulse") {
-        Mic::Default
+        // A filter as the default source sits between the real mic and the
+        // canceller, and its effects (a noise gate, a voice changer, auto
+        // level) bend the echo the canceller models as linear, so record
+        // the mic under it. A system echo canceller is left alone: the plan
+        // skips ours for it.
+        match filter_upstream(default_source, &sources, &outputs) {
+            Some(real) if !system_canceller => {
+                wraps = Some(default_source.to_string());
+                Mic::Node(real)
+            }
+            _ => Mic::Default,
+        }
     } else if sources
         .iter()
         .any(|s| s["name"].as_str() == Some(mic_device))
@@ -229,10 +291,8 @@ pub fn environment_from(
     Environment {
         output: classify_default(sinks_json, default_sink),
         mic,
-        system_canceller: sources
-            .iter()
-            .find(|s| s["name"].as_str() == Some(default_source.trim()))
-            .is_some_and(is_echo_canceller),
+        system_canceller,
+        wraps,
         available,
     }
 }
@@ -262,6 +322,7 @@ pub fn begin(
             output: Output::Unknown,
             mic: Mic::Default,
             system_canceller: false,
+            wraps: None,
             available: tools.is_some(),
         }
     } else {
@@ -270,6 +331,7 @@ pub fn begin(
             &pactl(&["get-default-source"]),
             &pactl(&["-f", "json", "list", "sinks"]),
             &pactl(&["-f", "json", "list", "sources"]),
+            &pactl(&["-f", "json", "list", "source-outputs"]),
             mic_device,
             tools.is_some(),
         )
@@ -277,6 +339,15 @@ pub fn begin(
     let (path, why) = plan(mode, &env);
     match (path, tools) {
         (EchoPath::Webrtc, Some(tools)) => {
+            if let (Some(filter), Mic::Node(real)) = (&env.wraps, &env.mic) {
+                tracing::info!(
+                    "The default source {} is a filter over {}; the echo canceller records {} \
+                     so the filter's effects do not bend the echo it removes",
+                    filter,
+                    real,
+                    real
+                );
+            }
             let target = match env.mic {
                 Mic::Node(ref node) => Some(node.as_str()),
                 _ => None,
@@ -660,6 +731,7 @@ mod tests {
             output,
             mic: Mic::Default,
             system_canceller: false,
+            wraps: None,
             available: true,
         }
     }
@@ -731,6 +803,7 @@ mod tests {
             "alsa_input.usb-mic\n",
             &sinks,
             &sources,
+            "[]",
             "default",
             true,
         );
@@ -743,23 +816,169 @@ mod tests {
             "echo-cancel-source",
             &sinks,
             &sources,
+            "[]",
             "pipewire",
             true,
         );
         assert!(e.system_canceller);
         // Our own canceller left as the default is not the user's.
-        let e = environment_from("spk", SOURCE_NODE, &sinks, &sources, "", true);
+        let e = environment_from("spk", SOURCE_NODE, &sinks, &sources, "[]", "", true);
         assert!(!e.system_canceller);
-        let e = environment_from("spk", "x", &sinks, &sources, "alsa_input.usb-mic", true);
+        let e = environment_from(
+            "spk",
+            "x",
+            &sinks,
+            &sources,
+            "[]",
+            "alsa_input.usb-mic",
+            true,
+        );
         assert_eq!(e.mic, Mic::Node("alsa_input.usb-mic".into()));
-        let e = environment_from("spk", "x", &sinks, &sources, "hw:CARD=Mic,DEV=0", true);
+        let e = environment_from(
+            "spk",
+            "x",
+            &sinks,
+            &sources,
+            "[]",
+            "hw:CARD=Mic,DEV=0",
+            true,
+        );
         assert_eq!(e.mic, Mic::Unmapped("hw:CARD=Mic,DEV=0".into()));
         // No pactl output at all: unknown output, default mic.
-        let e = environment_from("", "", "", "", "default", true);
+        let e = environment_from("", "", "", "", "", "default", true);
         assert_eq!(
             (e.output, e.mic, e.system_canceller),
             (Output::Unknown, Mic::Default, false)
         );
+    }
+
+    /// Pete's machine on 2026-11-11, from `pactl -f json list sources` and
+    /// `source-outputs`: Camera Effects wraps the C920 webcam mic as
+    /// `camera-effects-mic`, the default source.
+    fn camera_effects() -> (String, String) {
+        let sources = json!([
+            {"index": 69, "name": "alsa_input.usb-046d_HD_Pro_Webcam_C920_C1FB42FF-02.analog-stereo",
+             "properties": {"media.class": "Audio/Source", "device.api": "alsa"}},
+            {"index": 68, "name": "alsa_input.usb-Generic_USB_Audio-00.HiFi__Mic__source",
+             "properties": {"media.class": "Audio/Source", "device.api": "alsa"}},
+            {"index": 65, "name": "alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor",
+             "properties": {}},
+            {"index": 37704, "name": "camera-effects-mic",
+             "properties": {"media.class": "Audio/Source", "device.api": "camera-effects-server",
+                            "node.link-group": "camera-effects-mic"}},
+        ])
+        .to_string();
+        let outputs = json!([
+            {"index": 463, "source": 37704, "properties": {"node.name": "alsa_capture.hex"}},
+            {"index": 37725, "source": 69,
+             "properties": {"node.name": "camera-effects-mic-input",
+                            "node.link-group": "camera-effects-mic"}},
+        ])
+        .to_string();
+        (sources, outputs)
+    }
+
+    #[test]
+    fn a_filter_default_source_is_unwrapped_to_its_mic() {
+        let (sources, outputs) = camera_effects();
+        let sinks = json!([sink("spk", "[Out] Speaker", "Speaker", json!({}))]).to_string();
+        let webcam = "alsa_input.usb-046d_HD_Pro_Webcam_C920_C1FB42FF-02.analog-stereo";
+        let env = |default: &str, mic: &str| {
+            environment_from("spk", default, &sinks, &sources, &outputs, mic, true)
+        };
+        let e = env("camera-effects-mic\n", "default");
+        assert_eq!(e.mic, Mic::Node(webcam.to_string()));
+        assert_eq!(e.wraps.as_deref(), Some("camera-effects-mic"));
+        assert!(
+            !e.system_canceller,
+            "Camera Effects is not an echo canceller"
+        );
+        assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Webrtc);
+        // With Camera Effects hiding the real mics, other clients (pactl
+        // included) cannot see the webcam, so there is nothing to unwrap to:
+        // the canceller records camera-effects-mic as the default source.
+        let hidden: Vec<serde_json::Value> =
+            serde_json::from_str::<Vec<serde_json::Value>>(&sources)
+                .unwrap()
+                .into_iter()
+                .filter(|s| s["index"] != 69)
+                .collect();
+        let hidden = serde_json::to_string(&hidden).unwrap();
+        let e = environment_from(
+            "spk",
+            "camera-effects-mic",
+            &sinks,
+            &hidden,
+            &outputs,
+            "default",
+            true,
+        );
+        assert_eq!((e.mic.clone(), e.wraps.clone()), (Mic::Default, None));
+        assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Webrtc);
+        // A plain mic as the default is not a filter.
+        let e = env(webcam, "default");
+        assert_eq!((e.mic, e.wraps), (Mic::Default, None));
+        // A mic_device named outright is taken as given.
+        let e = env("camera-effects-mic", "camera-effects-mic");
+        assert_eq!(e.mic, Mic::Node("camera-effects-mic".to_string()));
+        assert_eq!(e.wraps, None);
+    }
+
+    #[test]
+    fn filters_over_monitors_or_echo_cancellers_are_not_unwrapped() {
+        let s: Vec<serde_json::Value> = serde_json::from_value(json!([
+            {"index": 1, "name": "mic", "properties": {}},
+            {"index": 2, "name": "speakers.monitor", "properties": {}},
+            {"index": 3, "name": "fx", "properties": {"node.link-group": "fx"}},
+            {"index": 4, "name": "fx2", "properties": {"node.link-group": "fx2"}},
+            {"index": 5, "name": "loud", "properties": {"node.link-group": "loud"}},
+            {"index": 7, "name": "virtual", "properties": {"node.link-group": "virtual"}},
+            {"index": 8, "name": "fx_virtual", "properties": {"node.link-group": "fxv"}},
+            {"index": 6, "name": "echo-cancel-source",
+             "properties": {"node.link-group": "echo-cancel-6-7", "node.group": "echo-cancel-6-7"}},
+        ]))
+        .unwrap();
+        let o: Vec<serde_json::Value> = serde_json::from_value(json!([
+            {"source": 1, "properties": {"node.link-group": "fx"}},
+            {"source": 3, "properties": {"node.link-group": "fx2"}},
+            {"source": 2, "properties": {"node.link-group": "loud"}},
+            {"source": 2, "properties": {"node.link-group": "virtual"}},
+            {"source": 7, "properties": {"node.link-group": "fxv"}},
+            {"source": 1, "properties": {"node.link-group": "echo-cancel-6-7"}},
+        ]))
+        .unwrap();
+        assert_eq!(filter_upstream("fx", &s, &o).as_deref(), Some("mic"));
+        assert_eq!(
+            filter_upstream("fx2", &s, &o).as_deref(),
+            Some("mic"),
+            "two deep"
+        );
+        assert_eq!(
+            filter_upstream("loud", &s, &o),
+            None,
+            "straight over a monitor"
+        );
+        assert_eq!(
+            filter_upstream("fx_virtual", &s, &o).as_deref(),
+            Some("virtual"),
+            "stops at the virtual mic a monitor feeds"
+        );
+        assert_eq!(filter_upstream("mic", &s, &o), None, "not a filter");
+        // A user's echo canceller as default source keeps the skip rule.
+        let sources = serde_json::to_string(&s).unwrap();
+        let outputs = serde_json::to_string(&o).unwrap();
+        let e = environment_from(
+            "x",
+            "echo-cancel-source",
+            "[]",
+            &sources,
+            &outputs,
+            "",
+            true,
+        );
+        assert!(e.system_canceller);
+        assert_eq!((e.mic.clone(), e.wraps.clone()), (Mic::Default, None));
+        assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Gtcrn);
     }
 
     #[test]
@@ -869,7 +1088,11 @@ mod tests {
         let pid = fakes.canceller_pid();
         let shell = aec.abandon();
         wait_gone(pid);
-        let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(shell as i32), None);
+        wait_gone(shell as i32);
+        let _ = nix::sys::wait::waitpid(
+            nix::unistd::Pid::from_raw(shell as i32),
+            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+        );
     }
 
     /// A canceller whose shell was killed on its own is stopped by the next
@@ -889,8 +1112,8 @@ mod tests {
         let _ = std::fs::remove_file(fakes.dir.path().join("canceller.pid"));
 
         let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None).unwrap();
-        let _ = orphan.wait();
-        assert!(!running(orphan_pid), "the stale one was stopped");
+        wait_gone(orphan_pid);
+        let _ = orphan.try_wait();
         aec.stop();
     }
 

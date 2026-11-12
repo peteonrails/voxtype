@@ -39,6 +39,11 @@ cannot hide the echo. It passes when:
 - with `webrtc` at most one remote-only word reaches the mic transcript, and
   with `disabled` (the control) at least five do;
 - the kept mic track's echo is at least 20 dB quieter with `webrtc`;
+- a default source that is a filter over the mic (a `module-remap-source`,
+  standing in for Camera Effects) is unwrapped: the canceller records the
+  mic under it, and the echo still stays off the mic track;
+- an unmapped `mic_device`, and a user's own echo canceller as the default
+  source, leave the canceller off, each with its log line;
 - after `kill -9` of the daemon mid-meeting, the canceller's source and
   process are gone.
 
