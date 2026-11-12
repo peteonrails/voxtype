@@ -2,6 +2,8 @@
 //!
 //! ```text
 //! Meeting: Weekly sync, 2026-11-11 14:00, 32m. Speakers: Pete (You), Steve (Remote 1).
+//! The user asking is Pete (You).
+//! Write about the user in the second person ("you said", ...), never as a third person named You.
 //! [00:41] Steve: ...
 //! [00:52] Pete: ...
 //! User notes: ...
@@ -282,6 +284,10 @@ pub fn pieces(lines: &[Line], budget: usize) -> Vec<Vec<Line>> {
     out
 }
 
+/// Follows the reader line, so an agent writes "you said" rather than
+/// "You expected their lines", as if the reader were a third person.
+pub const SECOND_PERSON: &str = "Write about the user in the second person (\"you said\", \"your action item\"), never as a third person named You.";
+
 /// Everything the agent is told about the meeting.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
@@ -304,6 +310,8 @@ impl Context {
         p.push('\n');
         if let Some(reader) = &self.reader {
             p.push_str(reader);
+            p.push('\n');
+            p.push_str(SECOND_PERSON);
             p.push('\n');
         }
         if let Some(excerpt) = &self.excerpt {
@@ -361,7 +369,7 @@ impl Context {
 }
 
 const SUMMARY_INSTRUCTIONS: &str = r#"Summarize this meeting. Where the user's notes say what mattered, expand on them from the transcript rather than ignoring them.
-Use speaker names exactly as written above. Reply with only a JSON object, no other text:
+Use speaker names exactly as written above, also for action item owners; in the prose, write about the reader as described above. Reply with only a JSON object, no other text:
 {
   "overview": "3-5 sentences on what the meeting covered and concluded",
   "key_points": ["..."],
@@ -427,6 +435,24 @@ mod tests {
         let ts: Vec<&str> = c.iter().map(|c| c.ts.as_str()).collect();
         assert_eq!(ts, vec!["00:41", "01:58", "02:10"]);
         assert_eq!(c[1].ms, 118_000);
+    }
+
+    #[test]
+    fn the_reader_line_is_followed_by_the_second_person_rule() {
+        let ctx = Context {
+            header: "Meeting: X".into(),
+            reader: Some("The user asking is the speaker You.".into()),
+            ..Default::default()
+        };
+        let p = ctx.ask("what did I say?");
+        assert!(p.starts_with(&format!(
+            "Meeting: X\nThe user asking is the speaker You.\n{SECOND_PERSON}\n"
+        )));
+        let none = Context {
+            header: "Meeting: X".into(),
+            ..Default::default()
+        };
+        assert!(!none.ask("q").contains(SECOND_PERSON));
     }
 
     #[test]

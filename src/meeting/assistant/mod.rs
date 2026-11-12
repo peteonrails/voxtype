@@ -916,6 +916,10 @@ mod tests {
             p.contains("Speakers: Steve (Remote 1), Pete (You), Dana (Remote 2)."),
             "{p}"
         );
+        assert!(
+            p.contains("\nThe user asking is Pete (You).\nWrite about the user in the second person"),
+            "{p}"
+        );
         assert!(p.contains(
             "[00:41] Steve: We ship on Friday.\n[00:52] Pete: Agreed.\n[01:00] Dana: The budget is 40k.\n"
         ));
