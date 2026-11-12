@@ -162,6 +162,19 @@ Scenarios:
   share-real-unavailable  the real voxtype with no wl-copy or xdg-open on
               its PATH and a share command configured: greyed Copy and
               Email, the command run for real, a refused save shown
+  actions     the Summary tab's action items: rows all ticked, owner, due,
+              the time jumping to the line, the summary's own list hidden;
+              Send to Todoist for the ticked rows, a resend not duplicating
+              (✓ on sent rows), Remind me... with a delay
+  actions-connect  not connected: Connect Todoist... waits on the browser,
+              then Send appears; no reminder app, no Remind me; a refused
+              send shown in the urgent colour
+  actions-old a voxtype without `meeting actions` keeps the summary as it was
+  actions-real  against a real voxtype (REAL_VOXTYPE) and a fake Todoist API:
+              Connect Todoist... through a stand-in browser that clicks
+              Allow, Send to Todoist for one ticked item, Remind me... in 15
+              min through a recording omarchy-reminder, then all, the sent
+              one skipped
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -206,6 +219,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
+             "actions", "actions-connect", "actions-old", "actions-real",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing",
              "notice", "notice-acked")
 
@@ -320,6 +334,44 @@ def hybrid_meeting():
     return m
 
 
+class FakeTodoist:
+    """Todoist's API for actions-real: client registration, tokens and
+    tasks, each request recorded. Started on a free loopback port."""
+    def __init__(self):
+        import http.server
+        import threading
+        seen = self.seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+                seen.append((self.path, body))
+                reply = {"/oauth/register": {"client_id": "tdd_test"},
+                         "/oauth/access_token": {"access_token": "at1", "refresh_token": "rt1", "expires_in": 3600,
+                                                 "scope": "task:add"},
+                         "/api/v1/tasks": {"id": "task%d" % len(seen)}}.get(self.path.split("?")[0], {})
+                data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            do_GET = do_POST
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tasks(self):
+        return [json.loads(b) for p, b in self.seen if p.startswith("/api/v1/tasks")]
+
+    def close(self):
+        self.server.shutdown()
+
+
 def seed_shared_meeting(real, data_home, config_home, folder, command=None):
     """The running meeting (MEETING_ID) stored the way a real voxtype keeps
     one, with a summary and notes, for `meeting share` to read; and a
@@ -338,7 +390,8 @@ def seed_shared_meeting(real, data_home, config_home, folder, command=None):
     (meeting_dir / "transcript.json").write_text(json.dumps({"segments": segs, "total_chunks": 2}))
     (meeting_dir / "notes.md").write_text("follow up with Steve\n")
     summary = {"summary": "A short standup about the release.", "key_points": [], "decisions": ["Ship today."],
-               "action_items": [{"description": "Cut the tag", "assignee": "Pete", "completed": False}],
+               "action_items": [{"description": "Cut the tag", "assignee": "Pete", "completed": False},
+                                {"description": "Update the release notes", "assignee": "Dana", "completed": False}],
                "generated_at": "2026-11-12T16:00:00Z", "model": "claude"}
     now = int(time.time())
     db = sqlite3.connect(store / "index.db")
@@ -406,6 +459,10 @@ INITIAL = {
     "share": lambda: [running_meeting()],
     "share-unavailable": lambda: [running_meeting()],
     "share-old": lambda: [running_meeting()],
+    "actions": lambda: [running_meeting()],
+    "actions-connect": lambda: [running_meeting()],
+    "actions-old": lambda: [running_meeting()],
+    "actions-real": lambda: [running_meeting()],
     "share-real": lambda: [running_meeting()],
     "share-real-unavailable": lambda: [running_meeting()],
     "undo-edit": lambda: [running_meeting()],
@@ -459,6 +516,9 @@ STATE = {
                           "share_command": "post-standup --channel team",
                           "share_fail": {"file": "Documents/Voxtype is not writable. Check its permissions."}},
     "share-old": {"old": True},
+    "actions": {"actions_todoist": True, "actions_reminder": True},
+    "actions-connect": {"actions_reminder": False},
+    "actions-old": {"old": True},
     "recovery-socket": {"recover_array": True},
     "recovery": {"recover_summary": {"state": "failed", "message": "the local model answered 500"},
                  "recoverable": [
@@ -627,6 +687,25 @@ def run(scenario, host, shell, evidence):
             seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", share_folder, command)
             real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
                         "XDG_CONFIG_HOME": str(r.root / "xdg-config"), "REAL_SHARE_PATH": str(tools)}
+        todoist = None
+        if scenario == "actions-real":
+            real = os.environ["REAL_VOXTYPE"]
+            tools = r.root / "real-tools"
+            tools.mkdir()
+            (tools / "xdg-open").write_text("#!/bin/sh\nexec " + sys.executable + " -I "
+                                            + str(h.HERE / "fake-browser-xdg-open.py") + ' "$@"\n')
+            (tools / "xdg-open").chmod(0o755)
+            reminders = r.root / "reminders.txt"
+            (tools / "omarchy-reminder").write_text("#!/bin/sh\nprintf '%s|%s\\n' \"$1\" \"$2\" >> " + str(reminders) + "\n")
+            (tools / "omarchy-reminder").chmod(0o755)
+            for prog in ("sh",):
+                (tools / prog).symlink_to(shutil.which(prog))
+            seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", documents / "Voxtype")
+            todoist = FakeTodoist()
+            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
+                        "XDG_CONFIG_HOME": str(r.root / "xdg-config"), "REAL_SHARE_PATH": str(tools),
+                        "VOXTYPE_TODOIST_API": todoist.base, "VOXTYPE_TODOIST_APP": "https://app.todoist.invalid",
+                        "FAKE_BROWSER_LOG": str(r.root / "browser.txt")}
         if scenario == "recovery-real":
             real = os.environ["REAL_VOXTYPE"]
             seed_interrupted(real, r.root / "xdg-data")
@@ -681,6 +760,10 @@ def run(scenario, host, shell, evidence):
             if documents.exists() else []
         export_head = [(documents / e).read_text().splitlines()[0] for e in exports]
         export_text = {e: (documents / e).read_text() for e in exports}
+        reminder_calls = (r.root / "reminders.txt").read_text().splitlines() if (r.root / "reminders.txt").exists() else []
+        todoist_tasks = todoist.tasks() if todoist else []
+        if todoist:
+            todoist.close()
         shared_by_command = r.root / "shared-by-command.txt"
         shared_by_command = shared_by_command.read_text() if shared_by_command.exists() else ""
         if (documents / "Voxtype").exists():
@@ -705,6 +788,13 @@ def run(scenario, host, shell, evidence):
         drafts = [p for p in opened_paths if p.startswith("mailto:")]
         if len(drafts) != 1 or str(documents / "Voxtype") not in opened_paths:
             problems.append("opened: %s" % opened_paths)
+    if scenario == "actions-real":
+        # voxtype adds the owner to the task's text and links the meeting.
+        if [t.get("content") for t in todoist_tasks] != ["Cut the tag (Pete)", "Update the release notes (Dana)"] \
+                or not all(MEETING_ID[:8] in t.get("description", "") for t in todoist_tasks):
+            problems.append("Todoist tasks: %s" % todoist_tasks)
+        if reminder_calls != ["15|Cut the tag (from Standup)"]:
+            problems.append("reminders: %s" % reminder_calls)
     if scenario == "share-real-unavailable":
         sent = shared_by_command
         if "A short standup about the release." not in sent:
@@ -737,7 +827,8 @@ def read_only(argv):
     if argv == ["meeting", "my-name", "--json"]:
         return True
     if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"] \
-            or argv == ["meeting", "recover", "--json"]:
+            or argv == ["meeting", "recover", "--json"] \
+            or (argv[:2] == ["meeting", "actions"] and len(argv) == 4 and argv[3] == "--json"):
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -913,6 +1004,23 @@ def check_calls(scenario, calls, runtime_notes=""):
         sh = ["meeting", "share", MEETING_ID]
         expect(meeting, [sh + ["--preview", "--json"], sh + ["--to", "command", "--json"], sh + ["--to", "file", "--json"]],
                "meeting commands")
+    elif scenario == "actions":
+        ac = ["meeting", "actions", MEETING_ID]
+        expect(meeting, [["meeting", "stop"], ac + ["--send", "todoist", "--pick", "1", "--json"],
+                         ac + ["--send", "todoist", "--all", "--json"],
+                         ac + ["--send", "reminder", "--in", "15", "--all", "--json"]], "meeting commands")
+    elif scenario == "actions-connect":
+        ac = ["meeting", "actions", MEETING_ID]
+        expect(meeting, [["meeting", "stop"], ["meeting", "todoist", "connect", "--json"],
+                         ac + ["--send", "todoist", "--all", "--json"]], "meeting commands")
+    elif scenario == "actions-old":
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "actions-real":
+        ac = ["meeting", "actions", MEETING_ID]
+        expect(meeting, [["meeting", "stop"], ["meeting", "todoist", "connect", "--json"],
+                         ac + ["--send", "todoist", "--pick", "1", "--json"],
+                         ac + ["--send", "reminder", "--in", "15", "--pick", "1", "--json"],
+                         ac + ["--send", "todoist", "--all", "--json"]], "meeting commands")
     elif scenario == "share-real":
         sh = ["meeting", "share", MEETING_ID]
         expect(meeting, [sh + ["--preview", "--json"], sh + ["--preview", "--json", "--transcript"],
@@ -989,7 +1097,7 @@ def main():
             if host != "omarchy" and scenario in OMARCHY_ONLY:
                 continue
             # Needs a real voxtype with `meeting recover` / `meeting share`.
-            if scenario in ("recovery-real", "share-real", "share-real-unavailable") \
+            if scenario in ("recovery-real", "share-real", "share-real-unavailable", "actions-real") \
                     and not os.environ.get("REAL_VOXTYPE"):
                 continue
             output, problems, calls = run(scenario, host, args.shell, args.evidence)

@@ -881,6 +881,102 @@ def share(state, args):
     return 0
 
 
+DEFAULT_ACTIONS = [
+    {"number": 1, "key": "3fa2c0de11aa16b1", "text": "Cut the tag", "owner": "Pete", "mine": True,
+     "due": "2026-11-13", "due_time": None, "due_said": "Friday", "source_ms": 35000, "sent": {}},
+    {"number": 2, "key": "77b0e3c9d24f8a10", "text": "Update the release notes", "owner": "Dana", "mine": False,
+     "due": None, "due_time": None, "due_said": "next week", "source_ms": 9000, "sent": {}},
+]
+
+
+def actions(state, args):
+    """meeting actions M --json | M --send todoist|reminder [--all | --pick 1,3] [--in MINUTES] --json
+
+    detect-140's f1601769 contract. state: actions_todoist (connected),
+    actions_reminder, actions_send_fail (stderr, nothing tried, exit 1),
+    actions_item_fail {number: error} (that item fails, exit 1, JSON kept)."""
+    real = os.environ.get("REAL_VOXTYPE")
+    if real:
+        if os.environ.get("REAL_SHARE_PATH") is not None:
+            os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
+        os.execv(real, [real, "meeting", "actions"] + args)
+    meeting = resolve(state, args[0])
+    # A past meeting's items come from its saved summary.
+    meta = os.path.join(past_dir(meeting), "metadata.json")
+    if os.path.exists(meta) and "actions" not in state:
+        with open(meta) as f:
+            saved = (json.load(f).get("summary") or {}).get("action_items", [])
+        state["actions"] = [{"number": i + 1, "key": "past%d" % i, "text": a["description"], "owner": a.get("assignee"),
+                             "mine": False, "due": None, "due_time": None, "due_said": None, "source_ms": None,
+                             "sent": {}} for i, a in enumerate(saved)]
+    items = state.setdefault("actions", json.loads(json.dumps(DEFAULT_ACTIONS)))
+    if "--send" in args:
+        dest = args[args.index("--send") + 1]
+        if state.get("actions_send_fail"):
+            print("Error: " + state["actions_send_fail"], file=sys.stderr)
+            return 1
+        if dest == "todoist" and not state.get("actions_todoist"):
+            print("Error: Todoist is not connected. Connect it with:\n  voxtype meeting todoist connect", file=sys.stderr)
+            return 1
+        if "--pick" in args:
+            picked = [int(n) for n in args[args.index("--pick") + 1].split(",")]
+        else:
+            picked = [i["number"] for i in items]
+        fails = {int(k): v for k, v in state.get("actions_item_fail", {}).items()}
+        results = []
+        for item in items:
+            if item["number"] not in picked:
+                continue
+            r = {"number": item["number"], "text": item["text"]}
+            if item["sent"].get(dest):
+                r["status"] = "already_sent"
+            elif item["number"] in fails:
+                r.update(status="failed", error=fails[item["number"]])
+            else:
+                item["sent"][dest] = {"id": "6XGg%d" % item["number"], "at": 1763000000} if dest == "todoist" \
+                    else {"at": 1763000000}
+                r["status"] = "sent"
+                if dest == "todoist":
+                    r["remote_id"] = item["sent"][dest]["id"]
+                else:
+                    r["minutes"] = int(args[args.index("--in") + 1]) if "--in" in args else 60
+            results.append(r)
+        save(state)
+        print(json.dumps({"meeting_id": meeting, "target": dest, "results": results}))
+        return 1 if any(r["status"] == "failed" for r in results) else 0
+    print(json.dumps({"meeting_id": meeting, "title": "Standup", "summarized": True,
+                      "todoist_connected": bool(state.get("actions_todoist")),
+                      "reminder_available": bool(state.get("actions_reminder")), "items": items}))
+    return 0
+
+
+def todoist(state, args):
+    """meeting todoist connect|status|disconnect --json: connect prints the
+    authorize line, waits (state todoist_wait seconds), then connected or
+    error (state todoist_connect_error)."""
+    real = os.environ.get("REAL_VOXTYPE")
+    if real:
+        if os.environ.get("REAL_SHARE_PATH") is not None:
+            os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
+        os.execv(real, [real, "meeting", "todoist"] + args)
+    if args[:1] == ["connect"]:
+        emit({"event": "authorize", "url": "https://app.todoist.com/oauth/authorize?client_id=fake&state=x", "port": 47815})
+        time.sleep(state.get("todoist_wait", 0.8))
+        if state.get("todoist_connect_error"):
+            emit({"event": "error", "message": state["todoist_connect_error"]})
+            return 1
+        state["actions_todoist"] = True
+        save(state)
+        emit({"event": "connected", "scope": "task:add", "expires_at": None})
+        return 0
+    if args[:1] == ["status"]:
+        print(json.dumps({"connected": bool(state.get("actions_todoist")), "method": "oauth" if state.get("actions_todoist") else None,
+                          "scope": "task:add" if state.get("actions_todoist") else None, "expires_at": None,
+                          "path": "/tmp/todoist.json"}))
+        return 0
+    return 2
+
+
 def soundcheck(state, args):
     """meeting soundcheck [--seconds N] [--json] | --stop
 
@@ -964,7 +1060,7 @@ def main():
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
             "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
-            "soundcheck", "search", "waveform", "recover", "share"):
+            "soundcheck", "search", "waveform", "recover", "share", "actions", "todoist"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -1018,6 +1114,10 @@ def main():
         return recover(state, args[2:])
     elif action == "delete" and "--force" in args:
         return delete_meeting(state, args[2:])
+    elif action == "actions":
+        return actions(state, args[2:])
+    elif action == "todoist":
+        return todoist(state, args[2:])
     elif action == "share":
         return share(state, args[2:])
     elif action == "search":

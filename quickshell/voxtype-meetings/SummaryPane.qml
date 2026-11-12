@@ -19,6 +19,16 @@ Item {
   signal settingsRequested()
   property bool canOpenSettings: false
   property string copiedKey: ""
+  // MeetingActions: the action items as rows to tick and send.
+  property var actions: null
+  readonly property bool actionsShown: actionsPanel.visible
+
+  // The summary as written, without its action items section while the
+  // panel above it shows them.
+  function shownMarkdown(md) {
+    if (!root.actionsShown) return md
+    return md.replace(/(^|\n\n)## Action items\n\n[\s\S]*?(?=\n\n## |$)/, "")
+  }
 
   readonly property string summaryState: root.assistant ? root.assistant.summaryState : ""
   readonly property alias flick: flick
@@ -197,16 +207,30 @@ Item {
       Layout.fillHeight: true
       clip: true
       contentWidth: width
-      contentHeight: summaryText.implicitHeight
+      contentHeight: summaryColumn.implicitHeight
       boundsBehavior: Flickable.StopAtBounds
       // An old summary stays readable while a new one is written.
       visible: root.assistant && root.assistant.summaryMarkdown !== ""
+
+      Column {
+        id: summaryColumn
+        width: flick.width
+        spacing: root.theme.lg
+
+      ActionItemsPanel {
+        id: actionsPanel
+        objectName: "actionsPanel"
+        width: flick.width
+        theme: root.theme
+        actions: root.actions
+        onCitationActivated: function(ms) { root.citationActivated(ms) }
+      }
 
       Text {
         id: summaryText
         objectName: "summaryText"
         width: flick.width
-        text: root.assistant ? MT.linkify(root.assistant.summaryMarkdown, root.theme.accent) : ""
+        text: root.assistant ? MT.linkify(root.shownMarkdown(root.assistant.summaryMarkdown), root.theme.accent) : ""
         textFormat: Text.MarkdownText
         color: root.theme.fg
         linkColor: root.theme.accent
@@ -222,6 +246,7 @@ Item {
           acceptedButtons: Qt.NoButton
           cursorShape: parent.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
         }
+      }
       }
     }
 

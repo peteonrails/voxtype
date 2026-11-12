@@ -589,6 +589,22 @@ Item {
   readonly property alias playback: playback
   // ------------------------------------------------------------ sound check
 
+  // A summary's action items, read once it is in for the meeting on screen.
+  readonly property alias actions: actions
+  MeetingActions {
+    id: actions
+    bin: root.bin
+  }
+  function syncActions() {
+    if (feed.meetingId !== "" && assistant.summaryMarkdown !== "" && assistant.summaryMeeting === feed.meetingId)
+      actions.load(feed.meetingId)
+  }
+  Connections {
+    target: assistant
+    function onSummaryMarkdownChanged() { root.syncActions() }
+    function onSummaryMeetingChanged() { root.syncActions() }
+  }
+
   readonly property alias share: share
   MeetingShare {
     id: share
@@ -967,6 +983,7 @@ Item {
       })
       view.search = search
       view.share = share
+      view.actions = actions
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })
