@@ -170,6 +170,31 @@ impl Diarizer for HybridDiarizer {
             .unwrap_or_default()
     }
 
+    fn merge_similar_speakers(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        let merged = self.remote.merge_similar_speakers();
+        if merged.is_empty() {
+            return Vec::new();
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let clusters = state.clusters;
+        let mut renames = Vec::new();
+        for (gone, kept) in merged {
+            let (SpeakerId::Auto(g), SpeakerId::Auto(k)) = (gone, kept) else {
+                continue;
+            };
+            if state.last_cluster == Some(g) {
+                state.last_cluster = Some(k);
+            }
+            renames.push((
+                SpeakerId::Named(Self::remote_name(g, clusters)),
+                SpeakerId::Named(Self::remote_name(k, clusters)),
+            ));
+        }
+        renames
+    }
+
     fn name(&self) -> &'static str {
         "hybrid"
     }
@@ -375,5 +400,64 @@ mod tests {
         );
 
         assert_eq!(names(&out), vec!["Remote"]);
+    }
+
+    /// A clusterer that merges speaker 2 into speaker 0 when asked.
+    struct Merging(Scripted);
+
+    impl Diarizer for Merging {
+        fn diarize(
+            &self,
+            samples: &[f32],
+            source: AudioSource,
+            start: u64,
+            segs: &[TranscriptSegment],
+        ) -> Vec<DiarizedSegment> {
+            self.0.diarize(samples, source, start, segs)
+        }
+
+        fn merge_similar_speakers(&self) -> Vec<(SpeakerId, SpeakerId)> {
+            vec![(SpeakerId::Auto(2), SpeakerId::Auto(0))]
+        }
+
+        fn name(&self) -> &'static str {
+            "merging"
+        }
+    }
+
+    #[test]
+    fn a_merge_renames_by_remote_name_and_moves_the_last_voice() {
+        let (inner, _) = Scripted::new(vec![
+            SpeakerId::Auto(0),
+            SpeakerId::Auto(1),
+            SpeakerId::Auto(2),
+            SpeakerId::Unknown,
+        ]);
+        let d = HybridDiarizer::new(Box::new(Merging(inner)));
+        d.diarize(
+            &[],
+            AudioSource::Loopback,
+            0,
+            &segs(3, AudioSource::Loopback),
+        );
+
+        let renames: Vec<(String, String)> = d
+            .merge_similar_speakers()
+            .into_iter()
+            .map(|(a, b)| (a.display_name(), b.display_name()))
+            .collect();
+        assert_eq!(
+            renames,
+            vec![("Remote 3".to_string(), "Remote 1".to_string())]
+        );
+
+        // The last voice heard was the merged one; a short clip now follows the survivor.
+        let out = d.diarize(
+            &[],
+            AudioSource::Loopback,
+            30_000,
+            &segs(1, AudioSource::Loopback),
+        );
+        assert_eq!(names(&out), vec!["Remote 1"]);
     }
 }

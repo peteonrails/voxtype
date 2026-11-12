@@ -24,6 +24,7 @@
 
 pub mod actions;
 pub mod assistant;
+pub mod calendar;
 pub mod chunk;
 pub mod data;
 pub mod detect;
@@ -43,6 +44,7 @@ pub mod playback;
 pub mod recover;
 pub mod repeat;
 pub mod retained_audio;
+pub mod retitle;
 pub mod retranscribe;
 pub mod search;
 pub mod share;
@@ -354,15 +356,7 @@ impl MeetingDaemon {
         let meeting_id = meeting.metadata.id;
         let title = meeting.metadata.title.clone();
         let started_at = meeting.metadata.started_at;
-        self.title_labels = self.me.as_ref().and_then(|me| {
-            let labels = title_labels::labels_for(title.as_deref()?, me)?;
-            tracing::info!(
-                "Naming speakers from the title: You as {:?}, every remote voice as {:?}",
-                labels.you,
-                labels.other
-            );
-            Some(labels)
-        });
+        self.title_labels = self.labels_for_title(title.as_deref());
         let (diarization_enabled, diarization_backend) = match &self.config.diarization {
             Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
             None => (false, None),
@@ -873,6 +867,42 @@ impl MeetingDaemon {
     /// the meeting so far and `new` segments, leaving any speaker that has a
     /// name alone. A speaker heard before but only named now has its earlier
     /// lines updated on the live feed.
+    /// The speaker names `title` gives, logged when it gives any.
+    fn labels_for_title(&self, title: Option<&str>) -> Option<title_labels::TitleLabels> {
+        let labels = title_labels::labels_for(title?, self.me.as_ref()?)?;
+        tracing::info!(
+            "Naming speakers from the title: You as {:?}, every remote voice as {:?}",
+            labels.you,
+            labels.other
+        );
+        Some(labels)
+    }
+
+    /// Give the running meeting a new title (and its call link, when it has
+    /// none): stored at once, and the speakers the new title names are
+    /// labelled from now on and on the lines already there, unless they
+    /// have a name. The folder keeps its name. Returns false when no
+    /// meeting is running.
+    pub async fn retitle(&mut self, title: &str, url: Option<&str>) -> bool {
+        let Some(ref mut meeting) = self.current_meeting else {
+            return false;
+        };
+        meeting.metadata.title = Some(title.to_string());
+        if meeting.metadata.url.is_none() {
+            meeting.metadata.url = url.map(str::to_string);
+        }
+        if let Err(e) = self.storage.update_meeting(&meeting.metadata) {
+            tracing::warn!("Failed to store the meeting's new title: {}", e);
+        }
+        tracing::info!("Meeting {} retitled {:?}", meeting.metadata.id, title);
+        self.title_labels = self.labels_for_title(Some(title));
+        // Rewrites transcript.md under the new title, and names the
+        // speakers already heard.
+        self.label_from_title(&[]).await;
+        self.persist_transcript();
+        true
+    }
+
     async fn label_from_title(&mut self, new: &[TranscriptSegment]) {
         let (Some(labels), Some(meeting)) = (&self.title_labels, &self.current_meeting) else {
             return;
@@ -1014,7 +1044,20 @@ impl MeetingDaemon {
                     seg.confidence = Some(diar.confidence);
                 }
             }
-            for (from, to) in diarizer.take_speaker_renames() {
+            let renames = diarizer.take_speaker_renames();
+            let merges = diarizer.merge_similar_speakers();
+            for (from, to) in renames {
+                self.rename_speaker(&from, &to).await;
+            }
+            // Speakers found to be one voice become one, labels included.
+            for (from, to) in merges {
+                let (from, to) = (from.display_name(), to.display_name());
+                // This chunk's own segments are not in the transcript yet.
+                for seg in &mut result.segments {
+                    if seg.speaker_id.as_deref() == Some(from.as_str()) {
+                        seg.speaker_id = Some(to.clone());
+                    }
+                }
                 self.rename_speaker(&from, &to).await;
             }
         }
@@ -2547,6 +2590,100 @@ mod tests {
         );
     }
 
+    /// Voices 0, 1, 1 for three loopback chunks, then decides after the
+    /// third that voice 1 was voice 0 all along.
+    struct SplitThenMerge(AtomicU32);
+
+    impl diarization::Diarizer for SplitThenMerge {
+        fn diarize(
+            &self,
+            _samples: &[f32],
+            _source: AudioSource,
+            _chunk_start_ms: u64,
+            segments: &[TranscriptSegment],
+        ) -> Vec<diarization::DiarizedSegment> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            segments
+                .iter()
+                .map(|seg| diarization::DiarizedSegment {
+                    speaker: diarization::SpeakerId::Auto(call.min(1)),
+                    start_ms: seg.start_ms,
+                    end_ms: seg.end_ms,
+                    text: seg.text.clone(),
+                    confidence: 0.8,
+                })
+                .collect()
+        }
+
+        fn merge_similar_speakers(&self) -> Vec<(diarization::SpeakerId, diarization::SpeakerId)> {
+            if self.0.load(Ordering::SeqCst) == 3 {
+                vec![(
+                    diarization::SpeakerId::Auto(1),
+                    diarization::SpeakerId::Auto(0),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "split-then-merge"
+        }
+    }
+
+    /// One voice split in two (Pete's Chris meeting) is merged back: earlier
+    /// lines and the chunk that triggered it both end up on the survivor,
+    /// and the name Pete gave the survivor holds for all of them.
+    #[tokio::test]
+    async fn a_merged_speaker_takes_over_earlier_lines_and_keeps_the_survivors_name() {
+        let mut h = harness().await;
+        h.daemon.diarizer = Some(Box::new(diarization::hybrid::HybridDiarizer::new(
+            Box::new(SplitThenMerge(AtomicU32::new(0))),
+        )));
+        h.pair(&[], &[(5.0, 7.0)]).await;
+        h.pair(&[], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote 1", "Chris").unwrap();
+        cli.set_speaker_label(&id, "Remote 2", "Chris?").unwrap();
+        h.pair(&[], &[(5.0, 7.0)]).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = h.events.try_recv() {
+            match event {
+                MeetingEvent::SpeakerRenamed { from, to } => {
+                    events.push(format!("rename {from} -> {to}"))
+                }
+                MeetingEvent::ChunkProcessed { segments, .. } => {
+                    events.extend(segments.iter().map(|s| s.speaker_key()))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("Remote 1"),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&"rename Remote 2 -> Remote 1".to_string()),
+            "{events:?}"
+        );
+
+        h.daemon.stop().await.unwrap();
+        let speakers: Vec<(String, String)> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.speaker_display()))
+            .collect();
+        assert_eq!(
+            speakers,
+            vec![("Remote 1".to_string(), "Chris".to_string()); 3]
+        );
+    }
+
     /// A meeting titled `title`, hybrid-diarized with a new remote voice
     /// every chunk, run by a user named Pete Jackson.
     async fn titled_harness(title: &str) -> Harness {
@@ -2643,6 +2780,72 @@ mod tests {
                 ("Remote 3", "Chris"),
             ])
         );
+    }
+
+    /// Retitling mid-call to a 1:1 title names the speakers already heard,
+    /// on the live feed and on disk, and every voice heard from then on,
+    /// but never a speaker named by hand.
+    #[tokio::test]
+    async fn retitling_mid_meeting_names_speakers_from_then_and_before() {
+        let mut h = titled_harness("Zoom call").await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(live_names(&mut h.events), ["You: You", "Remote: Remote"]);
+
+        assert!(h.daemon.retitle("Pete <> Chad Bi-Weekly", None).await);
+        assert_eq!(
+            live_names(&mut h.events),
+            ["updated You: Pete Jackson", "updated Remote: Chad"]
+        );
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(
+            live_names(&mut h.events),
+            ["You: Pete Jackson", "Remote 2: Chad"]
+        );
+        h.daemon.stop().await.unwrap();
+        let saved = h.saved();
+        assert_eq!(
+            saved.metadata.title.as_deref(),
+            Some("Pete <> Chad Bi-Weekly")
+        );
+        let names: Vec<String> = saved
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(names, ["Pete Jackson", "Chad", "Pete Jackson", "Chad"]);
+        let md = std::fs::read_to_string(h.folder().join("transcript.md")).unwrap();
+        assert!(md.starts_with("# Pete <> Chad Bi-Weekly"), "{md}");
+    }
+
+    #[tokio::test]
+    async fn retitling_keeps_hand_labels_and_the_link() {
+        let mut h = titled_harness("Zoom call").await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Sam").unwrap();
+        h.daemon.apply_segment_edits().await;
+        let _ = live_names(&mut h.events);
+
+        assert!(
+            h.daemon
+                .retitle("Pete / Chad", Some("https://zoom.us/j/9"))
+                .await
+        );
+        assert_eq!(live_names(&mut h.events), ["updated You: Pete Jackson"]);
+        h.daemon.stop().await.unwrap();
+        let saved = h.saved();
+        assert_eq!(saved.metadata.url.as_deref(), Some("https://zoom.us/j/9"));
+        let names: Vec<String> = saved
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(names, ["Pete Jackson", "Sam"]);
+        // With no meeting running there is nothing to retitle.
+        assert!(!h.daemon.retitle("Anything", None).await);
     }
 
     /// A name given by hand stays, on the speaker it was given to, while

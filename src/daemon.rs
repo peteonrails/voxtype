@@ -797,6 +797,7 @@ fn cleanup_meeting_files() {
         "meeting_resume",
         "meeting_edit",
         "meeting_notes",
+        meeting::retitle::TRIGGER,
         meeting::notice::ACK_TRIGGER,
     ] {
         let file = runtime_dir.join(name);
@@ -2970,6 +2971,139 @@ impl Daemon {
         }
     }
 
+    /// A meeting was retitled (`voxtype meeting title`, or from the
+    /// calendar), its storage already updated: bring the running meeting,
+    /// its speaker names and the meeting view up to date.
+    async fn apply_retitle(&mut self, retitle: meeting::retitle::Retitle) {
+        let live = self
+            .meeting_daemon
+            .as_ref()
+            .and_then(|d| d.current_meeting_id())
+            .is_some_and(|id| id.to_string() == retitle.meeting_id);
+        if live {
+            if let Some(ref mut daemon) = self.meeting_daemon {
+                daemon.retitle(&retitle.title, retitle.url.as_deref()).await;
+            }
+        } else {
+            // Stopped since: its last save may have kept the old title.
+            let storage = match self.meeting_daemon.as_ref() {
+                Some(d) => d.storage().config().clone(),
+                None => StorageConfig {
+                    storage_path: if self.config.meeting.storage_path == "auto" {
+                        Config::data_dir().join("meetings")
+                    } else {
+                        PathBuf::from(&self.config.meeting.storage_path)
+                    },
+                    retain_audio: self.config.meeting.retain_audio,
+                    max_meetings: 0,
+                    my_name: self.config.meeting.my_name.clone(),
+                },
+            };
+            let reapplied = Ok::<_, String>(storage).and_then(|config| {
+                let storage = meeting::MeetingStorage::open(config).map_err(|e| e.to_string())?;
+                let id = storage
+                    .resolve_meeting_id(&retitle.meeting_id)
+                    .map_err(|e| e.to_string())?;
+                meeting::retitle::retitle_stored(
+                    &storage,
+                    &id,
+                    &retitle.title,
+                    retitle.url.as_deref(),
+                    true,
+                )
+                .map_err(|e| e.to_string())
+            });
+            if let Err(e) = reapplied {
+                tracing::debug!("Retitle of a meeting no longer running: {}", e);
+            }
+        }
+        if self.meeting_hud.meeting_id.as_deref() == Some(retitle.meeting_id.as_str()) {
+            self.meeting_hud.title = Some(retitle.title.clone());
+        }
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+            hub.publish_title_changed(&retitle.meeting_id, &retitle.title);
+        }
+    }
+
+    /// Ask the calendar, off the event loop, what the meeting that just
+    /// started is called. A title found is stored and sent back through the
+    /// retitle trigger, unless the meeting got a real title meanwhile. Any
+    /// failure leaves the title as it is.
+    fn title_from_calendar(&self, meeting_id: meeting::MeetingId, storage: StorageConfig) {
+        let settings = self.config.meeting.calendar.clone();
+        let Some(command) = Config::config_dir()
+            .and_then(|voxtype_dir| voxtype_dir.parent().map(|p| p.to_path_buf()))
+            .and_then(|config_dir| meeting::calendar::resolve(&settings.command, &config_dir))
+        else {
+            tracing::debug!("No calendar command: meeting title left as it is");
+            return;
+        };
+        tokio::spawn(async move {
+            let timeout = std::time::Duration::from_secs(settings.timeout_secs.max(1));
+            let found =
+                match meeting::calendar::lookup(&command, timeout, settings.window_mins).await {
+                    Ok(Some(found)) => found,
+                    Ok(None) => {
+                        tracing::debug!(
+                            "No calendar event within {} min of the meeting's start ({})",
+                            settings.window_mins,
+                            command.source
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::debug!("No title from the calendar ({}): {}", command.source, e);
+                        return;
+                    }
+                };
+            let stored = tokio::task::spawn_blocking(move || {
+                let storage = meeting::MeetingStorage::open(storage).map_err(|e| e.to_string())?;
+                let current = storage
+                    .get_meeting(&meeting_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("the meeting is gone")?;
+                if !meeting::calendar::is_replaceable(current.title.as_deref()) {
+                    return Err(format!(
+                        "it was titled {:?} meanwhile",
+                        current.title.unwrap_or_default()
+                    ));
+                }
+                meeting::retitle::retitle_stored(
+                    &storage,
+                    &meeting_id,
+                    &found.title,
+                    found.url.as_deref(),
+                    false,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .await;
+            match stored {
+                Ok(Ok(done)) => {
+                    tracing::info!(
+                        "Meeting {} titled {:?} from the calendar ({})",
+                        meeting_id,
+                        done.title,
+                        command.source
+                    );
+                    let trigger = meeting::retitle::Retitle {
+                        meeting_id: meeting_id.to_string(),
+                        title: done.title,
+                        url: done.url,
+                    };
+                    if let Err(e) =
+                        meeting::retitle::write_trigger(&Config::runtime_dir(), &trigger)
+                    {
+                        tracing::warn!("Could not hand the calendar title to the meeting: {}", e);
+                    }
+                }
+                Ok(Err(e)) => tracing::debug!("Calendar title not used: {}", e),
+                Err(e) => tracing::debug!("Calendar title not used: {}", e),
+            }
+        });
+    }
+
     /// Add a processed chunk to the HUD snapshot and stream it on meeting.sock.
     fn publish_meeting_chunk(&mut self, chunk_id: u32, segments: &[meeting::TranscriptSegment]) {
         // The live view shows [meeting] my_name for "You", like the saved
@@ -3089,6 +3223,7 @@ impl Daemon {
         };
         let title_for_hud = title.clone();
 
+        let calendar_title_wanted = meeting::calendar::is_replaceable(title.as_deref());
         let meeting_config = meeting::MeetingConfig {
             enabled: self.config.meeting.enabled,
             chunk_duration_secs: self.config.meeting.chunk_duration_secs,
@@ -3109,6 +3244,8 @@ impl Daemon {
             echo_rules: (&self.config.meeting.audio).into(),
             auto_label_from_title: self.config.meeting.auto_label_from_title,
         };
+
+        let storage_for_calendar = meeting_config.storage.clone();
 
         // Start capturing before anything loads. Building the meeting daemon
         // loads the transcription model (a GGUF worker, seconds on a CPU) and
@@ -3161,6 +3298,9 @@ impl Daemon {
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
                         self.start_meeting_levels(capture.meters(), &id_str);
+                        if calendar_title_wanted {
+                            self.title_from_calendar(meeting_id, storage_for_calendar.clone());
+                        }
                         self.meeting_audio_capture = Some(capture);
 
                         let used = self.meeting_echo_path_in_use(echo_path);
@@ -3714,6 +3854,10 @@ impl Daemon {
                 tracing::debug!("Meeting transcript edit requested via file trigger");
                 daemon.apply_segment_edits().await;
             }
+        }
+
+        if let Some(retitle) = meeting::retitle::take_trigger(&Config::runtime_dir()) {
+            self.apply_retitle(retitle).await;
         }
 
         if check_meeting_notes() {

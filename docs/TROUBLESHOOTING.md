@@ -244,6 +244,7 @@ what is wrong instead of showing an empty pane:
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [No Meeting Window Appears](#no-meeting-window-appears)
 - [Action Items: Todoist and Reminders](#action-items-todoist-and-reminders)
+- [Meeting Titles: The Calendar Title Was Not Used](#meeting-titles-the-calendar-title-was-not-used)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1871,6 +1872,19 @@ The meeting itself never depends on the summary: if summarizing fails, the trans
 **Sending says Todoist refused the connection.** The access was revoked in Todoist or the tokens no longer renew. Run `voxtype meeting todoist connect` again.
 
 **`--send reminder` is not available.** Reminders use `omarchy-reminder`, which comes with Omarchy. Elsewhere, send to Todoist instead.
+
+## Meeting Titles: The Calendar Title Was Not Used
+
+A meeting takes its title from the calendar only when it started without a real title (none, "Zoom call", "Google Meet call", "Teams call" or the date-only default) and an event is running or starts within `[meeting.calendar] window_mins` of the start. Anything else is logged at debug level. Run the daemon with `-vv`, or look in the journal:
+
+```bash
+journalctl --user -u voxtype --since "15 minutes ago" | grep -i calendar
+```
+
+- **"No calendar command"**: `[meeting.calendar] command` is empty and the Omarchy Next Meeting widget is not on your bar. Set the command.
+- **"ran past 3 s"**: the calendar answered too slowly. Raise `[meeting.calendar] timeout_secs`.
+- **"printed something other than the agenda JSON"**: run the command yourself (`bash -lc '<command>'`) and check it prints one JSON object and nothing else. A login profile that prints a greeting breaks it.
+- **"No calendar event within 10 min"**: the event was further from the start than the window. Raise `window_mins`, or set the title by hand with `voxtype meeting title latest "<title>"`.
 
 ## Systemd Service Issues
 

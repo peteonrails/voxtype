@@ -1119,6 +1119,11 @@ impl MeetingStorage {
         Ok(keys)
     }
 
+    /// The settings this storage was opened with.
+    pub fn config(&self) -> &StorageConfig {
+        &self.config
+    }
+
     /// Name `speaker_key` unless it already has a name, so a name the user
     /// gave by hand is never replaced. Returns whether it was named.
     pub fn label_speaker_if_unlabeled(
