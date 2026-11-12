@@ -40,7 +40,10 @@ pub use meeting::{
     MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingStartOptions,
     MeetingSummaryConfig,
 };
-pub use meeting_detect::{default_apps as default_call_apps, CallAppPattern, MeetingDetectConfig};
+pub use meeting_detect::{
+    default_apps as default_call_apps, CallAppPattern, CallEnd, MeetingDetectConfig,
+    CALL_END_CHOICES,
+};
 pub use notification::NotificationConfig;
 pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,

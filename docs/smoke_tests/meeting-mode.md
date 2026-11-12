@@ -48,7 +48,8 @@ Open a Meet call in Chromium, keep its tab active, and join.
 Expected:
 
 - About 5 seconds after joining, one notification: **Google Meet call
-  detected**, body `Record "Meet - <code>" as a meeting?` and a second line
+  detected**, body `Record "Google Meet call" as a meeting?` (or the
+  meeting's name, when the Meet tab shows one rather than its code) and a second line
   `Let the others know you're transcribing.`, with **Record** and
   **Dismiss**.
 - No prompt during the lobby's mic preview is acceptable, but at most one
@@ -64,7 +65,7 @@ Click **Record**. Then type a few characters in the Meet chat.
 Expected:
 
 - The meeting view opens as a card at the right edge, titled
-  `Meet - <code>`, showing **Recording** and a running time, with **Pause**
+  `Google Meet call` (or the meeting's name), showing **Recording** and a running time, with **Pause**
   and **Stop**.
 - Your typing still goes to the Meet chat: the card did not take focus.
 - No "Meeting Started" notification, because the view is showing it.
@@ -162,10 +163,12 @@ Leave the Meet call while still recording.
 Expected:
 
 - About 5 seconds later: **Call ended**, `Chromium released the microphone.
-  Stop the meeting recording?`, with **Stop meeting** and **Keep recording**.
-  The meeting keeps recording until you choose.
-
-Click **Stop meeting**.
+  Stopping the recording in 20 s.`, with **Keep recording**.
+- Let it run out. After 20 seconds the meeting stops by itself.
+- The journal says so: `journalctl --user -u voxtype --since "2 minutes ago" | grep "Meeting detection"`
+  shows the call ending and "stopping the meeting, the Google Meet call ended".
+- To check **Keep recording**, run a second short call and press it within
+  the 20 seconds: the meeting keeps recording; stop it with **Stop**.
 
 Expected:
 

@@ -256,7 +256,7 @@ The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INT
 
 ## Meeting Detection
 
-Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
 
 Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
 
@@ -268,6 +268,8 @@ enabled = true
 enabled = true          # unset: on for Omarchy, off elsewhere
 auto_record_apps = []   # e.g. ["Zoom"] to record Zoom calls without asking
 debounce_secs = 5
+on_call_end = "stop"    # when the call ends: "stop", "ask" or "keep"
+stop_grace_secs = 20
 ```
 
 The setting is read when the daemon starts, so restart it after changing it.
@@ -283,7 +285,12 @@ The setting is read when the daemon starts, so restart it after changing it.
 - Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt.
 - Not while a meeting is already recording.
 - Not while you are dictating: the prompt waits until dictation ends.
-- When the call app releases the microphone while a meeting is recording, a second notification offers **Stop meeting**. Voxtype never stops a meeting on its own.
+- When the call ends (the call app releases the microphone for `debounce_secs`) while a meeting records, `on_call_end` decides:
+  - `"stop"` (default): a notification says **Call ended**, "Stopping the recording in 20 s.", with **Keep recording**. Unless you press it, the meeting then stops as `voxtype meeting stop` would, and the summary at stop runs as usual. `stop_grace_secs` sets the wait. If the call app takes the microphone again within it, the stop is called off.
+  - `"ask"`: a notification offers **Stop meeting** and **Keep recording**, and nothing happens until you choose.
+  - `"keep"`: the meeting keeps recording.
+- A meeting you started by hand, with no call detected while it ran, is never stopped this way.
+- Each step is logged at info level (`journalctl --user -u voxtype | grep "Meeting detection"`): the call seen, with its app and audio stream, the prompt, the call ending, and the stop taken or not.
 
 Detection never records by itself, except for apps you list in `auto_record_apps`.
 
@@ -306,7 +313,7 @@ mic streams: 3
   ignored mic stream 105 (PipeWire ALSA [hex]): another dictation app
   ignored mic stream 129 (Camera Effects): camera-effects virtual mic
 evidence: Chromium has the mic (stream 211) and window "Meet - abc-defg-hij - Chromium" matches
-would prompt: Record "Meet - abc-defg-hij"? (Google Meet)
+would prompt: Record "Google Meet call"? (Google Meet)
 ```
 
 Without `--dry-run`, `voxtype meeting suggest` runs the detector in the foreground with real prompts. It refuses while the daemon is already prompting.

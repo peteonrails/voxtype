@@ -215,9 +215,7 @@ fn confirm(
             .iter()
             .find(|w| w.title.to_lowercase().contains("meeting"))
             .or(own.first());
-        let title = window
-            .map(|w| clean_title(&w.title))
-            .unwrap_or_else(|| app.name.clone());
+        let title = meeting_title(&app.name, window.map(|w| w.title.as_str()));
         return Some(Call {
             app: app.name.clone(),
             title,
@@ -231,7 +229,7 @@ fn confirm(
     })?;
     Some(Call {
         app: app.name.clone(),
-        title: clean_title(&window.title),
+        title: meeting_title(&app.name, Some(&window.title)),
         reason: format!(
             "{} has the mic (stream {}) and window \"{}\" matches",
             stream.label(),
@@ -239,6 +237,131 @@ fn confirm(
             window.title
         ),
         auto_record,
+    })
+}
+
+/// Which service a call app is, for its titles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Service {
+    Zoom,
+    Meet,
+    Teams,
+    Other,
+}
+
+impl Service {
+    fn of(app: &str) -> Self {
+        let a = app.to_lowercase();
+        if a.contains("zoom") {
+            Self::Zoom
+        } else if a.contains("meet") {
+            Self::Meet
+        } else if a.contains("teams") {
+            Self::Teams
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Window titles that name the app, not the meeting: "Zoom Meeting",
+/// "Join from Zoom Workplace app - Zoom", "Calling | Microsoft Teams".
+const ZOOM_GENERIC: &[&str] = &[
+    "",
+    "zoom",
+    "zoom meeting",
+    "zoom workplace",
+    "zoom cloud meetings",
+    "zoom webinar",
+    "meeting",
+    "webinar",
+    "join meeting",
+    "launch meeting",
+];
+const MEET_GENERIC: &[&str] = &["", "meet", "google meet"];
+const TEAMS_GENERIC: &[&str] = &[
+    "",
+    "teams",
+    "microsoft teams",
+    "microsoft teams (work or school)",
+    "new microsoft teams",
+    "meeting",
+    "meeting in progress",
+    "meeting compact view",
+    "call",
+    "calling",
+    "chat",
+    "activity",
+    "calendar",
+    "teams and channels",
+];
+
+/// Cut a case-insensitive suffix such as " - Zoom" off `t`.
+fn without_suffix<'a>(t: &'a str, suffixes: &[&str]) -> &'a str {
+    let lower = t.to_lowercase();
+    for s in suffixes {
+        if lower.ends_with(s) && t.is_char_boundary(t.len() - s.len()) {
+            return t[..t.len() - s.len()].trim_end();
+        }
+    }
+    t
+}
+
+/// "abc-defg-hij": a Meet meeting code, which says nothing to a person.
+fn is_meet_code(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('-').collect();
+    parts.len() == 3
+        && [3, 4, 3]
+            .iter()
+            .zip(&parts)
+            .all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_lowercase()))
+}
+
+/// The meeting title for a call: the meeting's own name when the window
+/// title holds one ("Meet - Weekly sync", "Weekly sync | Microsoft Teams"),
+/// otherwise "Zoom call", "Google Meet call" or "Teams call", never a
+/// placeholder such as "Join from Zoom Workplace app - Zoom".
+pub fn meeting_title(app: &str, window_title: Option<&str>) -> String {
+    let service = Service::of(app);
+    let cleaned = window_title.map(clean_title).unwrap_or_default();
+    let real = match service {
+        Service::Zoom => {
+            let t = without_suffix(&cleaned, &[" - zoom", " | zoom", " – zoom"]).trim();
+            let lower = t.to_lowercase();
+            (!ZOOM_GENERIC.contains(&lower.as_str())
+                && !lower.contains("join from zoom")
+                && !lower.contains("zoom workplace"))
+            .then(|| t.to_string())
+        }
+        Service::Meet => {
+            let t = without_suffix(&cleaned, &[" - google meet", " | google meet"]).trim();
+            let t = ["Meet - ", "Meet – ", "Meet: ", "Meet "]
+                .iter()
+                .find_map(|p| t.strip_prefix(p))
+                .unwrap_or(t)
+                .trim();
+            let lower = t.to_lowercase();
+            (!MEET_GENERIC.contains(&lower.as_str()) && !is_meet_code(&lower))
+                .then(|| t.to_string())
+        }
+        Service::Teams => {
+            let lower_all = cleaned.to_lowercase();
+            let cut = [" | microsoft teams", " - microsoft teams"]
+                .iter()
+                .filter_map(|s| lower_all.find(s))
+                .min()
+                .unwrap_or(cleaned.len());
+            let t = cleaned[..cut].trim();
+            let lower = t.to_lowercase();
+            (!TEAMS_GENERIC.contains(&lower.as_str())).then(|| t.to_string())
+        }
+        Service::Other => (!cleaned.is_empty()).then_some(cleaned.clone()),
+    };
+    real.unwrap_or_else(|| match service {
+        Service::Zoom => "Zoom call".to_string(),
+        Service::Meet => "Google Meet call".to_string(),
+        Service::Teams => "Teams call".to_string(),
+        Service::Other => format!("{} call", app.trim()),
     })
 }
 
@@ -463,7 +586,7 @@ pub fn describe(event: &Event) -> String {
         Event::Ended { call, offer_stop } => {
             if *offer_stop {
                 format!(
-                    "call ended: {} released the mic; would offer \"Stop meeting?\"",
+                    "call ended: {} released the mic while a meeting records ([meeting.detect] on_call_end decides)",
                     call.app
                 )
             } else {
