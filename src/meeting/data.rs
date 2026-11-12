@@ -282,6 +282,52 @@ impl Transcript {
         outcome
     }
 
+    /// Drop microphone lines among `quiet_ids` (lines whose audio showed no
+    /// voice of yours) that are only a speech engine's no-speech phrase
+    /// ("Thank you.", see [`crate::meeting::echo::no_speech_phrase`]) said
+    /// while the remote was talking. Returns the ids dropped.
+    ///
+    /// The engine writes those for the faint residual an echo canceller
+    /// leaves, and no loopback word explains them, so the echo rules keep
+    /// them under You. A "thank you" you really say is loud enough to read
+    /// as your voice and never reaches this.
+    pub fn drop_no_speech_lines(&mut self, quiet_ids: &std::collections::HashSet<u32>) -> Vec<u32> {
+        use crate::meeting::echo::{no_speech_phrase, normalize_word, ECHO_TOLERANCE_MS};
+        let remote: Vec<(u64, u64)> = self
+            .segments
+            .iter()
+            .filter(|s| {
+                s.source == AudioSource::Loopback && !s.deleted && !s.text.trim().is_empty()
+            })
+            .map(|s| (s.start_ms, s.end_ms))
+            .collect();
+        let mut dropped = Vec::new();
+        self.segments.retain(|seg| {
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            let hallucination = seg.source == AudioSource::Microphone
+                && !seg.deleted
+                && quiet_ids.contains(&seg.id)
+                && no_speech_phrase(&words)
+                && remote.iter().any(|&(start, end)| {
+                    seg.start_ms < end + ECHO_TOLERANCE_MS && start < seg.end_ms + ECHO_TOLERANCE_MS
+                });
+            if hallucination {
+                tracing::debug!(
+                    "Dropping a no-speech phrase over the remote: {:?}",
+                    seg.text
+                );
+                dropped.push(seg.id);
+            }
+            !hallucination
+        });
+        dropped
+    }
+
     /// Remove echoed phrases from mic segments that match loopback transcripts.
     /// Works at the phrase level: finds runs of consecutive words in a mic segment
     /// that appear in any loopback segment and strips them out, keeping the user's
@@ -1391,6 +1437,54 @@ mod tests {
 
     /// Lines the audio called echo: dropped when the loopback says the same
     /// at the time, otherwise moved to the remote speaker they overlap.
+    #[test]
+    fn only_quiet_no_speech_phrases_over_the_remote_are_dropped() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            10_000,
+            16_000,
+            AudioSource::Loopback,
+            "Only one. The banner stays.",
+        ));
+        // Quiet, a no-speech phrase, over the remote: dropped.
+        t.add_segment(said(
+            1,
+            11_000,
+            11_400,
+            AudioSource::Microphone,
+            "Thank you.",
+        ));
+        // The same words in your voice: not among the quiet lines, kept.
+        t.add_segment(said(
+            2,
+            12_000,
+            12_400,
+            AudioSource::Microphone,
+            "Thank you.",
+        ));
+        // Quiet, but real words: kept.
+        t.add_segment(said(
+            3,
+            13_000,
+            13_400,
+            AudioSource::Microphone,
+            "Sounds good.",
+        ));
+        // Quiet, a no-speech phrase, but long after the remote: kept.
+        t.add_segment(said(
+            4,
+            30_000,
+            30_400,
+            AudioSource::Microphone,
+            "Thank you.",
+        ));
+        let quiet = [1, 3, 4].into_iter().collect();
+        assert_eq!(t.drop_no_speech_lines(&quiet), vec![1]);
+        let ids: Vec<u32> = t.segments.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![0, 2, 3, 4]);
+    }
+
     #[test]
     fn echo_lines_are_dropped_when_confirmed_and_moved_when_not() {
         let mut t = Transcript::new();
