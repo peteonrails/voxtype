@@ -149,6 +149,8 @@ Item {
           else if (s === "undo-edit") tc.driveUndoEdit()
           else if (s === "undo-reassign") tc.driveUndoReassign()
           else if (s === "seek") tc.driveSeek()
+          else if (s === "waveform") tc.driveWaveform()
+          else if (s === "waveform-missing") tc.driveWaveformMissing()
           else if (s === "recovery-old") tc.driveRecoveryOld()
           else if (s === "search") tc.driveSearch()
           else if (s === "search-old") tc.driveSearchOld()
@@ -1891,6 +1893,46 @@ Item {
       waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
       waitFor(function() { return lines()[3][1] === "Remote" }, "put back")
       check(!shown(find(view(), "undoBar")), "nothing to undo")
+    }
+
+    function driveWaveform() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(!shown(find(view(), "waveform")), "no waveform while recording")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      waitFor(function() { return shown(find(view(), "waveform")) }, "the waveform", 6000)
+      check(view().waveform.mic.length === 160 && view().waveform.loopback !== null, "both tracks, 160 buckets")
+      var strip = find(view(), "waveformArea")
+      // Laid out first: a strip still at width 0 puts every point at 0:00.
+      waitFor(function() { return strip.width > 100 }, "the strip laid out")
+      wait(100)
+      // Twenty seconds in, a little past so rounding cannot land on 0:19.
+      var x = (20.4 * 1000) / view().waveform.durationMs * strip.width
+      // Enter, then move: a single synthetic move onto a just-shown item
+      // does not always register as hover.
+      mouseMove(strip, Math.max(1, x - 6), strip.height / 2)
+      wait(80)
+      mouseMove(strip, x, strip.height / 2)
+      waitFor(function() { return shown(find(view(), "waveformHoverTime")) && txt("waveformHoverTime") === "0:20" }, "hover time: " + txt("waveformHoverTime"))
+      mouseClick(strip, x, strip.height / 2)
+      waitFor(function() { return shown(find(view(), "transportStop")) && shown(find(view(), "waveformPlayhead")) }, "playing from there")
+      var x0 = find(view(), "waveformPlayhead").x
+      waitFor(function() { return find(view(), "waveformPlayhead").x > x0 }, "the playhead moves", 4000)
+      mouseMove(view(), -40, -40)
+      shot("waveform")
+      click(find(view(), "transportStop"), "Stop audio")
+      waitFor(function() { return !shown(find(view(), "waveformPlayhead")) }, "playhead gone")
+    }
+
+    function driveWaveformMissing() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      wait(1500)
+      check(!shown(find(view(), "waveform")), "no strip")
+      check(!shown(find(view(), "actionError")), "nothing reported")
     }
 
     function driveSeek() {

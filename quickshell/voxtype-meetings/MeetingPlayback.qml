@@ -40,6 +40,15 @@ Item {
                      "--track", track || "mixed", "--json"])
   }
 
+  // From a point in the meeting (the waveform player): `--at` whole seconds.
+  function playAt(meeting, ms, track) {
+    if (root.busy) return
+    root.error = ""
+    playProc.err = ""
+    playProc.launch([root.bin, "meeting", "play", String(meeting), "--at", String(Math.floor(Math.max(0, ms) / 1000)),
+                     "--track", track || "mixed", "--json"])
+  }
+
   function stop() {
     if (stopProc.running || stopProc.startPending) return
     stopProc.out = ""

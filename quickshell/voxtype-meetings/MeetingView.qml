@@ -28,6 +28,10 @@ Item {
   property var assistant: null
   // MeetingSoundCheck, from the controller.
   property var soundcheck: null
+  // MeetingWaveform, and where playback is in this meeting (-1: not here).
+  property var waveform: null
+  property real playPositionMs: -1
+  signal playAtRequested(real ms)
   // The last edit or move, while it can be undone ("Line edited.").
   property string changeLabel: ""
   signal undoChangeRequested()
@@ -680,6 +684,18 @@ Item {
           bordered: true
           onClicked: root.stopPlaybackRequested()
         }
+      }
+
+      // A finished meeting with its audio kept: the whole meeting as a
+      // waveform; a click plays from there.
+      WaveformPlayer {
+        objectName: "waveform"
+        Layout.fillWidth: true
+        visible: root.ended && root.waveform !== null && root.waveform.available
+        theme: root.theme
+        wave: root.waveform
+        positionMs: root.playPositionMs
+        onSeekRequested: function(ms) { root.playAtRequested(ms) }
       }
 
       // Listening, paused or finalizing, between chunks.

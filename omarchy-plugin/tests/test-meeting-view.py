@@ -126,6 +126,10 @@ Scenarios:
               leaves nothing to undo
   seek        a line's time plays the kept audio from that line, and moves a
               running playback; without kept audio it is not a link
+  waveform    an ended meeting with kept audio shows its waveform (the
+              proposed `meeting waveform`); a click plays from that point
+              (`play --at`), the playhead follows, Stop audio
+  waveform-missing  a voxtype without `meeting waveform`: no strip, no error
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -161,7 +165,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-old",
-             "undo-edit", "undo-reassign", "seek")
+             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -296,6 +300,8 @@ INITIAL = {
     "undo-edit": lambda: [running_meeting()],
     "undo-reassign": lambda: [running_meeting()],
     "seek": lambda: [running_meeting()],
+    "waveform": lambda: [running_meeting()],
+    "waveform-missing": lambda: [running_meeting()],
     "summary-local-error": lambda: [running_meeting()],
     "summary-error-cli": lambda: [running_meeting()],
     "summary-stale": lambda: [running_meeting()],
@@ -334,6 +340,8 @@ STATE = {
     "search": {"search_delay": 0.6},
     "recovery-old": {"finish_missing": True},
     "seek": {"play_speed": 10},
+    "waveform": {"play_speed": 10},
+    "waveform-missing": {"waveform_missing": True},
     "search-old": {"old": True},
     "soundcheck-error": {"sc_error": "Audio connection failed: no such device 'usb-mic'"},
     "summary-local-error": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE],
@@ -548,7 +556,7 @@ def read_only(argv):
     """Reads the view makes on its own (notes, assistant status, show)."""
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
-    if argv == ["meeting", "play", "--status", "--json"]:
+    if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"]:
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -685,6 +693,15 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "undo-reassign":
         expect(meeting, [reassign("2", "You"), ["meeting", "reassign", MEETING_ID, "2", "--reset", "--json"],
                          reassign("4", "You")], "meeting commands")
+    elif scenario == "waveform":
+        expect(meeting, [["meeting", "stop"],
+                         ["meeting", "play", MEETING_ID, "--at", "20", "--track", "mixed", "--json"],
+                         ["meeting", "play", "--stop", "--json"]], "meeting commands")
+        waves = [c for c in calls if c[:2] == ["meeting", "waveform"]]
+        if waves != [["meeting", "waveform", MEETING_ID, "--buckets", "160", "--json"]]:
+            problems.append("waveform calls: " + json.dumps(waves))
+    elif scenario == "waveform-missing":
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
     elif scenario == "seek":
         def play_from(seg):
             return ["meeting", "play", MEETING_ID, "--segment", seg, "--track", "mixed", "--json"]

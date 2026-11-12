@@ -511,6 +511,26 @@ Item {
     storedProc.load(meetingId)
   }
 
+  // The finished meeting's kept audio as a waveform (`meeting waveform`).
+  readonly property alias waveform: waveform
+  MeetingWaveform {
+    id: waveform
+    bin: root.bin
+  }
+  function syncWaveform() {
+    if (feed.ended && feed.meetingId !== "" && assistant.audioRetained !== false) waveform.load(feed.meetingId)
+    else waveform.clear()
+  }
+  Connections {
+    target: feed
+    function onEndedChanged() { root.syncWaveform() }
+    function onMeetingIdChanged() { root.syncWaveform() }
+  }
+  Connections {
+    target: assistant
+    function onAudioRetainedChanged() { root.syncWaveform() }
+  }
+
   readonly property alias soundcheck: soundcheck
   MeetingSoundCheck {
     id: soundcheck
@@ -833,6 +853,10 @@ Item {
       view.feed = feed
       view.assistant = assistant
       view.soundcheck = soundcheck
+      view.waveform = waveform
+      view.playPositionMs = Qt.binding(function() {
+        return playback.playing && playback.meetingId === feed.meetingId ? playback.positionMs : -1
+      })
       view.search = search
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
@@ -890,6 +914,7 @@ Item {
     function onDeleteLineRequested(segId) { root.deleteLine(segId) }
     function onUndoDeleteRequested() { root.undoDelete() }
     function onUndoChangeRequested() { root.undoChange() }
+    function onPlayAtRequested(ms) { if (feed.meetingId !== "") playback.playAt(feed.meetingId, ms, "mixed") }
     function onExportRequested(format) { root.exportMeeting(format) }
     function onOpenFolderRequested(path) { root.openFolder(path) }
     function onExportNoticeDismissed() { root.lastExport = null }

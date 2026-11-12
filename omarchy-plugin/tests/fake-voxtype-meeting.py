@@ -613,12 +613,19 @@ def play(state, args):
         print(state["play_error"], file=sys.stderr)
         return 1
     meeting = resolve(state, args[0])
-    seg_id = args[args.index("--segment") + 1]
     track = args[args.index("--track") + 1] if "--track" in args else "mixed"
-    seg = next((s for s in segments_of(state, meeting) or [] if str(s["id"]) == seg_id), None)
-    if seg is None:
-        print("Error: no segment %s in meeting %s" % (seg_id, meeting), file=sys.stderr)
-        return 1
+    if "--at" in args:
+        # Seconds (95), mm:ss or hh:mm:ss, as the real --at.
+        secs = 0
+        for part in args[args.index("--at") + 1].split(":"):
+            secs = secs * 60 + int(part)
+        seg = {"start_ms": secs * 1000}
+    else:
+        seg_id = args[args.index("--segment") + 1]
+        seg = next((s for s in segments_of(state, meeting) or [] if str(s["id"]) == seg_id), None)
+        if seg is None:
+            print("Error: no segment %s in meeting %s" % (seg_id, meeting), file=sys.stderr)
+            return 1
     p = {"state": "playing", "meeting_id": meeting, "track": track, "from_ms": seg["start_ms"], "pid": 4242,
          "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "_t0": time.time()}
     with open(play_path(), "w") as f:
@@ -767,6 +774,33 @@ def delete_meeting(state, args):
     return 0
 
 
+def waveform(state, args):
+    """meeting waveform M --buckets N --json: PROPOSED, not in a released
+    voxtype. Peaks per bucket from the meeting's lines (loud where someone
+    speaks, -100 between). state["waveform_missing"] answers as a voxtype
+    without it; a meeting without kept audio is refused like play."""
+    if state.get("waveform_missing"):
+        print("error: unrecognized subcommand 'waveform'", file=sys.stderr)
+        return 2
+    if state.get("audio_retained") is False:
+        print("Error: This meeting was recorded without keeping audio.", file=sys.stderr)
+        return 1
+    meeting = resolve(state, args[0])
+    n = int(args[args.index("--buckets") + 1]) if "--buckets" in args else 160
+    segs = segments_of(state, meeting) or []
+    duration = max([s["end_ms"] for s in segs] + [60000]) + 5000
+    bucket = duration / n
+    mic, loop = [], []
+    for i in range(n):
+        t = i * bucket
+        live = [s for s in segs if s["start_ms"] <= t < s["end_ms"] + 2000]
+        mic.append(-12.0 if any(s["source"] == "microphone" for s in live) else -100.0)
+        loop.append(-15.0 if any(s["source"] == "loopback" for s in live) else -100.0)
+    print(json.dumps({"meeting_id": meeting, "duration_ms": int(duration), "bucket_ms": int(bucket),
+                      "mic": mic, "loopback": loop}))
+    return 0
+
+
 def soundcheck(state, args):
     """meeting soundcheck [--seconds N] [--json] | --stop
 
@@ -843,7 +877,7 @@ def main():
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
             "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
-            "soundcheck", "search"):
+            "soundcheck", "search", "waveform"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -891,6 +925,8 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "waveform":
+        return waveform(state, args[2:])
     elif action == "finish":
         return finish(state, args[2:])
     elif action == "delete" and "--force" in args:
