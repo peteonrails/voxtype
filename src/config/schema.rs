@@ -251,7 +251,7 @@ const FEEDBACK_THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const OUTPUT_MODE_CHOICES: &[&str] = &["type", "clipboard", "paste", "file"];
 const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
-const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "aec", "gtcrn", "off", "disabled"];
+const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "webrtc", "gtcrn", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
@@ -284,6 +284,19 @@ const ICON_THEME_CHOICES: &[&str] = &[
     "arrows",
     "text",
 ];
+
+/// Old names a closed key still accepts, written as their current name.
+/// They are not offered as choices; a config that still holds one loads as
+/// before, since the field itself is a plain string.
+fn choice_alias(key: &str, raw: &str) -> Option<&'static str> {
+    match (key, raw) {
+        // Renamed in 1.3.0 before release: "aec" and "off" shipped in test
+        // builds.
+        ("meeting.audio.echo_cancel", "aec") => Some("webrtc"),
+        ("meeting.audio.echo_cancel", "off") => Some("disabled"),
+        _ => None,
+    }
+}
 
 const fn closed(choices: &'static [&'static str]) -> KeyType {
     KeyType::Enum {
@@ -1392,7 +1405,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(ECHO_CANCEL_CHOICES),
         "Meeting",
         "Echo cancellation",
-        "auto cancels speaker echo with PipeWire's WebRTC canceller on speakers, GTCRN otherwise. aec forces it, gtcrn is the old behaviour, off is neither.",
+        "auto cancels speaker echo with PipeWire's WebRTC canceller unless the output is headphones, GTCRN otherwise. webrtc forces it, gtcrn is the old behaviour, disabled is neither.",
     ),
     spec(
         "meeting.diarization.enabled",
@@ -2718,6 +2731,9 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
         KeyType::Enum { choices, open } => {
             if choices.contains(&raw) {
                 return Ok(TypedValue::Str(raw.to_string()));
+            }
+            if let Some(canonical) = choice_alias(spec.key, raw) {
+                return Ok(TypedValue::Str(canonical.to_string()));
             }
             if open {
                 if raw.is_empty() {
