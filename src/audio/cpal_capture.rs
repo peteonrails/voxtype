@@ -154,23 +154,31 @@ impl AudioCapture for CpalCapture {
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-        // Get the device info before spawning the thread
-        let host = cpal::default_host();
-
-        let device = if self.config.device == "default" {
-            host.default_input_device()
-                .ok_or_else(|| AudioError::DeviceNotFound("default".to_string()))?
-        } else {
-            find_audio_device(&host, &self.config.device)?
+        // Find the device and its config before spawning the capture
+        // thread. ALSA blocks forever here when a sound server's socket
+        // exists but nothing answers, and this runs on the daemon's event
+        // loop, so it gets a deadline and a thread of its own.
+        let wanted = self.config.device.clone();
+        let lookup = move || -> Result<(cpal::Device, cpal::SupportedStreamConfig), AudioError> {
+            let host = cpal::default_host();
+            let device = if wanted == "default" {
+                host.default_input_device()
+                    .ok_or_else(|| AudioError::DeviceNotFound("default".to_string()))?
+            } else {
+                find_audio_device(&host, &wanted)?
+            };
+            let config = device
+                .default_input_config()
+                .map_err(|e| AudioError::Connection(e.to_string()))?;
+            Ok((device, config))
         };
+        let timeout = super::devices::SOUND_SERVER_TIMEOUT;
+        let (device, supported_config) = super::devices::bounded_async(timeout, lookup)
+            .await
+            .ok_or(AudioError::NoSoundServer(timeout.as_secs()))??;
 
         let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
         tracing::info!("Using audio device: {}", device_name);
-
-        // Get supported config
-        let supported_config = device
-            .default_input_config()
-            .map_err(|e| AudioError::Connection(e.to_string()))?;
 
         let source_sample_rate = supported_config.sample_rate().0;
         let source_channels = supported_config.channels() as usize;

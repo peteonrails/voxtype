@@ -472,6 +472,18 @@ systemctl --user restart pipewire pipewire-pulse
 systemctl --user restart pulseaudio
 ```
 
+### "No sound server answered within 5 s"
+
+Voxtype asked the audio system for the microphone and got no reply. This happens when PipeWire or PulseAudio is wedged (its socket exists but it does not answer), or in a sandbox, container or clean chroot with no sound server. Recording, `voxtype info devices` and the Settings panel's device list stop waiting after 5 seconds and report this instead of hanging.
+
+```bash
+systemctl --user status pipewire pipewire-pulse wireplumber
+systemctl --user restart pipewire pipewire-pulse wireplumber
+voxtype info devices
+```
+
+If `info devices` lists your microphone again, recording works too; the daemon does not need a restart.
+
 ### "Audio format not supported"
 
 **Cause:** Audio device doesn't support 16kHz sample rate.

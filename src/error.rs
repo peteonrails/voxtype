@@ -69,6 +69,12 @@ pub enum AudioError {
 
     #[error("Audio stream error: {0}")]
     StreamError(String),
+
+    #[error(
+        "No sound server answered within {0} s. Is PipeWire or PulseAudio running?\n  \
+         Check: systemctl --user status pipewire pipewire-pulse"
+    )]
+    NoSoundServer(u64),
 }
 
 /// Errors related to speech-to-text transcription
