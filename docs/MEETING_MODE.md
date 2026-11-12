@@ -206,7 +206,7 @@ The daemon acts on meeting commands between audio chunks, so while it is transcr
 
 The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
 
-The header shows the meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. Below it are four tabs:
+The header shows the meeting title (click it to rename the meeting: Enter saves with `voxtype meeting title`, Escape cancels; a rename made elsewhere, or a title taken from the calendar after the start, shows up at once; renaming a finished meeting to a two-person title such as "Pete <> Chad" shows the names on its lines right away), how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. Below it are four tabs:
 
 - **Transcript**: one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up; **Jump to latest** takes you back.
   - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
@@ -441,6 +441,8 @@ Labels are saved to the database and applied to the transcript, so subsequent ex
 A two-person meeting usually says who is in it: "Pete <> Andrew standup", "Andrew <> Pete Standup", "Pete / Chris", "Pete x Chris", "Pete & Chris", "Pete and Chris 1:1", "1:1 Pete/Chris" or "Chris - Pete sync". When a meeting's title reads like that, voxtype names the speakers for you. The side of the title that is you names your microphone, and the other side names every remote voice. In a 1:1 every remote voice is the same person, so this also tidies up a diarizer that heard one person as `Remote 1`, `Remote 2` and `Remote 3`.
 
 You are recognized by your account's full name (the GECOS field, as `getent passwd $USER` shows it). Matching ignores case, and a first name is enough: an account named "Pete Jackson" matches a title that says "Pete". Your microphone is labelled with your full name.
+
+Many accounts have no full name set (`getent passwd $USER` shows an empty field between the colons, as in `pete:x:1000:1000::/home/pete:/bin/bash`). Then your login name stands in as a first name: the login `pete` matches "Pete" in a title, and your microphone is labelled as the title spells it. A login name is only ever matched as a first name, and only when it is letters alone and not an account such as `root`, `user` or `deck`. To be matched by your full name, set it with `sudo chfn -f "Pete Jackson" $USER`.
 
 The rules are strict on purpose, because a wrong name is worse than none. Each name is one or two capitalized words. Words like standup, sync, weekly, check-in and 1:1 before or after the names are ignored. Nothing is named when:
 

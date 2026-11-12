@@ -110,6 +110,21 @@ def load():
         return {}
 
 
+def real_voxtype():
+    """The real voxtype to hand `meeting title` to, only in a scenario that
+    asked for one (REAL_SCENARIO=1, set by the harness for title-real). A
+    REAL_VOXTYPE exported for the whole suite changes nothing elsewhere."""
+    if os.environ.get("REAL_SCENARIO") != "1":
+        return None
+    return os.environ.get("REAL_VOXTYPE") or None
+
+
+def real_store():
+    """The real voxtype for `meeting list` and `meeting show` too, in a
+    scenario that browses a real meetings store (REAL_STORE=1)."""
+    return real_voxtype() if os.environ.get("REAL_STORE") == "1" else None
+
+
 def control(cmd):
     with open(os.environ["FAKE_MEETING_CTL"], "a") as f:
         f.write(json.dumps(cmd) + "\n")
@@ -575,6 +590,72 @@ def export(state, args):
     return 0
 
 
+def retitle(state, args):
+    """meeting title M "TITLE" [--json]: detect-140's contract (d315459b).
+
+    The title is stored as one line with its whitespace collapsed; empty is
+    refused. A past meeting takes it in the list and its folder; the
+    socket's running or just-ended meeting is announced (title_changed).
+    Prints {meeting_id, title, previous_title, live, labelled}. state:
+    title_fail (refused, with that reason); title_labels {key: name}, the
+    speakers a finished meeting's two-person title names, written to its
+    transcript and reported in "labelled" (the daemon names a live
+    meeting's speakers itself)."""
+    real = real_voxtype()
+    if real:
+        os.execv(real, [real, "meeting", "title"] + args)
+    if state.get("title_fail"):
+        print("Error: " + state["title_fail"], file=sys.stderr)
+        return 1
+    title = " ".join((args[1] if len(args) > 1 else "").split())
+    if title == "":
+        print("Error: A meeting title can't be empty.", file=sys.stderr)
+        return 1
+    meeting = resolve(state, args[0])
+    if meeting is None:
+        print("Error: Meeting not found: " + args[0], file=sys.stderr)
+        return 1
+    snap = snapshot()
+    live_m = snap.get("live")
+    live = bool(live_m and live_m.get("meeting_id") == meeting)
+    previous = None
+    labelled = []
+    for m in state.get("meetings", []):
+        if m["id"] == meeting:
+            previous = m.get("title")
+            m["title"] = title
+            save(state)
+    folder = past_dir(meeting)
+    if os.path.isdir(folder):
+        with open(os.path.join(folder, "metadata.json")) as f:
+            meta = json.load(f)
+        meta["title"] = title
+        with open(os.path.join(folder, "metadata.json"), "w") as f:
+            json.dump(meta, f)
+        names = state.get("title_labels") or {}
+        if names:
+            path = os.path.join(folder, "transcript.json")
+            with open(path) as f:
+                transcript = json.load(f)
+            for s in transcript.get("segments", []):
+                key = segment_key(s)
+                if key in names and not s.get("speaker_label"):
+                    s["speaker_label"] = names[key]
+                    if key not in labelled:
+                        labelled.append(key)
+            with open(path, "w") as f:
+                json.dump(transcript, f)
+    else:
+        for m in (live_m, snap.get("stored")):
+            if m and m.get("meeting_id") == meeting:
+                previous = m.get("title")
+                control({"cmd": "title", "meeting_id": meeting, "title": title})
+                break
+    print(json.dumps({"meeting_id": meeting, "title": title, "previous_title": previous, "live": live,
+                      "labelled": labelled}, indent=2))
+    return 0
+
+
 def play_path():
     return os.path.join(os.environ["FAKE_MEETING_DATA"], "play.json")
 
@@ -716,6 +797,8 @@ def main():
     if args[:1] != ["meeting"] or len(args) < 2:
         return 2
     action = args[1]
+    if action in ("list", "show") and real_store():
+        os.execv(real_store(), [real_store()] + args)
     failing = state.get("fail", {})
     # A failing ask answers in its own NDJSON form.
     if action in failing and action != "ask":
@@ -754,6 +837,8 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "title":
+        return retitle(state, args[2:])
     elif action == "notice" and args[2:] == ["--ack"]:
         control({"cmd": "notice", "pending": False})
         print("Acknowledged.")

@@ -128,6 +128,36 @@ Item {
   signal stopRequested()
   signal startRequested(string title)
   signal renameRequested(var keys, string name)
+  // The meeting's title, typed into the header (`meeting title`).
+  signal retitleRequested(string title)
+  property bool editingTitle: false
+  property string titleError: ""
+  onHasMeetingChanged: if (!root.hasMeeting) root.editingTitle = false
+
+  function beginTitleEdit() {
+    if (!root.hasMeeting || !root.feed || root.feed.meetingId === "") return
+    root.titleError = ""
+    titleEditField.text = root.feed.title
+    root.editingTitle = true
+    titleEditField.forceActiveFocus()
+    titleEditField.selectAll()
+  }
+  function commitTitle() {
+    var t = String(titleEditField.text).trim()
+    if (t === "") {
+      root.titleError = "A meeting needs a title."
+      return
+    }
+    root.editingTitle = false
+    root.titleError = ""
+    root.retitleRequested(t)
+    root.forceActiveFocus()
+  }
+  function cancelTitle() {
+    root.editingTitle = false
+    root.titleError = ""
+    root.forceActiveFocus()
+  }
   // Move one line: `speaker` goes to `voxtype meeting reassign`, `key` is the
   // speaker key to show until it answers.
   signal reassignRequested(int segId, string speaker, string key)
@@ -531,8 +561,15 @@ Item {
         implicitHeight: headerRow.implicitHeight
 
       DragArea {
+        id: headerDrag
         objectName: "headerDrag"
         anchors.fill: parent
+        // A click (not a drag) on the title renames the meeting.
+        onTapped: {
+          var p = headerDrag.mapToItem(titleText, headerDrag.pressX, headerDrag.pressY)
+          if (titleText.visible && p.x >= 0 && p.x <= titleText.width && p.y >= 0 && p.y <= titleText.height)
+            root.beginTitleEdit()
+        }
       }
 
       RowLayout {
@@ -549,8 +586,10 @@ Item {
         }
 
         Text {
+          id: titleText
           objectName: "meetingTitle"
           Layout.fillWidth: true
+          visible: !root.editingTitle
           text: root.hasMeeting
             ? (root.feed.title !== "" ? root.feed.title : "Untitled meeting")
             : "Meetings"
@@ -559,6 +598,22 @@ Item {
           font.pixelSize: root.theme.heading
           font.bold: true
           elide: Text.ElideRight
+        }
+
+        MeetingTextField {
+          id: titleEditField
+          objectName: "titleEditField"
+          Layout.fillWidth: true
+          visible: root.editingTitle
+          theme: root.theme
+          placeholderText: "Meeting title"
+          onAccepted: root.commitTitle()
+          onTextChanged: if (root.titleError !== "" && String(text).trim() !== "") root.titleError = ""
+          Keys.onEscapePressed: function(event) {
+            root.cancelTitle()
+            event.accepted = true
+          }
+          onActiveFocusChanged: if (!activeFocus && root.editingTitle && root.titleError === "") root.cancelTitle()
         }
 
         // Export, folders and Reset position.
@@ -781,6 +836,16 @@ Item {
       }
 
       // ------------------------------------------------------- notices
+
+      Text {
+        objectName: "titleError"
+        Layout.fillWidth: true
+        visible: root.editingTitle && root.titleError !== ""
+        text: root.titleError
+        color: root.theme.urgent
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+      }
 
       Text {
         objectName: "reconnectNotice"
