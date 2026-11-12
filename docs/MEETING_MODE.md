@@ -116,7 +116,7 @@ The `--title` flag is optional. If omitted, the meeting is named by its date and
 
 Only one meeting can run at a time. Starting a second meeting while one is active will fail.
 
-On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs.
+On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs. **Meetings...** near the top of the menu opens the meeting view.
 
 Recording starts as soon as the daemon reads the request, before any model loads, so nothing said in the first seconds is lost.
 
