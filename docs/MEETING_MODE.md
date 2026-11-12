@@ -589,7 +589,7 @@ voxtype meeting share latest --transcript --preview       # Print what would be 
 | `email` | Opens a draft in your mail app through a `mailto:` link, with the title and date as the subject and the notes as the body. A transcript is too long for a mail link, so with `--transcript` it is saved as a file next to your other shares and the draft tells you to attach it |
 | `command` | Runs `[meeting.share] command` (or `--command`) through `sh -c` with the share on stdin |
 
-Nothing is ever shared on its own: every share is a command you run or a menu item you click, and there is no hosted link or cloud copy. `--preview` prints exactly what would be sent without sending it, and `--preview --json` gives the same to the meeting view's share preview along with which destinations work on this machine.
+Nothing is ever shared on its own: every share is a command you run or a menu item you click, and there is no hosted link or cloud copy. `--preview` prints exactly what would be sent without sending it, and `--preview --json` gives the same to the meeting view's share preview along with which destinations work on this machine and, for any that do not, why.
 
 The share command is for anything voxtype does not do itself: posting to a chat webhook, converting with pandoc, or uploading somewhere. It gets these variables:
 
