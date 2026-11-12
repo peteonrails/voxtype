@@ -1219,6 +1219,25 @@ mod tests {
         assert!(!running, "sleep {pid} outlived its timeout: {state}");
     }
 
+    /// A command that exits but leaves something running with its output
+    /// open finishes when it exits, not when the leftover does.
+    #[tokio::test]
+    async fn a_post_meeting_command_that_leaves_a_child_running_still_finishes() {
+        let mut h = harness().await;
+        with_command(
+            &mut h,
+            "sleep 30 & echo $! > child.pid; echo started",
+            std::time::Duration::from_millis(800),
+        );
+        let id = h.daemon.stop().await.unwrap();
+        let started = std::time::Instant::now();
+        let outcome = h.daemon.post_meeting(id).run().await;
+        assert_eq!(outcome, Some(hook::HookOutcome::Succeeded));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let pid = std::fs::read_to_string(h.folder().join("child.pid")).unwrap();
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    }
+
     #[tokio::test]
     async fn a_failing_post_meeting_command_leaves_the_daemon_working() {
         let mut h = harness().await;
