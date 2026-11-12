@@ -805,6 +805,125 @@ mod tests {
         );
     }
 
+    /// Parakeet's own token times, when a model is given:
+    /// `VOXTYPE_TEST_PARAKEET_MODEL=/path/parakeet-tdt-0.6b-v3-int8 cargo test
+    /// --features parakeet parakeet_meeting -- --nocapture`. Two sentences
+    /// 0.3 s apart are one utterance to the pause splitter; they come back as
+    /// two lines, the second at its own start. With
+    /// `VOXTYPE_TEST_MEETING_WAVS=a.wav:b.wav` it also prints, per file,
+    /// the lines with and without the token times, and how much silence each
+    /// line's start runs ahead of its speech.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn parakeet_meeting_lines_follow_its_token_times() {
+        let Ok(model) = std::env::var("VOXTYPE_TEST_PARAKEET_MODEL") else {
+            eprintln!("skipping: VOXTYPE_TEST_PARAKEET_MODEL is not set");
+            return;
+        };
+        let read = |path: &str| -> Vec<f32> {
+            hound::WavReader::open(path)
+                .unwrap()
+                .samples::<i16>()
+                .map(|s| s.unwrap() as f32 / 32768.0)
+                .collect()
+        };
+        let parakeet: Arc<dyn Transcriber> = Arc::new(
+            crate::transcribe::parakeet::ParakeetTranscriber::new(&crate::config::ParakeetConfig {
+                model,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        /// The engine as meetings saw it before: one line per utterance.
+        struct Untimed(Arc<dyn Transcriber>);
+        impl Transcriber for Untimed {
+            fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+                self.0.transcribe(samples)
+            }
+            fn short_clips_are_cheap(&self) -> bool {
+                true
+            }
+        }
+        let lines = |engine: Arc<dyn Transcriber>, track: &[f32]| {
+            let mut processor = ChunkProcessor::new(ChunkConfig::default(), engine);
+            let (mut out, mut at, mut id) = (Vec::new(), 0usize, 0u32);
+            while at < track.len() {
+                let rest = &track[at..];
+                let cut = chunk_cut_point(rest, &[], 30 * 16000, 16000, 0.01).max(1);
+                let mut buffer =
+                    processor.new_buffer(id, AudioSource::Microphone, (at / 16) as u64);
+                buffer.add_samples(&rest[..cut]);
+                out.extend(processor.process_chunk(buffer).unwrap().segments);
+                at += cut;
+                id += 1;
+            }
+            out
+        };
+        // Silence between a line's start and its first voiced 30 ms frame.
+        let lead_ms = |track: &[f32], seg: &TranscriptSegment| -> u64 {
+            let from = (seg.start_ms * 16) as usize;
+            track[from.min(track.len())..]
+                .chunks(480)
+                .position(|f| VoiceActivityDetector::calculate_rms(f) > 0.01)
+                .map_or(0, |n| n as u64 * 30)
+        };
+
+        let sentence = read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/vad/speech_long.wav"
+        ));
+        let mut audio = vec![0.0f32; 16000];
+        audio.extend(&sentence);
+        audio.extend(vec![0.0f32; 4800]);
+        let second_at_ms = (audio.len() / 16) as u64;
+        audio.extend(&sentence);
+        audio.resize(15 * 16000, 0.0);
+        let timed = lines(parakeet.clone(), &audio);
+        let untimed = lines(Arc::new(Untimed(parakeet.clone())), &audio);
+        eprintln!("timed: {timed:#?}\nuntimed: {untimed:#?}");
+        assert_eq!(untimed.len(), 1, "one utterance to the pause splitter");
+        assert!(timed.len() >= 2, "{timed:?}");
+        assert!(
+            timed
+                .iter()
+                .any(|s| s.start_ms.abs_diff(second_at_ms) < 400),
+            "a line starts with the second sentence at {second_at_ms} ms: {timed:?}"
+        );
+
+        for path in std::env::var("VOXTYPE_TEST_MEETING_WAVS")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|p| !p.is_empty())
+        {
+            let track = read(path);
+            for (name, engine) in [
+                (
+                    "untimed",
+                    Arc::new(Untimed(parakeet.clone())) as Arc<dyn Transcriber>,
+                ),
+                ("timed", parakeet.clone()),
+            ] {
+                let segs = lines(engine, &track);
+                let leads: Vec<u64> = segs.iter().map(|s| lead_ms(&track, s)).collect();
+                eprintln!(
+                    "{path} {name}: {} lines, lead silence mean {} ms, max {} ms",
+                    segs.len(),
+                    leads.iter().sum::<u64>() / leads.len().max(1) as u64,
+                    leads.iter().max().unwrap_or(&0)
+                );
+                for (s, lead) in segs.iter().zip(&leads) {
+                    eprintln!(
+                        "  {:>6.2}-{:>6.2} lead {:>4} ms  {}",
+                        s.start_ms as f32 / 1000.0,
+                        s.end_ms as f32 / 1000.0,
+                        lead,
+                        s.text
+                    );
+                }
+            }
+        }
+    }
+
     /// Bug: a chunk was transcribed only if over 10% of it was speech, so a
     /// 30 s chunk holding one two-second sentence was dropped whole.
     #[test]
