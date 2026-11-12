@@ -130,6 +130,8 @@ Item {
           else if (s === "old-voxtype") tc.driveOldVoxtype()
           else if (s === "copy") tc.driveCopy()
           else if (s === "minimize") tc.driveMinimize()
+          else if (s === "pill-states") tc.drivePillStates()
+          else if (s === "pill-idle") tc.drivePillIdle()
           else if (s === "minimize-autoopen") tc.driveMinimizeAutoOpen()
           else if (s === "resize") tc.driveResize()
           else if (s === "move") tc.driveMove()
@@ -159,6 +161,7 @@ Item {
           else if (s === "search-old") tc.driveSearchOld()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
           else if (s === "soundcheck-error") tc.driveSoundCheckError()
+          else if (s === "live-labels") tc.driveLiveLabels()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
           else if (s === "summary-stale") tc.driveSummaryStale()
@@ -1461,20 +1464,41 @@ Item {
       placement().screenName = "DP-1"
     }
 
+    function minimizeNow() {
+      click(find(view(), "minimizeButton"), "Minimize")
+      waitFor(function() { return find(view(), "pill").visible && placement().minimized }, "the pill")
+    }
+
+    function pillSays() { return txt("pillState") + (shown(find(view(), "pillElapsed")) ? " | " + txt("pillElapsed") : "") }
+
     function driveMinimize() {
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
-      click(find(view(), "minimizeButton"), "Minimize")
-      var pill = find(view(), "pill")
-      waitFor(function() { return pill.visible && placement().minimized }, "the pill")
+      screen1600()
+      var p = placement()
+      var cardRight = p.left + p.cardWidth
+      minimizeNow()
       var win = host.ctrl().window
-      check(win.implicitWidth === 300 && win.implicitHeight === 40, "pill-sized window: " + win.implicitWidth + "x" + win.implicitHeight)
       check(host.viewOpen(), "the view is still open (the pill is the view)")
-      check(txt("pillState") === "Recording" && /^1:0\d$/.test(txt("pillElapsed")), "state and time: " + txt("pillState") + " " + txt("pillElapsed"))
-      check(txt("pillLine") === "Remote: The build went green overnight.", "last line: " + txt("pillLine"))
+      check(txt("pillState") === "Standup" && /^1:0\d$/.test(txt("pillElapsed")), "title and time: " + pillSays())
+      check(shown(find(view(), "pillDot")) && find(view(), "pillDot").color === view().theme.urgent, "a red dot while recording")
+      check(!shown(find(view(), "pillStart")), "no Start while recording")
+      // Sized to what it says, inside the bounds, and on the card's outer
+      // (right) edge.
+      check(win.implicitHeight === 40 && win.implicitWidth >= p.pillMinWidth && win.implicitWidth < 260,
+            "fits its text: " + win.implicitWidth + "x" + win.implicitHeight)
+      check(Math.abs(win.implicitWidth - p.pillWidth) < 1, "the window is the pill")
+      check(p.left + p.pillWidth === cardRight, "right edge kept: " + (p.left + p.pillWidth) + " vs " + cardRight)
       shot("pill", true)
+      // Dragged, it moves; expanded, the card is back on screen beside it.
+      var drag = find(view(), "pillDrag")
+      mousePress(drag, 20, 20)
+      mouseMove(drag, 20 - 300, 20 + 60)
+      mouseRelease(drag, 20 - 300, 20 + 60)
+      check(Math.abs(p.left + p.pillWidth - (cardRight - 300)) < 2 && p.top > p.gap, "moved with the pointer: " + p.left + "," + p.top)
       click(find(view(), "pillDrag"), "the pill")
       waitFor(function() { return !placement().minimized && shown(find(view(), "transcriptList")) }, "expanded by a click")
+      check(p.left + p.cardWidth === cardRight - 300, "the card's right edge follows the pill: " + (p.left + p.cardWidth))
 
       // `voxtype meeting view --minimize`, then `--expand`.
       request({ window: "minimize" })
@@ -1482,6 +1506,54 @@ Item {
       request({ window: "expand" })
       waitFor(function() { return !placement().minimized }, "expanded by request")
       check(host.opens === 1, "one window throughout: " + host.opens)
+    }
+
+    function drivePillStates() {
+      ctl({ cmd: "autosummary", summary: { summary: "A short standup.", decisions: [], action_items: [], key_points: [] } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // Pause and Stop from the card, then watch the pill.
+      click(find(view(), "pauseButton"), "Pause")
+      waitFor(function() { return feed().status === "paused" }, "paused")
+      minimizeNow()
+      waitFor(function() { return txt("pillState") === "Paused" && /^1:0\d$/.test(txt("pillElapsed")) }, "Paused and the time: " + pillSays())
+      check(find(view(), "pillDot").color !== view().theme.urgent, "no red dot while paused")
+      shot("pill-paused", true)
+      click(find(view(), "pillDrag"), "expand")
+      waitFor(function() { return !placement().minimized }, "expanded")
+      click(find(view(), "pauseButton"), "Resume")
+      waitFor(function() { return feed().status === "recording" }, "recording again")
+      click(find(view(), "stopButton"), "Stop")
+      minimizeNow()
+      waitFor(function() { return txt("pillState") === "Finishing…" && !shown(find(view(), "pillElapsed")) }, "Finishing…: " + pillSays())
+      shot("pill-finishing", true)
+      waitFor(function() { return txt("pillState") === "Summarizing · Claude…" }, "Summarizing with the agent: " + pillSays(), 6000)
+      shot("pill-summarizing", true)
+      waitFor(function() { return txt("pillState") === "Ended" && /^1:0\d · Summary ready$/.test(txt("pillElapsed")) }, "Ended with the summary: " + pillSays(), 8000)
+      shot("pill-ended", true)
+    }
+
+    function drivePillIdle() {
+      waitFor(function() { return feed().connected && feed().status === "idle" }, "feed connected")
+      openView()
+      minimizeNow()
+      check(txt("pillState") === "No meeting" && !shown(find(view(), "pillDot")) && !shown(find(view(), "pillElapsed")), "idle: " + pillSays())
+      check(shown(find(view(), "pillStart")), "Start offered")
+      shot("pill-idle", true)
+      var narrow = placement().pillWidth
+      click(find(view(), "pillStart"), "Start")
+      // A start from the pill expands it (a meeting start does).
+      waitFor(function() { return feed().status === "recording" && !placement().minimized }, "started and expanded", 6000)
+      // A long title is elided; the pill stops at its maximum width.
+      ctl({ cmd: "stop" })
+      waitFor(function() { return feed().ended }, "ended", 6000)
+      ctl({ cmd: "start", title: "Quarterly planning with the platform, mobile and web teams" })
+      waitFor(function() { return feed().title.indexOf("Quarterly") === 0 && feed().status === "recording" }, "long title", 6000)
+      minimizeNow()
+      var p = placement()
+      check(p.pillWidth <= p.pillMaxWidth && p.pillWidth > narrow, "wider, within the maximum: " + p.pillWidth)
+      check(find(view(), "pillState").truncated, "the title elided")
+      shot("pill-long-title", true)
     }
 
     function driveMinimizeAutoOpen() {
@@ -1744,6 +1816,45 @@ Item {
       if (useAgent !== "") check(txt("summaryUseAgent") === "Use " + useAgent + " instead", "use: " + txt("summaryUseAgent"))
       check(shown(find(view(), "summarySettings")) === view().canOpenSettings, "Settings offered where the host has it")
       check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+    }
+
+    function speakerOf(text) {
+      var all = lines()
+      for (var i = 0; i < all.length; i++) if (all[i][2] === text) return all[i][1]
+      return "<no line " + text + ">"
+    }
+
+    function driveLiveLabels() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      check(speakerOf("Yes, loud and clear.") === "Remote 1", "Remote 1 at first")
+      rename(1, "Chris")
+      waitFor(function() { return speakerOf("Yes, loud and clear.") === "Chris" }, "renamed: " + speakerOf("Yes, loud and clear."))
+      waitFor(idleCli, "label stored")
+      // Remote 1 talks again: the new lines keep the name.
+      ctl({ cmd: "segments", chunk_id: 2, segments: [seg(5, 40, "Shall I share my screen?", "loopback", "Remote 1", 2),
+                                                     seg(6, 44, "Go ahead.", "microphone", "You", 2)] })
+      waitFor(function() { return lines().length === 6 }, "chunk 2")
+      check(speakerOf("Shall I share my screen?") === "Chris", "later line keeps the name: " + speakerOf("Shall I share my screen?"))
+      // Remote 2 is named and never speaks again.
+      rename(2, "Announcer")
+      waitFor(function() { return speakerOf("This meeting is being recorded.") === "Announcer" }, "second rename")
+      waitFor(idleCli, "second label stored")
+      shot("labels")
+      // The view starts over from the daemon's hello, as after a shell
+      // restart or reopening: the names come from the backlog itself.
+      ctl({ cmd: "drop" })
+      waitFor(function() { return !feed().connected }, "dropped")
+      waitFor(function() { return feed().connected && lines().length === 6 }, "reconnected", 12000)
+      check(speakerOf("Yes, loud and clear.") === "Chris", "Remote 1's first line after hello: " + speakerOf("Yes, loud and clear."))
+      check(speakerOf("Shall I share my screen?") === "Chris", "Remote 1's later line after hello")
+      check(speakerOf("This meeting is being recorded.") === "Announcer",
+            "a silent renamed speaker keeps the name after hello: " + speakerOf("This meeting is being recorded."))
+      ctl({ cmd: "segments", chunk_id: 3, segments: [seg(7, 70, "Here it is.", "loopback", "Remote 1", 3)] })
+      waitFor(function() { return lines().length === 7 }, "chunk 3")
+      check(speakerOf("Here it is.") === "Chris", "and after it: " + speakerOf("Here it is."))
+      var names = renderedChips()
+      check(names.indexOf("Remote 1") === -1 && names.indexOf("Remote 2") === -1, "no bare ids in the chips: " + JSON.stringify(names))
     }
 
     function driveSummaryError() {

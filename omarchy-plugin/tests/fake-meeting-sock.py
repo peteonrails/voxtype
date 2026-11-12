@@ -231,7 +231,16 @@ class Server:
                 ev["soundcheck"] = True
             self.broadcast(ev)
         elif kind == "label":
+            # As the daemon does since `meeting label` pokes it: later lines
+            # carry the name, and lines already sent get it too, each
+            # published as segment_updated and kept in the hello backlog.
             self.labels[cmd["key"]] = cmd["name"]
+            for i, seg in enumerate(self.state["segments"]):
+                named = self.labelled(seg)
+                if named.get("speaker_label") != seg.get("speaker_label"):
+                    self.state["segments"][i] = named
+                    self.broadcast({"event": "segment_updated", "meeting_id": self.state.get("meeting_id"),
+                                    "segment": named})
         elif kind == "update":
             seg = cmd["segment"]
             target = None
