@@ -165,6 +165,7 @@ needed:
 {"event": "notes_updated", "meeting_id": "...", "updated_at": "2026-11-11T20:00:00Z"}
 {"event": "status", "status": "paused"}
 {"event": "playback", "meeting_id": "...", "track": "mixed", "state": "playing", "from_ms": 61250}
+{"event": "import_progress", "meeting_id": "...", "operation": "import", "state": "transcribing", "chunks_done": 2, "chunks_total": 5, "position_ms": 60000, "duration_ms": 150000}
 {"event": "error", "message": "..."}
 ```
 
@@ -252,6 +253,11 @@ A summary that fails ends with the `error` event instead of `summary_ready`;
 neither event. `agent` is `claude`, `codex`, `local:<model>`, or `ollama` /
 `remote` for the older summarizers. The saved summary is also in
 `voxtype meeting show <id> --json` under `metadata.summary`.
+
+`import_progress` follows `voxtype meeting import` and `meeting
+retranscribe`, which run outside the daemon and hand it their progress:
+see [Importing and transcribing again](#importing-and-transcribing-again-meeting-import-and-meeting-retranscribe)
+below. It is not sent while the daemon is down.
 
 `speakers` (live speaker naming) events are planned for a later release and
 are not emitted yet.
@@ -364,6 +370,44 @@ meeting recorded without loopback has no `loopback` track), the segment is
 unknown, or `ffmpeg` or a player is not installed (the message names what is
 missing).
 
+### Importing and transcribing again: `meeting import` and `meeting retranscribe`
+
+```sh
+voxtype meeting import <file> [--title T] [--engine E] [--model M] [--language L]
+                       [--date RFC3339] [--channels mono|mic,loopback,...] [--diarization B] [--json]
+voxtype meeting retranscribe <meeting> [--engine E] [--model M] [--language L] [--diarization B]
+                             [--keep-edits | --discard-edits] [--json]
+```
+
+Both run in the calling process, not in the daemon, and can take minutes.
+With `--json` they print one JSON object per line on stdout: a `progress`
+line when they start, one after each chunk and one at the end, then the
+result. Logs go to stderr.
+
+```json
+{"event": "progress", "meeting_id": "...", "operation": "import", "state": "transcribing", "chunks_done": 3, "chunks_total": 5, "position_ms": 89000, "duration_ms": 150000}
+{"event": "progress", "meeting_id": "...", "operation": "import", "state": "done", "chunks_done": 5, "chunks_total": 5, "position_ms": 150000, "duration_ms": 150000}
+{"event": "imported", "meeting_id": "...", "title": "Client call", "folder": "/home/me/.local/share/voxtype/meetings/2026-11-02-client-call", "started_at": "2026-11-02T15:00:00Z", "duration_ms": 150000, "channels": "mic,loopback", "segments": 42, "engine": "whisper", "model": "base.en", "audio_files": ["mic.opus", "loopback.opus", "mixed.opus"]}
+```
+
+```json
+{"event": "retranscribed", "meeting_id": "...", "previous_transcript": "transcript.v1.json", "segments": 40, "engine": "whisper", "model": "large-v3-turbo", "channels": "mic,loopback", "edits": {"edits_carried": 3, "edits_dropped": 1, "edits_discarded": 0, "annotations_carried": 2, "annotations_dropped": 0}}
+```
+
+- `operation` is `import` or `retranscribe`; `state` is `transcribing`,
+  `done` or `failed`.
+- `chunks_total` is estimated from the duration and settles at the end, when
+  it equals `chunks_done`. `position_ms` is how far through the audio it is.
+- The same object, with `"event": "import_progress"`, goes to `meeting.sock`
+  when the daemon is running, so a view can show the progress of an import
+  started elsewhere.
+- `channels` is `mono` or the `--channels` map.
+- `previous_transcript` is `null` when the meeting had no transcript.
+  `edits` counts speaker moves, text corrections and deleted lines
+  (`edits_*`) and annotations separately; `edits_discarded` is non-zero
+  only with `--discard-edits`.
+- A failure exits 1 with the reason on stderr.
+
 ### The meeting folder and `meeting.json`
 
 Every meeting has a folder under the meeting storage path
@@ -434,8 +478,10 @@ The fields:
   same name keep separate entries.
 - `files`: the meeting's files that exist, in the order shown, with their
   size in bytes when the manifest was written. `kind` is one of
-  `transcript`, `transcript_markdown`, `notes`, `summary`, `audio_mic`,
-  `audio_loopback` or `audio_mixed`. Names are relative to the folder.
+  `transcript`, `transcript_markdown`, `notes`, `summary`,
+  `transcript_previous` (a transcript `meeting retranscribe` replaced,
+  `transcript.v1.json` and on, oldest first), `audio_mic`, `audio_loopback`
+  or `audio_mixed`. Names are relative to the folder.
   Audio files end in `.opus` (Ogg Opus, 16 kHz mono) or, when ffmpeg was
   missing, `.wav` (16-bit PCM, 16 kHz mono); match on `kind`, not on the
   name.

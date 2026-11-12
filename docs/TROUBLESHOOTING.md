@@ -1670,6 +1670,23 @@ done
 
 `meeting.json` lists whichever files are there the next time it is rewritten.
 
+### `meeting import` or `meeting retranscribe` fails
+
+- **"need ffmpeg and ffprobe"**: install ffmpeg; ffprobe comes with it.
+- **"Cannot read ..."**: ffprobe could not find an audio stream. Check the
+  file plays (`ffprobe file`).
+- **"Invalid --channels ..."**: name one side per channel, in order. The
+  message says how many channels the file has; `ffprobe -show_streams file`
+  shows the layout. Leave `--channels` out to mix everything.
+- **"recorded without keeping audio"**: `meeting retranscribe` needs the
+  meeting's audio. Meetings recorded with `retain_audio = true`, and every
+  imported meeting, have it.
+- **A model or engine is refused**: the same checks as `meeting start
+  --model` apply; download the model first (`voxtype setup model`).
+- **Speaker names look swapped after transcribing again with `ml`
+  diarization**: the speaker numbers come from a new clustering. Rename them
+  with `voxtype meeting label`.
+
 ### `meeting play` fails or plays nothing
 
 - **"needs ffmpeg and one of pw-play (PipeWire), paplay (PulseAudio) or

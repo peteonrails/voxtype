@@ -149,6 +149,11 @@ fn folder_files(dir: &Path) -> Vec<ManifestFile> {
     .map(|(name, kind)| (name.to_string(), kind.to_string()))
     .collect();
     candidates.extend(
+        transcript_versions(dir)
+            .into_iter()
+            .map(|(_, name)| (name, "transcript_previous".to_string())),
+    );
+    candidates.extend(
         retained_audio::retained_files(dir)
             .into_iter()
             .map(|(stem, name)| (name, format!("audio_{stem}"))),
@@ -164,4 +169,24 @@ fn folder_files(dir: &Path) -> Vec<ManifestFile> {
             })
         })
         .collect()
+}
+
+/// Earlier transcripts kept by `meeting retranscribe`, `transcript.v1.json`
+/// and on, as (version, file name) in version order.
+pub fn transcript_versions(dir: &Path) -> Vec<(u32, String)> {
+    let mut versions: Vec<(u32, String)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let n = name
+                .strip_prefix("transcript.v")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
+            Some((n, name))
+        })
+        .collect();
+    versions.sort();
+    versions
 }

@@ -3428,6 +3428,16 @@ impl Daemon {
             }
         }
 
+        // `meeting import` or `meeting retranscribe` got a chunk further.
+        if take_trigger(meeting::import::PROGRESS_TRIGGER) {
+            if let (Some(progress), Some(ref hub)) = (
+                meeting::import::read_progress(&Config::runtime_dir()),
+                &self.meeting_event_hub,
+            ) {
+                hub.publish_import_progress(&progress);
+            }
+        }
+
         // `meeting play` started or stopped, or a playback ran to its end.
         if take_trigger(meeting::playback::TRIGGER) {
             if let Some(ref hub) = self.meeting_event_hub {

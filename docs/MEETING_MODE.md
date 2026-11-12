@@ -18,6 +18,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [The Meeting Folder](#the-meeting-folder)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
+  - [Importing a Recording](#importing-a-recording)
+  - [Transcribing a Meeting Again](#transcribing-a-meeting-again)
   - [Running a Command After a Meeting](#running-a-command-after-a-meeting)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
@@ -342,6 +344,44 @@ voxtype meeting play --stop
 Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
 
 Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
+
+### Importing a Recording
+
+`voxtype meeting import` turns a recording made elsewhere (a phone memo, a call recorded by another app, a video) into a meeting like any other: transcript, speakers, exports, the kept audio, the summary at the end when auto-summary is on, and `post_meeting_command`. Anything ffmpeg reads works.
+
+```bash
+voxtype meeting import call.mp3 --title "Client call"
+voxtype meeting import memo.m4a --model large-v3-turbo --language de
+voxtype meeting import recording.wav --channels mic,loopback
+voxtype meeting import memo.m4a --date 2026-11-02T15:00:00Z
+```
+
+It runs in your terminal, not in the daemon, so it never interrupts a meeting being recorded, and prints its progress chunk by chunk. `--engine`, `--model` and `--language` work as they do for `meeting start`, and `--diarization` picks the backend for this import.
+
+**Channels.** By default every channel is mixed into one track. Lines then have no side (they show as `Unknown` until you label them), and with `ml` diarization each voice gets its own speaker. A call recorded with you on one channel and the others on another can say so: `--channels mic,loopback` (or `loopback,mic`) names each channel in order, so lines are attributed to You and Remote, and `hybrid` diarization splits the remote side into Remote 1, Remote 2. `ignore` (or `-`) skips a channel.
+
+**Date.** The meeting is dated by `--date` (RFC 3339), else by the file's `creation_time` tag, else by its modification time. Its length is the recording's.
+
+**Audio.** The recording is kept in the meeting folder as `mixed.opus`, plus `mic.opus` and `loopback.opus` when channels are mapped, whatever `retain_audio` says, so the meeting can be played back and transcribed again. The original file is left where it is.
+
+### Transcribing a Meeting Again
+
+`voxtype meeting retranscribe` runs a meeting's kept audio through the transcriber again, for a better model, another engine or another language:
+
+```bash
+voxtype meeting retranscribe latest --model large-v3-turbo
+voxtype meeting retranscribe b6b2 --engine parakeet --discard-edits
+```
+
+It needs the meeting's audio: a meeting recorded with `retain_audio = true`, or an imported one. The meeting keeps its ID, folder, notes, speaker names and summary, and its previous transcript is kept as `transcript.v1.json` (then `v2`, and so on).
+
+Edits you made line by line are tied to the old lines, and the new transcript has new lines, so each old line is matched to the new line it overlaps most in time, on the same side:
+
+- annotations always move to their matching line;
+- speaker moves, text corrections and deleted lines move too with `--keep-edits` (the default), or are dropped with `--discard-edits`;
+- an edit whose line has no match (the new transcript has nothing there, or splits it differently) is dropped.
+
+The command says how many carried over. Speaker names carry over by speaker: with `simple` and `hybrid` diarization You and Remote stay put, but with `ml` the speaker numbers come from a fresh clustering, so check the names. A meeting that is still recording cannot be transcribed again until it stops.
 
 ### Running a Command After a Meeting
 

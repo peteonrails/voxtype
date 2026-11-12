@@ -409,6 +409,110 @@ pub enum MeetingAction {
         #[arg(long)]
         no_open: bool,
     },
+    /// Import a recording made elsewhere as a meeting
+    ///
+    /// Any file ffmpeg reads (mp3, m4a, ogg, opus, wav, flac, video) becomes
+    /// a normal meeting: transcript, speakers, exports, kept audio, the
+    /// summary at the end when auto-summary is on, and post_meeting_command.
+    /// Runs here rather than in the daemon, so it never interrupts a meeting
+    /// being recorded. Prints progress as it goes.
+    ///
+    /// By default every channel is mixed into one track and speakers are
+    /// told apart by diarization alone. For a call recorded with you on one
+    /// channel and the others on another, name the channels in order with
+    /// --channels mic,loopback (or loopback,mic) so lines are attributed to
+    /// You and Remote, and hybrid diarization can split the remote side.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting import call.mp3 --title 'Client call'\n  \
+        voxtype meeting import recording.wav --channels mic,loopback\n  \
+        voxtype meeting import memo.m4a --date 2026-11-02T15:00:00Z --model large-v3-turbo\n  \
+        voxtype meeting import zoom.mp4 --json")]
+    Import {
+        /// The recording to import
+        file: std::path::PathBuf,
+
+        /// Meeting title (default: the file name)
+        #[arg(long, short)]
+        title: Option<String>,
+
+        /// Transcription engine (default: the configured engine)
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Model, as `voxtype info models` lists it; implies its engine
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Language hint for engines that take one
+        #[arg(long)]
+        language: Option<String>,
+
+        /// When the recording started, RFC 3339 (default: the file's
+        /// creation_time tag, else its modification time)
+        #[arg(long, value_name = "RFC3339")]
+        date: Option<String>,
+
+        /// How channels map to sides: `mono` (mix them all, the default),
+        /// or one of mic, loopback or ignore per channel, comma-separated
+        #[arg(long, value_name = "MAP")]
+        channels: Option<String>,
+
+        /// Diarization backend for this import (default: the configured one)
+        #[arg(long, value_parser = PossibleValuesParser::new(DIARIZATION_BACKENDS))]
+        diarization: Option<String>,
+
+        /// Print progress and the result as JSON lines
+        #[arg(long)]
+        json: bool,
+    },
+    /// Transcribe a meeting again from its kept audio
+    ///
+    /// Re-runs a meeting recorded with retain_audio, or imported, with
+    /// another engine, model or language. The meeting keeps its ID, notes,
+    /// speaker names and summary; its previous transcript is kept as
+    /// transcript.v1.json (then v2, ...). Annotations move to the new line
+    /// they overlap most in time. Speaker moves, text corrections and
+    /// deleted lines do the same with --keep-edits (the default), or are
+    /// dropped with --discard-edits; the output says how many carried over.
+    /// Speaker names carry over by speaker, so with ML diarization check
+    /// that the same voice kept the same speaker number.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting retranscribe latest --model large-v3-turbo\n  \
+        voxtype meeting retranscribe b6b2 --engine parakeet --discard-edits\n  \
+        voxtype meeting retranscribe latest --language de --json")]
+    Retranscribe {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// Transcription engine (default: the configured engine)
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Model, as `voxtype info models` lists it; implies its engine
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Language hint for engines that take one
+        #[arg(long)]
+        language: Option<String>,
+
+        /// Diarization backend for this run (default: the configured one)
+        #[arg(long, value_parser = PossibleValuesParser::new(DIARIZATION_BACKENDS))]
+        diarization: Option<String>,
+
+        /// Carry speaker moves, text corrections and deleted lines over to
+        /// the new lines they overlap (the default)
+        #[arg(long, conflicts_with = "discard_edits")]
+        keep_edits: bool,
+
+        /// Drop speaker moves, text corrections and deleted lines
+        #[arg(long)]
+        discard_edits: bool,
+
+        /// Print progress and the result as JSON lines
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate an AI summary of a meeting
     ///
     /// Writes an overview, key points, decisions, action items with owners
@@ -740,5 +844,75 @@ mod tests {
         assert!(play(&["latest", "--stop"]).is_err());
         assert!(play(&["--stop", "--status"]).is_err());
         assert!(play(&["latest", "--track", "speakers"]).is_err());
+    }
+
+    fn meeting(args: &[&str]) -> Result<MeetingAction, clap::Error> {
+        let argv = ["voxtype", "meeting"].iter().chain(args).copied();
+        match Cli::try_parse_from(argv)?.command {
+            Some(Commands::Meeting { action }) => Ok(action),
+            _ => panic!("Expected a meeting command"),
+        }
+    }
+
+    #[test]
+    fn meeting_import_and_retranscribe_parse() {
+        match meeting(&[
+            "import",
+            "call.mp3",
+            "--title",
+            "Call",
+            "--channels",
+            "mic,loopback",
+            "--date",
+            "2026-11-02T15:00:00Z",
+            "--model",
+            "large-v3-turbo",
+            "--json",
+        ])
+        .unwrap()
+        {
+            MeetingAction::Import {
+                file,
+                title,
+                channels,
+                date,
+                model,
+                json,
+                ..
+            } => {
+                assert_eq!(file, std::path::PathBuf::from("call.mp3"));
+                assert_eq!(title.as_deref(), Some("Call"));
+                assert_eq!(channels.as_deref(), Some("mic,loopback"));
+                assert_eq!(date.as_deref(), Some("2026-11-02T15:00:00Z"));
+                assert_eq!(model.as_deref(), Some("large-v3-turbo"));
+                assert!(json);
+            }
+            _ => panic!("Expected Meeting Import"),
+        }
+        match meeting(&[
+            "retranscribe",
+            "latest",
+            "--engine",
+            "parakeet",
+            "--discard-edits",
+        ])
+        .unwrap()
+        {
+            MeetingAction::Retranscribe {
+                meeting_id,
+                engine,
+                keep_edits,
+                discard_edits,
+                ..
+            } => {
+                assert_eq!(meeting_id, "latest");
+                assert_eq!(engine.as_deref(), Some("parakeet"));
+                assert!(!keep_edits && discard_edits);
+            }
+            _ => panic!("Expected Meeting Retranscribe"),
+        }
+        assert!(meeting(&["import"]).is_err(), "a file is required");
+        assert!(meeting(&["retranscribe", "latest", "--keep-edits", "--discard-edits"]).is_err());
+        assert!(meeting(&["import", "a.mp3", "--diarization", "magic"]).is_err());
     }
 }

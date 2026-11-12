@@ -184,6 +184,7 @@ enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         meeting_id: Option<String>,
     },
+    ImportProgress(crate::meeting::import::Progress),
     Playback {
         meeting_id: String,
         track: String,
@@ -363,6 +364,12 @@ impl MeetingEventHub {
             status: status.to_string(),
             meeting_id: None,
         });
+    }
+
+    /// Broadcast an `import_progress` event: how far a `meeting import` or
+    /// `meeting retranscribe` has got.
+    pub fn publish_import_progress(&self, progress: &crate::meeting::import::Progress) {
+        self.publish(WireEvent::ImportProgress(progress.clone()));
     }
 
     /// Broadcast a `playback` event: `meeting play` started or stopped
@@ -806,6 +813,34 @@ mod tests {
         assert_eq!(value["event"], "status");
         assert_eq!(value["status"], "paused");
 
+        hub.cleanup();
+    }
+
+    #[tokio::test]
+    async fn import_progress_reaches_subscribers() {
+        let (_tmp, path) = temp_socket_dir();
+        let hub = MeetingEventHub::start(path.clone())
+            .await
+            .expect("start hub");
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        let _hello = read_line(&mut client).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        hub.publish_import_progress(&crate::meeting::import::Progress {
+            meeting_id: "abc-123".to_string(),
+            operation: "import".to_string(),
+            state: "transcribing".to_string(),
+            chunks_done: 2,
+            chunks_total: 5,
+            position_ms: 60_000,
+            duration_ms: 150_000,
+        });
+        assert_eq!(
+            read_line(&mut client).await,
+            serde_json::json!({"event": "import_progress", "meeting_id": "abc-123",
+                "operation": "import", "state": "transcribing", "chunks_done": 2,
+                "chunks_total": 5, "position_ms": 60_000, "duration_ms": 150_000})
+        );
         hub.cleanup();
     }
 
