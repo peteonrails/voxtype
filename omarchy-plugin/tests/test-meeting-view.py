@@ -102,6 +102,7 @@ Scenarios:
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
+  autoopen-gtk4  ... unless [meeting] view sends meetings to another view
   autoopen-settings  an open Settings panel is not taken over
   reconnect   the socket going away and coming back (daemon drop, restart,
               which leaves the meeting on screen as Ended)
@@ -124,7 +125,7 @@ import time
 
 import panel_harness as h
 
-SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-settings", "reconnect",
+SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-gtk4", "autoopen-settings", "reconnect",
              "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
@@ -278,6 +279,7 @@ LONG_SUMMARY = {"summary": "\n\n".join("### Section %d\n\nA paragraph of summary
 STATE = {
     "autoopen-off": {"show_view_on_start": False},
     "autoopen-oldcli": {"no_show_key": True},
+    "autoopen-gtk4": {"view": "gtk4"},
     "idle": {"fail": {"start": "Error: Meeting mode is disabled in config."}},
     "reassign-fails": {"fail": {"reassign": "Error: segment 2 cannot be reassigned: the transcript is locked."}},
     "consent": {"assistant": {"agent": None, "local_only": False, "candidates": [dict(CLAUDE, consent=False)]}},
@@ -527,6 +529,7 @@ def check_calls(scenario, calls, runtime_notes=""):
     config = [c for c in calls if (c[:2] == ["config", "set"] or c[:2] == ["config", "get"])
               and c != ["config", "get", "meeting.view_opacity"]]
     show_key = ["config", "get", "meeting.show_view_on_start"]
+    view_key = ["config", "get", "meeting.view"]
 
     def expect(actual, wanted, what):
         if actual != wanted:
@@ -541,8 +544,12 @@ def check_calls(scenario, calls, runtime_notes=""):
             ["meeting", "pause"], ["meeting", "resume"], ["meeting", "stop"],
         ], "meeting commands")
         expect(config, [], "config reads")
-    elif scenario in ("autoopen", "autoopen-off", "autoopen-oldcli"):
+    elif scenario == "autoopen-off":
         expect(config, [show_key], "config reads")
+        expect(meeting, [], "meeting commands")
+    elif scenario in ("autoopen", "autoopen-oldcli", "autoopen-gtk4"):
+        # On (or unreadable): then which view meetings go to.
+        expect(config, [show_key, view_key], "config reads")
         expect(meeting, [], "meeting commands")
     elif scenario == "autoopen-settings":
         expect(show_key in config, False, "show_view_on_start read with Settings open")

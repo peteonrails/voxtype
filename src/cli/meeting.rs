@@ -432,6 +432,12 @@ pub enum MeetingAction {
     /// need to know which one you use. An Ask notification's Open action runs
     /// it. Nothing opens if neither is running.
     ///
+    /// Without Quickshell (GNOME, Plasma, Sway, X11), this opens the meeting
+    /// window `voxtype-meetings-gtk4` instead. `[meeting] view` (or
+    /// VOXTYPE_MEETING_VIEW) chooses: auto, quickshell, gtk4, terminal (runs
+    /// `voxtype meeting watch`) or none. --minimize and --expand only act on
+    /// the Quickshell view.
+    ///
     /// With a meeting ID other than the current one, the view opens on that
     /// meeting's saved transcript. --ask asks one of the view's quick
     /// questions; with --no-open the answer arrives as a notification instead.
@@ -674,6 +680,26 @@ pub enum MeetingAction {
         /// Use the local model (Ollama) instead of an agent
         #[arg(long, conflicts_with = "agent")]
         local: bool,
+    },
+    /// Watch the meeting in the terminal
+    ///
+    /// Shows the running meeting live: state and elapsed time, the
+    /// transcript as it is transcribed (following new lines until you
+    /// scroll up; End follows again), and its speakers. Keys: p pause or
+    /// resume, s stop, r move the selected line to another speaker, n note
+    /// on the selected line, a ask the assistant, q quit. With no meeting
+    /// running it lists recent meetings; Enter opens one, Esc goes back.
+    ///
+    /// --json prints the daemon's meeting.sock events as NDJSON instead,
+    /// for scripts: one JSON object per line, starting with a `hello`
+    /// snapshot, and a new `hello` after the daemon restarts.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting watch\n  \
+        voxtype meeting watch --json | jq -c 'select(.event == \"segments\")'")]
+    Watch {
+        /// Print the live events as NDJSON instead of drawing the screen
+        #[arg(long)]
+        json: bool,
     },
     /// Choose and allow the agent that answers questions and writes summaries
     #[command(after_help = "Examples:\n  \

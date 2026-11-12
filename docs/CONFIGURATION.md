@@ -3831,10 +3831,25 @@ Maximum meeting duration in minutes. Set to `0` for unlimited.
 **Default:** `true`
 **Required:** No
 
-Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view runs in the Voxtype plugin for the Omarchy shell and in voxtype's standalone Quickshell shell (`voxtype setup quickshell`); without either, this does nothing. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. Which view opens is [`view`](#view): the Quickshell view (the Voxtype plugin for the Omarchy shell, or voxtype's standalone Quickshell shell) opens itself, and the daemon opens the GTK4 window, or `voxtype meeting watch` in a terminal for an explicit `view = "terminal"`. When `view` resolves to nothing, this does nothing. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
 
 ```bash
 voxtype config set meeting.show_view_on_start false
+```
+
+### view
+
+**Type:** String (`"auto"`, `"quickshell"`, `"gtk4"`, `"terminal"`, `"none"`)
+**Default:** `"auto"`
+**Required:** No
+
+Which meeting view opens, both for `voxtype meeting view` (including from an Ask notification's Open action) and when a meeting starts (see `show_view_on_start`). `auto` uses the Quickshell view when Quickshell can run (its launcher is installed, `qs` is on PATH and there is a Wayland session), else the GTK4 window `voxtype-meetings-gtk4` when it is installed, GTK 4 loads and there is a display, else nothing. `terminal` runs `voxtype meeting watch`, opening a terminal with `xdg-terminal-exec` when not already in one, and is never picked by `auto`. Any value other than `auto` and `quickshell` keeps the Quickshell view from opening on its own when a meeting starts, so a Quickshell desktop can use the GTK4 window instead. See [MEETING_MODE.md](MEETING_MODE.md#without-quickshell-the-meeting-window).
+
+**Environment variable:** `VOXTYPE_MEETING_VIEW`
+
+```toml
+[meeting]
+view = "gtk4"
 ```
 
 ### view_opacity

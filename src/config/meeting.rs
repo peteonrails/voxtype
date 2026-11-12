@@ -73,11 +73,17 @@ pub struct MeetingConfig {
     #[serde(default = "default_max_duration")]
     pub max_duration_mins: u32,
 
-    /// Open the live meeting view when a meeting starts. Read by the Omarchy
-    /// plugin, which is the only frontend with such a view; elsewhere it does
-    /// nothing.
+    /// Open the live meeting view when a meeting starts: the Quickshell
+    /// view reads it itself, and the daemon opens the GTK4 window when
+    /// `view` resolves to it.
     #[serde(default = "default_true")]
     pub show_view_on_start: bool,
+
+    /// Which meeting view opens: "auto", "quickshell", "gtk4", "terminal" or
+    /// "none". auto uses Quickshell when it can run, then the GTK4 window.
+    /// Also set with VOXTYPE_MEETING_VIEW.
+    #[serde(default = "default_meeting_view")]
+    pub view: String,
 
     /// How opaque the meeting view's background is while the pointer is
     /// elsewhere (0.3 to 1.0), so it reads as an overlay. Text stays opaque.
@@ -155,6 +161,10 @@ pub struct MeetingAudioConfig {
 
 fn default_echo_fuzzy_max_words() -> u32 {
     4
+}
+
+fn default_meeting_view() -> String {
+    "auto".to_string()
 }
 
 fn default_view_opacity() -> f32 {
@@ -433,6 +443,7 @@ impl Default for MeetingConfig {
             post_meeting_timeout_secs: default_post_meeting_timeout(),
             max_duration_mins: default_max_duration(),
             show_view_on_start: true,
+            view: default_meeting_view(),
             view_opacity: default_view_opacity(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),

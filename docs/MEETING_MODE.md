@@ -26,6 +26,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Correcting and Deleting Lines](#correcting-and-deleting-lines)
   - [Annotating a Line](#annotating-a-line)
   - [Notes](#notes)
+  - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
   - [Exporting Transcripts](#exporting-transcripts)
   - [Deleting Meetings](#deleting-meetings)
 - [Meeting Audio](#meeting-audio)
@@ -214,6 +215,9 @@ voxtype meeting view latest --tab summary
 voxtype meeting view --ask last-5m --no-open   # answer arrives as a notification
 ```
 
+`voxtype meeting view` opens the view that `[meeting] view` picks (see [Without Quickshell](#without-quickshell-the-meeting-window) below); on a Quickshell desktop that is this one.
+
+
 In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
 
 An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
@@ -228,6 +232,38 @@ To stop it opening on its own:
 ```bash
 voxtype config set meeting.show_view_on_start false
 ```
+
+### Without Quickshell: the meeting window
+
+On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, the meeting opens in an ordinary window, `voxtype-meetings-gtk4`, which you can move, resize and alt-tab to like any other. It opens by itself when a meeting starts (`show_view_on_start`, as above), and `voxtype meeting view` opens it or brings it forward. It shows the meeting as the Quickshell view's Transcript tab does:
+
+- the state, title and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar, and a level meter for your microphone and the call while the daemon sends levels;
+- the transcript, one colored line per utterance in the order it was spoken, following new lines until you scroll up (**Follow new lines** goes back). A corrected line is marked "(edited)", a moved line says who the diarizer gave it to ("(was Remote 1)"), highlighted lines are tinted, notes sit under their lines, deleted lines disappear, and while the meeting's audio plays (`voxtype meeting play`) the line being heard has a ▶;
+- a button per speaker that renames them (`voxtype meeting label`, once for each speaker merged under that name); **Move line to…** and **Note on line…** for the selected line; your **Notes** with **Save notes**; an **Ask** box whose answer streams in under it; and the **Summary** once it is written;
+- with no meeting running, **Start meeting** with an optional title, and your recent meetings. **Meetings** in the title bar goes back to that list.
+
+A past meeting opened from the list is read-only: its transcript, speakers and notes, and its summary as saved in `summary.md`. Ask still works on it. To fix a past meeting, use the `voxtype meeting` commands, the Quickshell view or `voxtype meeting watch`. A meeting that starts while you are reading one takes over the window.
+
+Every button runs the matching `voxtype meeting` command, so it behaves as the command line does. A second `voxtype meeting view` brings the open window forward instead of opening another. A window the daemon opened at the start of a meeting closes if the daemon is stopped or restarted (it runs as part of the voxtype service); one you opened yourself reconnects.
+
+Choosing `gtk4` (or `terminal` or `none`) on a Quickshell desktop keeps the Quickshell view from opening on its own, and `voxtype meeting view` opens the chosen view instead.
+
+Which view opens is `[meeting] view`:
+
+| Value | Opens |
+|-------|-------|
+| `auto` (default) | The Quickshell view when Quickshell can run here, else the GTK4 window when it is installed and GTK 4 loads, else nothing |
+| `quickshell` | The Quickshell view (the Omarchy plugin or the standalone shell) |
+| `gtk4` | The GTK4 window |
+| `terminal` | `voxtype meeting watch`, in this terminal or a new one through `xdg-terminal-exec` |
+| `none` | Nothing |
+
+```bash
+voxtype config set meeting.view gtk4
+VOXTYPE_MEETING_VIEW=terminal voxtype meeting view
+```
+
+The deb and rpm packages install the window as `/usr/lib/voxtype/voxtype-meetings-gtk4`; it needs GTK 4 (`libgtk-4-1` on Debian and Ubuntu, `gtk4` on Fedora and Arch) but not gtk4-layer-shell.
 
 The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#the-live-feed-meetingsock). It does not open over an open Voxtype Settings panel.
 
@@ -418,6 +454,35 @@ voxtype meeting notes latest --json                  # {meeting_id, notes, updat
 ```
 
 Exports and `transcript.md` show the notes at the top, under "Notes".
+
+### Watching a Meeting in the Terminal
+
+`voxtype meeting watch` shows the running meeting in the terminal, on any desktop and over SSH:
+
+```bash
+voxtype meeting watch
+```
+
+- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time. While a meeting records it also shows a level meter for your microphone and the call, if the daemon sends levels; while its audio plays (`voxtype meeting play`) it says "▶ playing" and marks the line being heard; and while `meeting import` or `meeting retranscribe` works on it, how far it has got.
+- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. A corrected line is marked "(edited)", a line moved to another speaker shows who the diarizer gave it to ("(was Remote 1)"), highlighted lines are yellow, and deleted lines disappear (and come back if restored). It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
+- The side panel lists the speakers, merged by the names you gave them, and the summary once it is written.
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause or resume |
+| `s` | Stop (asks first) |
+| `l` | Name a speaker: pick one, type the name (`meeting label`, once for each speaker merged under that name) |
+| `r` | Move the selected line to another speaker: pick one, or "New speaker…" and type a name (`meeting reassign`) |
+| `n` | Add a note to the selected line (`meeting annotate`) |
+| `a` | Ask the assistant about the meeting; the answer streams into a pane at the bottom (`meeting ask`) |
+| `Esc` | Close the answer, or go to the list of meetings |
+| `q` | Quit |
+
+Each key runs the matching `voxtype meeting` command, so it behaves exactly as typing it would, including the assistant's consent: if transcripts have not been allowed to go to an agent yet, the answer pane says how to allow it.
+
+With no meeting running, `watch` lists recent meetings with their length, speaker count and whether they have a summary. Enter opens one (ended meetings still take `r`, `n` and `a`), Esc goes back, and a meeting that starts meanwhile appears at the top of the list. If the daemon restarts, the view says it is reconnecting and catches up when it is back.
+
+For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md)), reconnecting on its own; every connection starts with a `hello` snapshot.
 
 ### Exporting Transcripts
 

@@ -24,6 +24,8 @@ fake meeting.sock's control file (FAKE_MEETING_CTL; see fake-meeting-sock.py):
                                 state["show_view_on_start"] (default true);
                                 state["no_show_key"] exits 2 like a CLI that
                                 predates the key
+  config get meeting.view       state["view"] (default "auto"); exits 2 with
+                                state["no_show_key"] too
 
 The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
 
@@ -689,6 +691,13 @@ def main():
             print("error: unknown config key 'meeting.show_view_on_start'.", file=sys.stderr)
             return 2
         print("true" if state.get("show_view_on_start", True) else "false")
+        return 0
+
+    if args == ["config", "get", "meeting.view"]:
+        if state.get("no_show_key"):
+            print("error: unknown config key 'meeting.view'.", file=sys.stderr)
+            return 2
+        print(state.get("view", "auto"))
         return 0
 
     if args == ["config", "get", "meeting.view_opacity"]:

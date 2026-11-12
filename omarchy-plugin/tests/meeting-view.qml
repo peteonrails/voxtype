@@ -92,6 +92,7 @@ Item {
           else if (s === "autoopen") tc.driveAutoOpen(true)
           else if (s === "autoopen-oldcli") tc.driveAutoOpen(true)
           else if (s === "autoopen-off") tc.driveAutoOpen(false)
+          else if (s === "autoopen-gtk4") tc.driveAutoOpen(false)
           else if (s === "autoopen-settings") tc.driveAutoOpenSettings()
           else if (s === "reconnect") tc.driveReconnect()
           else if (s === "idle") tc.driveIdle()

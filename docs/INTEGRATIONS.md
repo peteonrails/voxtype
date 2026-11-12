@@ -328,6 +328,15 @@ with or without a meeting. It is one-way: connect and read lines.
 socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/voxtype/meeting.sock"
 ```
 
+`voxtype meeting watch --json` relays the socket to stdout line for line,
+waiting for the daemon if it is not running and reconnecting after it
+restarts, so a script or a QML `Process` can follow a meeting without a
+socket client of its own:
+
+```sh
+voxtype meeting watch --json | jq -c 'select(.event == "segments") | .segments[].text'
+```
+
 The first line on every connection is a `hello` snapshot, so a client that
 connects mid-meeting is correct at once. Delivery is best effort: a client
 that falls behind is disconnected rather than allowed to slow the daemon.

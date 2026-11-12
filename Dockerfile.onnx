@@ -128,18 +128,21 @@ RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,do
 # bridges the daemon's audio.sock to NDJSON for the Quickshell QML modules.
 # All four build with no extra GUI deps beyond what osd-gtk4 already pulls
 # in, so they ride alongside the existing gtk4 build with no overhead.
+# voxtype-meetings-gtk4, the meeting window for desktops without
+# Quickshell, uses the same GTK4 (without layer-shell) and builds here too.
 # Built at x86-64-v2, unlike the daemon: these are UI and IPC binaries with
 # no inference hot path, and pinning them to haswell left pre-AVX2 machines
 # with a working baseline daemon but no OSD at all (#740). One artifact at
 # the lower floor serves every x86_64 machine.
 RUN RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
-    cargo build --release --features osd-gtk4 \
-    --bin voxtype-osd --bin voxtype-osd-gtk4 \
+    cargo build --release --features osd-gtk4,meetings-gtk4 \
+    --bin voxtype-osd --bin voxtype-osd-gtk4 --bin voxtype-meetings-gtk4 \
     --bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype-osd /tmp/voxtype-osd \
     && cp target/release/voxtype-osd-gtk4 /tmp/voxtype-osd-gtk4 \
+    && cp target/release/voxtype-meetings-gtk4 /tmp/voxtype-meetings-gtk4 \
     && cp target/release/voxtype-osd-quickshell /tmp/voxtype-osd-quickshell \
     && cp target/release/voxtype-audio-bridge /tmp/voxtype-audio-bridge
 
@@ -148,7 +151,10 @@ RUN RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx51
 RUN mkdir -p /tmp/release-proof \
     && cp /tmp/voxtype-osd-gtk4 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
     && python3 scripts/release-artifacts.py record-runtime \
-        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 "${VERSION}"
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 "${VERSION}" \
+    && cp /tmp/voxtype-meetings-gtk4 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-meetings-gtk4 \
+    && python3 scripts/release-artifacts.py record-runtime \
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-meetings-gtk4 "${VERSION}"
 
 # Verify binary
 RUN echo "=== Verifying ONNX AVX2 binary ===" \
@@ -173,7 +179,9 @@ CMD mkdir -p /output \
     && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-avx2.gguf-worker \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-x86_64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
+    && cp /tmp/voxtype-meetings-gtk4 /output/voxtype-${VERSION}-linux-x86_64-meetings-gtk4 \
     && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4.version-proof.json /output/ \
+    && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-meetings-gtk4.version-proof.json /output/ \
     && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-x86_64-osd-quickshell \
     && cp /tmp/voxtype-audio-bridge /output/voxtype-${VERSION}-linux-x86_64-audio-bridge \
     && echo "Binaries copied to /output:" \

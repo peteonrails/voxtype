@@ -493,6 +493,22 @@ pub(crate) async fn run_meeting_command(
             minimize,
             expand,
         } => {
+            use voxtype::meeting::view::frontend::{self, ViewFrontend};
+            let resolution = frontend::resolve(
+                frontend::effective_configured(&config.meeting.view),
+                &voxtype::osd::frontend::SystemProbe,
+            );
+            tracing::debug!("Meeting view: {}", resolution.reason);
+            if resolution.active != ViewFrontend::Quickshell {
+                let args = super::meeting_watch::ViewArgs {
+                    meeting_id,
+                    ask_id,
+                    tab,
+                    ask,
+                    no_open,
+                };
+                return super::meeting_watch::open_view(&meeting_config, &resolution, args).await;
+            }
             let path = config::Config::runtime_dir().join("meeting-view.request");
             let request = ViewRequest {
                 meeting_id: meeting_id.as_deref(),
@@ -1024,6 +1040,10 @@ pub(crate) async fn run_meeting_command(
                 local,
             };
             run_ask(config, &meeting_config, args).await?;
+        }
+
+        MeetingAction::Watch { json } => {
+            super::meeting_watch::run_watch(json, &meeting_config).await?;
         }
 
         MeetingAction::Assistant { action } => {

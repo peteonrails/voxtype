@@ -2245,8 +2245,18 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Meeting",
         "Show meeting view on start",
-        "Open the live meeting view in the Omarchy shell when a meeting starts.",
+        "Open the live meeting view when a meeting starts: the Quickshell view, or the GTK4 window when the meeting view resolves to it.",
     ),
+    spec(
+        "meeting.view",
+        "meeting",
+        "view",
+        closed(crate::meeting::view::frontend::VIEW_CHOICES),
+        "Meeting",
+        "Meeting view",
+        "Which meeting view opens: auto uses Quickshell, then the GTK4 window; terminal runs `meeting watch` and is never automatic.",
+    )
+    .live(),
     spec(
         "meeting.view_opacity",
         "meeting",
@@ -3175,6 +3185,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
         "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
         "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
+        "meeting.view" => json!(cfg.meeting.view),
         // Two places are all an opacity needs, and an f32 such as 0.8 would
         // otherwise read back as 0.800000011920929.
         "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
