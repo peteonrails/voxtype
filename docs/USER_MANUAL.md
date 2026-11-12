@@ -2796,6 +2796,11 @@ voxtype meeting share latest --transcript --to file    # Save to ~/Documents/Vox
 voxtype meeting share latest --to email                # Open a mail draft
 voxtype meeting share latest --preview                 # See what would be shared
 
+# Action items from the summary
+voxtype meeting actions latest                         # List them
+voxtype meeting actions latest --send todoist          # Add them to Todoist
+voxtype meeting actions latest --send reminder --mine  # Omarchy reminders for yours
+
 # Speaker labeling (replace auto-generated IDs with names)
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label <id> 0 "Bob"

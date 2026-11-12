@@ -39,6 +39,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [The Meeting Assistant](#the-meeting-assistant)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
+  - [Action Items](#action-items)
   - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
   - [Privacy: Where Transcripts Go](#privacy-where-transcripts-go)
 - [Automation](#automation)
@@ -744,6 +745,34 @@ The summary is saved with the meeting: `summary.md` in the meeting folder, `meta
 The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent): the allowed agent, or the local model. The older Ollama and API summarizers (`[meeting.summary] backend = "local"` or `"remote"`) are used only while no agent is allowed; see [Which backend answers](#which-backend-answers).
 
 **Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md#status)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
+
+### Action Items
+
+A summary lists the meeting's action items: what to do, who took it on (a speaker name), the deadline if someone said one, and where in the meeting it came up. `voxtype meeting actions` lists them and sends them on:
+
+```bash
+voxtype meeting actions latest                           # List them
+voxtype meeting actions latest --mine                    # Only yours
+voxtype meeting actions latest --send todoist            # Add every item to Todoist
+voxtype meeting actions latest --send todoist --pick 1,3 # Only items 1 and 3
+voxtype meeting actions latest --send reminder --in 30   # Omarchy reminders in 30 minutes
+voxtype meeting actions latest --json                    # For scripts and the meeting view
+```
+
+```
+Action items from "Release sync":
+   1. Tag the release (Dana, due Fri Nov 13, at 01:05)
+   2. Write the notes (Pete (you), due Thu Nov 12 15:00)
+   3. Book the room (due "next week")  [sent: Todoist]
+```
+
+A deadline is only kept when someone said it, and voxtype turns what was said into a day counted from the meeting's date: "Friday" in a Thursday meeting is the next day, "by end of day" is the meeting's day, "November 20" and "next Friday" are what you would expect. Something that names no day ("next week", "soon") stays as it was said. An item is yours when its owner is `You` or your [name](#your-name) (`[meeting] my_name`).
+
+Every item is sent unless you narrow it with `--pick` (item numbers from the list, such as `1,3` or `2-4`) or `--mine`. Each send is remembered per item, so sending again skips what already went and never makes a second task; `--resend` sends it again anyway. An item that fails is reported and can simply be sent again. Items come from the summary, so a meeting without one has none: summarize it first with `voxtype meeting summarize`.
+
+**Todoist.** Each item becomes a task in your Inbox, or in `[meeting.actions] todoist_project_id` (or `--project`). The task is the item's text, with the owner added when it is someone else's, due on the resolved day (and time, when one was said). Its description names the meeting, the date and the moment the item came up, and the command that opens the meeting. Connect your Todoist account once with `voxtype meeting todoist connect`; voxtype keeps the access token in `~/.local/state/voxtype/todoist.json`, readable only by you, and never in `config.toml`.
+
+**Omarchy reminders.** On Omarchy, `--send reminder` sets an `omarchy-reminder` notification for each item. It goes off after `[meeting.actions] remind_in_mins` (60 by default, or `--in`), or at the time said when that is later today ("by 3pm"). Omarchy's reminders are timed notifications, not a task list, so they suit "remind me about this later today"; Todoist is the place to keep tasks. Without `omarchy-reminder` installed, this option is not offered.
 
 ### The Meeting Assistant and Consent
 

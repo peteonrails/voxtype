@@ -898,19 +898,26 @@ pub struct Chapter {
 }
 
 /// An action item from the meeting
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionItem {
     /// Description of the action
     pub description: String,
     /// Assigned to (speaker name)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
-    /// Due date (if mentioned)
+    /// Due date as it was said ("Friday", "end of the month"), if it was
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
     /// Completed status
     #[serde(default)]
     pub completed: bool,
+    /// `due_date` as a calendar day, resolved against the meeting's date,
+    /// when it names one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<chrono::NaiveDate>,
+    /// Where in the meeting the item was given, in milliseconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ms: Option<u64>,
 }
 
 /// Complete meeting data structure

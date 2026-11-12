@@ -22,6 +22,7 @@
 //! - **Phase 4 (v0.6.0):** Remote server sync for corporate deployments
 //! - **Phase 5 (v0.6.1):** AI summarization with action items
 
+pub mod actions;
 pub mod assistant;
 pub mod chunk;
 pub mod data;

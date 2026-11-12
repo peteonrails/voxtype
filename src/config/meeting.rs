@@ -107,6 +107,10 @@ pub struct MeetingConfig {
     #[serde(default)]
     pub share: MeetingShareConfig,
 
+    /// `voxtype meeting actions`: where action items are sent
+    #[serde(default)]
+    pub actions: MeetingActionsConfig,
+
     /// Call detection and the Record prompt
     #[serde(default)]
     pub detect: super::MeetingDetectConfig,
@@ -454,6 +458,33 @@ pub struct MeetingShareConfig {
     pub folder: String,
 }
 
+/// `[meeting.actions]`: where `voxtype meeting actions --send` puts
+/// action items
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct MeetingActionsConfig {
+    /// Minutes until an Omarchy reminder goes off, for an item with no
+    /// time later today said
+    #[serde(default = "default_remind_in_mins")]
+    pub remind_in_mins: u32,
+
+    /// Todoist project ID new tasks go to; unset is the Inbox
+    #[serde(default)]
+    pub todoist_project_id: Option<String>,
+}
+
+fn default_remind_in_mins() -> u32 {
+    60
+}
+
+impl Default for MeetingActionsConfig {
+    fn default() -> Self {
+        Self {
+            remind_in_mins: default_remind_in_mins(),
+            todoist_project_id: None,
+        }
+    }
+}
+
 fn default_share_timeout() -> u64 {
     60
 }
@@ -492,6 +523,7 @@ impl Default for MeetingConfig {
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
             share: MeetingShareConfig::default(),
+            actions: MeetingActionsConfig::default(),
             detect: super::MeetingDetectConfig::default(),
             assistant: MeetingAssistantConfig::default(),
         }
