@@ -109,6 +109,13 @@ Scenarios:
               name on lines that arrive later, and after the view reconnects
               (a fresh hello) both a talking and a silent renamed speaker
               keep theirs
+  title       a click on the title edits it: Enter saves (`meeting title`) and
+              the header changes at once; Escape cancels; an empty title is
+              refused; after the meeting the list shows the new title
+  title-external  a title_changed from elsewhere (the CLI, a calendar title
+              arriving after the start) updates the header and the pill
+  title-past  renaming a past meeting opened from the list, and the list
+  title-fail  a refused rename goes back, with the CLI's reason
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -147,7 +154,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
-             "play-errors", "notice", "notice-acked")
+             "play-errors", "notice", "notice-acked", "title", "title-external", "title-past", "title-fail")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -291,6 +298,9 @@ INITIAL = {
     "play": lambda: [running_meeting()],
     "play-no-audio": lambda: [running_meeting()],
     "play-errors": lambda: [running_meeting()],
+    "title": lambda: [running_meeting()],
+    "title-external": lambda: [running_meeting()],
+    "title-fail": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
     "summary-local-error": lambda: [running_meeting()],
     "summary-error-cli": lambda: [running_meeting()],
@@ -325,6 +335,7 @@ STATE = {
     "opacity": {"view_opacity": 0.5},
     "play": {"play_speed": 10},
     "play-no-audio": {"audio_retained": False},
+    "title-fail": {"title_fail": "Meeting titles are limited to 200 characters."},
     "play-errors": {"play_error": "This meeting was recorded without keeping audio. "
                                   "Turn on meeting.retain_audio for future meetings."},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
@@ -401,7 +412,7 @@ def past_meetings(data, scenario):
 
 
 PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-                  "list-old", "export-past"}
+                  "list-old", "export-past", "title-past"}
 
 
 def run(scenario, host, shell, evidence):
@@ -648,6 +659,14 @@ def check_calls(scenario, calls, runtime_notes=""):
         start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
         expect(meeting, [start, ["meeting", "play", "--stop", "--json"], start, ["meeting", "play", "--stop", "--json"]],
                "meeting commands")
+    elif scenario == "title":
+        expect(meeting, [["meeting", "title", MEETING_ID, "Release sync", "--json"], ["meeting", "stop"]], "meeting commands")
+    elif scenario == "title-external":
+        expect(meeting, [], "meeting commands")
+    elif scenario == "title-past":
+        expect(meeting, [["meeting", "title", PAST["one2one"], "1:1 with Sam and Dana", "--json"]], "meeting commands")
+    elif scenario == "title-fail":
+        expect(meeting, [["meeting", "title", MEETING_ID, "A very long title", "--json"]], "meeting commands")
     elif scenario == "play-no-audio":
         expect(meeting, [], "meeting commands")
     elif scenario == "play-errors":

@@ -45,6 +45,8 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    notice is unacknowledged) and, as the
                                    daemon does after `meeting notice --ack`,
                                    repeat the current status carrying it
+  {"cmd": "title", "title": T, "meeting_id"?}
+                                   a rename, announced as title_changed
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -218,6 +220,14 @@ class Server:
             self.broadcast(ev)
         elif kind == "error":
             self.broadcast({"event": "error", "message": cmd["message"]})
+        elif kind == "title":
+            # As the daemon announces a rename (CLI or calendar).
+            mid = cmd.get("meeting_id") or self.state.get("meeting_id")
+            if mid and mid == self.state.get("meeting_id"):
+                self.state["title"] = cmd["title"]
+            elif self.stored and mid == self.stored.get("meeting_id"):
+                self.stored["title"] = cmd["title"]
+            self.broadcast({"event": "title_changed", "meeting_id": mid, "title": cmd["title"]})
         elif kind == "label":
             # As the daemon does since `meeting label` pokes it: later lines
             # carry the name, and lines already sent get it too, each

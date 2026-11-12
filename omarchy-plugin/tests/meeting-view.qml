@@ -145,6 +145,10 @@ Item {
           else if (s === "export") tc.driveExport()
           else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
+          else if (s === "title") tc.driveTitle()
+          else if (s === "title-external") tc.driveTitleExternal()
+          else if (s === "title-past") tc.driveTitlePast()
+          else if (s === "title-fail") tc.driveTitleFail()
           else if (s === "live-labels") tc.driveLiveLabels()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
@@ -1900,6 +1904,86 @@ Item {
       check(speakerOf("Here it is.") === "Chris", "and after it: " + speakerOf("Here it is."))
       var names = renderedChips()
       check(names.indexOf("Remote 1") === -1 && names.indexOf("Remote 2") === -1, "no bare ids in the chips: " + JSON.stringify(names))
+    }
+
+    function editTitle() {
+      click(find(view(), "meetingTitle"), "the title")
+      var f = find(view(), "titleEditField")
+      waitFor(function() { return shown(f) && f.activeFocus }, "the title field, focused")
+      return f
+    }
+
+    function driveTitle() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var f = editTitle()
+      check(String(f.text) === "Standup", "starts with the title: " + f.text)
+      // Escape leaves it as it was.
+      f.text = "Nope"
+      keyClick(Qt.Key_Escape)
+      waitFor(function() { return shown(find(view(), "meetingTitle")) && txt("meetingTitle") === "Standup" }, "cancelled")
+      check(host.viewOpen(), "Escape in the field does not close the view")
+      // Empty is refused.
+      f = editTitle()
+      f.text = "   "
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return txt("titleError") === "A meeting needs a title." && shown(f) }, "refused: " + txt("titleError"))
+      shot("title-empty")
+      f.text = "Release sync"
+      keyClick(Qt.Key_Return)
+      check(txt("meetingTitle") === "Release sync" && !shown(find(view(), "titleError")), "renamed at once: " + txt("meetingTitle"))
+      waitFor(idleCli, "title stored")
+      wait(300)
+      check(txt("meetingTitle") === "Release sync", "kept after the daemon")
+      shot("title")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return feed().ended }, "ended", 6000)
+      click(find(view(), "backButton"), "back to the list")
+      waitFor(function() { return shown(find(view(), "meetingRow_0")) }, "the list")
+      waitFor(function() { return String(find(find(view(), "meetingRow_0"), "meetingRowTitle").text) === "Release sync" }, "the list has the new title", 6000)
+    }
+
+    function driveTitleExternal() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // Renamed elsewhere (the CLI, or a calendar title after the start).
+      ctl({ cmd: "title", title: "Weekly sync with Dana" })
+      waitFor(function() { return txt("meetingTitle") === "Weekly sync with Dana" }, "the header follows: " + txt("meetingTitle"))
+      // A meeting with nothing said yet shows its title in the pill.
+      ctl({ cmd: "stop" })
+      waitFor(function() { return feed().ended }, "ended", 6000)
+      ctl({ cmd: "start", title: "" })
+      waitFor(function() { return feed().status === "recording" && lines().length === 0 }, "a new meeting", 6000)
+      minimizeNow()
+      ctl({ cmd: "title", title: "Design review (from the calendar)" })
+      waitFor(function() { return txt("pillState") === "Design review (from the calendar)" }, "the pill follows: " + txt("pillState"))
+      shot("title-pill", true)
+    }
+
+    function driveTitlePast() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_1")) }, "the list")
+      click(find(view(), "meetingRow_1"), "1:1 with Sam")
+      waitFor(function() { return txt("meetingTitle") === "1:1 with Sam" }, "opened")
+      var f = editTitle()
+      f.text = "1:1 with Sam and Dana"
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return txt("meetingTitle") === "1:1 with Sam and Dana" }, "renamed")
+      waitFor(idleCli, "stored")
+      click(find(view(), "backButton"), "back")
+      waitFor(function() { return String(find(find(view(), "meetingRow_1"), "meetingRowTitle").text) === "1:1 with Sam and Dana" }, "the list follows", 6000)
+    }
+
+    function driveTitleFail() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var f = editTitle()
+      f.text = "A very long title"
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      check(view().actionError.indexOf("Meeting titles are limited to 200 characters.") !== -1, "the CLI's reason: " + view().actionError)
+      waitFor(function() { return txt("meetingTitle") === "Standup" }, "put back: " + txt("meetingTitle"))
+      shot("title-fail")
     }
 
     function driveSummaryError() {

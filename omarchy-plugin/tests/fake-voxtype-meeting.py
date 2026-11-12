@@ -575,6 +575,27 @@ def export(state, args):
     return 0
 
 
+def retitle(state, args):
+    """meeting title M "TITLE" [--json]: PROVISIONAL until detect-140's
+    contract. Renames a past meeting in the list, or the socket's meeting
+    (announced as title_changed). state["title_fail"]: refused."""
+    meeting = resolve(state, args[0])
+    title = args[1].strip() if len(args) > 1 else ""
+    if state.get("title_fail"):
+        print("Error: " + state["title_fail"], file=sys.stderr)
+        return 1
+    if title == "":
+        print("Error: A title can't be empty.", file=sys.stderr)
+        return 1
+    for m in state.get("meetings", []):
+        if m["id"] == meeting:
+            m["title"] = title
+            save(state)
+    control({"cmd": "title", "meeting_id": meeting, "title": title})
+    print(json.dumps({"meeting_id": meeting, "title": title}))
+    return 0
+
+
 def play_path():
     return os.path.join(os.environ["FAKE_MEETING_DATA"], "play.json")
 
@@ -754,6 +775,8 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "title":
+        return retitle(state, args[2:])
     elif action == "notice" and args[2:] == ["--ack"]:
         control({"cmd": "notice", "pending": False})
         print("Acknowledged.")
