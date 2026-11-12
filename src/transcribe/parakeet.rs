@@ -7,6 +7,7 @@
 //! - CTC (Connectionist Temporal Classification): faster, character-level output
 //! - TDT (Token-Duration-Transducer): recommended, proper punctuation and word boundaries
 
+use super::lines::{lines_from_words, TimedWord};
 use super::{TimedSegment, Transcriber};
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
@@ -233,52 +234,38 @@ impl ParakeetTranscriber {
     }
 }
 
-/// A gap between two tokens' starts this long or longer is a pause, and
-/// starts a new line. Shorter than the 0.7 s pause meeting mode splits
-/// utterances at, so a pause it cannot see in the audio level (a noisy
-/// room, the other side talking) still breaks the line.
-const LINE_PAUSE_SECS: f32 = 0.6;
-/// The longest a single token is taken to last. A transducer token's end is
-/// the next token's start, so the last word before a pause would otherwise
-/// stretch across the whole pause.
+/// The longest a single token is taken to last. parakeet-rs ends a
+/// transducer token where the next one starts, so the last word before a
+/// pause would otherwise stretch across the whole pause and hide it.
 const MAX_TOKEN_SECS: f32 = 0.5;
 
-/// Lines from Parakeet's timed tokens: one per sentence, and a new one
-/// after a pause. Each line runs from its first token's start to its last
-/// token's end, that end capped at [`MAX_TOKEN_SECS`] after the token began.
-/// The text is the tokens' own, so the lines join back into the transcript.
-pub(crate) fn lines_from_tokens(tokens: &[TimedToken]) -> Vec<TimedSegment> {
-    fn is_word_start(text: &str) -> bool {
-        text.starts_with([' ', '\u{2581}'])
-    }
-    let mut lines = Vec::new();
-    let mut text = String::new();
-    let mut start = 0.0f32;
-    for (i, token) in tokens.iter().enumerate() {
-        if text.trim().is_empty() {
-            text.clear();
-            start = token.start;
-        }
-        text.push_str(&token.text.replace('\u{2581}', " "));
-        let next = tokens.get(i + 1);
-        let next_starts_word = next.is_none_or(|n| is_word_start(&n.text));
-        let sentence_end = token.text.trim_end().ends_with(['.', '?', '!']) && next_starts_word;
-        let pause = next
-            .is_some_and(|n| n.start - token.start >= LINE_PAUSE_SECS && is_word_start(&n.text));
-        if sentence_end || pause || next.is_none() {
-            let trimmed = text.trim();
-            if trimmed.chars().any(char::is_alphanumeric) {
-                let end = token.end.min(token.start + MAX_TOKEN_SECS).max(token.start);
-                lines.push(TimedSegment {
-                    text: trimmed.to_string(),
-                    start_secs: start,
-                    end_secs: end.max(start),
-                });
+/// Words from Parakeet's timed tokens (a word starts at a token beginning
+/// with a space or the sentencepiece marker), each ending at most
+/// [`MAX_TOKEN_SECS`] after its last token began.
+fn words_from_tokens(tokens: &[TimedToken]) -> Vec<TimedWord> {
+    let mut words: Vec<TimedWord> = Vec::new();
+    for token in tokens {
+        let piece = token.text.replace('\u{2581}', " ");
+        let end = token.end.min(token.start + MAX_TOKEN_SECS).max(token.start);
+        match words.last_mut() {
+            Some(word) if !piece.starts_with(' ') => {
+                word.text.push_str(&piece);
+                word.end_secs = end;
             }
-            text.clear();
+            _ => words.push(TimedWord {
+                text: piece.trim_start().to_string(),
+                start_secs: token.start,
+                end_secs: end,
+            }),
         }
     }
-    lines
+    words
+}
+
+/// Meeting lines from Parakeet's timed tokens, by the shared word rules in
+/// [`super::lines`].
+pub(crate) fn lines_from_tokens(tokens: &[TimedToken]) -> Vec<TimedSegment> {
+    lines_from_words(&words_from_tokens(tokens))
 }
 
 /// Build the ONNX Runtime session config: the execution provider the
