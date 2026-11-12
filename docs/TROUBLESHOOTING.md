@@ -179,7 +179,7 @@ graphical frontend is installed, install a supported terminal or run
   `voxtype setup omarchy --restart-shell`.
 - **Removed it and want it back.** Run `voxtype setup omarchy`. The daemon never
   re-adds it on its own.
-- **"Voxtype Settings could not run ..."** The panel could not start the voxtype
+- **"The Voxtype panel could not run ..."** The panel could not start the voxtype
   binary it names, so it shows nothing rather than stale values. If the message
   names a `dev.json` (next to the plugin's `manifest.json`), that file points at
   a build that no longer exists: fix the path, or delete the file to use
@@ -213,6 +213,14 @@ what is wrong instead of showing an empty pane:
   agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
   agent menu shows it disabled, with the reason.
 - **"Copying needs wl-copy"**: install `wl-clipboard`.
+- **"Couldn't write the summary"** at the top of the Summary tab: the backend
+  that writes summaries failed, and the card says which and why. The chip in
+  the tab's header names that backend; it can be a local model (an older
+  `[meeting.summary]` backend such as Ollama) even when questions go to an
+  agent. "status code 500" from `localhost:11434` means Ollama is running but
+  failed: check `ollama list` for the model, or choose **Use Claude instead**
+  (shown when a local model failed and you have allowed an agent), which runs
+  `voxtype meeting summarize <id> --agent claude` for this meeting only.
 
 ## Table of Contents
 
@@ -1665,9 +1673,13 @@ The log line gives the reason when it is not `webrtc`:
 
 - **"the output is headphones"**: voxtype read your default output as headphones (its active port, its form factor, or Bluetooth). If sound is in fact coming from speakers, set `echo_cancel = "webrtc"` to use the canceller anyway.
 - **"Echo cancellation could not start"**: the canceller needs PipeWire's echo-cancel module and its WebRTC plugin. On Arch and Omarchy they come with `libpipewire` and `pipewire-audio`; elsewhere, check that `libpipewire-module-echo-cancel.so` and `aec/libspa-aec-webrtc.so` exist under your PipeWire library directories. PipeWire releases too old for the canceller's monitor mode also fall back. `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own error.
+- **"the mic is a monitor of the output the canceller would cancel"**: your default microphone (or `mic_device`) is a monitor of the output whose sound the canceller removes, so cancelling would leave nothing. This happens with a virtual mic fed from the speakers. Pick your real microphone as the default, or name it in `mic_device`.
+- **"The echo canceller's mic has been silent for 3s"**: the canceller started but delivered nothing but digital silence, so the meeting switched to recording the microphone directly with GTCRN (the status then says `gtcrn`). Either the canceller is not receiving the microphone, or your microphone is a monitor of your default output (a virtual mic fed from the speakers), whose every sound the canceller treats as echo. Check that `pactl list short sources` shows your real microphone and that it is not muted; `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own output. `echo_cancel = "gtcrn"` skips the canceller.
 - **"mic_device is not a PipeWire source"**: `meeting.audio.mic_device` names an ALSA device. Set it to a PipeWire source name from `pactl list short sources`, or to `default`.
 - **"the default source is already an echo canceller"**: you run your own echo canceller as the default microphone, and voxtype records from it rather than adding a second one. If echo still gets through, check that canceller's setup, or name your real microphone in `mic_device` to have voxtype's canceller instead.
 - **`none`**: `echo_cancel` is `disabled`, or it is `gtcrn` and the GTCRN model is missing.
+
+With a filter as your default microphone (Camera Effects, a noise-suppression chain), the log also says "The default source … is a filter over …": the canceller records the real microphone under the filter, so the filter's effects are not in the meeting's mic track. That is expected.
 
 The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
 
@@ -1764,6 +1776,7 @@ With speakers instead of headphones, your microphone hears the call. Voxtype rem
 
 - **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track, including the guard's. Check `[meeting.audio] echo_guard` is on (the default). Keep `echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones. A line that mixes your voice with the echo stays yours, echo included: the guard only removes lines that are nothing but echo.
 - **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. The guard drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
+- **"Thank you." under You while you said nothing.** Speech engines write a few stock phrases ("Thank you.", "Thanks for watching.") for faint sound, such as the echo canceller's residual. The guard drops them when the remote is talking and your microphone held no voice of yours at the time. One that comes while the call is silent stays: delete it with `voxtype meeting delete-line`.
 - **A remote line shows up twice, once under the remote speaker from your microphone.** The guard moved an echo line to the remote side because the loopback's transcript did not have its words. Delete the copy with `voxtype meeting delete-line`.
 - **A line of yours went missing or moved to the remote.** The guard keeps a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud call can still read as echo. Speak up or lower the call volume; move a line back with `voxtype meeting reassign <meeting> <line> You`; or set `echo_guard = false` to keep only exact-word matching.
 

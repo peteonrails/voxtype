@@ -111,11 +111,16 @@ pub struct MeetingAudioConfig {
     pub loopback_device: String,
 
     /// Echo cancellation for the meeting mic:
-    /// - "auto" (default): PipeWire's WebRTC echo canceller when the output is
-    ///   speakers and the module can run, GTCRN enhancement otherwise
-    /// - "aec": the WebRTC canceller whatever the output, GTCRN if it cannot run
+    /// - "auto" (default): PipeWire's WebRTC echo canceller unless the output
+    ///   is headphones, a headset or Bluetooth; GTCRN enhancement otherwise,
+    ///   or when the canceller cannot run
+    /// - "webrtc": the WebRTC canceller whatever the output, GTCRN if it
+    ///   cannot run
     /// - "gtcrn": GTCRN enhancement only (the behaviour before 1.3.0)
-    /// - "off" (or "disabled"): neither
+    /// - "disabled": neither
+    ///
+    /// "aec" and "off", the names in early 1.3.0 test builds, still work as
+    /// "webrtc" and "disabled".
     ///
     /// The canceller runs only during a meeting and never changes PipeWire's
     /// configuration. Transcript dedup runs in every case.

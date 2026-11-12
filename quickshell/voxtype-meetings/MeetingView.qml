@@ -157,6 +157,8 @@ Item {
   signal exportNoticeDismissed()
   signal closeRequested()
   signal errorDismissed()
+  property bool speakerHintDismissed: false
+  signal speakerHintDismissRequested()
 
   readonly property string status: feed ? feed.status : ""
   readonly property bool connected: feed ? feed.connected : false
@@ -266,7 +268,7 @@ Item {
   readonly property string endedAtText: {
     if (!root.ended || root.feed.endedAt <= 0) return ""
     var end = new Date(root.feed.endedAt)
-    if (end.toDateString() === new Date(root.now).toDateString()) return "ended at " + Qt.formatTime(end, "hh:mm")
+    if (end.toDateString() === new Date(root.now).toDateString()) return "at " + Qt.formatTime(end, "hh:mm")
     var start = root.parseTime(root.feed.startedAt)
     return Qt.formatDateTime(isNaN(start) ? end : new Date(start), "ddd d MMM yyyy, hh:mm")
   }
@@ -284,7 +286,6 @@ Item {
   }
 
   readonly property string listeningText: {
-    if (root.ended) return "Click a line's speaker to move it, or a chip to rename a speaker."
     if (!root.feed || !root.connected) return ""
     if (root.status === "paused") return "Paused. Nothing is being recorded."
     if (root.status === "finalizing") return "Transcribing the last of the audio…"
@@ -563,10 +564,28 @@ Item {
           font.pixelSize: root.theme.body
         }
 
+        // "Ended · 2:09 · at 00:02": dots between the parts of an ended
+        // meeting's line.
+        Text {
+          visible: root.ended && root.elapsedText !== ""
+          text: "·"
+          color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.body
+        }
+
         Text {
           objectName: "meetingElapsed"
           text: root.elapsedText
           visible: text !== ""
+          color: root.theme.dim
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.body
+        }
+
+        Text {
+          visible: root.endedAtText !== ""
+          text: "·"
           color: root.theme.dim
           font.family: root.theme.fontFamily
           font.pixelSize: root.theme.body
@@ -634,7 +653,7 @@ Item {
       RowLayout {
         objectName: "listeningIndicator"
         Layout.fillWidth: true
-        visible: root.live && root.connected || root.ended
+        visible: root.live && root.connected
         spacing: root.theme.md
 
         Row {
@@ -834,6 +853,8 @@ Item {
           theme: root.theme
           feed: root.feed
           ended: root.ended
+          speakerHintDismissed: root.speakerHintDismissed
+          onSpeakerHintDismissRequested: root.speakerHintDismissRequested()
           onRenameRequested: function(keys, name) { root.renameRequested(keys, name) }
           onSpeakerClicked: function(line, anchor) { root.openReassign(line, anchor) }
           onNoteClicked: function(line, anchor) { root.openNoteEditor(line, anchor) }
@@ -873,9 +894,11 @@ Item {
           assistant: root.assistant
           feed: root.feed
           copiedKey: root.copiedKey
+          canOpenSettings: root.canOpenSettings
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
           onCopyRequested: function(text, key) { root.copyRequested(text, key) }
+          onSettingsRequested: root.settingsRequested()
         }
       }
 
@@ -1079,11 +1102,13 @@ Item {
       }
 
       Repeater {
-        // What `meeting export --format` accepts (srt and vtt are not yet).
+        // What `meeting export --format` accepts.
         model: [
           { format: "markdown", label: "Markdown (.md)" },
           { format: "text", label: "Plain text (.txt)" },
-          { format: "json", label: "JSON (.json)" }
+          { format: "json", label: "JSON (.json)" },
+          { format: "srt", label: "Subtitles (.srt)" },
+          { format: "vtt", label: "WebVTT (.vtt)" }
         ]
         MeetingButton {
           required property var modelData

@@ -6,9 +6,9 @@
 //! never disagree about which microphone or which echo canceller a meeting
 //! will use.
 
-use crate::audio::echo_cancel::{self, EchoCanceller, EchoPath};
-use crate::audio::DualCapture;
-use crate::config::Config;
+use crate::audio::echo_cancel::{self, EchoCanceller, EchoPath, Liveness, LivenessCheck};
+use crate::audio::{DualCapture, DualSamples};
+use crate::config::{AudioConfig, Config};
 use crate::error::AudioError;
 use serde::Serialize;
 
@@ -21,6 +21,23 @@ pub const DEFAULT_SECONDS: u64 = 30;
 /// a sound check: `{"seconds": N}` or `{"stop": true}`.
 pub const TRIGGER: &str = "meeting_soundcheck";
 
+/// The meeting's loopback device, or `None` when it is off.
+pub fn loopback_device(config: &Config) -> Option<String> {
+    match config.meeting.audio.loopback_device.as_str() {
+        "disabled" | "" => None,
+        other => Some(other.to_string()),
+    }
+}
+
+/// Dictation's audio config with the meeting's mic, when it has its own.
+pub fn mic_config(config: &Config) -> AudioConfig {
+    let mut mic = config.audio.clone();
+    if !matches!(config.meeting.audio.mic_device.as_str(), "default" | "") {
+        mic.device = config.meeting.audio.mic_device.clone();
+    }
+    mic
+}
+
 /// A meeting's audio capture, started.
 pub struct MeetingCapture {
     pub capture: DualCapture,
@@ -30,32 +47,62 @@ pub struct MeetingCapture {
     pub canceller: Option<EchoCanceller>,
     /// What the microphone is recorded from, as the user would name it.
     pub mic: String,
+    /// Watches the canceller's first seconds; see [`MeetingCapture::samples`].
+    pub liveness: Option<LivenessCheck>,
+}
+
+impl MeetingCapture {
+    /// The audio since the last call. While a new canceller is on trial, its
+    /// mic also goes to the liveness guard: when the canceller delivers only
+    /// digital silence for [`echo_cancel::LIVENESS_SECS`], it is not hearing
+    /// the mic, and the mic moves to a direct capture with GTCRN
+    /// ([`leave_silent_canceller`]). Returns whether that happened.
+    pub async fn samples(&mut self, config: &Config) -> (DualSamples, bool) {
+        let mut samples = self.capture.get_samples().await;
+        let verdict = self.liveness.as_mut().map(|check| check.feed(&samples.mic));
+        match verdict {
+            Some(Liveness::Alive) => self.liveness = None,
+            Some(Liveness::Silent) => {
+                let rms = self.liveness.take().map(|c| c.rms()).unwrap_or_default();
+                if let Some(rest) =
+                    leave_silent_canceller(config, &mut self.capture, &mut self.canceller, rms)
+                        .await
+                {
+                    samples.mic.extend(rest.mic);
+                    samples.loopback.extend(rest.loopback);
+                    self.echo_path = EchoPath::Gtcrn;
+                    self.mic = mic_config(config).device;
+                    return (samples, true);
+                }
+            }
+            _ => {}
+        }
+        (samples, false)
+    }
 }
 
 /// Open and start the meeting's capture the way a meeting does: the
 /// meeting mic (or dictation's), the loopback device, and on speakers the
-/// mic through PipeWire's echo canceller, falling back to GTCRN.
+/// mic through PipeWire's echo canceller (fed what the loopback plays),
+/// falling back to GTCRN. With the canceller the capture's liveness guard
+/// is armed.
 pub async fn open_capture(config: &Config) -> Result<MeetingCapture, AudioError> {
-    let loopback_device = match config.meeting.audio.loopback_device.as_str() {
-        "disabled" | "" => None,
-        other => Some(other.to_string()),
-    };
-    let mut mic_config = config.audio.clone();
-    let meeting_mic = config.meeting.audio.mic_device.as_str();
-    if !matches!(meeting_mic, "default" | "") {
+    let loopback_device = loopback_device(config);
+    let mic_config = mic_config(config);
+    if mic_config.device != config.audio.device {
         tracing::info!(
             "Meeting mic override: {} (dictation uses {})",
-            meeting_mic,
+            mic_config.device,
             config.audio.device
         );
-        mic_config.device = meeting_mic.to_string();
     }
     // On speakers the mic is recorded from PipeWire's echo canceller, so it
     // starts first; anything that goes wrong falls back to GTCRN.
     let mode = echo_cancel::Mode::parse(&config.meeting.audio.echo_cancel);
     let mic_device = config.meeting.audio.mic_device.clone();
+    let loopback = config.meeting.audio.loopback_device.clone();
     let (mut echo_path, mut canceller) = tokio::task::spawn_blocking(move || {
-        echo_cancel::begin(mode, &mic_device, &Config::runtime_dir())
+        echo_cancel::begin(mode, &mic_device, &loopback, &Config::runtime_dir())
     })
     .await
     .unwrap_or((EchoPath::Gtcrn, None));
@@ -74,6 +121,7 @@ pub async fn open_capture(config: &Config) -> Result<MeetingCapture, AudioError>
                         echo_path,
                         canceller,
                         mic,
+                        liveness: Some(LivenessCheck::new(16000)),
                     });
                 }
                 Err(e) => {
@@ -99,7 +147,56 @@ pub async fn open_capture(config: &Config) -> Result<MeetingCapture, AudioError>
         echo_path,
         canceller,
         mic: mic_config.device,
+        liveness: None,
     })
+}
+
+/// The liveness guard's move, for a canceller that has delivered only
+/// digital silence (at `rms`): record the mic directly instead, as a
+/// meeting does when the canceller cannot start, and stop the canceller.
+/// The new capture feeds the old one's level meters. Returns what the old
+/// capture still held, or `None`, changing nothing, when the mic cannot be
+/// opened directly.
+pub async fn leave_silent_canceller(
+    config: &Config,
+    capture: &mut DualCapture,
+    canceller: &mut Option<EchoCanceller>,
+    rms: f32,
+) -> Option<DualSamples> {
+    tracing::warn!(
+        "The echo canceller's mic has been silent for {}s ({:.1e} RMS): it is not hearing \
+         the mic. Recording the mic directly with GTCRN instead",
+        echo_cancel::LIVENESS_SECS,
+        rms
+    );
+    let loopback_device = loopback_device(config);
+    let mut direct = match DualCapture::new_metered(
+        &mic_config(config),
+        loopback_device.as_deref(),
+        capture.meters(),
+    ) {
+        Ok(direct) => direct,
+        Err(e) => {
+            tracing::error!(
+                "Cannot record the mic directly ({}); keeping the canceller",
+                e
+            );
+            return None;
+        }
+    };
+    if let Err(e) = direct.start().await {
+        tracing::error!(
+            "Cannot record the mic directly ({}); keeping the canceller",
+            e
+        );
+        return None;
+    }
+    let mut old = std::mem::replace(capture, direct);
+    let rest = old.stop().await.unwrap_or_default();
+    if let Some(mut c) = canceller.take() {
+        c.stop();
+    }
+    Some(rest)
 }
 
 /// A `soundcheck` event: a sound check started, or ended and why.

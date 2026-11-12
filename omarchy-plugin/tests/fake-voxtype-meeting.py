@@ -39,7 +39,7 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
                                     error (consent_required while blocked,
                                     agent_failed with state["fail"]["ask"]);
                                     each answer is saved for `show --json`
-  meeting summarize M [--regenerate] --format json
+  meeting summarize M [--regenerate] [--agent ID] --format json
                                     the saved MeetingSummary, or a new one
                                     (state["summary_json"] or a default); refused
                                     on stderr while consent is missing
@@ -306,12 +306,19 @@ def status(state):
         backend, name, blocked = "none", None, "consent_required"
     else:
         backend, name, blocked = "none", None, "no_backend"
-    return {"agent": agent["id"] if agent else None, "agent_name": agent["name"] if agent else None,
+    out = {"agent": agent["id"] if agent else None, "agent_name": agent["name"] if agent else None,
             "agent_path": agent["path"] if agent else None, "source": "config" if a.get("agent") else "path",
             "consent": bool(agent and agent["consent"]), "choice_required": choice, "problem": None,
             "omarchy_default": None, "local_only": bool(a.get("local_only")), "local": local,
             "backend": backend, "backend_name": name, "blocked": blocked, "auto_summary": False,
             "auto_summary_configured": None, "consent_file": "/tmp/assistant-consent.json", "candidates": cands}
+    # Where summaries go: a legacy [meeting.summary] backend can differ from
+    # where questions go. `legacy_status` is a voxtype from before the field.
+    if a.get("summary_backend"):
+        out["summary_backend"], out["summary_backend_name"] = a["summary_backend"], a["summary_backend_name"]
+    elif not a.get("legacy_status"):
+        out["summary_backend"], out["summary_backend_name"] = backend, name
+    return out
 
 
 def assistant(state, args):
@@ -424,9 +431,17 @@ def summarize(state, args):
     elif os.path.exists(os.path.join(folder, "metadata.json")):
         with open(os.path.join(folder, "metadata.json")) as f:
             saved = json.load(f).get("summary")
-    if saved is None or "--regenerate" in args:
+    agent = args[args.index("--agent") + 1] if "--agent" in args else None
+    if saved is None or "--regenerate" in args or agent:
         st = status(state)
-        if st["backend"] == "none":
+        # `summary_fail`: the configured summary backend fails (a local model
+        # answering 500); `--agent` goes around it.
+        if state.get("summary_fail") and not agent:
+            print("Summarizing...", file=sys.stderr)
+            time.sleep(0.4)
+            print("Error: " + state["summary_fail"], file=sys.stderr)
+            return 1
+        if st["backend"] == "none" and not agent:
             print("Error: Meeting transcripts can't go to %s until you allow it (consent_required)"
                   % (st["agent_name"] or "an agent"), file=sys.stderr)
             return 1
@@ -544,8 +559,8 @@ def export(state, args):
         print("error: Meeting not found: " + args[0], file=sys.stderr)
         return 1
     fmt = args[args.index("--format") + 1]
-    if fmt not in ("text", "txt", "markdown", "md", "json"):
-        print("Error: Unknown export format '%s'. Valid formats: text, markdown, json" % fmt, file=sys.stderr)
+    if fmt not in ("text", "txt", "markdown", "md", "json", "srt", "vtt"):
+        print("Error: Unknown export format '%s'. Valid formats: text, markdown, json, srt, vtt" % fmt, file=sys.stderr)
         return 1
     out = args[args.index("--output") + 1]
     flags = [a for a in args if a in ("--timestamps", "--speakers", "--metadata")]

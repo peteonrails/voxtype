@@ -320,7 +320,9 @@ Expected:
 - The active port is a speaker (for example `[Out] Speaker`), `echo_cancel`
   is `"webrtc"` in the status and in `meeting.json`, the source
   `voxtype_meeting_aec_source` is listed while recording, and the log says
-  `Meeting echo handling: webrtc`.
+  `Meeting echo handling: webrtc`, with no "echo canceller's mic has been
+  silent" warning after it (that warning means the canceller heard nothing
+  and the meeting moved to GTCRN; the status then says `"gtcrn"`).
 - The microphone lines hold your own sentences and none of the talk. The
   talk appears only under Remote (the loopback track), if at all.
 - A mixer (`wpctl status`, pavucontrol) lists "Voxtype meeting echo
@@ -359,9 +361,10 @@ kill no `voxtype_meeting_aec_source` is left and no `pipewire -c
 …/meeting-aec.conf` process runs (`pgrep -af meeting-aec.conf` prints
 nothing).
 
-If your default microphone is a filter such as `camera-effects-mic`, the
-canceller records from it; note whether the result differs from a plain
-microphone.
+If your default microphone is a filter such as `camera-effects-mic`
+(Camera Effects), the log says "The default source camera-effects-mic is a
+filter over …" and names the real microphone: the canceller records that one,
+under the filter. Check that the named microphone is the one you speak into.
 
 ## Clean up
 

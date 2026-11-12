@@ -509,7 +509,9 @@ Item {
         root.meetingError(String(ev.meeting_id), String(ev.code || ""), String(ev.message || ""))
         return
       }
+      // No meeting named: the banner, unless a summary in progress claims it.
       root.lastError = String(ev.message || "")
+      root.meetingError("", String(ev.code || ""), String(ev.message || ""))
     }
   }
 

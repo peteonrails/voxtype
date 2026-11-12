@@ -152,10 +152,11 @@ async fn standalone(config: &Config, seconds: u64, out: &mut Output) -> anyhow::
     let line = tagged("soundcheck", &serde_json::to_string(&running)?);
     out.event(&line, &serde_json::from_str(&line)?);
 
-    let mut capture = opened.capture;
+    let mut opened = opened;
+    let started = std::time::Instant::now();
     let (levels_tx, mut levels_rx) = tokio::sync::mpsc::unbounded_channel::<Levels>();
     let publisher = tokio::spawn(levels::run_publisher(
-        capture.meters(),
+        opened.capture.meters(),
         None,
         Arc::new(AtomicBool::new(true)),
         || true,
@@ -174,16 +175,23 @@ async fn standalone(config: &Config, seconds: u64, out: &mut Output) -> anyhow::
                 out.levels_line(&line, &serde_json::from_str(&line)?);
             }
             _ = drain.tick() => {
-                // Nothing records this audio; keep it from piling up.
-                let _ = capture.get_samples().await;
+                // Nothing records this audio; keep it from piling up. The
+                // liveness guard still watches it, as in a meeting.
+                let (_, moved) = opened.samples(config).await;
+                if moved {
+                    let left = seconds.saturating_sub(started.elapsed().as_secs()).max(1);
+                    let running = SoundcheckEvent::running(&opened, left);
+                    let line = tagged("soundcheck", &serde_json::to_string(&running)?);
+                    out.event(&line, &serde_json::from_str(&line)?);
+                }
             }
             _ = tokio::signal::ctrl_c() => break "stopped",
             _ = &mut deadline => break "done",
         }
     };
     publisher.abort();
-    let _ = capture.stop().await;
-    drop(opened.canceller);
+    let _ = opened.capture.stop().await;
+    drop(opened);
     let stopped = SoundcheckEvent::stopped(reason, None);
     let line = tagged("soundcheck", &serde_json::to_string(&stopped)?);
     out.event(&line, &serde_json::from_str(&line)?);

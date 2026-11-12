@@ -202,6 +202,23 @@ impl DualCapture {
         )
     }
 
+    /// Like [`DualCapture::new`], feeding `meters`: another capture's, so
+    /// level events that follow it carry on when this one replaces it.
+    pub fn new_metered(
+        mic_config: &AudioConfig,
+        loopback_device: Option<&str>,
+        mut meters: crate::meeting::levels::MeetingMeters,
+    ) -> Result<Self, AudioError> {
+        if meters.loopback.is_none() {
+            meters.loopback = Some(crate::meeting::levels::TrackMeter::new());
+        }
+        Self::with_mic(
+            MicCapture::Cpal(CpalCapture::new(mic_config)?),
+            loopback_device,
+            meters,
+        )
+    }
+
     /// Like [`DualCapture::new`], recording the mic from the PipeWire or
     /// PulseAudio source `mic_source` (the echo canceller's) with parec.
     /// The first `delay_ms` of it are dropped: the canceller delivers the

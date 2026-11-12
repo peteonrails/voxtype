@@ -69,8 +69,8 @@ Scenarios:
               closing the view commits a pending delete
   export      More > Export (markdown) into Documents/Voxtype, then Open folder;
               Open meeting folder
-  export-past a JSON export of a past meeting, and its folder; SRT and VTT
-              are not offered (the CLI does not accept them)
+  export-past an SRT export of a past meeting (all five formats offered),
+              and its folder
   minimize    the pill (state, elapsed, last line), click to expand, the
               --minimize/--expand requests
   minimize-autoopen  a meeting start while minimized expands the one window
@@ -89,7 +89,16 @@ Scenarios:
   play-errors the CLI's refusals shown as they are: no kept audio (then no ▶
               and the hint), missing tools
   ask-error   an ask that fails shows the error event's message
-  summary-error  a summary that fails after the meeting shows its error
+  summary-error  a summary that fails after the meeting replaces Summarizing
+              with the error card at the top; Retry writes it; no "Use …
+              instead" when an agent was what failed
+  summary-local-error  summaries going to a local model (summary_backend_name)
+              while questions go to Claude: each chip names its own; the
+              local failure offers "Use Claude instead" (`--agent claude`)
+  summary-error-cli  Summarize failing in the CLI (a local model's 500) clears
+              Summarizing into the card, twice; local_only hides "Use …"
+  summary-stale  an error event naming no meeting (an older daemon) still
+              ends Summarizing; a status without summary_backend falls back
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -120,7 +129,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-             "ask-error", "summary-error", "list-old", "cli-missing", "daemon-old", "agent-missing",
+             "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors")
@@ -254,6 +263,9 @@ INITIAL = {
     "play-no-audio": lambda: [running_meeting()],
     "play-errors": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
+    "summary-local-error": lambda: [running_meeting()],
+    "summary-error-cli": lambda: [running_meeting()],
+    "summary-stale": lambda: [running_meeting()],
 }
 
 CLAUDE = {"id": "claude", "name": "Claude", "found": True, "supported": True, "consent": True}
@@ -285,6 +297,12 @@ STATE = {
     "play-errors": {"play_error": "This meeting was recorded without keeping audio. "
                                   "Turn on meeting.retain_audio for future meetings."},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
+    "summary-local-error": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE],
+                                          "summary_backend": "local", "summary_backend_name": "Local (llama3.2)"}},
+    "summary-error-cli": {"assistant": {"agent": None, "local_only": True, "candidates": [CLAUDE]},
+                          "summary_fail": "Local model (llama3.2 at http://localhost:11434) failed: "
+                                          "LLM request failed: http://localhost:11434/api/generate: status code 500"},
+    "summary-stale": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE], "legacy_status": True}},
 }
 
 
@@ -462,8 +480,8 @@ def run(scenario, host, shell, evidence):
         if opened_paths != [str(documents / "Voxtype"), str(data / ("live-" + MEETING_ID))]:
             problems.append("opened: %s" % opened_paths)
     if scenario == "export-past":
-        name = "Voxtype/2026-11-10 Design review.json"
-        if exports != [name] or export_head != ["FAKE EXPORT %s json " % PAST["design"]]:
+        name = "Voxtype/2026-11-10 Design review.srt"
+        if exports != [name] or export_head != ["FAKE EXPORT %s srt " % PAST["design"]]:
             problems.append("exports: %s %s" % (exports, export_head))
         if opened_paths != [str(data / "meetings" / PAST["design"])]:
             problems.append("opened: %s" % opened_paths)
@@ -584,8 +602,8 @@ def check_calls(scenario, calls, runtime_notes=""):
                           str(documents_dir(runtime_notes)) + "/Voxtype/" + time.strftime("%Y-%m-%d") + " Standup.md",
                           "--timestamps", "--speakers", "--metadata"]], "meeting commands")
     elif scenario == "export-past":
-        expect(meeting, [["meeting", "export", PAST["design"], "--format", "json", "--output",
-                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.json"]], "meeting commands")
+        expect(meeting, [["meeting", "export", PAST["design"], "--format", "srt", "--output",
+                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.srt"]], "meeting commands")
     elif scenario == "play":
         start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
         expect(meeting, [start, ["meeting", "play", "--stop", "--json"], start, ["meeting", "play", "--stop", "--json"]],
@@ -601,8 +619,14 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [ask_call("What did we decide?"), ["meeting", "stop"], summarize_call()], "meeting commands")
     elif scenario == "ask-error":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
-    elif scenario in ("summary", "view-request", "summary-error"):
+    elif scenario in ("summary", "view-request", "summary-stale"):
         expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "summary-error":
+        expect(meeting, [["meeting", "stop"], summarize_call()], "meeting commands")
+    elif scenario == "summary-local-error":
+        expect(meeting, [["meeting", "stop"], summarize_call() + ["--agent", "claude"]], "meeting commands")
+    elif scenario == "summary-error-cli":
+        expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call()], "meeting commands")
     elif scenario == "regenerate":
         expect(meeting, [["meeting", "stop"], summarize_call(), summarize_call(regenerate=True)], "meeting commands")
     elif scenario == "scroll-tabs":
