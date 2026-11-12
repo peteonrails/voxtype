@@ -2798,6 +2798,7 @@ voxtype meeting share latest --preview                 # See what would be share
 
 # Action items from the summary
 voxtype meeting actions latest                         # List them
+voxtype meeting todoist connect                        # Connect Todoist once, in the browser
 voxtype meeting actions latest --send todoist          # Add them to Todoist
 voxtype meeting actions latest --send reminder --mine  # Omarchy reminders for yours
 
