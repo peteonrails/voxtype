@@ -184,6 +184,13 @@ pub struct Transcript {
     pub total_chunks: u32,
 }
 
+/// What [`Transcript::resolve_echo_lines`] did, by segment ID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EchoLines {
+    pub dropped: Vec<u32>,
+    pub moved: Vec<u32>,
+}
+
 impl Transcript {
     /// Create a new empty transcript
     pub fn new() -> Self {
@@ -209,20 +216,86 @@ impl Transcript {
         self.segments.sort_by_key(|s| s.start_ms);
     }
 
+    /// Settle microphone lines the audio showed to be only the remote side's
+    /// echo ([`crate::meeting::echo::EchoProbe::echo_only`]), whatever their
+    /// length.
+    ///
+    /// When the loopback has the same speech at the same time, even part of
+    /// it, the line is dropped: the loopback's own line already holds those
+    /// words, transcribed from the clean signal, and keeping the echo would
+    /// show them twice. When it does not (the loopback's transcript missed
+    /// them, or the echo was not speech the loopback engine recognised),
+    /// dropping would lose the only copy, so the line moves to the remote
+    /// speaker it overlaps instead (`Remote` if none), keeping its text and
+    /// its microphone source. `meeting reassign <id> You` moves it back.
+    pub fn resolve_echo_lines(&mut self, echo_ids: &std::collections::HashSet<u32>) -> EchoLines {
+        use crate::meeting::echo::{normalize_word, overlapping_loopback_words, same_speech};
+        let mut outcome = EchoLines::default();
+        let snapshot = self.segments.clone();
+        for seg in self.segments.iter_mut() {
+            if seg.source != AudioSource::Microphone
+                || seg.deleted
+                || !echo_ids.contains(&seg.id)
+                || seg.text.trim().is_empty()
+            {
+                continue;
+            }
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if same_speech(&words, &overlapping_loopback_words(seg, &snapshot)) {
+                tracing::debug!("Dropping echo of the remote side: {:?}", seg.text);
+                seg.text.clear();
+                outcome.dropped.push(seg.id);
+                continue;
+            }
+            let remote = snapshot
+                .iter()
+                .filter(|s| s.source == AudioSource::Loopback && !s.deleted)
+                .map(|s| {
+                    let overlap =
+                        seg.end_ms.min(s.end_ms) as i64 - seg.start_ms.max(s.start_ms) as i64;
+                    (overlap, s)
+                })
+                .filter(|(overlap, _)| *overlap > 0)
+                .max_by_key(|(overlap, _)| *overlap)
+                .map(|(_, s)| s);
+            tracing::debug!(
+                "Moving echo of the remote side to {}: {:?}",
+                remote
+                    .and_then(|s| s.speaker_id.as_deref())
+                    .unwrap_or("Remote"),
+                seg.text
+            );
+            seg.speaker_id = Some(
+                remote
+                    .and_then(|s| s.speaker_id.clone())
+                    .unwrap_or_else(|| "Remote".to_string()),
+            );
+            seg.speaker_label = remote.and_then(|s| s.speaker_label.clone());
+            outcome.moved.push(seg.id);
+        }
+        self.segments.retain(|s| !s.text.trim().is_empty());
+        outcome
+    }
+
     /// Remove echoed phrases from mic segments that match loopback transcripts.
     /// Works at the phrase level: finds runs of consecutive words in a mic segment
     /// that appear in any loopback segment and strips them out, keeping the user's
     /// actual speech. Returns the number of words removed.
     pub fn dedup_bleed_through(&mut self) -> usize {
         let exact_only = crate::meeting::echo::EchoRules {
-            fuzzy: false,
+            guard: false,
             ..Default::default()
         };
         self.dedup_bleed_through_with(&exact_only, &|_| false)
     }
 
     /// [`Transcript::dedup_bleed_through`] with the short-line rules set by
-    /// `rules`: misheard short echoes too when `rules.fuzzy`. A microphone
+    /// `rules`: misheard short echoes too when `rules.guard`. A microphone
     /// segment for which `own_voice` is true (the audio shows you speaking,
     /// see [`crate::meeting::echo::EchoProbe`]) is never taken for a short
     /// echo, so a "yes" you say while the remote says "yes" stays.
@@ -268,7 +341,7 @@ impl Transcript {
             .segments
             .iter()
             .map(|seg| {
-                rules.fuzzy
+                rules.guard
                     && seg.source == AudioSource::Microphone
                     && !own_voice(seg)
                     && fuzzy_echo(
@@ -1312,9 +1385,79 @@ mod tests {
     }
 
     const FUZZY: crate::meeting::echo::EchoRules = crate::meeting::echo::EchoRules {
-        fuzzy: true,
+        guard: true,
         fuzzy_max_words: 4,
     };
+
+    /// Lines the audio called echo: dropped when the loopback says the same
+    /// at the time, otherwise moved to the remote speaker they overlap.
+    #[test]
+    fn echo_lines_are_dropped_when_confirmed_and_moved_when_not() {
+        let mut t = Transcript::new();
+        let mut remote = said(
+            0,
+            10_000,
+            16_000,
+            AudioSource::Loopback,
+            "Great! I tested the Amarky package this morning.",
+        );
+        remote.speaker_id = Some("Remote 1".into());
+        remote.speaker_label = Some("Dana".into());
+        t.add_segment(remote);
+        let mut long_echo = said(
+            1,
+            10_060,
+            13_000,
+            AudioSource::Microphone,
+            "great i tasted the omarky package this mourning",
+        );
+        long_echo.speaker_id = Some("You".into());
+        t.add_segment(long_echo);
+        let mut unheard = said(
+            2,
+            13_100,
+            16_000,
+            AudioSource::Microphone,
+            "mm hmm yeah okay",
+        );
+        unheard.speaker_id = Some("You".into());
+        t.add_segment(unheard);
+        let mut alone = said(3, 40_000, 42_000, AudioSource::Microphone, "la la la");
+        alone.speaker_id = Some("You".into());
+        t.add_segment(alone);
+        let mut yours = said(
+            4,
+            12_000,
+            14_000,
+            AudioSource::Microphone,
+            "We should check that.",
+        );
+        yours.speaker_id = Some("You".into());
+        t.add_segment(yours);
+
+        let ids: std::collections::HashSet<u32> = [1, 2, 3].into_iter().collect();
+        let settled = t.resolve_echo_lines(&ids);
+        assert_eq!(settled.dropped, vec![1]);
+        assert_eq!(settled.moved, vec![2, 3]);
+        let speakers: Vec<(u32, String, Option<String>)> = t
+            .segments
+            .iter()
+            .map(|s| (s.id, s.speaker_id.clone().unwrap(), s.speaker_label.clone()))
+            .collect();
+        assert_eq!(
+            speakers,
+            vec![
+                (0, "Remote 1".into(), Some("Dana".into())),
+                (4, "You".into(), None),
+                (2, "Remote 1".into(), Some("Dana".into())),
+                (3, "Remote".into(), None),
+            ]
+        );
+        // Moved lines keep their words and where they were heard.
+        let moved = t.segments.iter().find(|s| s.id == 2).unwrap();
+        assert_eq!(moved.text, "mm hmm yeah okay");
+        assert_eq!(moved.source, AudioSource::Microphone);
+    }
 
     #[test]
     fn fuzzy_rule_drops_a_misheard_short_echo() {

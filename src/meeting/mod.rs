@@ -557,31 +557,52 @@ impl MeetingDaemon {
             .iter()
             .flat_map(|(_, segments)| segments)
             .any(|s| s.source == AudioSource::Loopback);
+        // Judge this chunk's microphone lines by their audio, once, while
+        // it is at hand: your own voice, or nothing but the remote's echo.
+        let rules = self.config.echo_rules;
+        let mut echo_ids = std::collections::HashSet::new();
         if let Some(probe) = &probe {
             for seg in done.iter().flat_map(|(_, segments)| segments) {
-                if seg.source == AudioSource::Microphone
-                    && probe.own_voice(seg.start_ms, seg.end_ms)
-                {
+                if seg.source != AudioSource::Microphone {
+                    continue;
+                }
+                if probe.own_voice(seg.start_ms, seg.end_ms) {
                     self.own_voice_ids.insert(seg.id);
+                } else if rules.guard && probe.echo_only(seg.start_ms, seg.end_ms) {
+                    echo_ids.insert(seg.id);
                 }
             }
         }
-        if had_loopback {
+        if had_loopback || !echo_ids.is_empty() {
             let own = &self.own_voice_ids;
-            let rules = self.config.echo_rules;
             if let Some(ref mut meeting) = self.current_meeting {
-                let removed = meeting
-                    .transcript
-                    .dedup_bleed_through_with(&rules, &|s| own.contains(&s.id));
-                if removed > 0 {
-                    tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                if !echo_ids.is_empty() {
+                    let settled = meeting.transcript.resolve_echo_lines(&echo_ids);
+                    if !settled.dropped.is_empty() || !settled.moved.is_empty() {
+                        tracing::info!(
+                            "Echo guard: dropped {} microphone line(s) the loopback already has, moved {} to the remote speaker",
+                            settled.dropped.len(),
+                            settled.moved.len()
+                        );
+                    }
                 }
-                // Publish what is left of each segment after the dedup.
+                if had_loopback {
+                    let removed = meeting
+                        .transcript
+                        .dedup_bleed_through_with(&rules, &|s| own.contains(&s.id));
+                    if removed > 0 {
+                        tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                    }
+                }
+                // Publish what is left of each segment: text the dedup
+                // trimmed, and the speaker of a line moved to the remote.
                 let kept = &meeting.transcript.segments;
                 for (_, segments) in &mut done {
                     segments.retain_mut(|seg| match kept.iter().find(|k| k.id == seg.id) {
                         Some(k) => {
                             seg.text = k.text.clone();
+                            seg.speaker_id = k.speaker_id.clone();
+                            seg.speaker_label = k.speaker_label.clone();
                             true
                         }
                         None => false,
@@ -1504,6 +1525,21 @@ mod tests {
         /// `replies` are short lines of yours added on top: (start in
         /// seconds, text), voiced with the level of the demo's "Good.".
         fn load(replies: &[(f32, &str)]) -> Self {
+            let replies: Vec<Reply> = replies
+                .iter()
+                .map(|&(at, text)| Reply {
+                    at,
+                    text,
+                    from_ms: 18150,
+                    frames: 15,
+                    gain: 1.0,
+                })
+                .collect();
+            Self::load_in(&Room::demo(), &replies)
+        }
+
+        /// The demo meeting played in `room`, with `replies` of yours on top.
+        fn load_in(room: &Room, replies: &[Reply]) -> Self {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/meeting_echo/release-sync.json");
             let fixture: serde_json::Value =
@@ -1518,8 +1554,13 @@ mod tests {
             };
             let (own_rms, remote_rms) = (rms("own_rms"), rms("remote_rms"));
             let frames = own_rms.len();
-            let gain = fixture["bleed_gain"].as_f64().unwrap() as f32;
-            let delay = (fixture["bleed_delay_ms"].as_u64().unwrap() / 30) as usize;
+            let gain = room
+                .gain
+                .unwrap_or(fixture["bleed_gain"].as_f64().unwrap() as f32);
+            let delay = (room
+                .delay_ms
+                .unwrap_or(fixture["bleed_delay_ms"].as_u64().unwrap())
+                / 30) as usize;
 
             let mut own = vec![0.0f32; frames * Self::FRAME];
             let mut loopback = vec![0.0f32; frames * Self::FRAME];
@@ -1556,11 +1597,18 @@ mod tests {
                     remotes += 1;
                     for (f, &level) in remote_rms.iter().enumerate().take(last).skip(first) {
                         voice(&mut loopback, f, level, freq);
-                        if f + delay < frames {
-                            voice(&mut bleed, f + delay, gain * level, echo_freq);
+                        // The room: the direct sound, then reflections
+                        // dying away, summing to `gain` in steady state.
+                        for (k, w) in room.taps().into_iter().enumerate() {
+                            if f + delay + k < frames {
+                                voice(&mut bleed, f + delay + k, gain * w * level, echo_freq);
+                            }
                         }
                     }
-                    let heard = u["heard_on_mic"].as_str().map(str::to_string);
+                    let heard = match &room.heard {
+                        Some(heard) => heard(remotes - 1, &text),
+                        None => u["heard_on_mic"].as_str().map(str::to_string),
+                    };
                     echoes.extend(heard.clone());
                     lines.push(DemoLine {
                         freq,
@@ -1572,17 +1620,17 @@ mod tests {
                     });
                 }
             }
-            let good = (18150 / 30) as usize;
-            for &(start, text) in replies {
+            for reply in replies {
                 let freq = 400.0 + 200.0 * mics as f32;
                 mics += 1;
-                let at = (start / 0.03) as usize;
-                for i in 0..15 {
-                    voice(&mut own, at + i, own_rms[good + i], freq);
+                let at = (reply.at / 0.03) as usize;
+                let from = (reply.from_ms / 30) as usize;
+                for i in 0..reply.frames {
+                    voice(&mut own, at + i, reply.gain * own_rms[from + i], freq);
                 }
                 lines.push(DemoLine {
                     freq,
-                    text: Some(text.to_string()),
+                    text: Some(reply.text.to_string()),
                 });
             }
             let mic = own.iter().zip(&bleed).map(|(o, b)| o + b).collect();
@@ -1625,6 +1673,50 @@ mod tests {
                 }
             }
             (said(&h.saved().transcript.segments), said(&live))
+        }
+    }
+
+    /// A line of yours added to the demo: said at `at` seconds, with the
+    /// level of the demo's own voice from `from_ms` for `frames` frames,
+    /// times `gain`.
+    struct Reply<'a> {
+        at: f32,
+        text: &'a str,
+        from_ms: u64,
+        frames: usize,
+        gain: f32,
+    }
+
+    /// How the remote side reaches the microphone.
+    #[derive(Default)]
+    struct Room {
+        /// Echo level relative to the loopback; the demo's 0.12 if unset.
+        gain: Option<f32>,
+        /// Echo delay; the demo's 30 ms if unset.
+        delay_ms: Option<u64>,
+        /// Reflections dying away after the direct sound, as speakers in a
+        /// room give, instead of one clean copy.
+        reverb: bool,
+        /// What the engine hears in the echo of remote line `n` (its text
+        /// given); the demo's own fragments if unset.
+        #[allow(clippy::type_complexity)]
+        heard: Option<Box<dyn Fn(usize, &str) -> Option<String>>>,
+    }
+
+    impl Room {
+        fn demo() -> Self {
+            Self::default()
+        }
+
+        /// Weights of the direct sound and its reflections, one per 30 ms
+        /// frame, adding up to 1.
+        fn taps(&self) -> Vec<f32> {
+            if !self.reverb {
+                return vec![1.0];
+            }
+            let raw: Vec<f32> = (0..8).map(|k| 0.55f32.powi(k)).collect();
+            let sum: f32 = raw.iter().sum();
+            raw.iter().map(|w| w / sum).collect()
         }
     }
 
@@ -1752,7 +1844,7 @@ mod tests {
         assert_eq!(live, saved);
 
         let mut h = harness().await;
-        h.daemon.config.echo_rules.fuzzy = false;
+        h.daemon.config.echo_rules.guard = false;
         let (saved, _) = ReleaseSync::load(&[]).run(&mut h).await;
         for echo in &echoes {
             assert!(
@@ -1773,6 +1865,89 @@ mod tests {
         let expected = demo_lines(&[("You: Problems?", 3), ("You: Only one?", 5)]);
         assert_eq!(saved, expected, "{saved:#?}");
         assert_eq!(live, saved);
+    }
+
+    /// The demo meeting played through speakers instead of headphones, like
+    /// Pete's video in a 1.3.0 meeting: the whole remote side reaches the
+    /// microphone at 0.3 of the loopback's level, 60 ms late, with the
+    /// room's reflections, and the engine transcribes it at length under
+    /// You, misheard enough that no four words in a row match the loopback.
+    /// The third remote line's echo comes out as words the loopback never
+    /// said. On top, two lines of yours over the remote: a long one at the
+    /// demo's own speaking level and a short "Only one?".
+    fn speakers_room() -> Room {
+        Room {
+            gain: Some(0.3),
+            delay_ms: Some(60),
+            reverb: true,
+            heard: Some(Box::new(|n, _| {
+                Some(
+                    [
+                        "great i tasted the omarky package this mourning and the setting panel open without any problem",
+                        "only won the restore banner stay visible after the daemon restart i thing we can shit with that as a known issue",
+                        "mm hmm yeah yeah okay sure thing",
+                    ][n]
+                        .to_string(),
+                )
+            })),
+        }
+    }
+
+    const LONG_REPLY: Reply<'static> = Reply {
+        at: 12.0,
+        text: "We should check the Windows build too.",
+        from_ms: 31890,
+        frames: 100,
+        gain: 1.0,
+    };
+    /// Said over the loudest part of the remote's line. At the demo's own
+    /// level it is quieter than the echo there, which no engine (and not
+    /// the fake one) would make out; half again as loud, as a voice a foot
+    /// from the microphone is against speakers across the desk.
+    const SHORT_REPLY: Reply<'static> = Reply {
+        at: 23.1,
+        text: "Only one?",
+        from_ms: 18150,
+        frames: 15,
+        gain: 1.5,
+    };
+
+    #[tokio::test]
+    async fn speaker_echo_of_any_length_leaves_your_lines() {
+        let mut h = harness().await;
+        let (saved, live) = ReleaseSync::load_in(&speakers_room(), &[LONG_REPLY, SHORT_REPLY])
+            .run(&mut h)
+            .await;
+        // The two long echoes are gone: the loopback has the same speech.
+        // The one the loopback has no words for moves to the remote side.
+        // Both of your lines over the remote stay yours.
+        let mut expected = demo_lines(&[
+            ("You: We should check the Windows build too.", 3),
+            ("You: Only one?", 5),
+        ]);
+        expected.insert(9, "Remote: mm hmm yeah yeah okay sure thing".to_string());
+        assert_eq!(saved, expected, "{saved:#?}");
+        assert_eq!(live, saved);
+    }
+
+    #[tokio::test]
+    async fn without_the_guard_speaker_echo_stays_under_you() {
+        let mut h = harness().await;
+        h.daemon.config.echo_rules.guard = false;
+        let (saved, _) = ReleaseSync::load_in(&speakers_room(), &[LONG_REPLY, SHORT_REPLY])
+            .run(&mut h)
+            .await;
+        // The old phrase rule trims the one run of words that matches the
+        // loopback; the rest stays yours.
+        for echo in [
+            "You: great i tasted the omarky package this mourning and the setting panel open without any problem",
+            "You: only won the restore banner stay visible after the daemon restart i thing we can shit",
+            "You: mm hmm yeah yeah okay sure thing",
+            "You: We should check the Windows build too.",
+            "You: Only one?",
+        ] {
+            assert!(saved.contains(&echo.to_string()), "{echo:?} missing: {saved:#?}");
+        }
     }
 
     /// Clusters each loopback chunk as the next new voice: Auto(0), then

@@ -3873,19 +3873,23 @@ Echo cancellation mode for removing speaker bleed-through from the microphone si
 - `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
 - `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
 
-### echo_fuzzy
+### echo_guard
 
 **Type:** Boolean
 **Default:** `true`
 **Required:** No
 
-Drop short microphone lines that are a misheard echo of the remote side. With speakers instead of headphones, the microphone picks up the call, and what the speech engine makes of that echo is often a little off: the loopback says "the Omarchy package ... without any problems" and the microphone line reads "Omarky problem.". The exact-word and phrase checks miss these.
+Keep the call out of your lines when it reaches your microphone through speakers. With speakers instead of headphones, the microphone hears the other side (or a video playing on your desktop), and the speech engine transcribes it as You. Echo cancellation (`echo_cancel`, or PipeWire's) removes most of it from the audio; the guard is the safety net in the transcript.
 
-With `echo_fuzzy` on, a microphone line of up to `echo_fuzzy_max_words` words is dropped when it overlaps a remote line in time (within about a second, to allow for the echo's delay) and at least three in four of its words match words of that line by spelling or by sound ("daemon" and "demon", "5" and "five").
+For every microphone line, voxtype compares the two tracks' audio levels over that line. Echo is the loopback's audio, delayed and quieter, so its level follows the loopback's; your voice is louder than the echo path explains, or comes while the other side is silent.
 
-Your own short replies are kept. Before dropping a line, voxtype compares the two tracks' audio levels for it: echo is the remote audio, delayed and quieter, while your voice is louder on the microphone than the echo explains, or comes while the remote is silent. A "yes" or "only one?" you say while the other side says the same words stays in the transcript. When the levels can't be measured (no remote speech in that chunk), the line is kept.
+- **A line that is only echo**, at least 300 ms of sound with nine-tenths of it explained by the loopback and no stretch of your own voice, whatever its length:
+  - is dropped when the loopback has the same speech at the same time, even partly (a few of the same words). The loopback's own line already holds those words, transcribed from the clean signal, so keeping the echo would show them twice.
+  - otherwise moves to the remote speaker it overlaps (or `Remote`), keeping its words: the loopback's transcript missed them, so dropping the line would lose the only copy. `voxtype meeting reassign <meeting> <line> You` moves it back.
+- **A short line that is the remote misheard** (up to `echo_fuzzy_max_words` words, most of them matching the remote line at the same time by spelling or sound, such as "Omarky problem." while the loopback said "the Amarky package ... without any problems") is dropped.
+- **Your own lines stay**, even over the other side and even in the same words ("yes" over their "yes"): a line with any stretch of your own voice, 150 ms louder than the echo explains, is never touched by the guard. Neither is a line whose audio could not be measured (no remote speech in that chunk).
 
-Applies only while loopback capture is active. Set `false` to keep only the exact-word checks.
+`false` turns the whole guard off and leaves only the older checks: short lines with exactly the remote's words, and runs of four or more of the remote's words. Applies only while loopback capture is active. The older name `echo_fuzzy` is read too.
 
 ### echo_fuzzy_max_words
 
@@ -3893,10 +3897,10 @@ Applies only while loopback capture is active. Set `false` to keep only the exac
 **Default:** `4`
 **Required:** No
 
-The longest microphone line, in words, that `echo_fuzzy` considers. Longer echoed phrases are handled by the phrase check. Raising it catches longer misheard fragments but also lets the rule judge more of your own lines; the audio-level guard still applies to each.
+The longest microphone line, in words, that the guard's misheard-words check looks at. Lines the audio shows to be echo go at any length; this only limits the check that works from the words. Raising it catches longer misheard fragments but also lets that check judge more of your own lines; the audio-level guard still applies to each.
 
 ```bash
-voxtype config set meeting.audio.echo_fuzzy false
+voxtype config set meeting.audio.echo_guard false
 voxtype config set meeting.audio.echo_fuzzy_max_words 3
 ```
 
@@ -3915,7 +3919,7 @@ For quiet USB/XLR mics, try `0.001`.
 [meeting.audio]
 loopback_device = "auto"
 echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
-echo_fuzzy = true  # Also drop misheard short echoes of the remote side
+echo_guard = true  # Keep the call heard through speakers out of your lines
 echo_fuzzy_max_words = 4
 vad_threshold = 0.001  # Optional: quiet mic tuning
 ```

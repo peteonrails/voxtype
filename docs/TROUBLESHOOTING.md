@@ -1723,13 +1723,16 @@ terminal: anything that prompts for input fails.
 
 With speakers instead of headphones, your microphone hears the call. Voxtype removes that echo from your lines, but what is left can still show up:
 
-- **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track. Keep `[meeting.audio] echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones.
-- **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. `[meeting.audio] echo_fuzzy = true` (the default) drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
-- **A short reply of yours went missing.** The short-line checks keep a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud remote can still read as echo. Speak up, lower the call volume, or set `echo_fuzzy = false` to keep only exact-word matching. The log counts the words removed per chunk ("Removed N bleed-through word(s) via dedup"); at debug level it names each stripped line:
+- **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track, including the guard's. Check `[meeting.audio] echo_guard` is on (the default). Keep `echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones. A line that mixes your voice with the echo stays yours, echo included: the guard only removes lines that are nothing but echo.
+- **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. The guard drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
+- **A remote line shows up twice, once under the remote speaker from your microphone.** The guard moved an echo line to the remote side because the loopback's transcript did not have its words. Delete the copy with `voxtype meeting delete-line`.
+- **A line of yours went missing or moved to the remote.** The guard keeps a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud call can still read as echo. Speak up or lower the call volume; move a line back with `voxtype meeting reassign <meeting> <line> You`; or set `echo_guard = false` to keep only exact-word matching.
+
+The log counts what the guard did per chunk ("Echo guard: dropped N microphone line(s) ..., moved N ...", "Removed N bleed-through word(s) via dedup"); at debug level it names each line:
 
 ```bash
 systemctl --user stop voxtype
-RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -i "short echo"
+RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -iE "echo"
 ```
 
 ---

@@ -1,31 +1,39 @@
-//! Echo of the remote side on the microphone track, beyond exact words.
+//! The echo guard: the remote side, heard through speakers, kept out of
+//! the microphone's "You" lines.
 //!
 //! With speakers instead of headphones, the microphone hears the remote
-//! participants, and the speech engine transcribes that bleed under "You".
-//! Long echoed phrases are caught by the 4-gram match and short ones by the
-//! exact-words rule in [`crate::meeting::data::Transcript`]. Both miss a
-//! fragment the engine *misheard*: the demo replay left "Omarky problem."
-//! on the microphone while the loopback said "...the Amarchy package...
-//! without any problems".
+//! participants (or a video playing on the desktop), and the speech engine
+//! transcribes it under "You". Echo cancellation removes most of it from
+//! the audio; this is the safety net in the transcript. Long echoed phrases
+//! that match the loopback word for word are caught by the 4-gram match and
+//! short ones by the exact-words rule in [`crate::meeting::data::Transcript`].
+//! The guard catches what those miss:
 //!
-//! Two pieces close that gap:
-//!
-//! - [`fuzzy_echo`]: a short microphone line whose words are, most of them,
-//!   close to words of an overlapping loopback line, by spelling
-//!   (normalized edit distance) or by sound (a consonant skeleton).
-//! - [`EchoProbe`]: the guard. Your own short reply ("yes", "right") said
-//!   while the remote also said it looks the same in text, but not in the
-//!   audio: echo is the loopback, delayed and quieter; your voice is louder
-//!   on the microphone than the echo path explains. A line with a run of
-//!   such frames is yours and is kept by both short-line rules.
+//! - [`EchoProbe`] compares the two tracks' levels frame by frame. Echo is
+//!   the loopback, delayed and quieter, so its level follows the loopback's
+//!   at a steady ratio; your voice is louder than that path explains. A line
+//!   with a stretch of such frames is yours ([`EchoProbe::own_voice`]) and
+//!   no echo rule touches it. A line whose sound is all explained is echo
+//!   ([`EchoProbe::echo_only`]), whatever its length: Pete's 1.3.0 test had
+//!   long passages of a video transcribed as his.
+//! - [`same_speech`] decides what to do with such a line: drop it when the
+//!   loopback said the same at the time, move it to the remote speaker when
+//!   not (see [`crate::meeting::data::Transcript::resolve_echo_lines`]).
+//! - [`fuzzy_echo`]: a short line the engine *misheard*, whose words are,
+//!   most of them, close to words of an overlapping loopback line by spelling
+//!   (normalized edit distance) or by sound (a consonant skeleton). The demo
+//!   replay left "Omarky problem." while the loopback said "...the Amarchy
+//!   package... without any problems".
 
 use crate::meeting::data::{AudioSource, TranscriptSegment};
 
 /// Tunables for the short-line echo rules.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EchoRules {
-    /// Drop misheard short echoes, not only exact ones.
-    pub fuzzy: bool,
+    /// The echo guard (`echo_guard`): lines of any length that the audio
+    /// shows to be only echo, and short lines that are the remote misheard.
+    /// Off, only the exact-words and phrase rules run, as before 1.3.0.
+    pub guard: bool,
     /// The longest microphone line, in words, the fuzzy rule looks at.
     pub fuzzy_max_words: usize,
 }
@@ -33,7 +41,7 @@ pub struct EchoRules {
 impl Default for EchoRules {
     fn default() -> Self {
         Self {
-            fuzzy: true,
+            guard: true,
             fuzzy_max_words: 4,
         }
     }
@@ -42,7 +50,7 @@ impl Default for EchoRules {
 impl From<&crate::config::MeetingAudioConfig> for EchoRules {
     fn from(audio: &crate::config::MeetingAudioConfig) -> Self {
         Self {
-            fuzzy: audio.echo_fuzzy,
+            guard: audio.echo_guard,
             fuzzy_max_words: audio.echo_fuzzy_max_words.clamp(1, 12) as usize,
         }
     }
@@ -224,6 +232,29 @@ pub fn overlapping_loopback_words(
         .collect()
 }
 
+/// Whether a microphone line the audio already shows to be echo also says
+/// what the loopback said at the time: even part of it is enough to
+/// confirm, since the audio made the case. A short line needs most of its
+/// words to match; a longer one at least two words of five letters or more,
+/// and a quarter of those, so that "the", "and" or "with" confirm nothing.
+pub fn same_speech(mic_words: &[String], loopback_words: &[String]) -> bool {
+    if mic_words.is_empty() || loopback_words.is_empty() {
+        return false;
+    }
+    if mic_words.len() <= 3 {
+        return fuzzy_echo(mic_words, loopback_words, 3);
+    }
+    let content: Vec<&String> = mic_words
+        .iter()
+        .filter(|w| w.chars().count() >= 5)
+        .collect();
+    let matched = content
+        .iter()
+        .filter(|w| loopback_words.iter().any(|l| words_match(w, l)))
+        .count();
+    matched >= 2 && matched * 4 >= content.len()
+}
+
 /// Analysis frame for the energy guard.
 const FRAME_MS: u64 = 30;
 /// The longest echo path delay looked for.
@@ -234,6 +265,11 @@ const OWN_VOICE_MARGIN: f32 = 2.5;
 /// ...for this many consecutive frames (150 ms), a real onset rather than
 /// a click.
 const OWN_VOICE_FRAMES: usize = 5;
+/// A line counts as echo only with at least this much voiced microphone
+/// audio (300 ms) to judge ...
+const MIN_ECHO_FRAMES: usize = 10;
+/// ... and when at least this share of its voiced frames is explained.
+const ECHO_EXPLAINED: f32 = 0.9;
 
 /// Energy of one chunk of both tracks, for telling your voice from echo.
 #[derive(Debug, Clone)]
@@ -243,6 +279,10 @@ pub struct EchoProbe {
     mic_start_ms: u64,
     loopback_start_ms: u64,
     threshold: f32,
+    /// Below this a microphone frame is silence: the VAD threshold, or three
+    /// times the microphone's own noise floor if that is higher, so that a
+    /// noisy room or a low threshold does not read as speech between words.
+    mic_floor: f32,
     /// Echo delay in frames and microphone/loopback level ratio, when the
     /// chunk had enough remote speech to measure them.
     path: Option<(usize, f32)>,
@@ -281,9 +321,15 @@ impl EchoProbe {
             mic_start_ms,
             loopback_start_ms,
             threshold: threshold.max(1e-4),
+            mic_floor: 0.0,
             path: None,
         };
         probe.path = probe.measure_path();
+        // The quietest tenth of the chunk is the room with nobody talking.
+        let mut sorted = probe.mic.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let noise = sorted.get(sorted.len() / 10).copied().unwrap_or(0.0);
+        probe.mic_floor = probe.threshold.max(3.0 * noise);
         probe
     }
 
@@ -325,35 +371,54 @@ impl EchoProbe {
         best.map(|(lag, ratio, _)| (lag, ratio))
     }
 
+    /// The loudest the echo of the loopback could be in microphone frame
+    /// `i`: the measured echo path, with a frame of slack either side of
+    /// its delay. That slack and the margin also cover a room's ringing:
+    /// the speaker-echo test still catches every echo line with reflections
+    /// dying away at 0.75 per frame. `None` without a measured path.
+    fn explained(&self, i: usize) -> Option<f32> {
+        let (lag, ratio) = self.path?;
+        let offset = self.loopback_start_ms as i64 - self.mic_start_ms as i64;
+        let shift = offset / FRAME_MS as i64;
+        let centre = i as i64 - shift - lag as i64;
+        let level = |j: i64| -> f32 {
+            usize::try_from(j)
+                .ok()
+                .and_then(|j| self.loopback.get(j))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let remote = (centre - 1..=centre + 1).map(level).fold(0.0f32, f32::max);
+        Some(ratio * remote)
+    }
+
+    fn frames(&self, start_ms: u64, end_ms: u64) -> std::ops::Range<usize> {
+        let first = (start_ms.saturating_sub(self.mic_start_ms) / FRAME_MS) as usize;
+        let last = (end_ms.saturating_sub(self.mic_start_ms).div_ceil(FRAME_MS) as usize)
+            .min(self.mic.len());
+        first.min(last)..last
+    }
+
     /// Whether the microphone between `start_ms` and `end_ms` holds speech
     /// of its own: a run of frames louder than the echo path explains, or
     /// voiced while the remote is silent. Unknown audio counts as yours, so
     /// a line is never dropped on a guess.
     pub fn own_voice(&self, start_ms: u64, end_ms: u64) -> bool {
-        let Some((lag, ratio)) = self.path else {
-            return true;
-        };
-        let first = start_ms.saturating_sub(self.mic_start_ms) / FRAME_MS;
-        let last = end_ms.saturating_sub(self.mic_start_ms).div_ceil(FRAME_MS);
-        if first as usize >= self.mic.len() {
+        if self.path.is_none() {
             return true;
         }
-        let offset = self.loopback_start_ms as i64 - self.mic_start_ms as i64;
-        let shift = offset / FRAME_MS as i64;
+        let frames = self.frames(start_ms, end_ms);
+        if frames.is_empty() {
+            return true;
+        }
         let mut run = 0;
-        for i in first as usize..(last as usize).min(self.mic.len()) {
+        for i in frames {
             let m = self.mic[i];
-            if m <= self.threshold {
+            if m <= self.mic_floor {
                 run = 0;
                 continue;
             }
-            // The loudest the echo could be here, allowing a frame of slack
-            // either side of the measured delay.
-            let centre = i as i64 - shift - lag as i64;
-            let remote = (centre - 1..=centre + 1)
-                .filter_map(|j| self.loopback.get(usize::try_from(j).ok()?))
-                .fold(0.0f32, |a, &b| a.max(b));
-            let explained = ratio * remote;
+            let explained = self.explained(i).unwrap_or(0.0);
             if m > explained * OWN_VOICE_MARGIN {
                 run += 1;
                 if run >= OWN_VOICE_FRAMES {
@@ -364,6 +429,29 @@ impl EchoProbe {
             }
         }
         false
+    }
+
+    /// Whether the microphone between `start_ms` and `end_ms` is only the
+    /// remote side's echo: enough voiced audio to judge, at least
+    /// nine-tenths of it no louder than the echo path explains, and no
+    /// stretch of your own voice. This is the test for lines of any length;
+    /// a line with some of your speech in it is never echo.
+    pub fn echo_only(&self, start_ms: u64, end_ms: u64) -> bool {
+        if self.path.is_none() || self.own_voice(start_ms, end_ms) {
+            return false;
+        }
+        let (mut voiced, mut explained) = (0usize, 0usize);
+        for i in self.frames(start_ms, end_ms) {
+            let m = self.mic[i];
+            if m <= self.mic_floor {
+                continue;
+            }
+            voiced += 1;
+            if m <= self.explained(i).unwrap_or(0.0) * OWN_VOICE_MARGIN {
+                explained += 1;
+            }
+        }
+        voiced >= MIN_ECHO_FRAMES && explained as f32 >= voiced as f32 * ECHO_EXPLAINED
     }
 }
 
@@ -501,6 +589,103 @@ mod tests {
         let mic = with_echo(&remote, &tone(10.0, &[(6.0, 6.5, 0.05)]));
         let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
         assert!(probe.own_voice(5900, 6600));
+    }
+
+    /// The remote track at 0.3 into the microphone, 60 ms late.
+    fn speaker_echo(remote: &[f32], own: &[f32]) -> Vec<f32> {
+        let delay = (0.06 * RATE as f32) as usize;
+        own.iter()
+            .enumerate()
+            .map(|(i, &o)| {
+                o + if i >= delay {
+                    0.3 * remote[i - delay]
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_echo_is_echo_only() {
+        let remote = tone(20.0, &[(1.0, 15.0, 0.5)]);
+        let mic = speaker_echo(&remote, &vec![0.0; remote.len()]);
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
+        assert!(probe.echo_only(1000, 15000), "14 s of echo");
+        assert!(!probe.own_voice(1000, 15000));
+    }
+
+    /// A line that is partly yours is never echo, however much echo it has.
+    #[test]
+    fn a_line_mixing_echo_and_your_voice_is_not_echo() {
+        let remote = tone(20.0, &[(1.0, 15.0, 0.5)]);
+        // Your voice louder than the speakers' echo, as at a desk.
+        let own = tone(20.0, &[(8.0, 9.0, 0.5)]);
+        let mic = speaker_echo(&remote, &own);
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
+        assert!(!probe.echo_only(1000, 15000));
+        assert!(probe.own_voice(1000, 15000));
+        // The echo either side of you is still echo on its own.
+        assert!(probe.echo_only(1000, 7500));
+    }
+
+    /// A hissing microphone and a low VAD threshold: the noise between the
+    /// echo's words is not taken for your voice.
+    #[test]
+    fn microphone_noise_between_echoed_words_is_not_your_voice() {
+        // Remote words with gaps, the echo, and a steady noise floor.
+        let spans: Vec<(f32, f32, f32)> = (0..12)
+            .map(|i| (1.0 + i as f32, 1.6 + i as f32, 0.5))
+            .collect();
+        let remote = tone(15.0, &spans);
+        let mut mic = speaker_echo(&remote, &vec![0.0; remote.len()]);
+        let mut seed = 1u32;
+        for s in mic.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *s += ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.01;
+        }
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.001);
+        assert!(!probe.own_voice(1000, 13000));
+        assert!(probe.echo_only(1000, 13000));
+    }
+
+    #[test]
+    fn too_little_audio_or_no_echo_path_is_not_echo() {
+        let remote = tone(20.0, &[(1.0, 15.0, 0.5)]);
+        let mic = speaker_echo(&remote, &vec![0.0; remote.len()]);
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
+        // 210 ms of voiced audio is too little to judge.
+        assert!(!probe.echo_only(2000, 2210));
+        // Remote silent all chunk: no path, nothing is echo.
+        let quiet = vec![0.0f32; remote.len()];
+        let probe = EchoProbe::new(&mic, 0, &quiet, 0, RATE, 0.01);
+        assert!(!probe.echo_only(1000, 15000));
+    }
+
+    #[test]
+    fn same_speech_confirms_on_part_of_a_long_line_but_not_on_small_words() {
+        let remote = words(
+            "Only one. The restart banner stays visible after the demon restarts. I think we can ship with that as a known issue.",
+        );
+        assert!(same_speech(
+            &words("only won the restore banner stay visible after the daemon restart i thing we can shit"),
+            &remote
+        ));
+        // Two real words out of a long garble is enough: the audio made the case.
+        assert!(same_speech(
+            &words("la la banner la la la visible la la la"),
+            &remote
+        ));
+        assert!(!same_speech(
+            &words("mm hmm yeah yeah okay sure thing"),
+            &remote
+        ));
+        assert!(!same_speech(
+            &words("and the and the and with that as"),
+            &remote
+        ));
+        assert!(same_speech(&words("known issue"), &remote));
+        assert!(!same_speech(&words("sure thing"), &remote));
     }
 
     #[test]

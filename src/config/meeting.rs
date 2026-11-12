@@ -123,13 +123,17 @@ pub struct MeetingAudioConfig {
     #[serde(default = "default_meeting_vad_threshold")]
     pub vad_threshold: f32,
 
-    /// Also drop short microphone lines that are the remote side misheard
-    /// ("Omarky problem." under the remote's "Amarchy ... problems"), unless
-    /// the microphone's level shows you were the one speaking.
-    #[serde(default = "default_true")]
-    pub echo_fuzzy: bool,
+    /// The echo guard: keep the remote side, heard through your speakers,
+    /// out of your lines. Microphone lines whose sound is all explained by
+    /// the loopback go (or move to the remote speaker), and short lines that
+    /// are the remote misheard go, unless the microphone's level shows you
+    /// were the one speaking. `echo_fuzzy`, its name during development, is
+    /// read too.
+    #[serde(default = "default_true", alias = "echo_fuzzy")]
+    pub echo_guard: bool,
 
-    /// The longest microphone line, in words, `echo_fuzzy` checks.
+    /// The longest microphone line, in words, the guard's misheard-words
+    /// check looks at.
     #[serde(default = "default_echo_fuzzy_max_words")]
     pub echo_fuzzy_max_words: u32,
 }
@@ -165,7 +169,7 @@ impl Default for MeetingAudioConfig {
             loopback_device: default_loopback(),
             echo_cancel: default_echo_cancel(),
             vad_threshold: default_meeting_vad_threshold(),
-            echo_fuzzy: true,
+            echo_guard: true,
             echo_fuzzy_max_words: default_echo_fuzzy_max_words(),
         }
     }
@@ -459,21 +463,24 @@ mod tests {
         assert_eq!(config.mic_device, "default");
         assert_eq!(config.loopback_device, "auto");
         assert_eq!(config.vad_threshold, 0.01);
-        assert!(config.echo_fuzzy);
+        assert!(config.echo_guard);
         assert_eq!(config.echo_fuzzy_max_words, 4);
     }
 
     #[test]
-    fn test_echo_fuzzy_defaults_on_for_old_configs_and_can_be_set() {
+    fn test_echo_guard_defaults_on_for_old_configs_and_can_be_set() {
         let config: Config = toml::from_str("[meeting.audio]\necho_cancel = \"auto\"\n").unwrap();
         let rules = crate::meeting::echo::EchoRules::from(&config.meeting.audio);
         assert_eq!(rules, crate::meeting::echo::EchoRules::default());
 
         let config: Config =
-            toml::from_str("[meeting.audio]\necho_fuzzy = false\necho_fuzzy_max_words = 40\n")
+            toml::from_str("[meeting.audio]\necho_guard = false\necho_fuzzy_max_words = 40\n")
                 .unwrap();
         let rules = crate::meeting::echo::EchoRules::from(&config.meeting.audio);
-        assert!(!rules.fuzzy);
+        assert!(!rules.guard);
+        // The development name still reads.
+        let config: Config = toml::from_str("[meeting.audio]\necho_fuzzy = false\n").unwrap();
+        assert!(!config.meeting.audio.echo_guard);
         assert_eq!(rules.fuzzy_max_words, 12, "clamped to the schema's range");
     }
 

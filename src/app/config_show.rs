@@ -55,7 +55,7 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     let _ = writeln!(s, "  mic_device = {:?}", meeting.audio.mic_device);
     let _ = writeln!(s, "  loopback_device = {:?}", meeting.audio.loopback_device);
     let _ = writeln!(s, "  echo_cancel = {:?}", meeting.audio.echo_cancel);
-    let _ = writeln!(s, "  echo_fuzzy = {}", meeting.audio.echo_fuzzy);
+    let _ = writeln!(s, "  echo_guard = {}", meeting.audio.echo_guard);
     let _ = writeln!(
         s,
         "  echo_fuzzy_max_words = {}",
