@@ -138,7 +138,7 @@ Item {
       waitFor(function() { return panel.cliMissing !== "" }, "CLI failure noticed")
       check(panel.degraded, "panel degraded")
       check(panel.cliMissing === __MISSING__, "binary named: " + panel.cliMissing)
-      check(title() === "Voxtype Settings could not run " + __MISSING__ + ".", "title: " + title())
+      check(title() === "The Voxtype panel could not run " + __MISSING__ + ".", "title: " + title())
       check(detail().indexOf("set in " + __DEVJSON__ + ".") !== -1, "detail names dev.json: " + detail())
       checkCleared()
       click(find(panel.renderTest, "installButton"), "Install / Update")
@@ -151,7 +151,7 @@ Item {
       waitFor(function() { return panel.cliMissing !== "" }, "CLI failure noticed")
       check(panel.cliMissing === "voxtype", "binary named: " + panel.cliMissing)
       check(panel.cliMissingSource === "", "no dev.json source")
-      check(title() === "Voxtype Settings could not run voxtype.", "title: " + title())
+      check(title() === "The Voxtype panel could not run voxtype.", "title: " + title())
       check(detail() === "Is voxtype installed? Install it, or make sure voxtype is on PATH.", "detail: " + detail())
       checkCleared()
     }

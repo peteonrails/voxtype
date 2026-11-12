@@ -12,6 +12,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Pausing and Resuming](#pausing-and-resuming)
   - [Checking Status](#checking-status)
 - [Live Meeting View](#live-meeting-view)
+  - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
 - [Meeting Detection](#meeting-detection)
   - [How calls are recognized](#how-calls-are-recognized)
   - [When it prompts](#when-it-prompts)
@@ -28,6 +29,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Exporting Transcripts](#exporting-transcripts)
   - [Deleting Meetings](#deleting-meetings)
 - [Meeting Audio](#meeting-audio)
+  - [Checking the Audio](#checking-the-audio)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
   - [Importing a Recording](#importing-a-recording)
@@ -117,7 +119,7 @@ The `--title` flag is optional. If omitted, the meeting is named by its date and
 
 Only one meeting can run at a time. Starting a second meeting while one is active will fail.
 
-On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs.
+On Linux, the system tray menu has the same controls: **Start Meeting** (with the default title), then **Stop Meeting** and **Pause Meeting** / **Resume Meeting** while one runs. **Meetings...** near the top of the menu opens the meeting view.
 
 Recording starts as soon as the daemon reads the request, before any model loads, so nothing said in the first seconds is lost.
 
@@ -264,6 +266,34 @@ VOXTYPE_MEETING_VIEW=terminal voxtype meeting view
 The deb and rpm packages install the window as `/usr/lib/voxtype/voxtype-meetings-gtk4`; it needs GTK 4 (`libgtk-4-1` on Debian and Ubuntu, `gtk4` on Fedora and Arch) but not gtk4-layer-shell.
 
 The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#the-live-feed-meetingsock). It does not open over an open Voxtype Settings panel.
+
+### Watching a Meeting in the Terminal
+
+`voxtype meeting watch` shows the running meeting in the terminal, on any desktop and over SSH:
+
+```bash
+voxtype meeting watch
+```
+
+- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time.
+- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
+- The side panel lists the speakers, merged by the names you gave them, and the summary once it is written.
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause or resume |
+| `s` | Stop (asks first) |
+| `r` | Move the selected line to another speaker: pick one, or "New speaker…" and type a name (`meeting reassign`) |
+| `n` | Add a note to the selected line (`meeting annotate`) |
+| `a` | Ask the assistant about the meeting; the answer streams into a pane at the bottom (`meeting ask`) |
+| `Esc` | Close the answer, or go to the list of meetings |
+| `q` | Quit |
+
+Each key runs the matching `voxtype meeting` command, so it behaves exactly as typing it would, including the assistant's consent: if transcripts have not been allowed to go to an agent yet, the answer pane says how to allow it.
+
+With no meeting running, `watch` lists recent meetings with their length, speaker count and whether they have a summary. Enter opens one (ended meetings still take `r`, `n` and `a`), Esc goes back, and a meeting that starts meanwhile appears at the top of the list. If the daemon restarts, the view says it is reconnecting and catches up when it is back.
+
+For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md#the-live-feed-meetingsock)), reconnecting on its own; every connection starts with a `hello` snapshot. `voxtype meeting watch --levels` prints the microphone and loopback levels instead, about ten times a second while a meeting records, for a level meter; add both flags for everything.
 
 ---
 
@@ -506,6 +536,19 @@ Permanently deletes the meeting: its record, its folder and everything in it, au
 ---
 
 ## Meeting Audio
+
+### Checking the Audio
+
+Before a call, check that voxtype hears both sides:
+
+```bash
+voxtype meeting soundcheck                # 30 seconds of meters; Ctrl+C stops
+voxtype meeting soundcheck --seconds 60
+```
+
+It opens the meeting's microphone and loopback the way a meeting would (the same devices, and on speakers the same echo canceller), records and transcribes nothing, and shows a meter for each. Speak: the mic meter should move. Play something on the computer: the loopback meter should move, and with speakers the mic meter should stay low, because the echo canceller takes the speakers out of the mic. The first line says which echo handling the next meeting will use.
+
+During a meeting the levels are already live in `voxtype meeting watch --levels` and the meeting view, so the sound check refuses to run then. Starting a meeting ends a sound check.
 
 ### Keeping the Audio
 
@@ -840,6 +883,7 @@ Echo cancellation removes most of what your speakers play from the microphone. W
 
 - A microphone line whose sound is all explained by the loopback, whatever its length, is echo. When the loopback has the same speech at the time, the line is dropped, because the loopback already has those words. When it does not, the line moves to the remote speaker instead, so nothing the loopback missed is lost; `voxtype meeting reassign` moves it back if that was wrong.
 - A short line that is a misheard version of the remote's words, such as "after the daemon restarts." while the remote said "after the demon restarts", is dropped.
+- A short "Thank you." or "Thanks for watching." on a microphone with no voice of yours in it, while the other side talks, is dropped. Speech engines write these phrases for faint sound they cannot make out, such as what the echo canceller leaves behind.
 - Your own lines stay. Before touching a line the guard compares both tracks' audio levels: your voice is louder on the microphone than the echo can explain, so a line with any of your own speech in it stays yours, and "yes" said over the other side's "yes" stays too.
 
 Short lines with exactly the remote's words, and runs of four or more of them, are removed whether the guard is on or off. See [`echo_guard`](CONFIGURATION.md#echo_guard) for the details.

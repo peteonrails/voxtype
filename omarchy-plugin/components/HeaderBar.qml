@@ -15,7 +15,7 @@ import qs.Ui
 Item {
   id: root
 
-  property string title: "Voxtype Settings"
+  property string title: "Voxtype"
   property string voxtypeVersion: ""
   // What the running daemon reports, which is not always what the CLI that
   // rendered this panel is. An upgrade installed but never restarted leaves

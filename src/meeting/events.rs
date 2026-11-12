@@ -53,6 +53,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -195,6 +196,8 @@ enum WireEvent {
         state: String,
         from_ms: u64,
     },
+    Levels(crate::meeting::levels::Levels),
+    Soundcheck(crate::meeting::soundcheck::SoundcheckEvent),
     Error {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -265,6 +268,9 @@ struct HubInner {
     /// through the daemon. Independent of `state` so it survives a
     /// watchdog respawn untouched.
     hello: Arc<RwLock<String>>,
+    /// Connected subscribers, kept by the broadcast loop. A client that has
+    /// gone counts until the next event fails to reach it.
+    subscribers: Arc<AtomicUsize>,
 }
 
 impl HubInner {
@@ -290,13 +296,16 @@ impl MeetingEventHub {
         let hello = Arc::new(RwLock::new(
             WireEvent::hello(&MeetingHudState::idle()).to_line(),
         ));
-        let (state, accept_h, broadcast_h) = bind_and_spawn(&socket_path, hello.clone())?;
+        let subscribers = Arc::new(AtomicUsize::new(0));
+        let (state, accept_h, broadcast_h) =
+            bind_and_spawn(&socket_path, hello.clone(), subscribers.clone())?;
         tracing::info!("Meeting event socket listening at {:?}", socket_path);
 
         let inner = Arc::new(HubInner {
             state: RwLock::new(state),
             socket_path: socket_path.clone(),
             hello,
+            subscribers,
         });
 
         spawn_watchdog(inner.clone(), accept_h, broadcast_h);
@@ -396,6 +405,22 @@ impl MeetingEventHub {
         });
     }
 
+    /// Broadcast a `levels` event: the meeting's per-track levels.
+    pub fn publish_levels(&self, levels: crate::meeting::levels::Levels) {
+        self.publish(WireEvent::Levels(levels));
+    }
+
+    /// Broadcast a `soundcheck` event: a sound check started or stopped.
+    pub fn publish_soundcheck(&self, event: crate::meeting::soundcheck::SoundcheckEvent) {
+        self.publish(WireEvent::Soundcheck(event));
+    }
+
+    /// Is any client connected? Lets frequent events like `levels` skip
+    /// the work when nobody listens.
+    pub fn has_subscribers(&self) -> bool {
+        self.inner.subscribers.load(Ordering::Relaxed) > 0
+    }
+
     /// Broadcast an `error` event.
     pub fn publish_error(&self, message: &str) {
         self.publish(WireEvent::Error {
@@ -449,6 +474,7 @@ impl MeetingEventHub {
 fn bind_and_spawn(
     socket_path: &std::path::Path,
     hello: Arc<RwLock<String>>,
+    subscribers: Arc<AtomicUsize>,
 ) -> io::Result<(Arc<HubState>, JoinHandle<()>, JoinHandle<()>)> {
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
@@ -466,7 +492,7 @@ fn bind_and_spawn(
         run_accept_loop(listener, sub_tx, hello).await;
     });
     let broadcast_handle = tokio::spawn(async move {
-        run_broadcast_loop(broadcast_rx, sub_rx).await;
+        run_broadcast_loop(broadcast_rx, sub_rx, subscribers).await;
     });
 
     Ok((state, accept_handle, broadcast_handle))
@@ -511,7 +537,11 @@ fn spawn_watchdog(
             broadcast_handle.abort();
 
             loop {
-                match bind_and_spawn(&inner.socket_path, inner.hello.clone()) {
+                match bind_and_spawn(
+                    &inner.socket_path,
+                    inner.hello.clone(),
+                    inner.subscribers.clone(),
+                ) {
                     Ok((new_state, ah, bh)) => {
                         inner.replace(new_state);
                         tracing::info!("Meeting event socket rebound at {:?}", inner.socket_path);
@@ -595,8 +625,10 @@ async fn run_subscriber_writer(
 async fn run_broadcast_loop(
     mut line_rx: mpsc::Receiver<String>,
     mut new_subs: mpsc::UnboundedReceiver<SubscriberSlot>,
+    count: Arc<AtomicUsize>,
 ) {
     let mut subscribers: Vec<mpsc::Sender<String>> = Vec::new();
+    count.store(0, Ordering::Relaxed);
 
     loop {
         tokio::select! {
@@ -612,21 +644,74 @@ async fn run_broadcast_loop(
                         while let Ok(slot) = new_subs.try_recv() {
                             subscribers.push(slot.tx);
                         }
-                        if subscribers.is_empty() {
-                            continue;
+                        if !subscribers.is_empty() {
+                            subscribers.retain(|tx| tx.try_send(line.clone()).is_ok());
                         }
-                        subscribers.retain(|tx| tx.try_send(line.clone()).is_ok());
                     }
                     None => break,
                 }
             }
         }
+        // A writer that has gone (client disconnected) closes its queue.
+        subscribers.retain(|tx| !tx.is_closed());
+        count.store(subscribers.len(), Ordering::Relaxed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Level events reach a client in their documented shape, and the hub
+    /// knows when nobody is listening, so the publisher can skip the work.
+    #[tokio::test]
+    async fn levels_reach_subscribers_and_the_hub_counts_them() {
+        use tokio::io::AsyncBufReadExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let hub = MeetingEventHub::start(dir.path().join("meeting.sock"))
+            .await
+            .unwrap();
+        assert!(!hub.has_subscribers());
+
+        let stream = UnixStream::connect(hub.socket_path()).await.unwrap();
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        lines.next_line().await.unwrap().unwrap(); // hello
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !hub.has_subscribers() {
+            assert!(std::time::Instant::now() < deadline, "never counted");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        hub.publish_levels(crate::meeting::levels::Levels {
+            meeting_id: Some("m1".into()),
+            soundcheck: false,
+            t_ms: 1200,
+            mic: Some(-23.4),
+            mic_peak: Some(-15.1),
+            loopback: None,
+            loopback_peak: None,
+        });
+        let line = lines.next_line().await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"event": "levels", "meeting_id": "m1", "t_ms": 1200,
+                               "mic": -23.4, "mic_peak": -15.1,
+                               "loopback": null, "loopback_peak": null})
+        );
+
+        // The client leaves: the next event finds it gone and the count
+        // drops to zero.
+        drop(lines);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while hub.has_subscribers() {
+            assert!(std::time::Instant::now() < deadline, "still counted");
+            hub.publish_status("recording");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        hub.cleanup();
+    }
 
     #[tokio::test]
     async fn summary_events_reach_subscribers() {

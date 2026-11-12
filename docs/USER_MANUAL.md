@@ -173,8 +173,10 @@ The tray is enabled by default and remains visible while idle. Opt out with
 and failed-dictation states without relying on audio feedback.
 
 Clicking the icon opens a compact native menu without launching settings or closing
-the tray drawer. Choose the explicit **Settings** gear row for the full settings
-frontend. The menu shows live status. There is one recording
+the tray drawer. Choose the explicit **Settings...** gear row for the full settings
+frontend (on Omarchy, the Voxtype panel on its settings view). With meeting mode on,
+**Meetings...** under it opens the live meeting view: the Voxtype panel's meeting view on
+Omarchy, otherwise `voxtype meeting view` for voxtype's own Quickshell shell. The menu shows live status. There is one recording
 control, **Start Recording** / **Stop Recording**, and **Cancel** is available while
 recording or transcribing. Starting another recording is disabled during inference.
 The tray uses the existing daemon control protocol, not a second recording daemon.

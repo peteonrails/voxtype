@@ -113,3 +113,60 @@ fn meeting_view_says_why_nothing_opens() {
         assert!(err.contains("voxtype meeting watch"), "{err}");
     }
 }
+
+/// Run `meeting watch <args>` against a fake meeting.sock that sends `lines`
+/// and return the first `want` lines the relay prints.
+fn relayed(args: &[&str], lines: &[&str], want: usize) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let sock_dir = dir.path().join("voxtype");
+    std::fs::create_dir_all(&sock_dir).unwrap();
+    let listener = UnixListener::bind(sock_dir.join("meeting.sock")).unwrap();
+    let mut child = command(dir.path())
+        .args(["meeting", "watch"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let (mut conn, _) = listener.accept().unwrap();
+    for line in lines {
+        writeln!(conn, "{line}").unwrap();
+    }
+    let (tx, rx) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let out = (0..want)
+        .map(|_| {
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("a relayed line")
+        })
+        .collect();
+    // Nothing more arrives than expected.
+    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    let _ = child.kill();
+    let _ = child.wait();
+    out
+}
+
+#[test]
+fn levels_are_relayed_only_when_asked_for() {
+    let hello =
+        r#"{"event":"hello","status":"recording","meeting_id":"m1","chunk_count":0,"segments":[]}"#;
+    let levels = r#"{"event":"levels","meeting_id":"m1","t_ms":1200,"mic":-23.4,"mic_peak":-15.1,"loopback":-41.0,"loopback_peak":-33.2}"#;
+    let segments = r#"{"event":"segments","chunk_id":0,"segments":[]}"#;
+    let all = [hello, levels, segments];
+
+    assert_eq!(relayed(&["--levels"], &all, 1), vec![levels]);
+    assert_eq!(relayed(&["--json"], &all, 2), vec![hello, segments]);
+    assert_eq!(
+        relayed(&["--json", "--levels"], &all, 3),
+        vec![hello, levels, segments]
+    );
+}

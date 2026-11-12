@@ -165,6 +165,27 @@ impl EchoPath {
             EchoPath::None => "none",
         }
     }
+
+    /// What a meeting on this path really runs, and so reports: GTCRN
+    /// only when it can be used, nothing otherwise.
+    pub fn effective(self, gtcrn_usable: bool) -> Self {
+        match self {
+            EchoPath::Gtcrn if !gtcrn_usable => EchoPath::None,
+            path => path,
+        }
+    }
+}
+
+/// The GTCRN model's file name in the models directory.
+pub const GTCRN_MODEL_FILE: &str = "gtcrn_simple.onnx";
+
+/// Whether a meeting started now could run GTCRN: this build has it and
+/// its model is installed.
+pub fn gtcrn_available() -> bool {
+    cfg!(feature = "onnx-common")
+        && crate::config::Config::models_dir()
+            .join(GTCRN_MODEL_FILE)
+            .exists()
 }
 
 /// The meeting mic, as the canceller would capture it.
@@ -759,6 +780,14 @@ fn stop_stale(conf: &Path) -> usize {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn gtcrn_without_its_model_is_reported_as_none() {
+        assert_eq!(EchoPath::Gtcrn.effective(false), EchoPath::None);
+        assert_eq!(EchoPath::Gtcrn.effective(true), EchoPath::Gtcrn);
+        assert_eq!(EchoPath::Webrtc.effective(false), EchoPath::Webrtc);
+        assert_eq!(EchoPath::None.effective(true), EchoPath::None);
+    }
 
     fn sink(
         name: &str,

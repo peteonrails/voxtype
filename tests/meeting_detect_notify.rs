@@ -8,6 +8,8 @@
 
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -116,14 +118,11 @@ impl FakeServer {
 
 /// A stand-in for the voxtype binary that writes its arguments to `out`.
 fn fake_voxtype(dir: &Path, out: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let exe = dir.join("voxtype");
-    std::fs::write(
+    common::write_script(
         &exe,
-        format!("#!/bin/sh\nprintf '%s|' \"$@\" > '{}'\n", out.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\nprintf '%s|' \"$@\" > '{}'\n", out.display()),
+    );
     exe
 }
 
