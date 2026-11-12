@@ -1964,9 +1964,15 @@ mod tests {
         assert!(ran);
         assert!(matches!(events[0], SummaryEvent::Summarizing { .. }));
         match &events[1] {
-            SummaryEvent::Failed { code, message, .. } => {
+            SummaryEvent::Failed {
+                code,
+                message,
+                backend,
+                ..
+            } => {
                 assert_eq!(*code, "agent_failed");
                 assert!(message.contains("Not logged in"), "{message}");
+                assert_eq!(backend.as_deref(), Some("Claude"));
             }
             other => panic!("{other:?}"),
         }
