@@ -3748,6 +3748,23 @@ The Meeting Started, Paused, Resumed and Ended notifications. They name the meet
 
 `[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. Changing it needs a daemon restart.
 
+### my_name
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Your name, shown instead of "You" for your side of every meeting: in the meeting view, exports, `transcript.md`, summaries, the meeting assistant and `voxtype meeting search`. The assistant's prompt also names you as the person asking, so "I" in a question means your side. It is only a display label: your side stays keyed `You` in `transcript.json` and the index, so attribution and `meeting label` work as before, and a name you give with `meeting label <meeting> You "..."` wins for that meeting. You can also use it wherever a command takes a speaker, for example `meeting reassign <meeting> 12 Pete`.
+
+Voxtype never sets it for you. When it is unset, `voxtype meeting my-name` shows the full name on your account as a suggestion, and `meeting show` and `meeting search` offer it once in the terminal.
+
+```toml
+[meeting]
+my_name = "Pete"
+```
+
+Changing it needs a daemon restart for the live view; exports and search pick it up at once.
+
 ### chunk_duration_secs
 
 **Type:** Integer

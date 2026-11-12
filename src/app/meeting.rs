@@ -24,6 +24,7 @@ pub(crate) async fn run_meeting_command(
             storage_path,
             retain_audio: config.meeting.retain_audio,
             max_meetings: 0,
+            my_name: config.meeting.my_name.clone(),
         },
         retain_audio: config.meeting.retain_audio,
         max_duration_mins: config.meeting.max_duration_mins,
@@ -427,6 +428,9 @@ pub(crate) async fn run_meeting_command(
                         "Use 'voxtype meeting export {}' to export the transcript.",
                         meeting_id
                     );
+                    if meeting.transcript.speakers().iter().any(|s| s == "You") {
+                        offer_my_name(config);
+                    }
                 }
                 Err(e) => {
                     eprintln!("Error loading meeting: {}", e);
@@ -641,6 +645,49 @@ pub(crate) async fn run_meeting_command(
                     "Deleted segment {} from meeting {} (restore with --restore)",
                     segment.id, meeting_id
                 );
+            }
+        }
+
+        MeetingAction::Search {
+            query,
+            limit,
+            speaker,
+            since,
+            json,
+        } => {
+            run_meeting_search(config, &meeting_config, query, limit, speaker, since, json)?;
+        }
+
+        MeetingAction::MyName { json } => {
+            let configured = config
+                .meeting
+                .my_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty());
+            let suggestion = match configured {
+                Some(_) => None,
+                None => meeting::my_name::account_full_name(),
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "my_name": configured,
+                        "suggestion": suggestion,
+                    }))?
+                );
+            } else if let Some(name) = configured {
+                println!("Meetings show your side as \"{}\".", name);
+            } else {
+                println!("Meetings show your side as \"You\": [meeting] my_name is not set.");
+                if let Some(name) = suggestion {
+                    println!("Your account's full name is {}. To use it:", name);
+                    println!(
+                        "  voxtype config set meeting.my_name \"{}\"",
+                        name.replace('"', "\\\"")
+                    );
+                }
             }
         }
 
@@ -1001,6 +1048,104 @@ pub(crate) async fn run_meeting_suggest(
     {
         let _ = (config, config_path, dry_run, watch);
         anyhow::bail!("Meeting detection is only available on Linux.")
+    }
+}
+
+/// `voxtype meeting search`.
+fn run_meeting_search(
+    config: &config::Config,
+    meeting_config: &meeting::MeetingConfig,
+    query: Vec<String>,
+    limit: u32,
+    speaker: Option<String>,
+    since: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use meeting::search::{parse_since, SearchHit, SearchQuery};
+    let since = match since {
+        Some(s) => Some(parse_since(&s).ok_or_else(|| {
+            anyhow::anyhow!("--since takes a date like 2026-11-01 or a time like 2026-11-01T09:00:00Z, not '{}'", s)
+        })?),
+        None => None,
+    };
+    let text = query.join(" ");
+    let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())?;
+    let hits = storage.search(&SearchQuery {
+        text: text.clone(),
+        limit,
+        speaker: speaker.clone(),
+        since,
+    })?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "query": text,
+                "speaker": speaker,
+                "since": since.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                "results": hits,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        println!("No meetings mention \"{}\".", text);
+    }
+    let mut last_meeting: Option<&str> = None;
+    for hit in &hits {
+        let hit: &SearchHit = hit;
+        if last_meeting != Some(hit.meeting_id.as_str()) {
+            let date = chrono::DateTime::parse_from_rfc3339(&hit.date)
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|_| hit.date.clone());
+            if last_meeting.is_some() {
+                println!();
+            }
+            println!(
+                "{}  {}  ({})",
+                date,
+                hit.title,
+                &hit.meeting_id[..8.min(hit.meeting_id.len())]
+            );
+            last_meeting = Some(&hit.meeting_id);
+        }
+        let place = match (hit.start_ms, hit.speaker.as_deref()) {
+            (Some(ms), Some(who)) => format!("{}  {}:", format_ms(ms), who),
+            (Some(ms), None) => format_ms(ms),
+            _ => format!(
+                "{}:",
+                serde_json::to_value(hit.kind)?.as_str().unwrap_or("")
+            ),
+        };
+        println!("  {}  {}", place, hit.snippet.replace('\n', " "));
+    }
+
+    if hits.iter().any(|h| h.speaker.as_deref() == Some("You")) {
+        offer_my_name(config);
+    }
+    Ok(())
+}
+
+/// Once, in a terminal: suggest setting `[meeting] my_name` from the
+/// account's full name. Never sets it.
+fn offer_my_name(config: &config::Config) {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    if let Some(name) = meeting::my_name::suggest_once(
+        config.meeting.my_name.as_deref(),
+        meeting::my_name::account_full_name(),
+        &meeting::my_name::marker_path(),
+    ) {
+        eprintln!();
+        eprintln!("{}", meeting::my_name::suggestion_text(&name));
     }
 }
 

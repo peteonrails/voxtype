@@ -32,6 +32,9 @@ pub enum StorageError {
     #[error("Storage path not configured")]
     PathNotConfigured,
 
+    #[error("{0}")]
+    Search(String),
+
     #[error(
         "Speaker '{speaker}' is not in this meeting. Speakers in the transcript: {}",
         speaker_list(.available)
@@ -128,6 +131,9 @@ pub struct StorageConfig {
     pub retain_audio: bool,
     /// Maximum number of meetings to keep (0 = unlimited)
     pub max_meetings: u32,
+    /// `[meeting] my_name`: shown instead of "You" wherever a meeting is
+    /// displayed. A display label only; the speaker stays keyed "You".
+    pub my_name: Option<String>,
 }
 
 impl Default for StorageConfig {
@@ -136,6 +142,7 @@ impl Default for StorageConfig {
             storage_path: Self::default_storage_path(),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         }
     }
 }
@@ -308,6 +315,7 @@ impl MeetingStorage {
             self.conn
                 .execute_batch("ALTER TABLE meeting_context ADD COLUMN echo_cancel TEXT;")?;
         }
+        self.conn.execute_batch(super::search::SCHEMA)?;
         Ok(())
     }
 
@@ -371,6 +379,11 @@ impl MeetingStorage {
                 metadata.synced_at.map(|dt| dt.timestamp()),
                 metadata.url,
             ],
+        )?;
+        super::search::index_title(
+            &self.conn,
+            &metadata.id.to_string(),
+            metadata.title.as_deref(),
         )?;
 
         // Update metadata file if storage path exists
@@ -480,6 +493,7 @@ impl MeetingStorage {
                 summary.generated_at.timestamp(),
             ],
         )?;
+        super::search::index_summary(&self.conn, &meeting_id.to_string(), Some(summary))?;
         metadata.summary = Some(summary.clone());
         self.update_meeting(&metadata)
     }
@@ -645,6 +659,7 @@ impl MeetingStorage {
         // mid-meeting. Applying them here keeps every write labelled.
         let mut edited = transcript.clone();
         self.apply_edits(meeting_id, &mut edited)?;
+        self.unpresent(meeting_id, &mut edited)?;
         let transcript_path = storage_path.join("transcript.json");
         std::fs::write(transcript_path, serde_json::to_string_pretty(&edited)?)?;
 
@@ -654,6 +669,8 @@ impl MeetingStorage {
         let notes = self.load_notes(meeting_id)?.notes;
         edited.remove_deleted();
         self.store_speaker_count(meeting_id, &edited)?;
+        self.index_transcript(meeting_id, &metadata, &edited)?;
+        self.present(&mut edited);
         let data = MeetingData {
             metadata,
             transcript: edited,
@@ -667,6 +684,87 @@ impl MeetingStorage {
         self.refresh_manifest(meeting_id);
 
         Ok(())
+    }
+
+    /// Bring the search index up to date with a displayed transcript (edits
+    /// applied, deleted lines removed, no `my_name`) and the title. A
+    /// meeting indexed for the first time also gets its notes and summary.
+    fn index_transcript(
+        &self,
+        meeting_id: &MeetingId,
+        metadata: &MeetingMetadata,
+        displayed: &Transcript,
+    ) -> Result<(), StorageError> {
+        use super::search;
+        let id = meeting_id.to_string();
+        let tx = self.conn.unchecked_transaction()?;
+        search::index_lines(&tx, &id, displayed)?;
+        search::index_title(&tx, &id, metadata.title.as_deref())?;
+        if !search::is_indexed(&tx, &id)? {
+            search::index_notes(&tx, &id, &self.load_notes(meeting_id)?.notes)?;
+            search::index_summary(&tx, &id, self.get_summary(meeting_id)?.as_ref())?;
+            search::mark_indexed(&tx, &id)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Index a meeting from what is saved, for meetings recorded before the
+    /// search index existed.
+    fn reindex_meeting(&self, meeting_id: &MeetingId) -> Result<(), StorageError> {
+        use super::search;
+        let Some(metadata) = self.get_meeting(meeting_id)? else {
+            return Ok(());
+        };
+        let mut displayed = match self.load_transcript_all(meeting_id) {
+            Ok(t) => t,
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                Transcript::new()
+            }
+            Err(StorageError::PathNotConfigured) => Transcript::new(),
+            Err(e) => return Err(e),
+        };
+        displayed.remove_deleted();
+        let notes = self
+            .load_notes(meeting_id)
+            .map(|n| n.notes)
+            .unwrap_or_default();
+        let id = meeting_id.to_string();
+        let tx = self.conn.unchecked_transaction()?;
+        search::index_lines(&tx, &id, &displayed)?;
+        search::index_title(&tx, &id, metadata.title.as_deref())?;
+        search::index_notes(&tx, &id, &notes)?;
+        search::index_summary(&tx, &id, self.get_summary(meeting_id)?.as_ref())?;
+        search::mark_indexed(&tx, &id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Index every meeting that is not indexed yet. Returns how many were.
+    pub fn backfill_search_index(&self) -> Result<usize, StorageError> {
+        let ids = super::search::unindexed_meetings(&self.conn)?;
+        let mut done = 0;
+        for id in ids {
+            match MeetingId::parse(&id) {
+                Ok(meeting_id) => match self.reindex_meeting(&meeting_id) {
+                    Ok(()) => done += 1,
+                    Err(e) => tracing::warn!("Could not index meeting {}: {}", id, e),
+                },
+                Err(e) => tracing::warn!("Skipping meeting with a bad ID {}: {}", id, e),
+            }
+        }
+        Ok(done)
+    }
+
+    /// Search transcripts, titles, notes and summaries. Indexes any meeting
+    /// not indexed yet first. Results show `my_name` for the "You" side.
+    pub fn search(
+        &self,
+        query: &super::search::SearchQuery,
+    ) -> Result<Vec<super::search::SearchHit>, StorageError> {
+        self.backfill_search_index()?;
+        super::search::search(&self.conn, query, self.my_name())
+            .map_err(|e| StorageError::Search(e.to_string()))
     }
 
     /// Everything the user changed by hand, which lives in the index rather
@@ -690,7 +788,65 @@ impl MeetingStorage {
     pub fn load_transcript(&self, meeting_id: &MeetingId) -> Result<Transcript, StorageError> {
         let mut transcript = self.load_transcript_all(meeting_id)?;
         transcript.remove_deleted();
+        self.present(&mut transcript);
         Ok(transcript)
+    }
+
+    /// `[meeting] my_name`, when set.
+    pub fn my_name(&self) -> Option<&str> {
+        self.config
+            .my_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+    }
+
+    /// Apply what is shown but never saved: `my_name` on the "You" side.
+    fn present(&self, transcript: &mut Transcript) {
+        if let Some(name) = self.my_name() {
+            transcript.apply_my_name(name);
+        }
+    }
+
+    /// Undo [`Self::present`] on a transcript about to be saved, in case a
+    /// caller hands back one it loaded for display: `my_name` is a display
+    /// label and must never reach transcript.json.
+    fn unpresent(
+        &self,
+        meeting_id: &MeetingId,
+        transcript: &mut Transcript,
+    ) -> Result<(), StorageError> {
+        let Some(name) = self.my_name() else {
+            return Ok(());
+        };
+        let you = crate::meeting::data::MY_SPEAKER_KEY;
+        if self.get_speaker_labels(meeting_id)?.contains_key(you) {
+            return Ok(());
+        }
+        for s in &mut transcript.segments {
+            if s.speaker_key() == you && s.speaker_label.as_deref() == Some(name) {
+                s.speaker_label = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// A speaker given as `my_name` means the "You" side, unless a speaker
+    /// was labelled with that name by hand.
+    fn unalias_my_name<'a>(
+        &self,
+        meeting_id: &MeetingId,
+        speaker: &'a str,
+    ) -> Result<&'a str, StorageError> {
+        match self.my_name() {
+            Some(name)
+                if name.eq_ignore_ascii_case(speaker)
+                    && self.speaker_key_named(meeting_id, speaker)?.is_none() =>
+            {
+                Ok(crate::meeting::data::MY_SPEAKER_KEY)
+            }
+            _ => Ok(speaker),
+        }
     }
 
     /// Load the transcript with deleted lines still in it, marked `deleted`.
@@ -739,6 +895,7 @@ impl MeetingStorage {
         let metadata = self.get_meeting(meeting_id)?;
 
         // Delete from database
+        super::search::forget(&self.conn, &meeting_id.to_string())?;
         self.conn.execute(
             "DELETE FROM meetings WHERE id = ?1",
             params![meeting_id.to_string()],
@@ -864,6 +1021,7 @@ impl MeetingStorage {
             Err(e) => return Err(e),
         };
 
+        let speaker = self.unalias_my_name(meeting_id, speaker)?;
         let keys = resolve_speaker_keys(&transcript, speaker);
         if keys.is_empty() {
             return Err(StorageError::UnknownSpeaker {
@@ -938,6 +1096,7 @@ impl MeetingStorage {
             return Err(StorageError::EmptyLabel);
         }
         let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        let speaker = self.unalias_my_name(meeting_id, speaker)?;
 
         let key = match resolve_speaker_keys(&transcript, speaker)
             .into_iter()
@@ -1181,6 +1340,7 @@ impl MeetingStorage {
         let staged = dir.join(format!(".{}.{}", NOTES_FILE, std::process::id()));
         std::fs::write(&staged, notes)?;
         std::fs::rename(&staged, &path)?;
+        super::search::index_notes(&self.conn, &meeting_id.to_string(), notes)?;
         self.refresh_transcript_markdown(meeting_id);
         self.refresh_manifest(meeting_id);
         self.load_notes(meeting_id)
@@ -1427,8 +1587,17 @@ impl MeetingStorage {
     ) -> Result<TranscriptSegment, StorageError> {
         if rewrite {
             self.save_transcript(meeting_id, transcript)?;
+        } else {
+            // The daemon rewrites the file later; keep search current now.
+            let mut shown = transcript.clone();
+            self.apply_edits(meeting_id, &mut shown)?;
+            shown.remove_deleted();
+            if let Some(metadata) = self.get_meeting(meeting_id)? {
+                self.index_transcript(meeting_id, &metadata, &shown)?;
+            }
         }
         self.apply_edits(meeting_id, transcript)?;
+        self.present(transcript);
         Ok(transcript
             .segments
             .iter()
@@ -1589,6 +1758,7 @@ mod tests {
             storage_path: temp_dir.path().to_path_buf(),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         };
         let storage = MeetingStorage::open(config).unwrap();
         (storage, temp_dir)
@@ -1980,6 +2150,7 @@ mod tests {
             storage_path: PathBuf::from("/tmp/test-meetings"),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         };
         assert_eq!(
             config.db_path(),
@@ -2266,6 +2437,7 @@ mod tests {
             storage_path: temp.path().to_path_buf(),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         };
         let id = {
             let storage = MeetingStorage::open(config.clone()).unwrap();
@@ -2650,6 +2822,7 @@ mod tests {
             storage_path: temp.path().to_path_buf(),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         })
         .unwrap();
         let old = storage.list_meetings(None).unwrap();
@@ -2661,6 +2834,7 @@ mod tests {
             storage_path: temp.path().to_path_buf(),
             retain_audio: false,
             max_meetings: 0,
+            my_name: None,
         })
         .unwrap();
     }
