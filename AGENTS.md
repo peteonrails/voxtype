@@ -698,9 +698,24 @@ If GPU detection fails but the binary otherwise works, the build used stale arti
 
 The baseline variant promises x86-64-v2 and has its own contamination class:
 BMI2/FMA/AVX2 leaking in through ggml when the CMake toolchain constraints
-don't take (#740 - env vars like `GGML_NATIVE=OFF` and `CMAKE_C_FLAGS` are
-read by nothing; the only reliable channel into whisper-rs-sys's CMake is
-`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`).
+don't take (#740). The baseline build pins its floor with
+`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`.
+
+How environment variables reach whisper.cpp's CMake: whisper-rs-sys's
+`build.rs` forwards every `GGML_*`, `CMAKE_*` and `WHISPER_*` variable as a
+`-D` definition, so they are read, with two traps:
+
+- `CMAKE_C_FLAGS` / `CMAKE_CXX_FLAGS` **replace** the flags the cmake crate
+  would pass, `-fPIC` included, rather than adding to them. Ubuntu's and
+  Arch's GCC build PIE by default and hide this. Fedora's GCC does not, and
+  the link fails with `relocation R_X86_64_32S against .bss`. Put `-fPIC`
+  back in any `CMAKE_*_FLAGS` you set (the source RPM spec and Debian rules
+  do).
+- ggml turns `GGML_NATIVE` off by default when `SOURCE_DATE_EPOCH` is set,
+  and rpmbuild and dpkg-buildpackage both set it. With native off and no
+  `GGML_AVX512*` options, ggml builds AVX2-level code only, so a package
+  build cannot produce AVX-512 whisper.cpp without asking for it
+  explicitly. That is why the source packages ship no AVX-512 variant.
 
 No static count can gate the v2 floor: a correct build legitimately carries
 ~370 BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800 FMA
