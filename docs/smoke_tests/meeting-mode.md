@@ -285,6 +285,84 @@ Expected:
 
 Stop the shell with `kill %1`.
 
+## 13. Speaker echo in a real room (4 minutes, at a normal hour)
+
+This plays a talk out loud through the speakers, so do it when sound is
+welcome. It needs speakers, not headphones, and the microphone you use for
+calls.
+
+```bash
+pactl get-default-sink
+pactl -f json list sinks | jq -r '.[] | select(.name == "'"$(pactl get-default-sink)"'") | .active_port'
+voxtype meeting start --title "Echo check"
+voxtype meeting status --json | jq .echo_cancel
+pactl list short sources | grep voxtype_meeting_aec_source
+journalctl --user -u voxtype --since "1 minute ago" | grep "echo handling"
+```
+
+Then, with the meeting recording:
+
+1. Play a talk (any interview or lecture video) through the speakers at your
+   usual listening volume for about a minute.
+2. Stay silent for the first 30 seconds of it.
+3. For the next 30 seconds, say a few sentences of your own over it.
+4. Stop the video, then the meeting:
+
+```bash
+voxtype meeting stop
+voxtype meeting show latest --json \
+  | jq -r '.transcript.segments[] | select(.source == "microphone") | .text'
+jq .echo_cancel "$(voxtype meeting show latest --json | jq -r .metadata.storage_path)/meeting.json"
+```
+
+Expected:
+
+- The active port is a speaker (for example `[Out] Speaker`), `echo_cancel`
+  is `"webrtc"` in the status and in `meeting.json`, the source
+  `voxtype_meeting_aec_source` is listed while recording, and the log says
+  `Meeting echo handling: webrtc`.
+- The microphone lines hold your own sentences and none of the talk. The
+  talk appears only under Remote (the loopback track), if at all.
+- A mixer (`wpctl status`, pavucontrol) lists "Voxtype meeting echo
+  canceller" while the meeting records, and your default microphone does not
+  change. After `meeting stop` it is gone.
+
+For comparison, run the same minute with the canceller off, then put it
+back:
+
+```bash
+voxtype config set meeting.audio.echo_cancel gtcrn && systemctl --user restart voxtype
+# record the same 30 s of the talk with no speech, stop, check the mic lines
+voxtype config set meeting.audio.echo_cancel auto && systemctl --user restart voxtype
+```
+
+With `gtcrn` some of the talk shows up on the microphone lines; that is the
+echo the canceller removes.
+
+Headphones and a crash:
+
+```bash
+# Plug in headphones (the default output moves to them), then:
+voxtype meeting start --title "Headphones"
+voxtype meeting status --json | jq .echo_cancel      # "gtcrn"
+journalctl --user -u voxtype --since "1 minute ago" | grep "echo handling"
+voxtype meeting stop
+# Unplug, start a meeting on speakers again, and kill the daemon mid-meeting:
+voxtype meeting start --title "Crash"
+systemctl --user kill -s KILL voxtype
+sleep 2; pactl list short sources | grep -c voxtype_meeting_aec_source   # 0
+systemctl --user start voxtype
+```
+
+Expected: `gtcrn` with "the output is headphones" in the log; after the
+kill no `voxtype_meeting_aec_source` is left and no `pipewire -c
+…/meeting-aec.conf` process runs (`pgrep -af meeting-aec.conf` prints
+nothing).
+
+If your default microphone is a filter such as `camera-effects-mic`, the
+canceller records from it; note whether the result differs from a plain
+microphone.
+
 ## Clean up
 
 ```bash

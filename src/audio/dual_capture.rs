@@ -38,9 +38,11 @@ pub struct SourcedSample {
 }
 
 /// Capture from a PulseAudio/PipeWire source via a parec subprocess
-struct ParecLoopback {
+struct ParecCapture {
     /// Source name (PulseAudio/PipeWire source)
     source: String,
+    /// Samples to drop from the start, to line this track up with another
+    skip: usize,
     /// Child process
     child: Option<std::process::Child>,
     /// Shared buffer for received samples
@@ -49,10 +51,16 @@ struct ParecLoopback {
     reader_thread: Option<std::thread::JoinHandle<()>>,
 }
 
-impl ParecLoopback {
+impl ParecCapture {
     fn new(source: String) -> Self {
+        Self::skipping(source, 0)
+    }
+
+    /// Capture `source`, dropping its first `skip` samples.
+    fn skipping(source: String, skip: usize) -> Self {
         Self {
             source,
+            skip,
             child: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             reader_thread: None,
@@ -85,6 +93,7 @@ impl ParecLoopback {
 
         // Spawn reader thread
         let buffer = Arc::clone(&self.buffer);
+        let mut skip = self.skip;
         self.reader_thread = Some(std::thread::spawn(move || {
             use std::io::Read;
             let mut raw_buf = [0u8; 4096]; // 1024 f32 samples
@@ -107,8 +116,10 @@ impl ParecLoopback {
                                 samples.push(sample);
                             }
                         }
+                        let dropped = skip.min(samples.len());
+                        skip -= dropped;
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend(samples);
+                            buf.extend(&samples[dropped..]);
                         }
                     }
                     Err(_) => break,
@@ -141,7 +152,7 @@ impl ParecLoopback {
     }
 }
 
-impl Drop for ParecLoopback {
+impl Drop for ParecCapture {
     fn drop(&mut self) {
         self.stop();
     }
@@ -152,7 +163,7 @@ enum MicCapture {
     /// The configured device, via cpal/ALSA
     Cpal(CpalCapture),
     /// A PipeWire/PulseAudio source, via parec (the echo canceller's)
-    Parec(ParecLoopback),
+    Parec(ParecCapture),
 }
 
 /// Dual audio capture for mic + loopback
@@ -160,7 +171,7 @@ pub struct DualCapture {
     /// Microphone capture
     mic_capture: MicCapture,
     /// Loopback capture (via parec subprocess)
-    loopback: Option<ParecLoopback>,
+    loopback: Option<ParecCapture>,
     /// Sample counter for timestamps
     sample_counter: u64,
 }
@@ -179,12 +190,19 @@ impl DualCapture {
 
     /// Like [`DualCapture::new`], recording the mic from the PipeWire or
     /// PulseAudio source `mic_source` (the echo canceller's) with parec.
+    /// The first `delay_ms` of it are dropped: the canceller delivers the
+    /// mic that much later than the loopback, which comes straight from the
+    /// sink's monitor, and dropping it puts both tracks on one timeline.
     pub fn with_mic_source(
         mic_source: &str,
         loopback_device: Option<&str>,
+        delay_ms: u32,
     ) -> Result<Self, AudioError> {
         Self::with_mic(
-            MicCapture::Parec(ParecLoopback::new(mic_source.to_string())),
+            MicCapture::Parec(ParecCapture::skipping(
+                mic_source.to_string(),
+                16 * delay_ms as usize,
+            )),
             loopback_device,
         )
     }
@@ -198,7 +216,7 @@ impl DualCapture {
             Some("auto") => match Self::find_monitor_source() {
                 Some(source) => {
                     tracing::info!("Auto-detected loopback source: {}", source);
-                    Some(ParecLoopback::new(source))
+                    Some(ParecCapture::new(source))
                 }
                 None => {
                     tracing::warn!("No monitor source found, using mic only");
@@ -207,7 +225,7 @@ impl DualCapture {
             },
             Some(device) => {
                 tracing::info!("Using configured loopback source: {}", device);
-                Some(ParecLoopback::new(device.to_string()))
+                Some(ParecCapture::new(device.to_string()))
             }
         };
 

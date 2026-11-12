@@ -33,31 +33,37 @@ pub const CONF_FILE: &str = "meeting-aec.conf";
 /// How long the canceller has to come up before a meeting falls back.
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How much later the cancelled mic arrives than the loopback, which comes
+/// straight from the sink's monitor. Measured at 31 to 48 ms (37 ms
+/// typical) with this config on PipeWire 1.6; the meeting drops this much
+/// from the start of the mic so the two tracks share a timeline.
+pub const MIC_DELAY_MS: u32 = 37;
+
 /// `[meeting.audio] echo_cancel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// The WebRTC canceller on speakers, GTCRN otherwise
+    /// The WebRTC canceller unless the output is headphones, GTCRN otherwise
     Auto,
     /// The WebRTC canceller whatever the output
-    Aec,
+    Webrtc,
     /// GTCRN only, as before 1.3.0
     Gtcrn,
     /// Neither
-    Off,
+    Disabled,
 }
 
 impl Mode {
-    /// Parse the config value. `disabled` is the old name of `off`; an
-    /// unknown value is `auto`, with a warning.
+    /// Parse the config value. `aec` and `off` are accepted as `webrtc`
+    /// and `disabled`; an unknown value is `auto`, with a warning.
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "auto" | "" => Mode::Auto,
-            "aec" | "webrtc" => Mode::Aec,
+            "webrtc" | "aec" => Mode::Webrtc,
             "gtcrn" => Mode::Gtcrn,
-            "off" | "disabled" | "none" => Mode::Off,
+            "disabled" | "off" | "none" => Mode::Disabled,
             other => {
                 tracing::warn!(
-                    "Unknown [meeting.audio] echo_cancel '{}'; using auto (auto, aec, gtcrn or off)",
+                    "Unknown [meeting.audio] echo_cancel '{}'; using auto (auto, webrtc, gtcrn or disabled)",
                     other
                 );
                 Mode::Auto
@@ -80,22 +86,45 @@ pub enum Output {
 /// The echo handling a meeting used, as `meeting.json` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EchoPath {
-    /// PipeWire's WebRTC echo canceller
-    Aec,
-    /// The GTCRN enhancer on the mic track
+    /// PipeWire's WebRTC echo canceller (`webrtc`)
+    Webrtc,
+    /// The GTCRN enhancer on the mic track (`gtcrn`)
     Gtcrn,
-    /// Nothing
-    Off,
+    /// Nothing (`none`)
+    None,
 }
 
 impl EchoPath {
     pub fn as_str(self) -> &'static str {
         match self {
-            EchoPath::Aec => "aec",
+            EchoPath::Webrtc => "webrtc",
             EchoPath::Gtcrn => "gtcrn",
-            EchoPath::Off => "off",
+            EchoPath::None => "none",
         }
     }
+}
+
+/// The meeting mic, as the canceller would capture it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mic {
+    /// `mic_device` is the default: the canceller follows the default source
+    Default,
+    /// `mic_device` names a PipeWire source the canceller can capture
+    Node(String),
+    /// `mic_device` names something no PipeWire source is called (an ALSA
+    /// device name, say), so the canceller cannot record it
+    Unmapped(String),
+}
+
+/// What the decision depends on, read from the sound server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Environment {
+    pub output: Output,
+    pub mic: Mic,
+    /// The default source is already an echo canceller the user runs
+    pub system_canceller: bool,
+    /// pipewire, pactl and parec are installed
+    pub available: bool,
 }
 
 /// Classify one sink from `pactl -f json list sinks`.
@@ -143,40 +172,68 @@ pub fn classify_default(sinks_json: &str, default_sink: &str) -> Output {
         .unwrap_or(Output::Unknown)
 }
 
-/// Ask pactl what the default output is.
-pub fn default_output() -> Output {
-    let run = |args: &[&str]| -> Option<String> {
-        let out = Command::new("pactl")
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    match (
-        run(&["get-default-sink"]),
-        run(&["-f", "json", "list", "sinks"]),
-    ) {
-        (Some(default), Some(sinks)) => classify_default(&sinks, &default),
-        _ => Output::Unknown,
+/// What a meeting should try first, and why when it is not the canceller.
+pub fn plan(mode: Mode, env: &Environment) -> (EchoPath, &'static str) {
+    match mode {
+        Mode::Disabled => (EchoPath::None, "echo_cancel = \"disabled\""),
+        Mode::Gtcrn => (EchoPath::Gtcrn, "echo_cancel = \"gtcrn\""),
+        _ if !env.available => (EchoPath::Gtcrn, "pipewire, pactl or parec is not installed"),
+        _ if matches!(env.mic, Mic::Unmapped(_)) => (
+            EchoPath::Gtcrn,
+            "meeting.audio.mic_device is not a PipeWire source the canceller can record",
+        ),
+        _ if env.system_canceller && env.mic == Mic::Default => (
+            EchoPath::Gtcrn,
+            "the default source is already an echo canceller",
+        ),
+        Mode::Auto if env.output == Output::Headphones => {
+            (EchoPath::Gtcrn, "the output is headphones")
+        }
+        Mode::Auto | Mode::Webrtc => (EchoPath::Webrtc, ""),
     }
 }
 
-/// What a meeting should try first. `specific_mic` is a
-/// `[meeting.audio] mic_device` other than the default, which `auto` leaves
-/// to GTCRN: it names an ALSA device, not a PipeWire node the canceller can
-/// capture. `available` is whether the canceller's tools are installed.
-pub fn plan(mode: Mode, output: Output, specific_mic: bool, available: bool) -> EchoPath {
-    match mode {
-        Mode::Off => EchoPath::Off,
-        Mode::Gtcrn => EchoPath::Gtcrn,
-        Mode::Aec if available => EchoPath::Aec,
-        Mode::Aec => EchoPath::Gtcrn,
-        Mode::Auto if available && output != Output::Headphones && !specific_mic => EchoPath::Aec,
-        Mode::Auto => EchoPath::Gtcrn,
+/// Whether `source` (one entry of `pactl -f json list sources`) is an echo
+/// canceller: PipeWire's echo-cancel module groups its nodes as
+/// `echo-cancel-…`, however they are named.
+pub fn is_echo_canceller(source: &serde_json::Value) -> bool {
+    source["name"].as_str() != Some(SOURCE_NODE)
+        && source["properties"]["node.group"]
+            .as_str()
+            .is_some_and(|g| g.starts_with("echo-cancel"))
+}
+
+/// Read the environment from `pactl` output: the default sink and source,
+/// and the sink and source lists as JSON. `mic_device` is
+/// `[meeting.audio] mic_device`.
+pub fn environment_from(
+    default_sink: &str,
+    default_source: &str,
+    sinks_json: &str,
+    sources_json: &str,
+    mic_device: &str,
+    available: bool,
+) -> Environment {
+    let sources: Vec<serde_json::Value> = serde_json::from_str(sources_json).unwrap_or_default();
+    let mic_device = mic_device.trim();
+    let mic = if matches!(mic_device, "default" | "" | "pipewire" | "pulse") {
+        Mic::Default
+    } else if sources
+        .iter()
+        .any(|s| s["name"].as_str() == Some(mic_device))
+    {
+        Mic::Node(mic_device.to_string())
+    } else {
+        Mic::Unmapped(mic_device.to_string())
+    };
+    Environment {
+        output: classify_default(sinks_json, default_sink),
+        mic,
+        system_canceller: sources
+            .iter()
+            .find(|s| s["name"].as_str() == Some(default_source.trim()))
+            .is_some_and(is_echo_canceller),
+        available,
     }
 }
 
@@ -188,23 +245,50 @@ pub fn begin(
     mic_device: &str,
     runtime_dir: &Path,
 ) -> (EchoPath, Option<EchoCanceller>) {
-    let specific_mic = !matches!(mic_device.trim(), "default" | "" | "pipewire" | "pulse");
     let tools = Tools::detect();
-    let output = match mode {
-        Mode::Auto => default_output(),
-        _ => Output::Unknown,
+    let pactl = |args: &[&str]| -> String {
+        Command::new("pactl")
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
     };
-    let path = plan(mode, output, specific_mic, tools.is_some());
+    let env = if matches!(mode, Mode::Disabled | Mode::Gtcrn) {
+        Environment {
+            output: Output::Unknown,
+            mic: Mic::Default,
+            system_canceller: false,
+            available: tools.is_some(),
+        }
+    } else {
+        environment_from(
+            &pactl(&["get-default-sink"]),
+            &pactl(&["get-default-source"]),
+            &pactl(&["-f", "json", "list", "sinks"]),
+            &pactl(&["-f", "json", "list", "sources"]),
+            mic_device,
+            tools.is_some(),
+        )
+    };
+    let (path, why) = plan(mode, &env);
     match (path, tools) {
-        (EchoPath::Aec, Some(tools)) => {
-            let target = specific_mic.then_some(mic_device.trim());
+        (EchoPath::Webrtc, Some(tools)) => {
+            let target = match env.mic {
+                Mic::Node(ref node) => Some(node.as_str()),
+                _ => None,
+            };
             match EchoCanceller::start(&tools, runtime_dir, target) {
                 Ok(canceller) => {
                     tracing::info!(
-                        "Meeting echo handling: PipeWire WebRTC echo canceller (output: {:?})",
-                        output
+                        "Meeting echo handling: webrtc (PipeWire's echo canceller; output {:?}, mic {})",
+                        env.output,
+                        target.unwrap_or("the default source")
                     );
-                    (EchoPath::Aec, Some(canceller))
+                    (EchoPath::Webrtc, Some(canceller))
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -215,18 +299,13 @@ pub fn begin(
                 }
             }
         }
-        (path, tools) => {
-            let why = if path != EchoPath::Gtcrn || mode == Mode::Gtcrn {
-                "as configured"
-            } else if tools.is_none() {
-                "pipewire, pactl or parec is not installed"
-            } else if output == Output::Headphones {
-                "the output is headphones"
-            } else {
-                "meeting.audio.mic_device names a specific device"
-            };
-            if mode == Mode::Aec {
-                tracing::warn!("Echo cancellation needs pipewire, pactl and parec; using GTCRN");
+        (path, _) => {
+            if mode == Mode::Webrtc {
+                tracing::warn!(
+                    "echo_cancel = \"webrtc\" but {}; using {}",
+                    why,
+                    path.as_str()
+                );
             }
             tracing::info!("Meeting echo handling: {} ({})", path.as_str(), why);
             (path, None)
@@ -281,7 +360,7 @@ context.modules = [
             capture.props = {{ node.name = {CAPTURE_NODE} node.passive = true{target} }}
             source.props = {{
                 node.name = {SOURCE_NODE}
-                node.description = "Voxtype meeting mic (echo cancelled)"
+                node.description = "Voxtype meeting echo canceller"
                 priority.session = 1
             }}
             sink.props = {{ node.name = {SINK_NODE} }}
@@ -480,12 +559,13 @@ mod tests {
     }
 
     #[test]
-    fn modes_parse_with_disabled_as_off() {
+    fn modes_parse_with_old_names_accepted() {
         assert_eq!(Mode::parse("auto"), Mode::Auto);
-        assert_eq!(Mode::parse("AEC"), Mode::Aec);
+        assert_eq!(Mode::parse("WebRTC"), Mode::Webrtc);
+        assert_eq!(Mode::parse("aec"), Mode::Webrtc);
         assert_eq!(Mode::parse("gtcrn"), Mode::Gtcrn);
-        assert_eq!(Mode::parse("off"), Mode::Off);
-        assert_eq!(Mode::parse("disabled"), Mode::Off);
+        assert_eq!(Mode::parse("disabled"), Mode::Disabled);
+        assert_eq!(Mode::parse("off"), Mode::Disabled);
         assert_eq!(Mode::parse("loud"), Mode::Auto);
     }
 
@@ -575,27 +655,111 @@ mod tests {
         assert_eq!(classify_default("not json", "speaker"), Output::Unknown);
     }
 
+    fn env(output: Output) -> Environment {
+        Environment {
+            output,
+            mic: Mic::Default,
+            system_canceller: false,
+            available: true,
+        }
+    }
+
     #[test]
     fn the_plan_follows_mode_output_mic_and_availability() {
         use EchoPath::*;
         use Output::*;
-        assert_eq!(plan(Mode::Auto, Speakers, false, true), Aec);
-        assert_eq!(plan(Mode::Auto, Unknown, false, true), Aec);
-        assert_eq!(plan(Mode::Auto, Headphones, false, true), Gtcrn);
+        let path = |mode, e: Environment| plan(mode, &e).0;
+        // auto: the canceller for everything but headphones
+        assert_eq!(path(Mode::Auto, env(Speakers)), Webrtc);
         assert_eq!(
-            plan(Mode::Auto, Speakers, true, true),
-            Gtcrn,
-            "a specific mic device"
+            path(Mode::Auto, env(Unknown)),
+            Webrtc,
+            "HDMI, line out, unknown"
+        );
+        assert_eq!(path(Mode::Auto, env(Headphones)), Gtcrn);
+        // webrtc forces it past headphones
+        assert_eq!(path(Mode::Webrtc, env(Headphones)), Webrtc);
+        assert_eq!(path(Mode::Gtcrn, env(Speakers)), Gtcrn);
+        assert_eq!(path(Mode::Disabled, env(Speakers)), None);
+        // Module tools missing: GTCRN, whatever the mode asked for.
+        let missing = Environment {
+            available: false,
+            ..env(Speakers)
+        };
+        assert_eq!(path(Mode::Auto, missing.clone()), Gtcrn);
+        assert_eq!(path(Mode::Webrtc, missing), Gtcrn);
+        // A mic the canceller cannot record from.
+        let alsa = Environment {
+            mic: Mic::Unmapped("hw:1,0".into()),
+            ..env(Speakers)
+        };
+        let (p, why) = plan(Mode::Auto, &alsa);
+        assert_eq!(p, Gtcrn);
+        assert!(why.contains("mic_device"), "{why}");
+        let node = Environment {
+            mic: Mic::Node("alsa_input.usb".into()),
+            ..env(Speakers)
+        };
+        assert_eq!(path(Mode::Auto, node), Webrtc);
+        // The user already cancels echo on the default source.
+        let system = Environment {
+            system_canceller: true,
+            ..env(Speakers)
+        };
+        assert_eq!(path(Mode::Auto, system.clone()), Gtcrn);
+        assert_eq!(path(Mode::Webrtc, system.clone()), Gtcrn);
+        // ...but a mic named past it gets ours.
+        let past = Environment {
+            mic: Mic::Node("alsa_input.usb".into()),
+            ..system
+        };
+        assert_eq!(path(Mode::Auto, past), Webrtc);
+    }
+
+    #[test]
+    fn the_environment_reads_mic_and_system_canceller_from_pactl() {
+        let sources = json!([
+            {"name": "alsa_input.usb-mic", "properties": {"media.class": "Audio/Source"}},
+            {"name": "echo-cancel-source",
+             "properties": {"node.group": "echo-cancel-13-14", "media.class": "Audio/Source"}},
+            {"name": SOURCE_NODE, "properties": {"node.group": "echo-cancel-40-41"}},
+        ])
+        .to_string();
+        let sinks = json!([sink("spk", "[Out] Speaker", "Speaker", json!({}))]).to_string();
+        let e = environment_from(
+            "spk\n",
+            "alsa_input.usb-mic\n",
+            &sinks,
+            &sources,
+            "default",
+            true,
         );
         assert_eq!(
-            plan(Mode::Auto, Speakers, false, false),
-            Gtcrn,
-            "no module tools"
+            (e.output, e.mic.clone(), e.system_canceller),
+            (Output::Speakers, Mic::Default, false)
         );
-        assert_eq!(plan(Mode::Aec, Headphones, true, true), Aec);
-        assert_eq!(plan(Mode::Aec, Speakers, false, false), Gtcrn);
-        assert_eq!(plan(Mode::Gtcrn, Speakers, false, true), Gtcrn);
-        assert_eq!(plan(Mode::Off, Speakers, false, true), Off);
+        let e = environment_from(
+            "spk",
+            "echo-cancel-source",
+            &sinks,
+            &sources,
+            "pipewire",
+            true,
+        );
+        assert!(e.system_canceller);
+        // Our own canceller left as the default is not the user's.
+        let e = environment_from("spk", SOURCE_NODE, &sinks, &sources, "", true);
+        assert!(!e.system_canceller);
+        let e = environment_from("spk", "x", &sinks, &sources, "alsa_input.usb-mic", true);
+        assert_eq!(e.mic, Mic::Node("alsa_input.usb-mic".into()));
+        let e = environment_from("spk", "x", &sinks, &sources, "hw:CARD=Mic,DEV=0", true);
+        assert_eq!(e.mic, Mic::Unmapped("hw:CARD=Mic,DEV=0".into()));
+        // No pactl output at all: unknown output, default mic.
+        let e = environment_from("", "", "", "", "default", true);
+        assert_eq!(
+            (e.output, e.mic, e.system_canceller),
+            (Output::Unknown, Mic::Default, false)
+        );
     }
 
     #[test]
@@ -605,6 +769,7 @@ mod tests {
         assert!(c.contains("library.name = aec/libspa-aec-webrtc"));
         assert!(c.contains("monitor.mode = true"));
         assert!(c.contains(&format!("node.name = {SOURCE_NODE}")));
+        assert!(c.contains("node.description = \"Voxtype meeting echo canceller\""));
         assert!(!c.contains("target.object"), "follows the default source");
         assert!(
             config(Some("alsa_input.usb-mic")).contains("target.object = \"alsa_input.usb-mic\"")
