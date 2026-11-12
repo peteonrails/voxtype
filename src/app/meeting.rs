@@ -457,6 +457,7 @@ pub(crate) async fn run_meeting_command(
                         "chars": body.chars().count(),
                         "body": body,
                         "available": tools.available(command.as_deref()),
+                        "why": tools.why(command.as_deref()),
                         "command": command,
                         "folder": share::share_folder(&config.meeting.share.folder),
                     });
