@@ -342,6 +342,41 @@ impl Transcript {
         dropped
     }
 
+    /// Drop loopback lines among `quiet_ids` (lines whose span of the
+    /// loopback held no speech) that are only a no-speech phrase ("Thank
+    /// you.", "you"). The engine writes those for silence, tones or a
+    /// call's join sound on the far side. A "thank you" the remote really
+    /// says is speech on the loopback and never reaches this. Returns the
+    /// ids dropped.
+    pub fn drop_remote_no_speech_lines(
+        &mut self,
+        quiet_ids: &std::collections::HashSet<u32>,
+    ) -> Vec<u32> {
+        use crate::meeting::echo::{no_speech_phrase, normalize_word};
+        let mut dropped = Vec::new();
+        self.segments.retain(|seg| {
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            let hallucination = seg.source == AudioSource::Loopback
+                && !seg.deleted
+                && quiet_ids.contains(&seg.id)
+                && no_speech_phrase(&words);
+            if hallucination {
+                tracing::debug!(
+                    "Dropping a no-speech phrase with no remote speech under it: {:?}",
+                    seg.text
+                );
+                dropped.push(seg.id);
+            }
+            !hallucination
+        });
+        dropped
+    }
+
     /// Remove echoed phrases from mic segments that match loopback transcripts.
     /// Works at the phrase level: finds runs of consecutive words in a mic segment
     /// that appear in any loopback segment and strips them out, keeping the user's

@@ -30,7 +30,7 @@ QtObject {
   // The pill a minimized card becomes: as wide as what it says (the view
   // sets pillContentWidth), within these bounds.
   property int pillMinWidth: 140
-  property int pillMaxWidth: 380
+  property int pillMaxWidth: 460
   property real pillContentWidth: 200
   readonly property real pillWidth: Math.max(root.pillMinWidth, Math.min(root.pillMaxWidth, Math.round(root.pillContentWidth)))
   property int pillHeight: 40

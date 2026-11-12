@@ -427,6 +427,26 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show the recording-consent notice, or acknowledge it
+    ///
+    /// Laws on recording and transcribing conversations differ by place, and
+    /// some require everyone on the call to agree. Voxtype doesn't tell the
+    /// other people for you. Until you acknowledge this, `meeting start`
+    /// prints it on stderr and the meeting views show it. --ack records that
+    /// you have read it.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting notice\n  \
+        voxtype meeting notice --ack\n  \
+        voxtype meeting notice --json")]
+    Notice {
+        /// Record that you have read the notice, so it is no longer shown
+        #[arg(long)]
+        ack: bool,
+
+        /// Output as JSON: {"notice", "acknowledged", "acknowledged_at"}
+        #[arg(long)]
+        json: bool,
+    },
     /// Read or write a meeting's notes
     ///
     /// Free-text notes kept in notes.md in the meeting's folder. With no
@@ -583,6 +603,32 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Peak levels of a meeting's kept audio, for drawing a waveform
+    ///
+    /// Reads the meeting's mic and loopback audio (kept with
+    /// `[meeting] retain_audio = true`), decodes it with ffmpeg and reports
+    /// the peak level of each time bucket in dBFS, -100 for silence. The
+    /// result is cached in the meeting folder as waveform.json, so asking
+    /// again is instant until the audio changes. A meeting that kept no
+    /// audio exits with status 2.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting waveform latest\n  \
+        voxtype meeting waveform latest --buckets 2000 --json")]
+    Waveform {
+        /// Meeting ID, the start of one, or "latest" for the most recent
+        meeting_id: String,
+
+        /// How many buckets to split the meeting into (1 to 100000). Each
+        /// is a whole number of milliseconds, so there can be fewer.
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..=100_000))]
+        buckets: u64,
+
+        /// Print the result as JSON:
+        /// {"duration_ms", "bucket_ms", "mic": [...], "loopback": [...] or null, "mic_track"}
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Open the live meeting view
     ///
     /// Asks whichever meeting view is running to open: the Voxtype plugin in
@@ -1152,6 +1198,38 @@ mod tests {
             }
             _ => panic!("Expected Meeting Start command"),
         }
+    }
+
+    fn waveform(args: &[&str]) -> Result<MeetingAction, clap::Error> {
+        let argv = ["voxtype", "meeting", "waveform"]
+            .iter()
+            .chain(args)
+            .copied();
+        match Cli::try_parse_from(argv)?.command {
+            Some(Commands::Meeting { action }) => Ok(action),
+            _ => panic!("Expected a meeting command"),
+        }
+    }
+
+    #[test]
+    fn meeting_waveform_takes_a_bucket_count() {
+        match waveform(&["latest", "--json"]).unwrap() {
+            MeetingAction::Waveform {
+                meeting_id,
+                buckets,
+                json,
+            } => assert_eq!((meeting_id.as_str(), buckets, json), ("latest", 1000, true)),
+            _ => panic!("Expected Meeting Waveform"),
+        }
+        match waveform(&["abc1", "--buckets", "250"]).unwrap() {
+            MeetingAction::Waveform { buckets, json, .. } => {
+                assert_eq!((buckets, json), (250, false))
+            }
+            _ => panic!("Expected Meeting Waveform"),
+        }
+        assert!(waveform(&["latest", "--buckets", "0"]).is_err());
+        assert!(waveform(&["latest", "--buckets", "100001"]).is_err());
+        assert!(waveform(&[]).is_err(), "a meeting is required");
     }
 
     fn play(args: &[&str]) -> Result<MeetingAction, clap::Error> {

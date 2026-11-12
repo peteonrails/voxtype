@@ -5,6 +5,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 ## Table of Contents
 
 - [When to Use Meeting Mode](#when-to-use-meeting-mode)
+- [Recording Consent](#recording-consent)
 - [Quick Start](#quick-start)
 - [Recording a Meeting](#recording-a-meeting)
   - [Starting a Meeting](#starting-a-meeting)
@@ -70,6 +71,28 @@ Use meeting mode when you need a transcript of a longer recording session. Good 
 - Brainstorming sessions
 
 For short dictation (a sentence or two at a time), stick with the normal push-to-talk workflow.
+
+---
+
+## Recording Consent
+
+Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.
+
+You are responsible for following the rules that apply to you.
+
+Until you acknowledge this, voxtype reminds you:
+
+- `voxtype meeting start` prints it on stderr, starting with `Note:`. It never waits for an answer, and stdout stays the same for scripts.
+- The meeting view shows it at the top of a running meeting, with **Got it**.
+- The call-detection prompt always adds "Let the others know you're transcribing."
+
+```bash
+voxtype meeting notice          # show it, and whether you acknowledged it
+voxtype meeting notice --ack    # acknowledge it; the reminders stop
+voxtype meeting notice --json   # {"notice", "acknowledged", "acknowledged_at"}
+```
+
+**Got it** in the view does the same as `--ack`. The acknowledgement is kept in `~/.local/state/voxtype/recording-notice.json`.
 
 ---
 
@@ -207,7 +230,7 @@ The header shows the meeting title, how long it has been running, and whether it
 
 Ask and Summary show the agent in use ("Claude", or "Local (llama3.2)"); click it to pick another agent, switch to **Local model only**, or (in Omarchy) open the settings. The first time an agent is needed the view asks whether to send meeting transcripts to it, with **Use a local model instead** and **Not now**.
 
-The card is an overlay: its background is translucent (`[meeting] view_opacity`, 0.8 by default) and turns opaque while the pointer is on it or you are typing in it. It never takes keyboard focus from your call unless you click into one of its text fields. Drag the header to move it anywhere; it snaps to a screen edge when dropped near one. Drag its inner edge to make it narrower or wider (280 px up to half the screen), and use **↥/↧** for full height or a compact 40 %. **–** shrinks it to a pill that shows the meeting's status: a red dot, the title and the time while recording; "Paused" and the time; "Finishing…"; "Summarizing · Claude…"; "Ended · 21:03 · Summary ready" once the summary is in; or "No meeting" with a **Start** button. The pill is only as wide as what it says and keeps the card's outer edge; click it to bring the card back. A meeting that starts while it is a pill expands it. Position and size are remembered per screen in `~/.local/state/voxtype/meeting-view.json`; **⋯ → Reset position and size** puts it back on the right edge. `voxtype meeting view --minimize` and `--expand` do the same from a keybinding.
+The card is an overlay: its background is translucent (`[meeting] view_opacity`, 0.8 by default) and turns opaque while the pointer is on it or you are typing in it. It never takes keyboard focus from your call unless you click into one of its text fields. Drag the header to move it anywhere; it snaps to a screen edge when dropped near one. Drag its inner edge to make it narrower or wider (280 px up to half the screen), and use **↥/↧** for full height or a compact 40 %. **–** shrinks it to a pill that shows the meeting's status: a red dot, the time and the newest line ("Dana: …") while recording, or the title until the first line arrives; "Paused" and the time; "Finishing…"; "Summarizing · Claude…"; "Ended · 21:03 · Summary ready" once the summary is in; or "No meeting" with a **Start** button. The pill is only as wide as what it says (up to 460 px, where a long line is cut short) and keeps the card's outer edge; click it to bring the card back. A meeting that starts while it is a pill expands it. Position and size are remembered per screen in `~/.local/state/voxtype/meeting-view.json`; **⋯ → Reset position and size** puts it back on the right edge. `voxtype meeting view --minimize` and `--expand` do the same from a keybinding.
 
 Between updates the view says "Listening…": lines arrive once per chunk (`chunk_duration_secs`, 30 seconds by default), not word by word.
 
@@ -315,7 +338,7 @@ For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket a
 
 ## Meeting Detection
 
-Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?" with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window (for example "Meet - abc-defg-hij").
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
 
 Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
 
@@ -327,6 +350,8 @@ enabled = true
 enabled = true          # unset: on for Omarchy, off elsewhere
 auto_record_apps = []   # e.g. ["Zoom"] to record Zoom calls without asking
 debounce_secs = 5
+on_call_end = "stop"    # when the call ends: "stop", "ask" or "keep"
+stop_grace_secs = 20
 ```
 
 The setting is read when the daemon starts, so restart it after changing it.
@@ -342,7 +367,12 @@ The setting is read when the daemon starts, so restart it after changing it.
 - Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt.
 - Not while a meeting is already recording.
 - Not while you are dictating: the prompt waits until dictation ends.
-- When the call app releases the microphone while a meeting is recording, a second notification offers **Stop meeting**. Voxtype never stops a meeting on its own.
+- When the call ends (the call app releases the microphone for `debounce_secs`) while a meeting records, `on_call_end` decides:
+  - `"stop"` (default): a notification says **Call ended**, "Stopping the recording in 20 s.", with **Keep recording**. Unless you press it, the meeting then stops as `voxtype meeting stop` would, and the summary at stop runs as usual. `stop_grace_secs` sets the wait. If the call app takes the microphone again within it, the stop is called off.
+  - `"ask"`: a notification offers **Stop meeting** and **Keep recording**, and nothing happens until you choose.
+  - `"keep"`: the meeting keeps recording.
+- A meeting you started by hand, with no call detected while it ran, is never stopped this way.
+- Each step is logged at info level (`journalctl --user -u voxtype | grep "Meeting detection"`): the call seen, with its app and audio stream, the prompt, the call ending, and the stop taken or not.
 
 Detection never records by itself, except for apps you list in `auto_record_apps`.
 
@@ -365,7 +395,7 @@ mic streams: 3
   ignored mic stream 105 (PipeWire ALSA [hex]): another dictation app
   ignored mic stream 129 (Camera Effects): camera-effects virtual mic
 evidence: Chromium has the mic (stream 211) and window "Meet - abc-defg-hij - Chromium" matches
-would prompt: Record "Meet - abc-defg-hij"? (Google Meet)
+would prompt: Record "Google Meet call"? (Google Meet)
 ```
 
 Without `--dry-run`, `voxtype meeting suggest` runs the detector in the foreground with real prompts. It refuses while the daemon is already prompting.
@@ -423,6 +453,34 @@ voxtype config set meeting.my_name "Pete"
 ```
 
 Every meeting then shows your side as "Pete": the live view, exports, `transcript.md`, summaries and search. The meeting assistant is told who you are ("The user asking is Pete (You)."), so a question like "what did I agree to?" means your lines. It is a display name only, never saved into the transcript, and a label you set for one meeting still wins there. `voxtype meeting my-name` shows the setting, or the full name on your account as a suggestion when it is unset; voxtype never sets it on its own.
+
+### Naming Speakers from the Title
+
+A two-person meeting usually says who is in it: "Pete <> Andrew standup", "Andrew <> Pete Standup", "Pete / Chris", "Pete x Chris", "Pete & Chris", "Pete and Chris 1:1", "1:1 Pete/Chris" or "Chris - Pete sync". When a meeting's title reads like that, voxtype names the speakers for you. The side of the title that is you names your microphone, and the other side names every remote voice. In a 1:1 every remote voice is the same person, so this also tidies up a diarizer that heard one person as `Remote 1`, `Remote 2` and `Remote 3`.
+
+You are recognized by your account's full name (the GECOS field, as `getent passwd $USER` shows it). Matching ignores case, and a first name is enough: an account named "Pete Jackson" matches a title that says "Pete". Your microphone is labelled with your full name.
+
+The rules are strict on purpose, because a wrong name is worse than none. Each name is one or two capitalized words. Words like standup, sync, weekly, check-in and 1:1 before or after the names are ignored. Nothing is named when:
+
+- the title names three or more people ("Pete, Andrew, Sam sync") or none ("Zoom call", "Q4 planning")
+- neither side is you, or both could be
+- the title has words voxtype does not recognize as names or meeting words ("Pete <> Andrew quick sync")
+
+Names are given when the meeting starts, and each remote voice is named as it first speaks, so the live view shows names from the first line. A name you give with `voxtype meeting label` always wins: voxtype only names speakers that have no name yet. If a second remote voice really is someone else, relabel that speaker by its ID:
+
+```bash
+voxtype meeting label latest "Remote 2" "Sam"
+```
+
+Use the ID rather than the name here: `voxtype meeting label latest Andrew Sam` would rename every speaker the title named Andrew.
+
+Imports name their speakers the same way when the file has separate microphone and remote channels (`--channels mic,loopback`), taking the title from `--title` or the file name. A single mixed track has no sides to tell apart, so nothing is named. `voxtype meeting retranscribe` names the speakers of the new transcript from the meeting's title too.
+
+To turn this off:
+
+```bash
+voxtype config set meeting.auto_label_from_title false
+```
 
 ### Searching Meetings
 
@@ -694,6 +752,8 @@ voxtype meeting play --stop
 Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
 
 Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
+
+`voxtype meeting waveform latest` reports the peak level of each stretch of a meeting's kept audio, your side and the other side, the data a player draws its waveform from. `--json` gives the values (see [Integrations](INTEGRATIONS.md#drawing-a-waveform-meeting-waveform)) and `--buckets` how many stretches to split the meeting into. The result is kept in the meeting folder as `waveform.json`, so asking again is instant.
 
 ### Importing a Recording
 
@@ -1039,7 +1099,7 @@ Echo cancellation removes most of what your speakers play from the microphone. W
 
 - A microphone line whose sound is all explained by the loopback, whatever its length, is echo. When the loopback has the same speech at the time, the line is dropped, because the loopback already has those words. When it does not, the line moves to the remote speaker instead, so nothing the loopback missed is lost; `voxtype meeting reassign` moves it back if that was wrong.
 - A short line that is a misheard version of the remote's words, such as "after the daemon restarts." while the remote said "after the demon restarts", is dropped.
-- A short "Thank you." or "Thanks for watching." on a microphone with no voice of yours in it, while the other side talks, is dropped. Speech engines write these phrases for faint sound they cannot make out, such as what the echo canceller leaves behind.
+- A short "Thank you." or "Thanks for watching." on a microphone with no voice of yours in it, while the other side talks, is dropped. Speech engines write these phrases for faint sound they cannot make out, such as what the echo canceller leaves behind. The same phrase on the other side's track is dropped when nobody there was speaking at the time, as when a call is joined and the engine writes "Thank you." for the silence or the join sound.
 - Your own lines stay. Before touching a line the guard compares both tracks' audio levels: your voice is louder on the microphone than the echo can explain, so a line with any of your own speech in it stays yours, and "yes" said over the other side's "yes" stays too.
 
 Short lines with exactly the remote's words, and runs of four or more of them, are removed whether the guard is on or off. See [`echo_guard`](CONFIGURATION.md#echo_guard) for the details.

@@ -47,6 +47,10 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    a sound check's, with "soundcheck": true)
   {"cmd": "recoverable", "meetings": [...]}
                                    the daemon's list of unfinished meetings
+  {"cmd": "notice", "pending": B}  set recording_notice (the recording-consent
+                                   notice is unacknowledged) and, as the
+                                   daemon does after `meeting notice --ack`,
+                                   repeat the current status carrying it
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -88,6 +92,7 @@ class Server:
         self.clients = []
         self.labels = {}
         self.pending_idle = None
+        self.notice = False
         self.idle()
         self.up()
 
@@ -133,7 +138,8 @@ class Server:
 
     def hello(self):
         ev = {"event": "hello", "status": self.state["status"], "chunk_count": self.state["chunk_count"],
-              "diarization": self.state["diarization"], "segments": self.state["segments"]}
+              "diarization": self.state["diarization"], "segments": self.state["segments"],
+              "recording_notice": self.notice}
         for key in ("meeting_id", "title", "started_at"):
             if self.state.get(key):
                 ev[key] = self.state[key]
@@ -154,7 +160,7 @@ class Server:
             self.idle()
         else:
             self.state["status"] = status
-        self.broadcast({"event": "status", "status": status})
+        self.broadcast({"event": "status", "status": status, "recording_notice": self.notice})
 
     def labelled(self, seg):
         seg = dict(seg)
@@ -191,7 +197,7 @@ class Server:
             self.state.update({"status": "recording", "meeting_id": str(uuid.uuid4()),
                                "title": cmd.get("title") or None, "started_at": now_iso(),
                                "diarization": {"enabled": True, "backend": "hybrid"}})
-            self.broadcast({"event": "status", "status": "recording"})
+            self.broadcast({"event": "status", "status": "recording", "recording_notice": self.notice})
         elif kind == "stop":
             self.set_status("finalizing")
             self.pending_idle = time.monotonic() + 1.0
@@ -266,6 +272,9 @@ class Server:
         elif kind == "playback":
             self.broadcast({"event": "playback", "meeting_id": cmd["meeting_id"], "track": cmd["track"],
                             "state": cmd["state"], "from_ms": cmd["from_ms"]})
+        elif kind == "notice":
+            self.notice = bool(cmd.get("pending"))
+            self.broadcast({"event": "status", "status": self.state["status"], "recording_notice": self.notice})
         elif kind == "drop":
             self.drop()
         elif kind == "down":

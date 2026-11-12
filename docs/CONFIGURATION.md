@@ -3864,6 +3864,18 @@ How opaque the meeting view's background is, so it reads as an overlay on the wi
 voxtype config set meeting.view_opacity 0.6
 ```
 
+### auto_label_from_title
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Name the speakers of a two-person meeting from its title. In a meeting titled "Pete <> Andrew standup", "Pete / Chris", "Pete and Chris 1:1" or "Chris - Pete sync", the side that is you names your microphone (`You`) and the other side names every remote voice. You are recognized by your account's full name (the GECOS field), and a first-name match is enough. If neither side of the title is you, if both could be, or if the title names three or more people, nothing is named. A name you give with `voxtype meeting label` is never replaced. It applies to live meetings, imports with separate microphone and remote channels, and `voxtype meeting retranscribe`. See [Naming Speakers from the Title](MEETING_MODE.md#naming-speakers-from-the-title).
+
+```bash
+voxtype config set meeting.auto_label_from_title false
+```
+
 ---
 
 ## [meeting.audio]
@@ -3931,6 +3943,7 @@ For every microphone line, voxtype compares the two tracks' audio levels over th
   - otherwise moves to the remote speaker it overlaps (or `Remote`), keeping its words: the loopback's transcript missed them, so dropping the line would lose the only copy. `voxtype meeting reassign <meeting> <line> You` moves it back.
 - **A short line that is the remote misheard** (up to `echo_fuzzy_max_words` words, most of them matching the remote line at the same time by spelling or sound, such as "Omarky problem." while the loopback said "the Amarky package ... without any problems") is dropped.
 - **A no-speech phrase over the remote** is dropped: a microphone line of at most four words that is only what speech engines write for faint sound they cannot make out ("Thank you.", "Thanks for watching.", "You.", "Bye.", and the same in German, French, Spanish, Portuguese, Italian, Dutch, Russian, Japanese, Chinese and Korean), when its audio holds no voice of yours and the remote is talking within a second of it. The echo canceller's faint residual is the usual source. A "thank you" you say is loud enough to read as your voice and stays.
+- **A no-speech phrase on a silent loopback** is dropped too: a loopback line of the same kind with no speech on the loopback under it (no 150 ms of sound above the meeting's VAD level, or three times the loopback's own noise floor if higher), such as the "Thank you." an engine writes for the silence as a call is joined. A "thank you" the other side really says is speech on the loopback and stays.
 - **Your own lines stay**, even over the other side and even in the same words ("yes" over their "yes"): a line with any stretch of your own voice, 150 ms louder than the echo explains, is never touched by the guard. Neither is a line whose audio could not be measured (no remote speech in that chunk).
 
 `false` turns the whole guard off and leaves only the older checks: short lines with exactly the remote's words, and runs of four or more of the remote's words. Applies only while loopback capture is active. The older name `echo_fuzzy` is read too.
@@ -4234,6 +4247,8 @@ Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browse
 enabled = true
 auto_record_apps = []
 debounce_secs = 5
+on_call_end = "stop"
+stop_grace_secs = 20
 ```
 
 ### enabled
@@ -4263,6 +4278,22 @@ auto_record_apps = ["Zoom"]
 **Required:** No
 
 How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+
+### on_call_end
+
+**Type:** String (`"stop"`, `"ask"`, `"keep"`)
+**Default:** `"stop"`
+**Required:** No
+
+What happens when a detected call ends while a meeting records. `"stop"` shows **Call ended** with **Keep recording** and stops the meeting after `stop_grace_secs` unless you keep it; the stop runs the summary at stop as usual. `"ask"` offers **Stop meeting** and **Keep recording** and waits for you. `"keep"` leaves the meeting recording. A meeting started by hand with no detected call is never stopped. Changing it needs a daemon restart.
+
+### stop_grace_secs
+
+**Type:** Integer (0 to 600)
+**Default:** `20`
+**Required:** No
+
+Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call app takes the microphone again in that time, the stop is called off.
 
 ### apps
 

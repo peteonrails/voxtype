@@ -2763,6 +2763,8 @@ Recordings where speech falls below the detection threshold are rejected before 
 
 Meeting mode provides continuous transcription for meetings, with chunked processing, speaker diarization, and export capabilities. Unlike push-to-talk (which transcribes short clips), meeting mode runs continuously and processes audio in chunks for the duration of a meeting.
 
+**Recording consent.** Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant. Until you run `voxtype meeting notice --ack` (or press **Got it** in the meeting view), `meeting start` prints this on stderr and the meeting view shows it. See [Recording Consent](MEETING_MODE.md#recording-consent).
+
 ### Commands
 
 ```bash
@@ -2853,6 +2855,7 @@ storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
 retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the meeting folder
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
 show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
+auto_label_from_title = true     # Name both sides of "Pete <> Andrew standup" from the title
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)

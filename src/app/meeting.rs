@@ -31,6 +31,7 @@ pub(crate) async fn run_meeting_command(
         vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
         echo_rules: (&config.meeting.audio).into(),
+        auto_label_from_title: config.meeting.auto_label_from_title,
     };
 
     match action {
@@ -158,6 +159,47 @@ pub(crate) async fn run_meeting_command(
                 "Meeting start requested{}. Check status with 'voxtype meeting status'.",
                 suffix
             );
+            // stderr only: scripts parse stdout. Never a prompt.
+            if meeting::notice::pending() {
+                eprintln!("Note: {}", meeting::notice::NOTICE);
+                eprintln!("{}", meeting::notice::ACK_HINT);
+            }
+        }
+
+        MeetingAction::Notice { ack, json } => {
+            let path = meeting::notice::path();
+            let state = if ack {
+                let state = meeting::notice::acknowledge(&path)?;
+                // A running daemon tells the meeting views; without one there
+                // is nothing to tell.
+                let _ = std::fs::write(
+                    config::Config::runtime_dir().join(meeting::notice::ACK_TRIGGER),
+                    "",
+                );
+                state
+            } else {
+                meeting::notice::load(&path)
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&meeting::notice::to_json(&state))?
+                );
+            } else {
+                println!("{}", meeting::notice::NOTICE);
+                println!();
+                match state.acknowledged_at {
+                    Some(at) if ack => println!(
+                        "Acknowledged. Voxtype will not show this again (first acknowledged {}).",
+                        at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                    ),
+                    Some(at) => println!(
+                        "Acknowledged {}.",
+                        at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                    ),
+                    None => println!("Not acknowledged yet. {}", meeting::notice::ACK_HINT),
+                }
+            }
         }
 
         MeetingAction::Stop => {
@@ -1156,6 +1198,57 @@ pub(crate) async fn run_meeting_command(
                     track,
                     id,
                     format_ms(from_ms)
+                );
+            }
+        }
+
+        MeetingAction::Waveform {
+            meeting_id,
+            buckets,
+            json,
+        } => {
+            use meeting::waveform;
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let dir = storage
+                .get_meeting_path(&id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let ffmpeg = waveform::find_ffmpeg();
+            let result = tokio::task::spawn_blocking(move || {
+                waveform::load_or_compute(&dir, ffmpeg.as_deref(), buckets as usize)
+            })
+            .await?;
+            let wave = match result {
+                Ok(wave) => wave,
+                Err(e @ waveform::WaveformError::NoAudio) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if json {
+                println!("{}", serde_json::to_string(&wave)?);
+            } else {
+                let peak = |v: &[f32]| v.iter().copied().fold(waveform::SILENCE_DB, f32::max);
+                println!(
+                    "Meeting {}: {} in {} buckets of {} ms. Peak {:.1} dBFS on the {} track{}.",
+                    id,
+                    format_ms(wave.duration_ms),
+                    wave.mic.len(),
+                    wave.bucket_ms,
+                    peak(&wave.mic),
+                    wave.mic_track,
+                    wave.loopback
+                        .as_deref()
+                        .map(|l| format!(", {:.1} dBFS on the loopback", peak(l)))
+                        .unwrap_or_else(|| ", no loopback".to_string())
+                );
+                println!(
+                    "For the levels: voxtype meeting waveform {} --json",
+                    meeting_id
                 );
             }
         }

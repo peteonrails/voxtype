@@ -224,6 +224,11 @@ Item {
   signal errorDismissed()
   property bool speakerHintDismissed: false
   signal speakerHintDismissRequested()
+  // The recording-consent notice: shown on a live meeting until acknowledged.
+  readonly property string recordingNoticeText: "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant."
+  property bool noticeDismissed: false
+  readonly property bool showRecordingNotice: root.live && !root.noticeDismissed && root.feed !== null && root.feed.recordingNotice
+  signal noticeAcknowledged()
 
   readonly property string status: feed ? feed.status : ""
   readonly property bool connected: feed ? feed.connected : false
@@ -429,6 +434,15 @@ Item {
   // whom), ended (with whether the summary is in), or no meeting.
   readonly property bool summaryReady: root.assistant !== null && root.feed !== null
     && root.assistant.summaryMarkdown !== "" && root.assistant.summaryMeeting === root.feed.meetingId
+  // The newest line, "Speaker: text": what a recording pill shows once
+  // anything has been said.
+  readonly property string lastLine: {
+    if (!root.feed || root.feed.segments.count === 0) return ""
+    var r = root.feed.segments.get(root.feed.segments.count - 1)
+    return root.feed.displayName(r.speaker) + ": " + r.text
+  }
+  readonly property bool pillShowsLine: root.live && root.status === "recording" && root.busy !== "stop" && root.lastLine !== ""
+
   readonly property string pillText: {
     if (!root.hasMeeting) return root.connected ? "No meeting" : "Voxtype not running"
     if (root.busy === "stop" || root.status === "finalizing") return "Finishing…"
@@ -436,6 +450,7 @@ Item {
       return "Summarizing" + (root.assistant.summaryWith !== "" ? " · " + root.assistant.summaryWith : "") + "…"
     if (root.status === "paused") return "Paused"
     if (root.ended) return "Ended"
+    if (root.pillShowsLine) return root.lastLine
     return root.feed && root.feed.title !== "" ? root.feed.title : "Recording"
   }
   readonly property string pillDetail: {
@@ -486,22 +501,37 @@ Item {
         visible: root.hasMeeting
         color: root.status === "recording" && root.busy !== "stop" ? root.theme.urgent : root.theme.dim
       }
+      // Recording with something said: the time first, then the newest
+      // line, which takes whatever width the pill has left.
+      Text {
+        id: pillLineTime
+        objectName: "pillLineTime"
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.pillShowsLine
+        text: root.elapsedText
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+      }
       Text {
         objectName: "pillState"
         anchors.verticalCenter: parent.verticalCenter
-        // A long title gives way to the time.
-        width: Math.min(implicitWidth, 200)
+        // A line fills what the pill's maximum width leaves; a title gives
+        // way to the time sooner.
+        width: Math.min(implicitWidth, root.pillShowsLine
+          ? (root.placement ? root.placement.pillMaxWidth : 460) - pillLineTime.implicitWidth - 2 * (root.theme.lg + 4) - 8 - 2 * root.theme.md
+          : 200)
         text: root.pillText
         elide: Text.ElideRight
         color: root.theme.fg
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
-        font.bold: true
+        font.bold: !root.pillShowsLine
       }
       Text {
         objectName: "pillElapsed"
         anchors.verticalCenter: parent.verticalCenter
-        visible: text !== ""
+        visible: text !== "" && !root.pillShowsLine
         text: root.pillDetail
         color: root.theme.dim
         font.family: root.theme.fontFamily
@@ -895,6 +925,43 @@ Item {
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
         wrapMode: Text.WordWrap
+      }
+
+      Rectangle {
+        objectName: "recordingNotice"
+        Layout.fillWidth: true
+        visible: root.showRecordingNotice
+        implicitHeight: noticeText.implicitHeight + root.theme.padX * 2
+        radius: Math.min(root.theme.radius, 6)
+        color: root.theme.alpha(root.theme.accent, 0.12)
+        border.width: 1
+        border.color: root.theme.alpha(root.theme.accent, 0.45)
+
+        Text {
+          id: noticeText
+          objectName: "recordingNoticeText"
+          anchors.left: parent.left
+          anchors.right: noticeAck.left
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: root.theme.padX
+          anchors.rightMargin: root.theme.gap
+          text: root.recordingNoticeText
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        MeetingButton {
+          id: noticeAck
+          objectName: "recordingNoticeAck"
+          theme: root.theme
+          anchors.right: parent.right
+          anchors.rightMargin: root.theme.sm
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Got it"
+          onClicked: root.noticeAcknowledged()
+        }
       }
 
       Rectangle {
