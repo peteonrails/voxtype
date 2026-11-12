@@ -422,13 +422,18 @@ pub enum MeetingAction {
     /// channel and the others on another, name the channels in order with
     /// --channels mic,loopback (or loopback,mic) so lines are attributed to
     /// You and Remote, and hybrid diarization can split the remote side.
+    ///
+    /// Given a folder written by Omarchy Meeting Recorder, imports that
+    /// meeting as it is: its transcript, speaker names, chapters, notes and
+    /// audio. Transcribe it again with `meeting retranscribe` if you like.
     #[command(after_help = "Examples:\n  \
         voxtype meeting import call.mp3 --title 'Client call'\n  \
         voxtype meeting import recording.wav --channels mic,loopback\n  \
         voxtype meeting import memo.m4a --date 2026-11-02T15:00:00Z --model large-v3-turbo\n  \
-        voxtype meeting import zoom.mp4 --json")]
+        voxtype meeting import zoom.mp4 --json\n  \
+        voxtype meeting import ~/Documents/Meetings/'202511021500 Launch sync'")]
     Import {
-        /// The recording to import
+        /// The recording to import, or a Meeting Recorder meeting folder
         file: std::path::PathBuf,
 
         /// Meeting title (default: the file name)

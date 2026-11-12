@@ -364,6 +364,12 @@ It runs in your terminal, not in the daemon, so it never interrupts a meeting be
 
 **Audio.** The recording is kept in the meeting folder as `mixed.opus`, plus `mic.opus` and `loopback.opus` when channels are mapped, whatever `retain_audio` says, so the meeting can be played back and transcribed again. The original file is left where it is.
 
+**From Omarchy Meeting Recorder.** Give `meeting import` a Meeting Recorder meeting folder (the one with the `.meeting-recorder` file) and the meeting comes over as it is: its transcript, speaker names, chapters (as the summary's chapters), notes, and audio (from `.tracks/`, the separate files, or `audio.ogg`). Nothing is transcribed; run `meeting retranscribe` afterwards to redo it with a voxtype engine. This importer was written from Meeting Recorder's source, not tested against folders it wrote.
+
+```bash
+voxtype meeting import ~/Documents/Meetings/'202511021500 Launch sync'
+```
+
 ### Transcribing a Meeting Again
 
 `voxtype meeting retranscribe` runs a meeting's kept audio through the transcriber again, for a better model, another engine or another language:

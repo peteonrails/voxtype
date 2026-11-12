@@ -602,6 +602,15 @@ pub async fn import(
     resident: Option<Arc<dyn Transcriber>>,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<ImportOutcome, ImportError> {
+    if request.file.is_dir() {
+        if crate::meeting::meeting_recorder::manifest_in(&request.file).is_some() {
+            return crate::meeting::meeting_recorder::import(config, request, progress).await;
+        }
+        return Err(ImportError::Unreadable {
+            path: request.file.display().to_string(),
+            reason: "it is a folder, and not one Omarchy Meeting Recorder wrote".to_string(),
+        });
+    }
     let ff = Ffmpeg::detect()?;
     if !request.file.is_file() {
         return Err(ImportError::Unreadable {

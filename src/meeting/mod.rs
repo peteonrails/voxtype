@@ -32,6 +32,7 @@ pub mod export;
 pub mod hook;
 pub mod import;
 pub mod manifest;
+pub mod meeting_recorder;
 pub mod notes;
 pub mod playback;
 pub mod retained_audio;

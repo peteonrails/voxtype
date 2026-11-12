@@ -1674,7 +1674,8 @@ done
 
 - **"need ffmpeg and ffprobe"**: install ffmpeg; ffprobe comes with it.
 - **"Cannot read ..."**: ffprobe could not find an audio stream. Check the
-  file plays (`ffprobe file`).
+  file plays (`ffprobe file`); a folder is only accepted when it is an Omarchy
+  Meeting Recorder meeting folder.
 - **"Invalid --channels ..."**: name one side per channel, in order. The
   message says how many channels the file has; `ffprobe -show_streams file`
   shows the layout. Leave `--channels` out to mix everything.

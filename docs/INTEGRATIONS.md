@@ -373,7 +373,7 @@ missing).
 ### Importing and transcribing again: `meeting import` and `meeting retranscribe`
 
 ```sh
-voxtype meeting import <file> [--title T] [--engine E] [--model M] [--language L]
+voxtype meeting import <file|meeting-recorder-folder> [--title T] [--engine E] [--model M] [--language L]
                        [--date RFC3339] [--channels mono|mic,loopback,...] [--diarization B] [--json]
 voxtype meeting retranscribe <meeting> [--engine E] [--model M] [--language L] [--diarization B]
                              [--keep-edits | --discard-edits] [--json]
@@ -401,7 +401,8 @@ result. Logs go to stderr.
 - The same object, with `"event": "import_progress"`, goes to `meeting.sock`
   when the daemon is running, so a view can show the progress of an import
   started elsewhere.
-- `channels` is `mono` or the `--channels` map.
+- `channels` is `mono`, the `--channels` map, or `meeting-recorder` for a
+  Meeting Recorder folder (imported as it is, with nothing transcribed).
 - `previous_transcript` is `null` when the meeting had no transcript.
   `edits` counts speaker moves, text corrections and deleted lines
   (`edits_*`) and annotations separately; `edits_discarded` is non-zero
