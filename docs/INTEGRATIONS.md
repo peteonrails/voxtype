@@ -133,15 +133,16 @@ voxtype meeting status --json
 ```json
 {
   "active": true,
-  "echo_cancel": "aec",
+  "echo_cancel": "webrtc",
   "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed",
   "status": "recording"
 }
 ```
 
-`echo_cancel` is the echo handling the running meeting uses: `aec` (PipeWire's
-WebRTC echo canceller), `gtcrn` or `off`. It is `null` when no meeting is
-running.
+`echo_cancel` is the echo handling the running meeting uses: `webrtc`
+(PipeWire's WebRTC echo canceller), `gtcrn` (the speech enhancer) or `none`.
+It is `null` when no meeting is running. The meeting socket's `hello` carries
+the same `echo_cancel` once the meeting has started.
 
 `status` is one of `idle`, `starting`, `recording`, `pausing`, `paused`,
 `resuming`, `stopping` or `finalizing`. `starting`, `pausing`, `resuming` and
@@ -295,7 +296,7 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 #### `hello`
 
 ```json
-{"event": "hello", "status": "recording", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Release sync", "started_at": "2026-11-11T15:00:04Z", "chunk_count": 1, "diarization": {"enabled": true, "backend": "hybrid"}, "segments": [{"id": 0, "start_ms": 1410, "end_ms": 3090, "text": "Okay, let's start the release sync.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}, {"id": 1, "start_ms": 3750, "end_ms": 8310, "text": "The build for 1.2.1 passed on every variant last night.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}]}
+{"event": "hello", "status": "recording", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Release sync", "started_at": "2026-11-11T15:00:04Z", "chunk_count": 1, "diarization": {"enabled": true, "backend": "hybrid"}, "echo_cancel": "webrtc", "segments": [{"id": 0, "start_ms": 1410, "end_ms": 3090, "text": "Okay, let's start the release sync.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}, {"id": 1, "start_ms": 3750, "end_ms": 8310, "text": "The build for 1.2.1 passed on every variant last night.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}]}
 ```
 
 `status` is `idle`, `recording`, `paused` or `finalizing`. With no meeting it
@@ -762,7 +763,7 @@ beside it. Read the manifest rather than guessing file names, and rather than
   "engine": "parakeet",
   "model": "parakeet-tdt-0.6b-v3",
   "diarization": "hybrid",
-  "echo_cancel": "aec",
+  "echo_cancel": "webrtc",
   "speakers": [
     { "id": "Remote 1", "name": "Dana" },
     { "id": "Remote 2", "name": "Remote 2" },
@@ -817,9 +818,9 @@ The fields:
   oldest first), `audio_mic`, `audio_loopback` or `audio_mixed`. Names are relative to the folder. Audio is `.opus` (Ogg
   Opus, 16 kHz mono), or `.wav` (16-bit PCM, 16 kHz mono) when ffmpeg was
   missing; match on `kind`, not on the name.
-- `echo_cancel`: the echo handling the meeting used: `aec` (PipeWire's
-  WebRTC echo canceller, on speakers), `gtcrn` (the speech enhancer) or
-  `off`. `null` for meetings recorded before 1.3.0.
+- `echo_cancel`: the echo handling the meeting used: `webrtc` (PipeWire's
+  WebRTC echo canceller), `gtcrn` (the speech enhancer) or `none`. `null`
+  for meetings recorded before 1.3.0.
 - `audio_retained`: whether the meeting kept its audio (`retain_audio`).
 
 The folder can hold files the manifest does not list: `asks.jsonl` (one

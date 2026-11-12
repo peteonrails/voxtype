@@ -3085,7 +3085,11 @@ impl Daemon {
         .unwrap_or((audio::echo_cancel::EchoPath::Gtcrn, None));
         let mut aec_capture = None;
         if let Some(ref aec) = echo_canceller {
-            match audio::DualCapture::with_mic_source(aec.source(), loopback_device) {
+            match audio::DualCapture::with_mic_source(
+                aec.source(),
+                loopback_device,
+                audio::echo_cancel::MIC_DELAY_MS,
+            ) {
                 Ok(mut capture) => match capture.start().await {
                     Ok(()) => aec_capture = Some(capture),
                     Err(e) => {
@@ -3145,6 +3149,8 @@ impl Daemon {
                                 enabled: diar_enabled_for_hud,
                                 backend: diar_backend_for_hud,
                             },
+                            // Set once GTCRN has loaded or not, below.
+                            echo_cancel: None,
                             segments: Vec::new(),
                         };
                         self.update_meeting_state("recording", Some(&id_str));
@@ -3186,7 +3192,7 @@ impl Daemon {
                         let gtcrn_loaded = false;
                         let used = match echo_path {
                             audio::echo_cancel::EchoPath::Gtcrn if !gtcrn_loaded => {
-                                audio::echo_cancel::EchoPath::Off
+                                audio::echo_cancel::EchoPath::None
                             }
                             path => path,
                         };
@@ -3194,6 +3200,10 @@ impl Daemon {
                         self.meeting_echo_canceller = echo_canceller.take();
                         tracing::info!("Meeting {} echo handling: {}", meeting_id, used.as_str());
                         daemon.record_echo_cancel(used.as_str());
+                        self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
+                        if let Some(ref hub) = self.meeting_event_hub {
+                            hub.update_snapshot(&self.meeting_hud);
+                        }
 
                         self.meeting_daemon = Some(daemon);
                         self.meeting_mic_buffer.clear();
