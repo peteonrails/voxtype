@@ -29,6 +29,7 @@ pub(crate) async fn run_meeting_command(
         max_duration_mins: config.meeting.max_duration_mins,
         vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
+        echo_rules: (&config.meeting.audio).into(),
     };
 
     match action {

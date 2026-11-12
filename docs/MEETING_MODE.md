@@ -43,6 +43,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
   - [Echo Cancellation](#echo-cancellation)
+  - [Echo Guard](#echo-guard)
   - [Diarization Settings](#diarization-settings)
   - [Summarization Settings](#summarization-settings)
   - [Assistant Settings](#assistant-settings)
@@ -727,6 +728,11 @@ vad_threshold = 0.01
 
 # Echo cancellation for the mic (default: "auto"). See "Echo Cancellation".
 echo_cancel = "auto"
+
+# Keep the call heard through your speakers out of your lines (default: true);
+# the misheard-words check looks at lines up to this many words (default: 4)
+echo_guard = true
+echo_fuzzy_max_words = 4
 ```
 
 Setting `loopback_device = "auto"` lets voxtype capture system audio (the other side of a call). When loopback is active, speaker attribution can distinguish between "You" (from the mic) and "Remote" (from system audio).
@@ -755,7 +761,17 @@ With `echo_cancel = "auto"` (the default), a meeting whose output is speakers ru
 
 With `auto`, setting `mic_device` to a specific device also means GTCRN, because that is an ALSA device name the canceller cannot record from. Use `echo_cancel = "aec"` with a PipeWire source name (`pactl list short sources`) as `mic_device` to have both.
 
-The transcript dedup, which removes mic lines that also appear on the loopback track, runs whichever echo handling a meeting uses.
+The transcript dedup, which removes mic lines that also appear on the loopback track, and the echo guard below run whichever echo handling a meeting uses.
+
+### Echo Guard
+
+Echo cancellation removes most of what your speakers play from the microphone. What gets through, the echo guard (`echo_guard`, on by default) keeps out of your lines in the transcript:
+
+- A microphone line whose sound is all explained by the loopback, whatever its length, is echo. When the loopback has the same speech at the time, the line is dropped, because the loopback already has those words. When it does not, the line moves to the remote speaker instead, so nothing the loopback missed is lost; `voxtype meeting reassign` moves it back if that was wrong.
+- A short line that is a misheard version of the remote's words, such as "after the daemon restarts." while the remote said "after the demon restarts", is dropped.
+- Your own lines stay. Before touching a line the guard compares both tracks' audio levels: your voice is louder on the microphone than the echo can explain, so a line with any of your own speech in it stays yours, and "yes" said over the other side's "yes" stays too.
+
+Short lines with exactly the remote's words, and runs of four or more of them, are removed whether the guard is on or off. See [`echo_guard`](CONFIGURATION.md#echo_guard) for the details.
 
 ### Diarization Settings
 
