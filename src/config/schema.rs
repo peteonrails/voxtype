@@ -2456,6 +2456,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "API key for the remote summary backend.",
     ),
     spec(
+        "meeting.actions.remind_in_mins",
+        "meeting.actions",
+        "remind_in_mins",
+        KeyType::Int { min: 1, max: 10080 },
+        "Meeting",
+        "Reminder delay",
+        "Minutes until an Omarchy reminder for an action item goes off, unless a time later today was said.",
+    ),
+    spec(
+        "meeting.actions.todoist_project_id",
+        "meeting.actions",
+        "todoist_project_id",
+        KeyType::String,
+        "Meeting",
+        "Todoist project",
+        "Todoist project ID action items are added to. Empty is the Inbox.",
+    ),
+    spec(
         "meeting.share.command",
         "meeting.share",
         "command",
@@ -3211,6 +3229,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
         "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
         "meeting.share.command" => opt_str(cfg.meeting.share.command.as_ref()),
+        "meeting.actions.remind_in_mins" => json!(cfg.meeting.actions.remind_in_mins),
+        "meeting.actions.todoist_project_id" => {
+            opt_str(cfg.meeting.actions.todoist_project_id.as_ref())
+        }
         "meeting.share.timeout_secs" => json!(cfg.meeting.share.timeout_secs),
         "meeting.share.folder" => json!(cfg.meeting.share.folder),
         "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),

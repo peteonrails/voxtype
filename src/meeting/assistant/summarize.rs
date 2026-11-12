@@ -123,7 +123,8 @@ pub fn summarize_meeting(
         .map_err(|e| AssistantError::Storage(format!("Failed to load meeting: {e}")))?;
 
     let backend = choose_summary_backend(settings, overrides)?;
-    let (summary, used, fell_back_from) = run_summary(settings, &meeting, &backend)?;
+    let (mut summary, used, fell_back_from) = run_summary(settings, &meeting, &backend)?;
+    crate::meeting::actions::resolve_dues(&mut summary, &meeting.metadata);
     let agent_name = used.display_name(settings);
 
     let path = save(&storage, &meeting, &meeting_id, &summary, &agent_name)?;

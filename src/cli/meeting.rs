@@ -185,6 +185,67 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// List a meeting's action items, or send them to Todoist or as
+    /// Omarchy reminders
+    ///
+    /// The items come from the meeting's summary (`voxtype meeting
+    /// summarize`): what to do, who took it on, the deadline as said and
+    /// the day it resolves to, and where in the meeting it came up.
+    ///
+    /// --send todoist adds each item as a task (connect first with
+    /// `voxtype meeting todoist connect`). --send reminder sets an Omarchy
+    /// reminder for each, after [meeting.actions] remind_in_mins, or at the
+    /// time said when that is later today. Every item is sent unless you
+    /// narrow it with --pick or --mine, and an item already sent to that
+    /// place is skipped unless you add --resend.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting actions latest\n  \
+        voxtype meeting actions latest --send todoist\n  \
+        voxtype meeting actions latest --send todoist --pick 1,3\n  \
+        voxtype meeting actions latest --send reminder --mine --in 30\n  \
+        voxtype meeting actions latest --json")]
+    Actions {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Send the items: todoist or reminder
+        #[arg(
+            long,
+            value_name = "TARGET",
+            value_parser = clap::builder::PossibleValuesParser::new(["todoist", "reminder"])
+        )]
+        send: Option<String>,
+
+        /// Every item (the default)
+        #[arg(long, conflicts_with_all = ["pick", "mine"])]
+        all: bool,
+
+        /// Only these items, by number: 1,3 or 2-4
+        #[arg(long, value_name = "LIST")]
+        pick: Option<String>,
+
+        /// Only your own items: owned by You or [meeting] my_name
+        #[arg(long)]
+        mine: bool,
+
+        /// Send again items already sent there
+        #[arg(long)]
+        resend: bool,
+
+        /// For reminders: minutes until they go off, instead of
+        /// [meeting.actions] remind_in_mins
+        #[arg(long = "in", value_name = "MINUTES")]
+        remind_in: Option<u32>,
+
+        /// For Todoist: the project ID to add tasks to, instead of
+        /// [meeting.actions] todoist_project_id (default: Inbox)
+        #[arg(long, value_name = "ID")]
+        project: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show meeting details
     Show {
         /// Meeting ID (or "latest" for most recent)

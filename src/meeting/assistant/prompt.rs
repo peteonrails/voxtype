@@ -374,10 +374,11 @@ Use speaker names exactly as written above, also for action item owners; in the 
   "overview": "3-5 sentences on what the meeting covered and concluded",
   "key_points": ["..."],
   "decisions": ["..."],
-  "action_items": [{"description": "...", "owner": "speaker name or null", "due": "date or null"}],
+  "action_items": [{"description": "...", "owner": "speaker name or null", "due": "the deadline as said, or null", "at": "mm:ss"}],
   "chapters": [{"start": "mm:ss", "title": "..."}]
 }
 Chapters follow the order of the meeting; each start is the [mm:ss] of the line where that topic begins.
+List every action item someone took on or was given. "due" is only the deadline someone actually said ("Friday", "by end of day", "November 20"), word for word, never one you infer; "at" is the [mm:ss] of the line where the item was given.
 "#;
 
 /// Prompt that folds `lines` into a running summary of the meeting so far.

@@ -891,12 +891,14 @@ mod tests {
                     assignee: Some("Dana".into()),
                     due_date: Some("Friday".into()),
                     completed: false,
+                    ..Default::default()
                 },
                 ActionItem {
                     description: "Write the notes".into(),
                     assignee: None,
                     due_date: None,
                     completed: false,
+                    ..Default::default()
                 },
             ],
             decisions: vec!["Ship Friday".into()],

@@ -4126,6 +4126,32 @@ voxtype config set meeting.share.folder ~/Notes/Meetings
 
 ---
 
+## [meeting.actions]
+
+Settings for `voxtype meeting actions --send`. See [Action Items](MEETING_MODE.md#action-items).
+
+### remind_in_mins
+
+**Type:** Integer (1 to 10080)
+**Default:** `60`
+**Required:** No
+
+Minutes until an Omarchy reminder for an action item goes off. An item due at a time later today ("by 3pm") goes off at that time instead. `--in` overrides it for one send.
+
+```bash
+voxtype config set meeting.actions.remind_in_mins 30
+```
+
+### todoist_project_id
+
+**Type:** String
+**Default:** none (the Inbox)
+**Required:** No
+
+The Todoist project action items are added to, by ID. The ID is the last part of the project's URL in Todoist's web app. `--project` overrides it for one send. The Todoist connection itself is not a setting: `voxtype meeting todoist connect` stores its token in `~/.local/state/voxtype/todoist.json`.
+
+---
+
 ## [meeting.assistant]
 
 The meeting assistant answers `voxtype meeting ask` and writes summaries, through your own coding agent run headless with every tool off, or the local Ollama model from `[meeting.summary]`. Transcripts go to an agent only after you allow it once per agent. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) and its privacy section.
