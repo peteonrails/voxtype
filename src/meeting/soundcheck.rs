@@ -110,9 +110,10 @@ pub struct SoundcheckEvent {
     /// While running: seconds left.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<u64>,
-    /// While running: `webrtc`, `gtcrn` or `none`, as a meeting would use.
+    /// While running: `webrtc`, `gtcrn` or `none`, as a meeting would use;
+    /// named like `echo_cancel` in `hello` and `meeting status --json`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub echo_path: Option<String>,
+    pub echo_cancel: Option<String>,
     /// While running: what the microphone is recorded from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mic: Option<String>,
@@ -133,7 +134,13 @@ impl SoundcheckEvent {
         Self {
             state: "running".into(),
             seconds: Some(seconds),
-            echo_path: Some(opened.echo_path.as_str().into()),
+            echo_cancel: Some(
+                opened
+                    .echo_path
+                    .effective(echo_cancel::gtcrn_available())
+                    .as_str()
+                    .into(),
+            ),
             mic: Some(opened.mic.clone()),
             loopback: Some(opened.capture.has_loopback()),
             reason: None,
@@ -145,7 +152,7 @@ impl SoundcheckEvent {
         Self {
             state: "stopped".into(),
             seconds: None,
-            echo_path: None,
+            echo_cancel: None,
             mic: None,
             loopback: None,
             reason: Some(reason.into()),

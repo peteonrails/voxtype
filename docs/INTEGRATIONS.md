@@ -456,7 +456,7 @@ voxtype meeting watch --levels | jq -c '[.t_ms, .mic, .loopback]'
 #### `soundcheck`
 
 ```json
-{"event": "soundcheck", "state": "running", "seconds": 30, "echo_path": "webrtc", "mic": "voxtype_meeting_aec_source", "loopback": true}
+{"event": "soundcheck", "state": "running", "seconds": 30, "echo_cancel": "webrtc", "mic": "voxtype_meeting_aec_source", "loopback": true}
 {"event": "soundcheck", "state": "stopped", "reason": "done"}
 {"event": "soundcheck", "state": "stopped", "reason": "error", "message": "Audio connection failed: ..."}
 ```
@@ -465,9 +465,10 @@ voxtype meeting watch --levels | jq -c '[.t_ms, .mic, .loopback]'
 microphone and loopback exactly as a meeting would, record and transcribe
 nothing, and send `levels` with `"soundcheck": true` until it stops.
 
-- `running` says what the check, and so the next meeting, uses: `echo_path`
-  (`webrtc` for PipeWire's echo canceller, `gtcrn` or `none`), `mic` (the
-  device, or the canceller's source), and whether `loopback` is captured. It is sent again,
+- `running` says what the check, and so the next meeting, uses:
+  `echo_cancel` (`webrtc`, `gtcrn` or `none`, as `hello` and
+  `meeting status --json` report for a meeting), `mic` (the device, or the
+  canceller's source), and whether `loopback` is captured. It is sent again,
   with the new `seconds`, when a check is extended.
 - `stopped` gives a `reason`: `done` (its time ran out), `stopped` (asked to),
   `meeting` (a meeting needs the microphone; starting one ends the check) or

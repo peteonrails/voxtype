@@ -121,7 +121,7 @@ fn assert_two_second_check(events: &[serde_json::Value]) {
     assert_eq!(first["event"], "soundcheck");
     assert_eq!(first["state"], "running");
     assert_eq!(first["seconds"], 2);
-    assert_eq!(first["echo_path"], "webrtc");
+    assert_eq!(first["echo_cancel"], "webrtc");
     assert_eq!(first["mic"], "voxtype_meeting_aec_source");
     assert_eq!(first["loopback"], true);
 

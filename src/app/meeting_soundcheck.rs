@@ -237,7 +237,7 @@ impl Output {
                     "Sound check for {} s: mic {} (echo {}), {}. Speak, then play something; Ctrl+C stops.",
                     v["seconds"],
                     v["mic"].as_str().unwrap_or("?"),
-                    v["echo_path"].as_str().unwrap_or("?"),
+                    v["echo_cancel"].as_str().unwrap_or("?"),
                     if v["loopback"] == true {
                         "loopback on"
                     } else {

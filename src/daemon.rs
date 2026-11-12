@@ -3138,7 +3138,8 @@ impl Daemon {
                         if self.speech_enhancer.is_none()
                             && echo_path == audio::echo_cancel::EchoPath::Gtcrn
                         {
-                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
+                            let model_path =
+                                Config::models_dir().join(audio::echo_cancel::GTCRN_MODEL_FILE);
                             if model_path.exists() {
                                 match audio::enhance::GtcrnEnhancer::load(&model_path) {
                                     Ok(enhancer) => {
@@ -3166,12 +3167,7 @@ impl Daemon {
                         let gtcrn_loaded = self.speech_enhancer.is_some();
                         #[cfg(not(feature = "onnx-common"))]
                         let gtcrn_loaded = false;
-                        let used = match echo_path {
-                            audio::echo_cancel::EchoPath::Gtcrn if !gtcrn_loaded => {
-                                audio::echo_cancel::EchoPath::None
-                            }
-                            path => path,
-                        };
+                        let used = echo_path.effective(gtcrn_loaded);
                         self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
                         self.meeting_echo_canceller = echo_canceller.take();
                         tracing::info!("Meeting {} echo handling: {}", meeting_id, used.as_str());
@@ -3262,7 +3258,7 @@ impl Daemon {
                     "Sound check for {} s: mic {}, echo path {}, loopback {}",
                     seconds,
                     opened.mic,
-                    opened.echo_path.as_str(),
+                    running.echo_cancel.as_deref().unwrap_or("?"),
                     opened.capture.has_loopback()
                 );
                 let levels = self.meeting_event_hub.clone().map(|hub| {
