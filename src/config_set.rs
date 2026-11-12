@@ -839,6 +839,36 @@ gguf_backend = "cpu"
         );
     }
 
+    /// `echo_cancel` takes its current names, and the names early 1.3.0
+    /// test builds used ("aec", "off") are written as those, not refused;
+    /// a config still holding an old name loads and means the same.
+    #[test]
+    fn echo_cancel_takes_webrtc_and_still_reads_the_old_names() {
+        use crate::audio::echo_cancel::Mode;
+        let (_dir, path) = full_config();
+        let key = "meeting.audio.echo_cancel";
+        for value in ["webrtc", "gtcrn", "disabled", "auto"] {
+            set_key(path.clone(), key, value).unwrap();
+            assert_eq!(reload(&path).meeting.audio.echo_cancel, value);
+        }
+        let out = set_key(path.clone(), key, "aec").unwrap();
+        assert_eq!(out.value, TypedValue::Str("webrtc".to_string()));
+        assert_eq!(reload(&path).meeting.audio.echo_cancel, "webrtc");
+        set_key(path.clone(), key, "off").unwrap();
+        assert_eq!(reload(&path).meeting.audio.echo_cancel, "disabled");
+        assert!(set_key(path.clone(), key, "loud").is_err());
+
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            text.replace("echo_cancel = \"disabled\"", "echo_cancel = \"aec\""),
+        )
+        .unwrap();
+        let cfg = reload(&path);
+        assert_eq!(cfg.meeting.audio.echo_cancel, "aec");
+        assert_eq!(Mode::parse(&cfg.meeting.audio.echo_cancel), Mode::Webrtc);
+    }
+
     /// The OSD styling keys (#501) must be reachable through `config set`,
     /// not just by hand-editing the TOML: a style package path, the
     /// development plugin_path (set and unset), and the nested [osd.frame]
