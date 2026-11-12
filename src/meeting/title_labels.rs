@@ -791,6 +791,30 @@ mod tests {
         assert_eq!(Me::resolve(Some("Pete")).unwrap().names[0], "Pete");
     }
 
+    /// The order the user is known by: `meeting.my_name`, then the
+    /// account's full name, then the login name, which only stands in when
+    /// neither name is known.
+    #[test]
+    fn my_name_then_full_name_then_login() {
+        set_login_for_test(Some("pete"));
+        set_account_name_for_test(None);
+        let me = Me::resolve(Some("Peter")).unwrap();
+        assert_eq!(me, Me::named(&["Peter"]), "my_name, and no login fallback");
+        let labels = labels_for("Peter <> Chad", &me).unwrap();
+        assert_eq!(labels.you, "Peter");
+
+        set_account_name_for_test(Some("Pete Jackson"));
+        assert_eq!(
+            Me::resolve(Some("Peter")).unwrap(),
+            Me::named(&["Peter", "Pete Jackson"])
+        );
+        assert_eq!(Me::resolve(None).unwrap(), Me::named(&["Pete Jackson"]));
+
+        set_account_name_for_test(None);
+        assert_eq!(Me::resolve(None).unwrap(), Me::logged_in_as("pete"));
+        assert_eq!(Me::resolve(Some("  ")).unwrap(), Me::logged_in_as("pete"));
+    }
+
     #[test]
     fn system_and_odd_logins_name_nobody() {
         set_account_name_for_test(None);
