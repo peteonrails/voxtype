@@ -43,7 +43,7 @@ Item {
   signal discardStaleRequested(string meetingId)
   // MeetingSearch, from the controller.
   property var search: null
-  signal searchResultRequested(string meetingId, real startMs)
+  signal searchResultRequested(string meetingId, int segmentId, real startMs)
   // The idle screen shows the sound check instead of the meetings list.
   property bool soundCheckOpen: false
   onHasMeetingChanged: if (root.hasMeeting) root.soundCheckOpen = false
@@ -52,6 +52,25 @@ Item {
     if (!root.soundcheck) return
     root.soundCheckOpen = true
     if (!root.soundcheck.running) root.soundcheck.start()
+  }
+
+  // What happened to an unfinished meeting, and what Finish or Discard
+  // does with it. `last_chunk_ms`, `has_audio` and `untranscribed_chunks`
+  // come from `meeting recover`; a voxtype without it has none of them.
+  function recoveryText(m, confirming) {
+    var t = (m.title ? String(m.title) : "A meeting")
+    var when = root.recoveryWhen(m.started_at)
+    if (when !== "") t += ", started " + when + ","
+    if (m.last_chunk_ms !== undefined && m.last_chunk_ms !== null)
+      t += " stopped " + root.clock(m.last_chunk_ms) + " in,"
+    t += " did not finish, most likely because voxtype stopped during it. "
+    if (confirming) return t + "Discarding deletes its transcript and any kept audio."
+    var left = Number(m.untranscribed_chunks) || 0
+    if (left > 0 && m.has_audio === true)
+      return t + "Finish transcribes the " + (left === 1 ? "part" : left + " parts") + " not transcribed yet and closes it."
+    if (left > 0 && m.has_audio === false)
+      return t + "Finish closes it with what was transcribed; the last " + (left === 1 ? "part was" : left + " parts were") + " not kept."
+    return t + "Finish keeps what was recorded and closes it."
   }
 
   function recoveryWhen(iso) {
@@ -220,6 +239,11 @@ Item {
   function jumpTo(ms) {
     root.tab = "transcript"
     Qt.callLater(function() { transcriptPane.jumpTo(ms) })
+  }
+
+  function jumpToSegment(segId, ms) {
+    root.tab = "transcript"
+    Qt.callLater(function() { transcriptPane.jumpToSegment(segId, ms) })
   }
 
   // Ticks once a second while it matters, so elapsed and "ago" stay current.
@@ -1068,11 +1092,7 @@ Item {
               Text {
                 objectName: "recoveryText"
                 width: parent.width
-                text: (stale.modelData.title ? String(stale.modelData.title) : "A meeting")
-                  + (root.recoveryWhen(stale.modelData.started_at) !== "" ? ", started " + root.recoveryWhen(stale.modelData.started_at) : "")
-                  + ", did not finish, most likely because voxtype stopped during it. "
-                  + (stale.confirming ? "Discarding deletes its transcript and any kept audio."
-                                      : "Finish keeps what was recorded and closes it.")
+                text: root.recoveryText(stale.modelData, stale.confirming)
                 color: root.theme.fg
                 font.family: root.theme.fontFamily
                 font.pixelSize: root.theme.bodySmall
@@ -1195,7 +1215,7 @@ Item {
           hasMore: root.listHasMore
           search: root.search
           onOpenRequested: function(meetingId) { root.openMeetingRequested(meetingId) }
-          onResultRequested: function(meetingId, startMs) { root.searchResultRequested(meetingId, startMs) }
+          onResultRequested: function(meetingId, segmentId, startMs) { root.searchResultRequested(meetingId, segmentId, startMs) }
           onMoreRequested: root.moreMeetingsRequested()
         }
       }

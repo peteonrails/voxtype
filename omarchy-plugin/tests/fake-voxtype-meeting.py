@@ -698,7 +698,7 @@ def search(state, args):
             limit = int(args[i + 1])
             i += 2
             continue
-        if args[i] != "--json":
+        if args[i] not in ("--json", "--"):
             rest.append(args[i])
         i += 1
     words = " ".join(rest).lower().replace('"', " ").replace("*", " ").split()
@@ -742,26 +742,42 @@ def search(state, args):
     return 0
 
 
-def finish(state, args):
-    """meeting finish M [--json]: complete one meeting left active by a
-    crash. Proposed, not in a released voxtype: state["finish_missing"]
-    answers as a voxtype without it; state["finish_error"] fails."""
-    if state.get("finish_missing"):
-        print("error: unrecognized subcommand 'finish'", file=sys.stderr)
+def recover(state, args):
+    """meeting recover --json | --finish M --json | --discard M
+
+    The meetings voxtype stopped in the middle of: state["recoverable"], in
+    the real shape. --finish closes one (status completed) and prints its
+    metadata; --discard deletes it. state["recover_missing"] answers as a
+    voxtype without the command; state["recover_error"] fails --finish."""
+    if state.get("recover_missing"):
+        print("error: unrecognized subcommand 'recover'", file=sys.stderr)
         return 2
-    if state.get("finish_error"):
-        print("Error: " + state["finish_error"], file=sys.stderr)
-        return 1
-    for m in state.get("meetings", []):
-        if m["id"] == args[0]:
-            m["status"] = "completed"
-            m["duration_secs"] = 1260
-            m["ended_at"] = "2026-11-11T09:21:00Z"
+    rec = state.setdefault("recoverable", [])
+    if "--finish" in args or "--discard" in args:
+        finishing = "--finish" in args
+        mid = args[args.index("--finish" if finishing else "--discard") + 1]
+        if finishing and state.get("recover_error"):
+            print("Error: " + state["recover_error"], file=sys.stderr)
+            return 1
+        if not any(r["id"] == mid for r in rec):
+            print("Error: %s is not an unfinished meeting" % mid, file=sys.stderr)
+            return 1
+        state["recoverable"] = [r for r in rec if r["id"] != mid]
+        if finishing:
+            meta = None
+            for m in state.get("meetings", []):
+                if m["id"] == mid:
+                    m.update(status="completed", duration_secs=1260, ended_at="2026-11-11T09:21:00Z")
+                    meta = m
             save(state)
-            print(json.dumps(m) if "--json" in args else "Finished meeting " + m["id"])
-            return 0
-    print("Error: Meeting not found: " + args[0], file=sys.stderr)
-    return 1
+            print(json.dumps(meta or {"id": mid, "status": "completed"}))
+        else:
+            state["meetings"] = [m for m in state.get("meetings", []) if m["id"] != mid]
+            save(state)
+            print("Discarded meeting " + mid)
+        return 0
+    print(json.dumps(rec))
+    return 0
 
 
 def delete_meeting(state, args):
@@ -886,7 +902,7 @@ def main():
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
             "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
-            "soundcheck", "search", "waveform"):
+            "soundcheck", "search", "waveform", "recover"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -936,8 +952,8 @@ def main():
         return play(state, args[2:])
     elif action == "waveform":
         return waveform(state, args[2:])
-    elif action == "finish":
-        return finish(state, args[2:])
+    elif action == "recover":
+        return recover(state, args[2:])
     elif action == "delete" and "--force" in args:
         return delete_meeting(state, args[2:])
     elif action == "search":

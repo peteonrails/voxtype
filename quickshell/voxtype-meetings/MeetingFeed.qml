@@ -94,6 +94,9 @@ Item {
   // gave way to a recording one. Never fired for a meeting already running
   // when the feed first connected.
   signal meetingStarted()
+  // Meetings voxtype stopped in the middle of, as the daemon lists them
+  // after hello (`meeting recover --json` entries).
+  signal recoverable(var meetings)
 
   function speakerKey(segment) {
     if (segment.speaker_id !== undefined && segment.speaker_id !== null && segment.speaker_id !== "")
@@ -494,6 +497,8 @@ Item {
                         ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
+    } else if (kind === "recoverable") {
+      root.recoverable(ev.meetings && ev.meetings.length !== undefined ? ev.meetings : [])
     } else if (kind === "levels") {
       // A sound check's levels carry `soundcheck` and no meeting; the sound
       // check panel reads those from its own command.

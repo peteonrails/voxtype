@@ -114,12 +114,16 @@ Scenarios:
               meeting on the line, the query kept on Back, Escape back to the
               list, no matches, a title match
   search-old  a voxtype without `meeting search` is called too old
-  recovery    a meeting the list still calls active, with none recording:
-              the "Unfinished recording found" card; Finish runs
-              `meeting finish` and the card goes; Discard asks first, Keep
-              it backs out, Discard for good runs `meeting delete --force`
-  recovery-old  a voxtype without `meeting finish` says the meeting finishes
-              when voxtype next starts
+  recovery    unfinished meetings from `meeting recover --json` (the list
+              calls them interrupted): the "Unfinished recording found" card
+              with what is left to transcribe; Finish runs `recover --finish`
+              and the card goes; Discard asks first, Keep it backs out,
+              Discard for good runs `recover --discard`
+  recovery-socket  the daemon's `recoverable` event brings a card while the
+              view is open
+  recovery-old  a voxtype without `meeting recover`: found from the list's
+              active status, Finish says it finishes when voxtype next
+              starts, Discard runs `meeting delete --force`
   undo-edit   Undo after an edit: `edit --reset` for a first correction, the
               earlier text for a later one; the bar leaves after its window
   undo-reassign  Undo after moving a line: `reassign --reset`; a refused move
@@ -165,7 +169,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-gt
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
-             "levels", "search", "search-old", "recovery", "recovery-old",
+             "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -308,6 +312,7 @@ INITIAL = {
     "summary-stale": lambda: [running_meeting()],
 }
 
+STALE = ["c3000000-0000-4000-8000-000000000003", "c3000000-0000-4000-8000-000000000004"]
 CLAUDE = {"id": "claude", "name": "Claude", "found": True, "supported": True, "consent": True}
 CODEX = {"id": "codex", "name": "Codex", "found": True, "supported": True, "consent": True}
 LONG_SUMMARY = {"summary": "\n\n".join("### Section %d\n\nA paragraph of summary text for section %d, long "
@@ -340,7 +345,12 @@ STATE = {
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
     "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
     "search": {"search_delay": 0.6},
-    "recovery-old": {"finish_missing": True},
+    "recovery-old": {"recover_missing": True},
+    "recovery": {"recoverable": [
+        {"id": STALE[0], "title": "Planning", "started_at": "2026-11-11T09:00:00Z", "last_chunk_ms": 760000,
+         "has_audio": True, "untranscribed_chunks": 2},
+        {"id": STALE[1], "title": "Vendor call", "started_at": "2026-11-11T08:00:00Z", "last_chunk_ms": 300000,
+         "has_audio": False, "untranscribed_chunks": 1}]},
     "seek": {"play_speed": 10},
     "waveform": {"play_speed": 10},
     "waveform-missing": {"waveform_missing": True},
@@ -417,9 +427,12 @@ def past_meetings(data, scenario):
             if scenario == "recovery-old" and mid == STALE[1]:
                 continue
             add(mid, title, started, 20, [seg(0, 1, "Let's plan the week.", "microphone", "You")])
+            # The startup pass marks them interrupted; an older daemon left
+            # them active.
             for e in entries:
                 if e["id"] == mid:
-                    e.update(status="active", duration_secs=None, ended_at=None)
+                    e.update(status="active" if scenario == "recovery-old" else "interrupted",
+                             duration_secs=None, ended_at=None)
     if scenario == "list":
         for i in range(58):
             day = 7 - i // 10
@@ -429,9 +442,7 @@ def past_meetings(data, scenario):
 
 
 PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-                  "list-old", "export-past", "search", "search-old", "recovery", "recovery-old"}
-
-STALE = ["c3000000-0000-4000-8000-000000000003", "c3000000-0000-4000-8000-000000000004"]
+                  "list-old", "export-past", "search", "search-old", "recovery", "recovery-socket", "recovery-old"}
 
 
 def run(scenario, host, shell, evidence):
@@ -558,7 +569,8 @@ def read_only(argv):
     """Reads the view makes on its own (notes, assistant status, show)."""
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
-    if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"]:
+    if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"] \
+            or argv == ["meeting", "recover", "--json"]:
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -687,10 +699,10 @@ def check_calls(scenario, calls, runtime_notes=""):
                          ["meeting", "soundcheck", "--stop"]], "meeting commands")
     elif scenario == "search":
         def q(text):
-            return ["meeting", "search", text, "--limit", "30", "--json"]
+            return ["meeting", "search", "--limit", "30", "--json", "--", text]
         expect(meeting, [q("empty state"), q("zebra"), q("1:1")], "meeting commands")
     elif scenario == "search-old":
-        expect(meeting, [["meeting", "search", "layout", "--limit", "30", "--json"]], "meeting commands")
+        expect(meeting, [["meeting", "search", "--limit", "30", "--json", "--", "layout"]], "meeting commands")
     elif scenario == "undo-edit":
         def ed(seg, *rest):
             return ["meeting", "edit", MEETING_ID, seg] + list(rest) + ["--json"]
@@ -714,10 +726,12 @@ def check_calls(scenario, calls, runtime_notes=""):
             return ["meeting", "play", MEETING_ID, "--segment", seg, "--track", "mixed", "--json"]
         expect(meeting, [play_from("3"), play_from("1"), ["meeting", "play", "--stop", "--json"]], "meeting commands")
     elif scenario == "recovery":
-        expect(meeting, [["meeting", "finish", STALE[0], "--json"],
-                         ["meeting", "delete", STALE[1], "--force"]], "meeting commands")
+        expect(meeting, [["meeting", "recover", "--finish", STALE[0], "--json"],
+                         ["meeting", "recover", "--discard", STALE[1]]], "meeting commands")
+    elif scenario == "recovery-socket":
+        expect(meeting, [], "meeting commands")
     elif scenario == "recovery-old":
-        expect(meeting, [["meeting", "finish", STALE[0], "--json"]], "meeting commands")
+        expect(meeting, [["meeting", "delete", STALE[0], "--force"]], "meeting commands")
     elif scenario == "levels":
         expect(meeting, [], "meeting commands")
     elif scenario == "soundcheck-error":

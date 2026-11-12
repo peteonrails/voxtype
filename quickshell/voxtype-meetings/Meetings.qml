@@ -103,6 +103,7 @@ Item {
     listProc.out = ""
     listProc.err = ""
     listProc.launch([root.bin, "meeting", "list", "--json", "--limit", String(root.listLimit)])
+    root.refreshRecoverable()
   }
 
   function loadMoreMeetings() {
@@ -113,6 +114,7 @@ Item {
   // A past meeting, shown the way an ended one is.
   function openPast(meetingId) {
     root.actionError = ""
+    root.pendingJumpSeg = -1
     root.pendingJumpMs = -1
     storedProc.load(meetingId)
   }
@@ -155,16 +157,34 @@ Item {
 
   // ------------------------------------------------------------ recovery
 
-  // Meetings the list still calls active or paused that are not the one
-  // recording: left unfinished when voxtype stopped during them. The daemon
-  // completes these when it starts (storage's complete_stale_meetings), so
-  // they show while it is down, or before it has started again.
+  // Meetings left unfinished when voxtype stopped during them
+  // (`voxtype meeting recover`):
+  //
+  //   voxtype meeting recover --json
+  //     [{"id", "title", "started_at", "last_chunk_ms", "has_audio",
+  //       "untranscribed_chunks"}]
+  //   voxtype meeting recover --finish <id> --json   closes it, transcribing
+  //                                                 what was left; prints the
+  //                                                 metadata
+  //   voxtype meeting recover --discard <id>         deletes it
+  //   socket: {"event": "recoverable", "meetings": [...]} after hello
+  //
+  // The daemon's startup pass marks these "interrupted", so they are found
+  // from recover, not from a status. A voxtype without `recover` (its
+  // daemon completes them when it starts) falls back to the list: anything
+  // still active or paused that is not the meeting recording.
+  property var recoverable: []
+  // null: not asked yet; false: this voxtype has no `meeting recover`.
+  property var recoverSupported: null
   readonly property var staleMeetings: {
     var out = []
-    for (var i = 0; i < root.pastMeetings.length; i++) {
-      var m = root.pastMeetings[i]
-      var st = String(m.status || "")
-      if (st !== "active" && st !== "paused") continue
+    var src = root.recoverSupported === false ? root.pastMeetings : root.recoverable
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i]
+      if (root.recoverSupported === false) {
+        var st = String(m.status || "")
+        if (st !== "active" && st !== "paused") continue
+      }
       if (feed.active && String(m.id) === feed.meetingId) continue
       out.push(m)
     }
@@ -174,16 +194,24 @@ Item {
   // The meeting a Finish or Discard is running for.
   property string recoveryBusy: ""
 
-  // `voxtype meeting finish <id> --json`: completes that one meeting the way
-  // the daemon's start does, transcribing what the crash left if the audio
-  // was kept. A voxtype without it finishes them only when it starts.
+  function refreshRecoverable() {
+    if (recoverListProc.running || recoverListProc.startPending) return
+    recoverListProc.out = ""
+    recoverListProc.err = ""
+    recoverListProc.launch([root.bin, "meeting", "recover", "--json"])
+  }
+
   function finishStale(id) {
     if (root.recoveryBusy !== "") return
     root.recoveryError = ""
+    if (root.recoverSupported === false) {
+      root.recoveryError = root.finishLaterText()
+      return
+    }
     root.recoveryBusy = id
     recoveryProc.kind = "finish"
     recoveryProc.err = ""
-    recoveryProc.launch([root.bin, "meeting", "finish", id, "--json"])
+    recoveryProc.launch([root.bin, "meeting", "recover", "--finish", id, "--json"])
   }
 
   function discardStale(id) {
@@ -192,7 +220,41 @@ Item {
     root.recoveryBusy = id
     recoveryProc.kind = "discard"
     recoveryProc.err = ""
-    recoveryProc.launch([root.bin, "meeting", "delete", id, "--force"])
+    recoveryProc.launch(root.recoverSupported === false
+      ? [root.bin, "meeting", "delete", id, "--force"]
+      : [root.bin, "meeting", "recover", "--discard", id])
+  }
+
+  function finishLaterText() {
+    return "This voxtype cannot finish a recording from here. It finishes it the next time it starts: "
+      + (root.daemonRunning || feed.connected ? "systemctl --user restart voxtype" : "systemctl --user start voxtype") + "."
+  }
+
+  Connections {
+    target: feed
+    function onRecoverable(meetings) {
+      root.recoverSupported = true
+      root.recoverable = meetings
+    }
+  }
+
+  MeetingProcess {
+    id: recoverListProc
+    property string out: ""
+    property string err: ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: recoverListProc.out = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: recoverListProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (code !== 0) {
+        if (/unrecognized subcommand/i.test(recoverListProc.err)) root.recoverSupported = false
+        return
+      }
+      var data = null
+      try { data = JSON.parse(recoverListProc.out) } catch (e) {}
+      if (!data || data.length === undefined) return
+      root.recoverSupported = true
+      root.recoverable = data
+    }
   }
 
   MeetingProcess {
@@ -204,14 +266,18 @@ Item {
       root.recoveryBusy = ""
       if (code === 0) {
         root.refreshList()
+        root.refreshRecoverable()
         return
       }
-      if (recoveryProc.kind === "finish" && /unrecognized subcommand/i.test(recoveryProc.err))
-        root.recoveryError = "This voxtype cannot finish a recording from here. It finishes it the next time it starts: "
-          + (root.daemonRunning || feed.connected ? "systemctl --user restart voxtype" : "systemctl --user start voxtype") + "."
-      else
-        root.recoveryError = MT.cliProblem(recoveryProc.err, "finishing a recording")
-          || "voxtype meeting " + recoveryProc.kind + " exited " + code
+      if (/unrecognized subcommand|unexpected argument/i.test(recoveryProc.err)) {
+        root.recoverSupported = false
+        if (recoveryProc.kind === "finish") {
+          root.recoveryError = root.finishLaterText()
+          return
+        }
+      }
+      root.recoveryError = MT.cliProblem(recoveryProc.err, "finishing a recording")
+        || "voxtype meeting recover exited " + code
     }
     onFailedToStart: {
       root.recoveryBusy = ""
@@ -501,12 +567,14 @@ Item {
 
   // A search result opened: the meeting, then its line once it is loaded.
   property real pendingJumpMs: -1
-  function openResult(meetingId, startMs) {
+  property int pendingJumpSeg: -1
+  function openResult(meetingId, segmentId, startMs) {
     root.actionError = ""
     if (meetingId === feed.meetingId && feed.hasMeeting) {
-      if (startMs >= 0 && root.window) root.window.view.jumpTo(startMs)
+      if ((segmentId >= 0 || startMs >= 0) && root.window) root.window.view.jumpToSegment(segmentId, startMs)
       return
     }
+    root.pendingJumpSeg = segmentId
     root.pendingJumpMs = startMs
     storedProc.load(meetingId)
   }
@@ -815,10 +883,12 @@ Item {
         return
       }
       root.showTab("transcript")
-      if (root.pendingJumpMs >= 0 && root.window) {
+      if ((root.pendingJumpSeg >= 0 || root.pendingJumpMs >= 0) && root.window) {
+        var seg = root.pendingJumpSeg
         var ms = root.pendingJumpMs
-        Qt.callLater(function() { if (root.window) root.window.view.jumpTo(ms) })
+        Qt.callLater(function() { if (root.window) root.window.view.jumpToSegment(seg, ms) })
       }
+      root.pendingJumpSeg = -1
       root.pendingJumpMs = -1
     }
   }
@@ -901,7 +971,7 @@ Item {
     function onOpenMeetingRequested(meetingId) { root.openPast(meetingId) }
     function onFinishStaleRequested(meetingId) { root.finishStale(meetingId) }
     function onDiscardStaleRequested(meetingId) { root.discardStale(meetingId) }
-    function onSearchResultRequested(meetingId, startMs) { root.openResult(meetingId, startMs) }
+    function onSearchResultRequested(meetingId, segmentId, startMs) { root.openResult(meetingId, segmentId, startMs) }
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }
     function onMinimizeRequested() { root.minimize() }

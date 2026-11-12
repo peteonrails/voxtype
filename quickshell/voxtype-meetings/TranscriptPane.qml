@@ -66,6 +66,16 @@ Item {
     flashTimer.restart()
   }
 
+  // To one line by its id (a search result), or by time if it is gone.
+  function jumpToSegment(segId, ms) {
+    var row = root.feed ? root.feed.rowIndex(segId) : -1
+    if (row < 0) { root.jumpTo(ms); return }
+    transcript.follow = false
+    transcript.positionViewAtIndex(row, ListView.Center)
+    root.flashSegId = segId
+    flashTimer.restart()
+  }
+
   property int flashSegId: -1
   Timer { id: flashTimer; interval: 1600; onTriggered: root.flashSegId = -1 }
 

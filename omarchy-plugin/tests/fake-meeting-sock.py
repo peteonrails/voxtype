@@ -45,6 +45,8 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
    "meeting_id"?, "soundcheck"?}
                                    a levels event for the running meeting (or
                                    a sound check's, with "soundcheck": true)
+  {"cmd": "recoverable", "meetings": [...]}
+                                   the daemon's list of unfinished meetings
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -216,6 +218,8 @@ class Server:
             self.broadcast(ev)
         elif kind == "error":
             self.broadcast({"event": "error", "message": cmd["message"]})
+        elif kind == "recoverable":
+            self.broadcast({"event": "recoverable", "meetings": cmd["meetings"]})
         elif kind == "levels":
             # As the daemon sends them: the meeting's id (or null and
             # "soundcheck": true for a sound check's).

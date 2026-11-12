@@ -11,9 +11,10 @@ import "MeetingText.js" as MT
 //      "start_ms", "speaker", "snippet", "snippet_plain",
 //      "highlights": [[start, end), ...] in code points, "rank"}]}
 //
-// Best matches come first. The query goes as one argument: the command
-// reads it the same as separate words, and a "quoted phrase" or a word*
-// prefix stays intact. A query with no words fails; that is not run.
+// Best matches come first. The query goes as one argument after `--`: the
+// command joins its words with spaces, so this reads the same as separate
+// words, and a "quoted phrase" or a word* prefix stays intact. A query with
+// no words fails; that is not run.
 Item {
   id: root
 
@@ -52,7 +53,8 @@ Item {
     searchProc.asked = q
     searchProc.out = ""
     searchProc.err = ""
-    searchProc.launch([root.bin, "meeting", "search", q, "--limit", String(root.limit), "--json"])
+    // `--` first: a query that starts with "-" is words, not an option.
+    searchProc.launch([root.bin, "meeting", "search", "--limit", String(root.limit), "--json", "--", q])
   }
 
   function clear() { root.search("") }

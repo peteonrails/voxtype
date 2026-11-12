@@ -24,7 +24,7 @@ Item {
   property var search: null
   readonly property bool searchOn: root.search !== null && root.search.query !== ""
   // A search result: the meeting, and for a transcript line where it is.
-  signal resultRequested(string meetingId, real startMs)
+  signal resultRequested(string meetingId, int segmentId, real startMs)
 
   // Where the list was when older meetings were asked for: a longer list
   // replaces the model, which would otherwise jump back to the top.
@@ -50,8 +50,10 @@ Item {
   function duration(m) {
     if (m.duration_secs === undefined || m.duration_secs === null)
       // The list shows only with no meeting on screen, so an active one here
-      // is a recording a crash left unfinished.
-      return String(m.status) === "active" || String(m.status) === "paused" ? "unfinished" : ""
+      // is a recording a crash left unfinished; the daemon marks those
+      // interrupted when it next starts.
+      var st = String(m.status)
+      return st === "active" || st === "paused" || st === "interrupted" ? "unfinished" : ""
     var mins = Math.round(Number(m.duration_secs) / 60)
     if (mins < 1) return "under a minute"
     if (mins < 60) return mins + " min"
@@ -209,6 +211,7 @@ Item {
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
           onClicked: root.resultRequested(String(hit.modelData.meeting_id),
+                                          hit.line && hit.modelData.segment_id !== null ? Number(hit.modelData.segment_id) : -1,
                                           hit.line && hit.modelData.start_ms !== null ? Number(hit.modelData.start_ms) : -1)
         }
       }
