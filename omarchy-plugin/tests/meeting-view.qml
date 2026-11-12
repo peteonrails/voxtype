@@ -671,12 +671,18 @@ Item {
       click(find(view(), "stopButton"), "Stop")
       waitFor(function() { return txt("meetingState") === "Ended" }, "Ended: " + txt("meetingState"))
       check(lines().length === 4 && txt("meetingTitle") === "Standup", "transcript and title kept")
-      check(txt("meetingEndedAt").indexOf("ended at ") === 0, "end time: " + txt("meetingEndedAt"))
+      check(/^at \d\d:\d\d$/.test(txt("meetingEndedAt")), "end time: " + txt("meetingEndedAt"))
       check(/^1:0\d$/.test(txt("meetingElapsed")), "length: " + txt("meetingElapsed"))
       check(!shown(find(view(), "pauseButton")) && !shown(find(view(), "stopButton")), "no Pause or Stop")
       check(shown(find(view(), "endedStartButton")) && find(view(), "endedStartButton").enabled, "Start meeting offered")
       check(!shown(find(view(), "idleState")), "not the idle screen")
+      // One how-to, in the Transcript tab; none in the header.
+      check(!shown(find(view(), "listeningIndicator")), "no second hint under the header")
+      check(shown(find(view(), "speakerHint")), "the speaker how-to")
       shot("ended")
+      click(find(view(), "speakerHintDismiss"), "dismiss the how-to")
+      waitFor(function() { return !shown(find(view(), "speakerHint")) }, "how-to dismissed")
+      check(view().speakerHintDismissed === true, "remembered by the controller for the session")
 
       // Fixing a line after the call. No socket echo: only --json answers.
       openChooser(1)

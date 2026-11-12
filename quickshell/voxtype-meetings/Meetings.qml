@@ -411,6 +411,8 @@ Item {
   }
   // The last export: {path, folder}, for the notice and its Open folder.
   property var lastExport: null
+  // The Transcript tab's speaker how-to, dismissed for this session.
+  property bool speakerHintDismissed: false
 
   function exportName(format) {
     var started = Date.parse(String(feed.startedAt || "").replace(/(\.\d{3})\d+/, "$1"))
@@ -689,6 +691,7 @@ Item {
       view.daemonRunning = Qt.binding(function() { return root.daemonRunning })
       view.pendingDelete = Qt.binding(function() { return root.pendingDelete !== null })
       view.lastExport = Qt.binding(function() { return root.lastExport })
+      view.speakerHintDismissed = Qt.binding(function() { return root.speakerHintDismissed })
       view.playingHere = Qt.binding(function() { return playback.playing && playback.meetingId === feed.meetingId })
       view.playTrack = Qt.binding(function() { return playback.track })
       view.playingSegId = Qt.binding(function() { return root.playingSegId })
@@ -731,5 +734,6 @@ Item {
     function onExportNoticeDismissed() { root.lastExport = null }
     function onCloseRequested() { root.closeRequested() }
     function onErrorDismissed() { root.actionError = "" }
+    function onSpeakerHintDismissRequested() { root.speakerHintDismissed = true }
   }
 }

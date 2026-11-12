@@ -28,6 +28,10 @@ Item {
   // The line being heard while the meeting's audio plays.
   property int playingSegId: -1
   property bool audioHintDismissed: false
+  // The how-to under the chips, until dismissed (once per shell session:
+  // the controller remembers it across reopening the view).
+  property bool speakerHintDismissed: false
+  signal speakerHintDismissRequested()
   onAudioKnownMissingChanged: if (!root.audioKnownMissing) root.audioHintDismissed = false
   signal deleteRequested(int segId)
 
@@ -206,14 +210,26 @@ Item {
       }
     }
 
-    Text {
+    RowLayout {
+      objectName: "speakerHint"
       Layout.fillWidth: true
-      visible: root.feed && root.feed.chips.length > 0
-      text: "Click a chip to name a speaker; two given the same name are merged. Click a line's speaker to move just that line."
-      color: root.theme.dim
-      font.family: root.theme.fontFamily
-      font.pixelSize: root.theme.caption
-      wrapMode: Text.WordWrap
+      visible: root.feed !== null && root.feed.chips.length > 0 && !root.speakerHintDismissed
+      spacing: root.theme.md
+      Text {
+        objectName: "speakerHintText"
+        Layout.fillWidth: true
+        text: "Click a chip to name a speaker; two given the same name are merged. Click a line's speaker to move just that line."
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+        wrapMode: Text.WordWrap
+      }
+      MeetingButton {
+        objectName: "speakerHintDismiss"
+        theme: root.theme
+        text: "✕"
+        onClicked: root.speakerHintDismissRequested()
+      }
     }
 
     Rectangle {
