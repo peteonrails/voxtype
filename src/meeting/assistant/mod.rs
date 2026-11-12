@@ -482,6 +482,7 @@ pub fn build_context(
     let all = prompt::lines(&meeting.transcript.segments);
     let mut ctx = prompt::Context {
         header,
+        reader: prompt::reader_line(&meeting.transcript.segments, None),
         notes: read_notes(meeting),
         annotations: read_annotations(meeting, 0),
         ..Default::default()
@@ -851,10 +852,8 @@ mod tests {
             p.contains("Speakers: Steve (Remote 1), Pete (You), Dana (Remote 2)."),
             "{p}"
         );
-        assert!(
-            p.contains("\nPete (You) is the person reading this. Refer to them as Pete"),
-            "{p}"
-        );
+        assert!(p.contains("\nThe user asking is Pete (You).\n"), "{p}");
+        assert!(p.contains("in the second person"), "{p}");
         assert!(p.contains(
             "[00:41] Steve: We ship on Friday.\n[00:52] Pete: Agreed.\n[01:00] Dana: The budget is 40k.\n"
         ));

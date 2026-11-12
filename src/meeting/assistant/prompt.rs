@@ -2,7 +2,6 @@
 //!
 //! ```text
 //! Meeting: Weekly sync, 2026-11-11 14:00, 32m. Speakers: Pete (You), Steve (Remote 1).
-//! Pete (You) is the person reading this. Refer to them as Pete or "you", ...
 //! [00:41] Steve: ...
 //! [00:52] Pete: ...
 //! User notes: ...
@@ -145,33 +144,33 @@ pub fn speaker_list(segments: &[TranscriptSegment]) -> String {
         .join(", ")
 }
 
-/// Who the reader is. The microphone's speaker, `You`, is the person
-/// reading the answer; without this an agent writes "You expected their
-/// lines" about them, as if You were a third person. With a name given to
-/// You it uses the name.
-pub fn reader_note(segments: &[TranscriptSegment]) -> Option<String> {
-    let you = segments.iter().find(|s| s.speaker_key() == "You")?;
-    let name = you.speaker_display();
-    Some(if name == "You" {
-        "You is the person reading this. Write about them in the second person \
-         (\"you said\", \"your action item\"), never as a third person named You."
-            .to_string()
-    } else {
-        format!(
-            "{name} (You) is the person reading this. Refer to them as {name} or \
-             \"you\", never as a third person named You."
-        )
-    })
+/// The reader line: who the user is in this transcript. `my_name` wins when
+/// set; otherwise the user is whoever the "You" side is shown as. None
+/// when there is nothing to say (no `my_name` and no lines from the user).
+pub fn reader_line(segments: &[TranscriptSegment], my_name: Option<&str>) -> Option<String> {
+    let you = "You";
+    let shown_as = segments
+        .iter()
+        .find(|s| s.speaker_key() == you)
+        .map(|s| s.speaker_display());
+    let name = my_name.map(str::trim).filter(|n| !n.is_empty());
+    match (name, shown_as) {
+        (Some(n), Some(d)) if d == n => Some(format!("The user asking is {n} ({you}).")),
+        (Some(n), Some(d)) => Some(format!(
+            "The user asking is {n}, shown in this transcript as {d} ({you})."
+        )),
+        (Some(n), None) => Some(format!("The user asking is {n}.")),
+        (None, Some(d)) if d == you => Some(format!("The user asking is the speaker {you}.")),
+        (None, Some(d)) => Some(format!("The user asking is {d} ({you}).")),
+        (None, None) => None,
+    }
 }
 
-/// The first lines of the prompt: the meeting, and who is reading.
+/// The first line of the prompt.
 pub fn header(meeting: &MeetingData, now: DateTime<Utc>) -> String {
     let speakers = speaker_list(&meeting.transcript.segments);
-    let reader = reader_note(&meeting.transcript.segments)
-        .map(|note| format!("\n{note}"))
-        .unwrap_or_default();
     format!(
-        "Meeting: {}, {}, {}. Speakers: {}.{reader}",
+        "Meeting: {}, {}, {}. Speakers: {}.",
         meeting.metadata.display_title(),
         meeting
             .metadata
@@ -287,6 +286,8 @@ pub fn pieces(lines: &[Line], budget: usize) -> Vec<Vec<Line>> {
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     pub header: String,
+    /// Who is asking, so "I" and "me" in a question resolve to a speaker.
+    pub reader: Option<String>,
     /// Summary of the part of the meeting before `recent`, and where it ends.
     pub earlier_summary: Option<(String, u64)>,
     /// Said when only part of the meeting is included on purpose (`--last`).
@@ -301,6 +302,10 @@ impl Context {
         let mut p = String::new();
         p.push_str(&self.header);
         p.push('\n');
+        if let Some(reader) = &self.reader {
+            p.push_str(reader);
+            p.push('\n');
+        }
         if let Some(excerpt) = &self.excerpt {
             p.push_str(excerpt);
             p.push('\n');
@@ -342,6 +347,7 @@ impl Context {
     /// The prompt for one question.
     pub fn ask(&self, question: &str) -> String {
         let mut p = self.render();
+        p.push_str(SECOND_PERSON);
         p.push_str(&format!("Question: {}\n", question.trim()));
         p.push_str("Answer briefly. Cite the [mm:ss] of the lines you rely on.\n");
         p
@@ -351,12 +357,17 @@ impl Context {
     pub fn summary(&self) -> String {
         let mut p = self.render();
         p.push_str(SUMMARY_INSTRUCTIONS);
+        p.push_str(SECOND_PERSON);
         p
     }
 }
 
+/// Without this an agent writes "You expected their lines" about the user,
+/// as if You were a third person in the meeting.
+const SECOND_PERSON: &str = "Write about the user asking in the second person (\"you said\", \"your action item\"), never as a third person named You.\n";
+
 const SUMMARY_INSTRUCTIONS: &str = r#"Summarize this meeting. Where the user's notes say what mattered, expand on them from the transcript rather than ignoring them.
-Use speaker names exactly as written above, also for action item owners; in the prose, write about the reader as described above. Reply with only a JSON object, no other text:
+Use speaker names exactly as written above. Reply with only a JSON object, no other text:
 {
   "overview": "3-5 sentences on what the meeting covered and concluded",
   "key_points": ["..."],
@@ -422,30 +433,6 @@ mod tests {
         let ts: Vec<&str> = c.iter().map(|c| c.ts.as_str()).collect();
         assert_eq!(ts, vec!["00:41", "01:58", "02:10"]);
         assert_eq!(c[1].ms, 118_000);
-    }
-
-    #[test]
-    fn the_reader_is_you_in_the_second_person_or_by_name() {
-        let unnamed = [
-            seg(0, 1, "You", None, "hi"),
-            seg(1, 5, "Remote 1", None, "hello"),
-        ];
-        let note = reader_note(&unnamed).unwrap();
-        assert!(
-            note.starts_with("You is the person reading this."),
-            "{note}"
-        );
-        assert!(note.contains("second person"), "{note}");
-
-        let named = [seg(0, 1, "You", Some("Pete"), "hi")];
-        let note = reader_note(&named).unwrap();
-        assert!(
-            note.starts_with("Pete (You) is the person reading this."),
-            "{note}"
-        );
-        assert!(note.contains("Refer to them as Pete"), "{note}");
-
-        assert_eq!(reader_note(&[seg(0, 1, "Remote 1", None, "hello")]), None);
     }
 
     #[test]
@@ -517,6 +504,7 @@ mod tests {
     fn prompt_has_every_section() {
         let ctx = Context {
             header: "Meeting: X".into(),
+            reader: Some("The user asking is Pete (You).".into()),
             earlier_summary: Some(("They planned.".into(), 60_000)),
             excerpt: None,
             lines: vec![Line {
@@ -538,5 +526,58 @@ mod tests {
             "Question: what did Steve say?\nAnswer briefly. Cite the [mm:ss] of the lines you rely on.\n"
         ));
         assert!(ctx.summary().contains("\"chapters\""));
+    }
+
+    #[test]
+    fn reader_line_names_the_user_with_my_name_winning() {
+        let you = seg(0, 1, "You", None, "hi");
+        let labelled = seg(0, 1, "You", Some("Peter J"), "hi");
+        let remote = seg(1, 2, "Remote 1", Some("Steve"), "yo");
+        assert_eq!(
+            reader_line(&[you.clone(), remote.clone()], None).as_deref(),
+            Some("The user asking is the speaker You.")
+        );
+        let mut named = you.clone();
+        named.speaker_label = Some("Pete".into());
+        assert_eq!(
+            reader_line(&[named], Some("Pete")).as_deref(),
+            Some("The user asking is Pete (You).")
+        );
+        assert_eq!(
+            reader_line(std::slice::from_ref(&labelled), Some("Pete")).as_deref(),
+            Some("The user asking is Pete, shown in this transcript as Peter J (You).")
+        );
+        assert_eq!(
+            reader_line(std::slice::from_ref(&labelled), None).as_deref(),
+            Some("The user asking is Peter J (You).")
+        );
+        assert_eq!(
+            reader_line(std::slice::from_ref(&remote), Some("Pete")).as_deref(),
+            Some("The user asking is Pete.")
+        );
+        assert_eq!(reader_line(&[remote], None), None);
+        assert_eq!(
+            reader_line(&[you], Some("  ")).as_deref(),
+            Some("The user asking is the speaker You.")
+        );
+    }
+
+    #[test]
+    fn the_reader_line_follows_the_header() {
+        let ctx = Context {
+            header: "Meeting: X".into(),
+            reader: Some("The user asking is Pete (You).".into()),
+            ..Default::default()
+        };
+        assert!(ctx
+            .ask("what did I say?")
+            .starts_with("Meeting: X\nThe user asking is Pete (You).\n"));
+    }
+
+    #[test]
+    fn answers_and_summaries_speak_to_the_user() {
+        let ctx = Context::default();
+        assert!(ctx.ask("what did I say?").contains(SECOND_PERSON));
+        assert!(ctx.summary().ends_with(SECOND_PERSON));
     }
 }
