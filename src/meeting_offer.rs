@@ -562,10 +562,8 @@ mod tests {
     }
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&p, &format!("#!/bin/sh\n{body}\n"));
         p
     }
 
