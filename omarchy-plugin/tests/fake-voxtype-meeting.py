@@ -112,6 +112,16 @@ def load():
         return {}
 
 
+def real_voxtype():
+    """The real voxtype to hand recover/share/actions/todoist/waveform to,
+    only in a scenario that asked for one (REAL_SCENARIO=1, set by the
+    harness for the *-real scenarios). A REAL_VOXTYPE exported for the
+    whole suite changes nothing elsewhere."""
+    if os.environ.get("REAL_SCENARIO") != "1":
+        return None
+    return os.environ.get("REAL_VOXTYPE") or None
+
+
 def control(cmd):
     with open(os.environ["FAKE_MEETING_CTL"], "a") as f:
         f.write(json.dumps(cmd) + "\n")
@@ -756,7 +766,7 @@ def recover(state, args):
         print("error: unrecognized subcommand 'recover'", file=sys.stderr)
         return 2
     # A real voxtype to answer instead (the recovery-real scenario).
-    real = os.environ.get("REAL_VOXTYPE")
+    real = real_voxtype()
     if real:
         os.execv(real, [real, "meeting", "recover"] + args)
     rec = state.setdefault("recoverable", [])
@@ -812,7 +822,7 @@ def waveform(state, args):
     if state.get("waveform_missing"):
         print("error: unrecognized subcommand 'waveform'", file=sys.stderr)
         return 2
-    real = os.environ.get("REAL_VOXTYPE")
+    real = real_voxtype()
     if real:
         os.execv(real, [real, "meeting", "waveform"] + args)
     if state.get("audio_retained") is False:
@@ -842,7 +852,7 @@ def share(state, args):
     share_command, share_fail {dest: stderr line}. Sends nothing anywhere."""
     # A real voxtype to answer instead (the share-real scenarios), on the
     # PATH the scenario chose for it (which tools it can find).
-    real = os.environ.get("REAL_VOXTYPE")
+    real = real_voxtype()
     if real:
         if os.environ.get("REAL_SHARE_PATH") is not None:
             os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
@@ -898,7 +908,7 @@ def actions(state, args):
     detect-140's f1601769 contract. state: actions_todoist (connected),
     actions_reminder, actions_send_fail (stderr, nothing tried, exit 1),
     actions_item_fail {number: error} (that item fails, exit 1, JSON kept)."""
-    real = os.environ.get("REAL_VOXTYPE")
+    real = real_voxtype()
     if real:
         if os.environ.get("REAL_SHARE_PATH") is not None:
             os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
@@ -957,7 +967,7 @@ def todoist(state, args):
     """meeting todoist connect|status|disconnect --json: connect prints the
     authorize line, waits (state todoist_wait seconds), then connected or
     error (state todoist_connect_error)."""
-    real = os.environ.get("REAL_VOXTYPE")
+    real = real_voxtype()
     if real:
         if os.environ.get("REAL_SHARE_PATH") is not None:
             os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
