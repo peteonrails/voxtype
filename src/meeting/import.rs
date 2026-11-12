@@ -542,6 +542,7 @@ pub fn meeting_config_for(config: &Config, diarization: Option<&str>) -> Meeting
                 vad_hop_secs: d.vad_hop_secs,
                 vad_rms_floor: d.vad_rms_floor,
             }),
+        echo_rules: (&config.meeting.audio).into(),
     }
 }
 
