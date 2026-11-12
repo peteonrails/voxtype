@@ -143,6 +143,9 @@ Item {
           else if (s === "export") tc.driveExport()
           else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
+          else if (s === "soundcheck") tc.driveSoundCheck()
+          else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
+          else if (s === "soundcheck-error") tc.driveSoundCheckError()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
           else if (s === "summary-stale") tc.driveSummaryStale()
@@ -1812,6 +1815,63 @@ Item {
       checkErrorCard("Summary failed: no backend answered.", "")
       check(feed().lastError === "", "not repeated in the banner: " + feed().lastError)
       shot("summary-stale")
+    }
+
+    // ------------------------------------------------------------ sound check
+
+    function meterFill(name) { return find(find(view(), name), "meterFill").width }
+
+    function openSoundCheck() {
+      openView()
+      waitFor(function() { return shown(find(view(), "idleState")) }, "idle state")
+      check(shown(find(view(), "meetingListPane")), "the list first")
+      click(find(view(), "soundCheckButton"), "Sound check")
+      waitFor(function() { return shown(find(view(), "soundCheckPane")) }, "sound check pane")
+      check(!shown(find(view(), "meetingListPane")), "the pane replaces the list")
+    }
+
+    function driveSoundCheck() {
+      openSoundCheck()
+      waitFor(function() { return txt("soundCheckStatus").indexOf("s left") !== -1 }, "running: " + txt("soundCheckStatus"))
+      check(txt("soundCheckMic") === "voxtype_meeting_aec_source", "mic: " + txt("soundCheckMic"))
+      check(txt("soundCheckEcho").indexOf("WebRTC") !== -1, "echo: " + txt("soundCheckEcho"))
+      waitFor(function() { return meterFill("soundCheckMicMeter") > 0 && meterFill("soundCheckLoopbackMeter") > 0 }, "both meters move")
+      check(!shown(find(view(), "soundCheckNoLoopback")), "call audio captured")
+      check(shown(find(view(), "soundCheckStop")), "Stop offered")
+      wait(300)
+      shot("soundcheck")
+      click(find(view(), "soundCheckStop"), "Stop")
+      waitFor(function() { return txt("soundCheckStatus") === "Stopped." }, "stopped: " + txt("soundCheckStatus"))
+      waitFor(function() { return meterFill("soundCheckMicMeter") === 0 && meterFill("soundCheckLoopbackMeter") === 0 }, "meters fall", 2000)
+      check(String(find(view(), "soundCheckStart").text) === "Check again", "Check again offered")
+      click(find(view(), "soundCheckStart"), "Check again")
+      waitFor(function() { return txt("soundCheckStatus").indexOf("s left") !== -1 }, "running again")
+      waitFor(function() { return txt("soundCheckStatus").indexOf("Done.") === 0 }, "ran to its end: " + txt("soundCheckStatus"), 8000)
+      shot("soundcheck-done")
+      click(find(view(), "soundCheckClose"), "back to the meetings")
+      waitFor(function() { return shown(find(view(), "meetingListPane")) && !shown(find(view(), "soundCheckPane")) }, "list again")
+    }
+
+    function driveSoundCheckNoLoopback() {
+      openSoundCheck()
+      waitFor(function() { return txt("soundCheckStatus").indexOf("s left") !== -1 }, "running")
+      waitFor(function() { return meterFill("soundCheckMicMeter") > 0 }, "mic meter moves")
+      check(shown(find(view(), "soundCheckNoLoopback")) && !shown(find(view(), "soundCheckLoopbackMeter")), "no call audio said so")
+      check(txt("soundCheckEcho").indexOf("No echo cancellation") === 0, "echo: " + txt("soundCheckEcho"))
+      shot("soundcheck-no-loopback")
+      // Leaving the panel while it runs stops the check.
+      click(find(view(), "soundCheckClose"), "back while running")
+      waitFor(function() { return shown(find(view(), "meetingListPane")) }, "list again")
+      waitFor(function() { return view().soundcheck.checkState === "stopped" && view().soundcheck.reason === "stopped" }, "stopped by leaving: " + view().soundcheck.reason, 4000)
+    }
+
+    function driveSoundCheckError() {
+      openSoundCheck()
+      waitFor(function() { return view().soundcheck.checkState === "stopped" }, "failed")
+      check(txt("soundCheckStatus") === "Audio connection failed: no such device 'usb-mic'", "message: " + txt("soundCheckStatus"))
+      check(shown(find(view(), "soundCheckStart")) && !shown(find(view(), "soundCheckStop")), "can try again")
+      check(meterFill("soundCheckMicMeter") === 0, "no level shown")
+      shot("soundcheck-error")
     }
 
     function driveScroll() {

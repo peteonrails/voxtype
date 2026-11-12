@@ -373,6 +373,14 @@ Item {
   // ------------------------------------------------------------ playback
 
   readonly property alias playback: playback
+  // ------------------------------------------------------------ sound check
+
+  readonly property alias soundcheck: soundcheck
+  MeetingSoundCheck {
+    id: soundcheck
+    bin: root.bin
+  }
+
   MeetingPlayback {
     id: playback
     bin: root.bin
@@ -513,6 +521,8 @@ Item {
     // A finished meeting stays on screen until the view is closed.
     if (!root.shown) {
       if (playback.playing) playback.stop()
+      // Closing the view ends a check it started; nobody is watching it.
+      soundcheck.reset()
       root.commitDelete()
       feed.clearEnded()
       placement.minimized = false
@@ -681,6 +691,7 @@ Item {
       view.restingOpacity = Qt.binding(function() { return root.viewOpacity })
       view.feed = feed
       view.assistant = assistant
+      view.soundcheck = soundcheck
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })

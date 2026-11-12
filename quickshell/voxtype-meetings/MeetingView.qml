@@ -26,6 +26,22 @@ Item {
   property var placement: null
   property var feed: null
   property var assistant: null
+  // MeetingSoundCheck, from the controller.
+  property var soundcheck: null
+  // The idle screen shows the sound check instead of the meetings list.
+  property bool soundCheckOpen: false
+  onHasMeetingChanged: if (root.hasMeeting) root.soundCheckOpen = false
+
+  function openSoundCheck() {
+    if (!root.soundcheck) return
+    root.soundCheckOpen = true
+    if (!root.soundcheck.running) root.soundcheck.start()
+  }
+
+  function closeSoundCheck() {
+    if (root.soundcheck) root.soundcheck.reset()
+    root.soundCheckOpen = false
+  }
   // The action running now, from MeetingCli.busy.
   property string busy: ""
   property string actionError: ""
@@ -966,16 +982,35 @@ Item {
           }
         }
 
+        MeetingButton {
+          objectName: "soundCheckButton"
+          theme: root.theme
+          visible: !root.soundCheckOpen && root.soundcheck !== null
+          text: "Sound check…"
+          onClicked: root.openSoundCheck()
+        }
+
         Rectangle {
           Layout.fillWidth: true
           implicitHeight: 1
           color: root.theme.alpha(root.theme.fg, 0.12)
         }
 
+        SoundCheckPane {
+          objectName: "soundCheckPane"
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          visible: root.soundCheckOpen
+          theme: root.theme
+          check: root.soundcheck
+          onCloseRequested: root.closeSoundCheck()
+        }
+
         MeetingList {
           objectName: "meetingListPane"
           Layout.fillWidth: true
           Layout.fillHeight: true
+          visible: !root.soundCheckOpen
           theme: root.theme
           meetings: root.pastMeetings
           loading: root.listLoading

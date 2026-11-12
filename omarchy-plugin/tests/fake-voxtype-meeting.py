@@ -676,6 +676,54 @@ def show(state, args_meeting):
     return 0
 
 
+def soundcheck(state, args):
+    """meeting soundcheck [--seconds N] [--json] | --stop
+
+    Prints the real NDJSON: soundcheck running, levels about ten a second,
+    soundcheck stopped. Time runs at state["sc_time_scale"] (default 0.1, so
+    30 s take 3). state: sc_echo, sc_no_loopback, sc_error (stopped with
+    reason error, exit 1), sc_meeting_after (seconds of fake time before a
+    meeting takes the mic: reason meeting, exit 1). --stop writes a flag the
+    running check sees and ends with reason stopped. Opens no audio."""
+    flag = os.path.join(os.environ["FAKE_MEETING_DATA"], "soundcheck.stop")
+    if "--stop" in args:
+        open(flag, "w").close()
+        return 0
+    seconds = int(args[args.index("--seconds") + 1]) if "--seconds" in args else 30
+    if os.path.exists(flag):
+        os.remove(flag)
+    if state.get("sc_error"):
+        print("Opening the meeting audio...", file=sys.stderr)
+        emit({"event": "soundcheck", "state": "stopped", "reason": "error", "message": state["sc_error"]})
+        return 1
+    loopback = not state.get("sc_no_loopback")
+    emit({"event": "soundcheck", "state": "running", "seconds": seconds,
+          "echo_cancel": state.get("sc_echo", "webrtc"),
+          "mic": "voxtype_meeting_aec_source", "loopback": loopback})
+    scale = state.get("sc_time_scale", 0.1)
+    meeting_after = state.get("sc_meeting_after")
+    t = 0
+    while True:
+        time.sleep(0.1)
+        t += 100
+        fake_s = t / 1000.0 / scale
+        if os.path.exists(flag):
+            os.remove(flag)
+            emit({"event": "soundcheck", "state": "stopped", "reason": "stopped"})
+            return 0
+        if meeting_after is not None and fake_s >= meeting_after:
+            emit({"event": "soundcheck", "state": "stopped", "reason": "meeting"})
+            return 1
+        if fake_s >= seconds:
+            emit({"event": "soundcheck", "state": "stopped", "reason": "done"})
+            return 0
+        phase = (t // 100) % 10
+        mic = -45.0 + phase * 3.0
+        emit({"event": "levels", "meeting_id": None, "soundcheck": True, "t_ms": t,
+              "mic": mic, "mic_peak": mic + 4.0,
+              "loopback": (-20.0 if loopback else None), "loopback_peak": (-12.0 if loopback else None)})
+
+
 def main():
     args = sys.argv[1:]
     log = os.environ.get("FAKE_VOXTYPE_LOG")
@@ -703,7 +751,8 @@ def main():
         return 1
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
-            "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line"):
+            "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
+            "soundcheck"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -751,6 +800,8 @@ def main():
         return export(state, args[2:])
     elif action == "play":
         return play(state, args[2:])
+    elif action == "soundcheck":
+        return soundcheck(state, args[2:])
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))

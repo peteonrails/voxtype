@@ -99,6 +99,12 @@ Scenarios:
               Summarizing into the card, twice; local_only hides "Use …"
   summary-stale  an error event naming no meeting (an older daemon) still
               ends Summarizing; a status without summary_backend falls back
+  soundcheck  Sound check from the idle screen: both meters move, the mic and
+              echo handling shown, Stop drops the meters, Check again runs to
+              its end ("Done."), and back to the list
+  soundcheck-no-loopback  no call audio and no echo cancellation said so;
+              leaving the panel while it runs stops the check
+  soundcheck-error  the command's error shown as it words it
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -132,7 +138,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
-             "play-errors")
+             "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -297,6 +303,8 @@ STATE = {
     "play-errors": {"play_error": "This meeting was recorded without keeping audio. "
                                   "Turn on meeting.retain_audio for future meetings."},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
+    "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
+    "soundcheck-error": {"sc_error": "Audio connection failed: no such device 'usb-mic'"},
     "summary-local-error": {"assistant": {"agent": None, "local_only": False, "candidates": [CLAUDE],
                                           "summary_backend": "local", "summary_backend_name": "Local (llama3.2)"}},
     "summary-error-cli": {"assistant": {"agent": None, "local_only": True, "candidates": [CLAUDE]},
@@ -613,6 +621,14 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "play-errors":
         start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
         expect(meeting, [start, start], "meeting commands")
+    elif scenario == "soundcheck":
+        check_ = ["meeting", "soundcheck", "--seconds", "30", "--json"]
+        expect(meeting, [check_, ["meeting", "soundcheck", "--stop"], check_], "meeting commands")
+    elif scenario == "soundcheck-no-loopback":
+        expect(meeting, [["meeting", "soundcheck", "--seconds", "30", "--json"],
+                         ["meeting", "soundcheck", "--stop"]], "meeting commands")
+    elif scenario == "soundcheck-error":
+        expect(meeting, [["meeting", "soundcheck", "--seconds", "30", "--json"]], "meeting commands")
     elif scenario == "agent-missing":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario == "copy":
