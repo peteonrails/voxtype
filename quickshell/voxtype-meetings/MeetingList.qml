@@ -48,12 +48,13 @@ Item {
   }
 
   function duration(m) {
-    if (m.duration_secs === undefined || m.duration_secs === null)
+    if (m.duration_secs === undefined || m.duration_secs === null) {
       // The list shows only with no meeting on screen, so an active one here
       // is a recording a crash left unfinished; the daemon marks those
       // interrupted when it next starts.
       var st = String(m.status)
       return st === "active" || st === "paused" || st === "interrupted" ? "unfinished" : ""
+    }
     var mins = Math.round(Number(m.duration_secs) / 60)
     if (mins < 1) return "under a minute"
     if (mins < 60) return mins + " min"
