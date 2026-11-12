@@ -108,6 +108,9 @@ pub struct MeetingMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     OpenSettings,
+    /// The meeting view: the Omarchy panel's `meetings` verb when it
+    /// answers, otherwise `voxtype meeting view` (the standalone shell).
+    OpenMeetings,
     SelectLanguage(&'static str),
     ToggleRecording,
     Cancel,
@@ -141,6 +144,7 @@ impl TrayAction {
             Self::StopMeeting => &["meeting", "stop"],
             Self::PauseMeeting => &["meeting", "pause"],
             Self::ResumeMeeting => &["meeting", "resume"],
+            Self::OpenMeetings => &["meeting", "view"],
             _ => return None,
         })
     }
@@ -522,7 +526,7 @@ impl Tray for VoxtypeTray {
             }
             .into(),
             StandardItem {
-                label: "Settings".into(),
+                label: "Settings...".into(),
                 icon_name: "preferences-system-symbolic".into(),
                 activate: Box::new(|this: &mut Self| (this.actions)(TrayAction::OpenSettings)),
                 ..Default::default()
@@ -530,6 +534,16 @@ impl Tray for VoxtypeTray {
             .into(),
         ];
         menu.extend(self.upgrade_items());
+        if self.meeting.enabled {
+            menu.push(
+                StandardItem {
+                    label: "Meetings...".into(),
+                    activate: Box::new(|this: &mut Self| (this.actions)(TrayAction::OpenMeetings)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         menu.extend([
             self.language_menu(),
             MenuItem::Separator,
@@ -806,6 +820,10 @@ fn dispatch_action(action: TrayAction) {
     if action == TrayAction::OpenSettings && OPENING.swap(true, Ordering::AcqRel) {
         return;
     }
+    if action == TrayAction::OpenMeetings {
+        tokio::spawn(open_meetings());
+        return;
+    }
     tokio::spawn(async move {
         // On Omarchy with the Settings panel loaded, open the panel; anything
         // else (no shell, panel not linked, hung shell) opens the TUI.
@@ -844,6 +862,32 @@ fn dispatch_action(action: TrayAction) {
             }
         }
     });
+}
+
+/// The meeting view in the Omarchy panel when that plugin answers, otherwise
+/// `voxtype meeting view`, which asks whichever shell hosts the view
+/// (voxtype's own Quickshell shell) to show it.
+async fn open_meetings() {
+    static OPENING: AtomicBool = AtomicBool::new(false);
+    if OPENING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if !open_settings_plugin(&["meetings"]).await {
+        let result = match std::env::current_exe() {
+            Ok(bin) => {
+                cli_command(&bin, TrayAction::OpenMeetings)
+                    .stdin(std::process::Stdio::null())
+                    .status()
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(status) if status.success() => {}
+            error => tracing::warn!(?error, "Tray could not open the meeting view"),
+        }
+    }
+    OPENING.store(false, Ordering::Release);
 }
 
 /// The `voxtype` command an action runs: the same subcommand a user or a
@@ -1451,7 +1495,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(items.iter().any(|item| item.label == "Settings"));
+        assert!(items.iter().any(|item| item.label == "Settings..."));
         assert_eq!(
             items
                 .iter()
@@ -1626,7 +1670,7 @@ mod tests {
         };
         assert_eq!(
             position("Model update available..."),
-            position("Settings").map(|p| p + 1)
+            position("Settings...").map(|p| p + 1)
         );
         let tip = tray.tool_tip();
         assert!(tip.title.contains("model update available"));
@@ -1895,7 +1939,11 @@ mod tests {
     fn meeting_entries(tray: &VoxtypeTray) -> Vec<(String, bool)> {
         standard_items(tray)
             .into_iter()
-            .filter(|i| i.label.contains("Meeting") && !i.label.starts_with("Voxtype:"))
+            .filter(|i| {
+                i.label.contains("Meeting")
+                    && !i.label.starts_with("Voxtype:")
+                    && i.label != "Meetings..."
+            })
             .map(|i| (i.label, i.enabled))
             .collect()
     }
@@ -2076,6 +2124,48 @@ mod tests {
             Some(&["record", "cancel"][..])
         );
         assert_eq!(TrayAction::OpenSettings.cli_args(), None);
+        assert_eq!(
+            TrayAction::OpenMeetings.cli_args(),
+            Some(&["meeting", "view"][..])
+        );
+    }
+
+    #[test]
+    fn meetings_entry_opens_the_meeting_view_when_meetings_are_on() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        for state in [MeetingTrayState::Idle, MeetingTrayState::Recording] {
+            let mut tray = meeting_tray(TrayState::Idle, on(state), log.clone());
+            let labels: Vec<String> = standard_items(&tray).into_iter().map(|i| i.label).collect();
+            let pos = |l: &str| labels.iter().position(|x| x == l);
+            assert_eq!(
+                pos("Meetings..."),
+                pos("Settings...").map(|p| p + 1),
+                "{labels:?}"
+            );
+            click(&mut tray, "Meetings...");
+        }
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![TrayAction::OpenMeetings, TrayAction::OpenMeetings]
+        );
+        for menu in [off(true, false), off(false, false), off(false, true)] {
+            let tray = meeting_tray(TrayState::Idle, menu, log.clone());
+            assert!(
+                standard_items(&tray)
+                    .iter()
+                    .all(|i| i.label != "Meetings..."),
+                "no Meetings... while meeting mode is off"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn meetings_asks_the_omarchy_panel_for_its_meeting_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = fake_shell(dir.path(), "ok");
+        assert!(open_settings_plugin_with(Some(shell), &["meetings"]).await);
+        let log = std::fs::read_to_string(dir.path().join("omarchy-shell.log")).unwrap();
+        assert_eq!(log.trim(), "io.voxtype.settings meetings");
     }
 
     #[tokio::test]
