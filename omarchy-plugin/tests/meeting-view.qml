@@ -1577,7 +1577,10 @@ Item {
       wait(500)
       shot("translucent", true)
       // Over the card: opaque at once.
-      mouseMove(view(), 100, 300)
+      // On the meeting's state line: card, but nothing typeable (speaker
+      // names and chips ask for the keyboard, since they rename).
+      var spot = find(view(), "meetingState").mapToItem(view(), 4, 4)
+      mouseMove(view(), spot.x, spot.y)
       waitFor(function() { return view().engaged && view().cardAlpha === 1.0 }, "opaque on hover")
       check(host.ctrl().window.keyboardPolicy === "none", "hovering the card asks for no keyboard")
       // Away again: still opaque for a moment, then back.
