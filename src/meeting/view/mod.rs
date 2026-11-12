@@ -324,7 +324,7 @@ pub struct MeetingView {
     pub levels: Option<Levels>,
     /// When the latest levels arrived
     pub levels_at: Option<DateTime<Utc>>,
-    /// Bumped on every change, for viewers that cache rendering
+    /// Bumped on every change but levels, for viewers that cache rendering
     pub revision: u64,
 }
 
@@ -472,7 +472,9 @@ impl MeetingView {
     /// Apply one event.
     pub fn apply(&mut self, event: ViewEvent) -> Change {
         let change = self.apply_inner(event);
-        if change != Change::Nothing {
+        // Levels come ten times a second and are read each frame; they do
+        // not make a viewer draw the transcript again.
+        if !matches!(change, Change::Nothing | Change::Levels) {
             self.revision += 1;
         }
         change
@@ -1360,7 +1362,9 @@ mod tests {
         // Nothing to meter before a meeting.
         assert_eq!(v.apply_line(levels), Change::Nothing);
         v.apply_line(&hello("recording", "m1", vec![]));
+        let revision = v.revision;
         assert_eq!(v.apply_line(levels), Change::Levels);
+        assert_eq!(v.revision, revision, "levels do not redraw the transcript");
         let l = v.levels.as_ref().unwrap();
         assert!((meter(l.mic) - 0.5).abs() < 1e-6);
         assert_eq!(meter(l.loopback), 0.0);
