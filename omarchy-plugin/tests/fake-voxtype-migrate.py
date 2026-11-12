@@ -100,7 +100,8 @@ FRONTENDS = ["auto", "gtk4", "native", "quickshell"]
 # config_set::ENGINE_NAMES: what the real select-model accepts.
 SELECTABLE = ("whisper", "parakeet", "moonshine", "sensevoice", "paraformer", "dolphin", "omnilingual",
               "cohere", "gguf", "openvino")
-SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads"}
+SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads", "meeting.my_name", "meeting.view",
+            "meeting.audio.echo_guard"}
 
 
 def osd_status(state):
@@ -179,6 +180,26 @@ def schema(state):
             {"key": "osd.style", "type": "dynamic_enum", "source": "styles", "section": "OSD", "label": "Style",
              "description": "Quickshell style name.", "value": style or "hud",
              "file_value": style, "engine": None, "compiled": True, "restart_required": True},
+        ]
+    if state.get("meeting_keys"):
+        # The 1.3.1 meeting entries, as `config schema --json` prints them.
+        my_name = value_of(state, "meeting.my_name")
+        view = value_of(state, "meeting.view", "auto")
+        guard = value_of(state, "meeting.audio.echo_guard", True)
+        keys += [
+            {"key": "meeting.my_name", "type": "string", "section": "Meeting", "label": "Your name",
+             "description": "Shown instead of \"You\" for your side of a meeting, in the view, exports, "
+                            "summaries and search.",
+             "value": my_name, "file_value": my_name, "engine": None, "compiled": True, "restart_required": True},
+            {"key": "meeting.view", "type": "enum", "choices": ["auto", "quickshell", "gtk4", "terminal", "none"],
+             "section": "Meeting", "label": "Meeting view",
+             "description": "Which meeting view opens: auto uses Quickshell, then the GTK4 window; terminal "
+                            "runs `meeting watch` and is never automatic.",
+             "value": view, "file_value": None, "engine": None, "compiled": True, "restart_required": False},
+            {"key": "meeting.audio.echo_guard", "type": "bool", "section": "Meeting", "label": "Echo guard",
+             "description": "Keep the call heard through your speakers out of your lines: drop mic lines that "
+                            "are only its echo, unless the mic level shows you speaking.",
+             "value": guard, "file_value": None, "engine": None, "compiled": True, "restart_required": True},
         ]
     return {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
@@ -291,6 +312,10 @@ def main():
         if state.get("osd_keys"):
             styles.append({"name": "pill", "description": "Compact pill"})
         print(json.dumps(styles))
+    elif args[:3] == ["meeting", "my-name", "--json"] and "my_name_suggestion" in state:
+        # The account's full name while my_name is unset, as the real one.
+        mine = value_of(state, "meeting.my_name")
+        print(json.dumps({"my_name": mine, "suggestion": None if mine else state["my_name_suggestion"]}))
     elif args[:2] == ["config", "validate-selection"]:
         return 0
     elif args[:2] in (["config", "set"], ["config", "unset"]) and len(args) >= 3 and args[2] in SETTABLE:

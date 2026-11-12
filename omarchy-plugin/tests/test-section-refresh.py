@@ -36,6 +36,7 @@ READERS = {
     "upgrade": ["setup", "migrate", "--json"],
     "link": ["setup", "omarchy", "--status", "--json"],
     "osd": ["setup", "osd", "--status", "--json"],
+    "my-name": ["meeting", "my-name", "--json"],
 }
 
 ULTRA_OFFER = {"id": "parakeet-ultra", "kind": "model", "engine": "parakeet", "model": "parakeet-ultra-Q8_0.gguf",

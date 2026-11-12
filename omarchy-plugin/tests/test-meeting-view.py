@@ -569,6 +569,9 @@ def read_only(argv):
     """Reads the view makes on its own (notes, assistant status, show)."""
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
+    # The Settings panel's read of the name suggestion (Your name).
+    if argv == ["meeting", "my-name", "--json"]:
+        return True
     if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"] \
             or argv == ["meeting", "recover", "--json"]:
         return True

@@ -35,7 +35,8 @@ Item {
     }
 
     readonly property string scenario: __SCENARIO__
-    readonly property string startSection: scenario === "threads" ? "Engine"
+    readonly property string startSection: scenario === "meeting" || scenario === "meetingold" ? "Meeting"
+      : scenario === "threads" ? "Engine"
       : (scenario === "stalebanner" ? "Audio" : "OSD")
 
     Timer {
@@ -58,6 +59,8 @@ Item {
           else if (s === "styleactive") tc.driveStyleActive()
           else if (s === "stalebanner") tc.driveStaleBanner()
           else if (s === "threads") tc.driveThreads()
+          else if (s === "meeting") tc.driveMeeting()
+          else if (s === "meetingold") tc.driveMeetingOld()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -148,6 +151,34 @@ Item {
     function goTo(section) {
       panel.activeSection = section
       wait(150)
+    }
+
+    function driveMeeting() {
+      var name = row("meeting.my_name")
+      var view = row("meeting.view")
+      var guard = row("meeting.audio.echo_guard")
+      check(name !== null && view !== null && guard !== null, "all three rows in Meeting")
+      check(name.specLabel === "Your name" && view.specLabel === "Meeting view" && guard.specLabel === "Echo guard",
+            "plain labels: " + [name.specLabel, view.specLabel, guard.specLabel].join(", "))
+      check(name.controlKind === "text" && guard.controlKind === "bool" && view.controlKind === "dropdown",
+            "controls: " + [name.controlKind, view.controlKind, guard.controlKind].join(", "))
+      var values = view.optionList.map(function(o) { return o.value })
+      check(JSON.stringify(values) === JSON.stringify(["auto", "quickshell", "gtk4", "terminal", "none"]),
+            "view choices: " + JSON.stringify(values))
+      var field = find(name, "settingTextField")
+      waitFor(function() { return String(field.placeholderText) === "Dana Smith" }, "suggestion as placeholder: " + field.placeholderText)
+      check(String(field.text) === "", "the name itself is unset")
+      wait(200)
+      grabImage(panel.renderTest).save(__EVIDENCE__ + "/meeting-section.png")
+      name.apply("Dana")
+      waitFor(function() { var x = tc.row("meeting.my_name"); return x && x.spec.value === "Dana" }, "written and re-read")
+    }
+
+    function driveMeetingOld() {
+      var name = row("meeting.my_name")
+      check(name !== null, "Your name row")
+      wait(500)
+      check(String(find(name, "settingTextField").placeholderText) === "", "no placeholder without `meeting my-name`")
     }
 
     function styleHelp() { return rowText("osd.style", "settingHelpNote") }

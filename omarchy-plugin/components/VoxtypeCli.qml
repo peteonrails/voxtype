@@ -1145,6 +1145,33 @@ Item {
   readonly property bool osdSwitching: osdActionProc.running && osdActionProc.action === "use-auto"
   readonly property bool osdDismissing: osdActionProc.running && osdActionProc.action === "dismiss-offer"
 
+  // `voxtype meeting my-name --json`: {"my_name", "suggestion"}, the
+  // suggestion being the account's full name while my_name is unset. A
+  // voxtype without the command loads null; nothing else depends on it.
+  signal myNameLoaded(var answer)
+  function fetchMyName() {
+    if (myNameProc.running) return
+    myNameProc.out = ""
+    myNameProc.launch([root.bin, "meeting", "my-name", "--json"])
+  }
+
+  CliProcess {
+    id: myNameProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: myNameProc.out = String(text || "")
+    }
+    onFailedToStart: root.myNameLoaded(null)
+    onExited: function(exitCode) {
+      var parsed = null
+      if (exitCode === 0) {
+        try { parsed = JSON.parse(myNameProc.out) } catch (e) { parsed = null }
+      }
+      root.myNameLoaded(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null)
+    }
+  }
+
   function fetchOsdStatus() {
     if (osdStatusProc.running) {
       // The answer in flight may predate a write; ask again once it lands.
