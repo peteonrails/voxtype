@@ -10,87 +10,92 @@ case "$1" in
         #   voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
         #   voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
 
-        # Remove existing binary/symlink if present (for upgrades)
-        rm -f /usr/bin/voxtype
-
-        # Detect AVX-512 support (Linux-specific, falls back to AVX2)
-        if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
-            VARIANT="avx512"
-            ln -sf /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
-        else
-            VARIANT="avx2"
-            ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
-        fi
-
-        # Detect GPU for Vulkan acceleration recommendation
-        GPU_DETECTED=""
-        if [ -d /dev/dri ]; then
-            if ls /dev/dri/renderD* >/dev/null 2>&1; then
-                if command -v lspci >/dev/null 2>&1; then
-                    GPU_INFO=$(lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //')
-                    if [ -n "$GPU_INFO" ]; then
-                        GPU_DETECTED="$GPU_INFO"
-                    fi
-                fi
-                if [ -z "$GPU_DETECTED" ]; then
-                    GPU_DETECTED="GPU detected (install pciutils for details)"
-                fi
+        # /usr/bin/voxtype is a symlink to the variant in use. An existing
+        # link that still resolves is kept: `voxtype setup gpu --enable`
+        # points it at voxtype-vulkan, and an upgrade must not undo that. A
+        # missing or dangling one is created for this CPU.
+        if [ ! -e /usr/bin/voxtype ]; then
+            rm -f /usr/bin/voxtype
+            if [ -f /proc/cpuinfo ] && grep -qw avx512f /proc/cpuinfo 2>/dev/null; then
+                ln -s /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
+            else
+                ln -s /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
             fi
         fi
+        VARIANT=$(basename "$(readlink -f /usr/bin/voxtype)")
 
-        echo ""
-        echo "=== Voxtype Post-Installation ==="
-        echo ""
-        echo "CPU backend: $VARIANT (using voxtype-$VARIANT)"
+        # The setup instructions are for a fresh install only
+        if [ -z "$2" ]; then
+            # Detect GPU for Vulkan acceleration recommendation
+            GPU_DETECTED=""
+            if [ -d /dev/dri ]; then
+                if ls /dev/dri/renderD* >/dev/null 2>&1; then
+                    if command -v lspci >/dev/null 2>&1; then
+                        GPU_INFO=$(lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //')
+                        if [ -n "$GPU_INFO" ]; then
+                            GPU_DETECTED="$GPU_INFO"
+                        fi
+                    fi
+                    if [ -z "$GPU_DETECTED" ]; then
+                        GPU_DETECTED="GPU detected (install pciutils for details)"
+                    fi
+                fi
+            fi
 
-        if [ -n "$GPU_DETECTED" ]; then
             echo ""
-            echo "GPU detected: $GPU_DETECTED"
+            echo "=== Voxtype Post-Installation ==="
             echo ""
-            echo "  For GPU acceleration (faster inference), run:"
-            echo "    sudo voxtype setup gpu --enable"
+            echo "Active build: $VARIANT"
+
+            if [ -n "$GPU_DETECTED" ]; then
+                echo ""
+                echo "GPU detected: $GPU_DETECTED"
+                echo ""
+                echo "  For GPU acceleration (faster inference), run:"
+                echo "    sudo voxtype setup gpu --enable"
+                echo ""
+                echo "  Requires: libvulkan1 package"
+            fi
+
             echo ""
-            echo "  Requires: libvulkan1 package"
+            echo "To complete setup:"
+            echo ""
+            echo "  1. Download a whisper model:"
+            echo "     voxtype setup --download"
+            echo ""
+            echo "  2. Start voxtype:"
+            echo "     systemctl --user enable --now voxtype"
+            echo ""
+            echo "=== Hotkey Configuration ==="
+            echo ""
+            echo "RECOMMENDED: Use compositor keybindings (no special permissions)"
+            echo ""
+            echo "  Add to your compositor config:"
+            echo ""
+            echo "  Hyprland:  bind = SUPER, V, exec, voxtype record start"
+            echo "             bindr = SUPER, V, exec, voxtype record stop"
+            echo ""
+            echo "  Sway:      bindsym \$mod+v exec voxtype record start"
+            echo "             bindsym --release \$mod+v exec voxtype record stop"
+            echo ""
+            echo "  Then disable built-in hotkey in ~/.config/voxtype/config.toml:"
+            echo "    [hotkey]"
+            echo "    enabled = false"
+            echo ""
+            echo "ALTERNATIVE: Built-in hotkey (GNOME, KDE, X11)"
+            echo ""
+            echo "  If your desktop doesn't support key release events, you can use"
+            echo "  voxtype's built-in hotkey. This requires the 'input' group:"
+            echo ""
+            echo "     sudo usermod -aG input \$USER"
+            echo "     # Log out and back in for changes to take effect"
+            echo ""
+            echo "  WARNING: The input group grants access to ALL keyboard input."
+            echo "  Only use this if compositor keybindings aren't available."
+            echo ""
+            echo "See: https://github.com/peteonrails/voxtype/blob/main/docs/USER_MANUAL.md"
+            echo ""
         fi
-
-        echo ""
-        echo "To complete setup:"
-        echo ""
-        echo "  1. Download a whisper model:"
-        echo "     voxtype setup --download"
-        echo ""
-        echo "  2. Start voxtype:"
-        echo "     systemctl --user enable --now voxtype"
-        echo ""
-        echo "=== Hotkey Configuration ==="
-        echo ""
-        echo "RECOMMENDED: Use compositor keybindings (no special permissions)"
-        echo ""
-        echo "  Add to your compositor config:"
-        echo ""
-        echo "  Hyprland:  bind = SUPER, V, exec, voxtype record start"
-        echo "             bindr = SUPER, V, exec, voxtype record stop"
-        echo ""
-        echo "  Sway:      bindsym \$mod+v exec voxtype record start"
-        echo "             bindsym --release \$mod+v exec voxtype record stop"
-        echo ""
-        echo "  Then disable built-in hotkey in ~/.config/voxtype/config.toml:"
-        echo "    [hotkey]"
-        echo "    enabled = false"
-        echo ""
-        echo "ALTERNATIVE: Built-in hotkey (GNOME, KDE, X11)"
-        echo ""
-        echo "  If your desktop doesn't support key release events, you can use"
-        echo "  voxtype's built-in hotkey. This requires the 'input' group:"
-        echo ""
-        echo "     sudo usermod -aG input \$USER"
-        echo "     # Log out and back in for changes to take effect"
-        echo ""
-        echo "  WARNING: The input group grants access to ALL keyboard input."
-        echo "  Only use this if compositor keybindings aren't available."
-        echo ""
-        echo "See: https://github.com/peteonrails/voxtype/blob/main/docs/USER_MANUAL.md"
-        echo ""
         ;;
 esac
 

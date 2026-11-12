@@ -50,7 +50,10 @@ for artifact in "${artifacts[@]}"; do
 done
 
 if [[ -n "$vulkan" ]]; then
-    if objdump -p "$worker" | grep -qE 'NEEDED +libvulkan\.so\.1$'; then
+    # Not grep -q: it exits at the first match, objdump then dies of SIGPIPE
+    # on its next write, and pipefail reports a linked worker as unlinked
+    # (31 of 200 runs on Fedora 44).
+    if objdump -p "$worker" | grep -E 'NEEDED +libvulkan\.so\.1$' >/dev/null; then
         linked=required
     else
         linked=forbidden
