@@ -11,7 +11,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use voxtype::meeting::data::{AudioSource, MeetingMetadata, Transcript, TranscriptSegment};
-use voxtype::meeting::{MeetingStorage, StorageConfig};
+use voxtype::meeting::{MeetingId, MeetingStorage, StorageConfig};
 
 struct Scratch {
     dir: tempfile::TempDir,
@@ -122,6 +122,40 @@ fn a_finished_meeting_is_retitled_everywhere_but_its_folder() {
     assert!(String::from_utf8_lossy(&empty.stderr).contains("can't be empty"));
     let show = json(&s.voxtype(&["meeting", "show", &id, "--json"]));
     assert_eq!(show["metadata"]["title"], "Q4 planning");
+}
+
+/// Retitling matches the title against `meeting.my_name` before the
+/// account's full name: only my_name makes "Zebulon" the user here.
+#[test]
+fn retitling_names_speakers_through_my_name() {
+    let s = Scratch::new();
+    let config = s.path("config/voxtype/config.toml");
+    let toml = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        toml.replace(
+            "[meeting]\nenabled = true\n",
+            "[meeting]\nenabled = true\nmy_name = \"Zebulon Quux\"\n",
+        ),
+    )
+    .unwrap();
+    let (id, _) = s.meeting("Zoom call");
+
+    let out = json(&s.voxtype(&["meeting", "title", &id, "Zebulon <> Chad", "--json"]));
+    let mut labelled: Vec<&str> = out["labelled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    labelled.sort();
+    assert_eq!(labelled, ["Remote", "You"], "{out}");
+    let labels = s
+        .storage()
+        .get_speaker_labels(&MeetingId::parse(&id).unwrap())
+        .unwrap();
+    assert_eq!(labels.get("You").map(String::as_str), Some("Zebulon Quux"));
+    assert_eq!(labels.get("Remote").map(String::as_str), Some("Chad"));
 }
 
 #[test]

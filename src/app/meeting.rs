@@ -697,7 +697,9 @@ pub(crate) async fn run_meeting_command(
                     },
                 )?;
             } else if config.meeting.auto_label_from_title {
-                if let Some(me) = meeting::title_labels::Me::resolve(None) {
+                if let Some(me) =
+                    meeting::title_labels::Me::resolve(config.meeting.my_name.as_deref())
+                {
                     labelled = meeting::title_labels::label_stored(&storage, &id, &me)?;
                 }
             }
