@@ -357,6 +357,15 @@ Item {
   // whom), ended (with whether the summary is in), or no meeting.
   readonly property bool summaryReady: root.assistant !== null && root.feed !== null
     && root.assistant.summaryMarkdown !== "" && root.assistant.summaryMeeting === root.feed.meetingId
+  // The newest line, "Speaker: text": what a recording pill shows once
+  // anything has been said.
+  readonly property string lastLine: {
+    if (!root.feed || root.feed.segments.count === 0) return ""
+    var r = root.feed.segments.get(root.feed.segments.count - 1)
+    return root.feed.displayName(r.speaker) + ": " + r.text
+  }
+  readonly property bool pillShowsLine: root.live && root.status === "recording" && root.busy !== "stop" && root.lastLine !== ""
+
   readonly property string pillText: {
     if (!root.hasMeeting) return root.connected ? "No meeting" : "Voxtype not running"
     if (root.busy === "stop" || root.status === "finalizing") return "Finishing…"
@@ -364,6 +373,7 @@ Item {
       return "Summarizing" + (root.assistant.summaryWith !== "" ? " · " + root.assistant.summaryWith : "") + "…"
     if (root.status === "paused") return "Paused"
     if (root.ended) return "Ended"
+    if (root.pillShowsLine) return root.lastLine
     return root.feed && root.feed.title !== "" ? root.feed.title : "Recording"
   }
   readonly property string pillDetail: {
@@ -414,22 +424,37 @@ Item {
         visible: root.hasMeeting
         color: root.status === "recording" && root.busy !== "stop" ? root.theme.urgent : root.theme.dim
       }
+      // Recording with something said: the time first, then the newest
+      // line, which takes whatever width the pill has left.
+      Text {
+        id: pillLineTime
+        objectName: "pillLineTime"
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.pillShowsLine
+        text: root.elapsedText
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+      }
       Text {
         objectName: "pillState"
         anchors.verticalCenter: parent.verticalCenter
-        // A long title gives way to the time.
-        width: Math.min(implicitWidth, 200)
+        // A line fills what the pill's maximum width leaves; a title gives
+        // way to the time sooner.
+        width: Math.min(implicitWidth, root.pillShowsLine
+          ? (root.placement ? root.placement.pillMaxWidth : 460) - pillLineTime.implicitWidth - 2 * (root.theme.lg + 4) - 8 - 2 * root.theme.md
+          : 200)
         text: root.pillText
         elide: Text.ElideRight
         color: root.theme.fg
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
-        font.bold: true
+        font.bold: !root.pillShowsLine
       }
       Text {
         objectName: "pillElapsed"
         anchors.verticalCenter: parent.verticalCenter
-        visible: text !== ""
+        visible: text !== "" && !root.pillShowsLine
         text: root.pillDetail
         color: root.theme.dim
         font.family: root.theme.fontFamily

@@ -1517,16 +1517,24 @@ Item {
       minimizeNow()
       var win = host.ctrl().window
       check(host.viewOpen(), "the view is still open (the pill is the view)")
-      check(txt("pillState") === "Standup" && /^1:0\d$/.test(txt("pillElapsed")), "title and time: " + pillSays())
+      check(/^1:0\d$/.test(txt("pillLineTime")) && txt("pillState") === "Remote: The build went green overnight.",
+            "time and the newest line: " + txt("pillLineTime") + " " + txt("pillState"))
+      check(!shown(find(view(), "pillElapsed")), "the time shown once")
       check(shown(find(view(), "pillDot")) && find(view(), "pillDot").color === view().theme.urgent, "a red dot while recording")
       check(!shown(find(view(), "pillStart")), "no Start while recording")
       // Sized to what it says, inside the bounds, and on the card's outer
       // (right) edge.
-      check(win.implicitHeight === 40 && win.implicitWidth >= p.pillMinWidth && win.implicitWidth < 260,
+      check(win.implicitHeight === 40 && win.implicitWidth >= p.pillMinWidth && win.implicitWidth < p.pillMaxWidth,
             "fits its text: " + win.implicitWidth + "x" + win.implicitHeight)
       check(Math.abs(win.implicitWidth - p.pillWidth) < 1, "the window is the pill")
       check(p.left + p.pillWidth === cardRight, "right edge kept: " + (p.left + p.pillWidth) + " vs " + cardRight)
       shot("pill", true)
+      // A long line fills the pill's maximum width, elided.
+      ctl({ cmd: "segments", chunk_id: 2, segments: [seg(5, 50, "So the plan is to cut the tag after lunch, run the smoke tests on the Ivy Bridge VM, and only then push the AUR update.", "loopback", "Remote", 2)] })
+      waitFor(function() { return txt("pillState").indexOf("Remote: So the plan") === 0 }, "the newest line: " + txt("pillState"))
+      waitFor(function() { return p.pillWidth === p.pillMaxWidth && find(view(), "pillState").truncated }, "elided at the maximum width: " + p.pillWidth)
+      check(p.left + p.pillWidth === cardRight, "right edge still kept")
+      shot("pill-long-line", true)
       // Dragged, it moves; expanded, the card is back on screen beside it.
       var drag = find(view(), "pillDrag")
       mousePress(drag, 20, 20)
@@ -1589,7 +1597,8 @@ Item {
       minimizeNow()
       var p = placement()
       check(p.pillWidth <= p.pillMaxWidth && p.pillWidth > narrow, "wider, within the maximum: " + p.pillWidth)
-      check(find(view(), "pillState").truncated, "the title elided")
+      check(txt("pillState").indexOf("Quarterly") === 0 && find(view(), "pillState").truncated, "the title, elided, before any line")
+      check(shown(find(view(), "pillElapsed")) && !shown(find(view(), "pillLineTime")), "the time after the title")
       shot("pill-long-title", true)
     }
 

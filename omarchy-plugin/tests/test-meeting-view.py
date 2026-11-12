@@ -71,13 +71,14 @@ Scenarios:
               Open meeting folder
   export-past an SRT export of a past meeting (all five formats offered),
               and its folder
-  minimize    the pill while recording (red dot, title, elapsed), sized to
-              what it says, on the card's outer edge and dragged with it;
+  minimize    the pill while recording (red dot, elapsed, the newest line),
+              sized to what it says up to 460 px, where a long line elides;
+              on the card's outer edge and dragged with it;
               click to expand, the --minimize/--expand requests
   pill-states the pill through a meeting: Paused, Finishing..., Ended with
               its length, Summarizing with the agent, Summary ready
-  pill-idle   no meeting: "No meeting" and Start, which starts one; a long
-              title is elided within the pill's maximum width
+  pill-idle   no meeting: "No meeting" and Start, which starts one; before
+              anything is said the pill shows the title, a long one elided
   minimize-autoopen  a meeting start while minimized expands the one window
   resize      the inner-edge handle (clamped 280 px to half the screen) and
               compact height
