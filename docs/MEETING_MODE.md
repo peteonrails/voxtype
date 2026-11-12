@@ -342,7 +342,7 @@ Rather than labelling `You` in every meeting, set your name once:
 voxtype config set meeting.my_name "Pete"
 ```
 
-Every meeting then shows your side as "Pete": the live view, exports, `transcript.md`, summaries and search. It is a display name only, never saved into the transcript, and a label you set for one meeting still wins there. `voxtype meeting my-name` shows the setting, or the full name on your account as a suggestion when it is unset; voxtype never sets it on its own.
+Every meeting then shows your side as "Pete": the live view, exports, `transcript.md`, summaries and search. The meeting assistant is told who you are ("The user asking is Pete (You)."), so a question like "what did I agree to?" means your lines. It is a display name only, never saved into the transcript, and a label you set for one meeting still wins there. `voxtype meeting my-name` shows the setting, or the full name on your account as a suggestion when it is unset; voxtype never sets it on its own.
 
 ### Searching Meetings
 
