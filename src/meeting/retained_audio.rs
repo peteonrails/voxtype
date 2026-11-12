@@ -280,11 +280,10 @@ fn ffmpeg_command(ffmpeg: &Path, path: &Path) -> Command {
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"])
         .args(["-f", "s16le", "-ar", &SAMPLE_RATE.to_string(), "-ac", "1"])
         .args(["-i", "pipe:0"])
-        .args(["-c:a", "libopus", "-b:a", &format!("{OPUS_BITRATE_KBPS}k")])
-        .args(["-application", "voip"])
+        .args(encoder_args(AudioFormat::Opus))
         // Hand each Ogg page to the file as soon as it is complete, so a
         // crash loses at most the page in progress (about a second).
-        .args(["-flush_packets", "1", "-f", "ogg", "-y"])
+        .args(["-flush_packets", "1", "-y"])
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -293,6 +292,27 @@ fn ffmpeg_command(ffmpeg: &Path, path: &Path) -> Command {
     // stop the encoder before the daemon hands it the last chunk.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     cmd
+}
+
+/// ffmpeg output arguments that write a retained track in `format`:
+/// 16 kHz mono Ogg Opus at [`OPUS_BITRATE_KBPS`], or 16-bit WAV. The
+/// caller supplies the input, the sample rate and channel layout if it
+/// needs converting, and the output path.
+pub fn encoder_args(format: AudioFormat) -> Vec<String> {
+    let args: Vec<String> = match format {
+        AudioFormat::Opus => vec![
+            "-c:a".into(),
+            "libopus".into(),
+            "-b:a".into(),
+            format!("{OPUS_BITRATE_KBPS}k"),
+            "-application".into(),
+            "voip".into(),
+            "-f".into(),
+            "ogg".into(),
+        ],
+        AudioFormat::Wav => vec!["-c:a".into(), "pcm_s16le".into(), "-f".into(), "wav".into()],
+    };
+    args
 }
 
 fn to_i16(sample: f32) -> i16 {

@@ -35,6 +35,8 @@ pub struct MeetingContext {
     pub diarization: Option<String>,
     /// The voxtype version that recorded the meeting
     pub voxtype_version: Option<String>,
+    /// The echo handling the meeting used: `aec`, `gtcrn` or `off`
+    pub echo_cancel: Option<String>,
 }
 
 /// A speaker in the transcript and the name it is shown with.
@@ -72,6 +74,9 @@ pub struct Manifest {
     pub engine: Option<String>,
     pub model: Option<String>,
     pub diarization: Option<String>,
+    /// `aec`, `gtcrn` or `off`; null for meetings recorded before 1.3.0
+    #[serde(default)]
+    pub echo_cancel: Option<String>,
     pub speakers: Vec<ManifestSpeaker>,
     pub audio_retained: bool,
     pub files: Vec<ManifestFile>,
@@ -105,6 +110,7 @@ impl Manifest {
             engine: context.engine.clone().or_else(|| metadata.model.clone()),
             model: context.model.clone(),
             diarization: context.diarization.clone(),
+            echo_cancel: context.echo_cancel.clone(),
             speakers: speaker_keys
                 .iter()
                 .map(|id| ManifestSpeaker {
@@ -149,6 +155,11 @@ fn folder_files(dir: &Path) -> Vec<ManifestFile> {
     .map(|(name, kind)| (name.to_string(), kind.to_string()))
     .collect();
     candidates.extend(
+        transcript_versions(dir)
+            .into_iter()
+            .map(|(_, name)| (name, "transcript_previous".to_string())),
+    );
+    candidates.extend(
         retained_audio::retained_files(dir)
             .into_iter()
             .map(|(stem, name)| (name, format!("audio_{stem}"))),
@@ -164,4 +175,24 @@ fn folder_files(dir: &Path) -> Vec<ManifestFile> {
             })
         })
         .collect()
+}
+
+/// Earlier transcripts kept by `meeting retranscribe`, `transcript.v1.json`
+/// and on, as (version, file name) in version order.
+pub fn transcript_versions(dir: &Path) -> Vec<(u32, String)> {
+    let mut versions: Vec<(u32, String)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let n = name
+                .strip_prefix("transcript.v")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
+            Some((n, name))
+        })
+        .collect();
+    versions.sort();
+    versions
 }

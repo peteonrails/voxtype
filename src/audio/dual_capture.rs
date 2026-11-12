@@ -5,7 +5,10 @@
 //!
 //! Mic capture uses cpal (ALSA). Loopback capture uses `parec` (PulseAudio
 //! recording client) which works with PipeWire's PulseAudio compatibility
-//! layer and can access monitor sources that aren't visible to ALSA.
+//! layer and can access monitor sources that aren't visible to ALSA. While
+//! the meeting echo canceller runs (`audio::echo_cancel`), the mic is
+//! recorded with `parec` too, from the canceller's source, which ALSA
+//! cannot name either.
 
 use super::cpal_capture::CpalCapture;
 use super::AudioCapture;
@@ -34,7 +37,7 @@ pub struct SourcedSample {
     pub timestamp: u64,
 }
 
-/// Loopback capture via parec subprocess
+/// Capture from a PulseAudio/PipeWire source via a parec subprocess
 struct ParecLoopback {
     /// Source name (PulseAudio/PipeWire source)
     source: String,
@@ -81,7 +84,7 @@ impl ParecLoopback {
             .ok_or_else(|| AudioError::Connection("Failed to capture parec stdout".to_string()))?;
 
         self.child = Some(child);
-        tracing::info!("Loopback capture started via parec: {}", self.source);
+        tracing::info!("Capture started via parec: {}", self.source);
 
         // Spawn reader thread
         let buffer = Arc::clone(&self.buffer);
@@ -149,10 +152,18 @@ impl Drop for ParecLoopback {
     }
 }
 
+/// Where the microphone is recorded from.
+enum MicCapture {
+    /// The configured device, via cpal/ALSA
+    Cpal(CpalCapture),
+    /// A PipeWire/PulseAudio source, via parec (the echo canceller's)
+    Parec(ParecLoopback),
+}
+
 /// Dual audio capture for mic + loopback
 pub struct DualCapture {
-    /// Microphone capture (via cpal/ALSA)
-    mic_capture: CpalCapture,
+    /// Microphone capture
+    mic_capture: MicCapture,
     /// Loopback capture (via parec subprocess)
     loopback: Option<ParecLoopback>,
     /// Sample counter for timestamps
@@ -169,13 +180,39 @@ impl DualCapture {
         mic_config: &AudioConfig,
         loopback_device: Option<&str>,
     ) -> Result<Self, AudioError> {
-        let mic_capture = CpalCapture::new(mic_config)?;
-        let mut meters = crate::meeting::levels::MeetingMeters::new(true);
+        Self::with_mic(
+            MicCapture::Cpal(CpalCapture::new(mic_config)?),
+            loopback_device,
+            crate::meeting::levels::MeetingMeters::new(true),
+        )
+    }
+
+    /// Like [`DualCapture::new`], recording the mic from the PipeWire or
+    /// PulseAudio source `mic_source` (the echo canceller's) with parec.
+    pub fn with_mic_source(
+        mic_source: &str,
+        loopback_device: Option<&str>,
+    ) -> Result<Self, AudioError> {
+        let meters = crate::meeting::levels::MeetingMeters::new(true);
+        Self::with_mic(
+            MicCapture::Parec(ParecLoopback::new(
+                mic_source.to_string(),
+                meters.mic.clone(),
+            )),
+            loopback_device,
+            meters,
+        )
+    }
+
+    fn with_mic(
+        mic_capture: MicCapture,
+        loopback_device: Option<&str>,
+        mut meters: crate::meeting::levels::MeetingMeters,
+    ) -> Result<Self, AudioError> {
         let loopback_meter = meters
             .loopback
             .clone()
             .expect("created with a loopback meter");
-
         let loopback = match loopback_device {
             Some("disabled") | Some("") | None => None,
             Some("auto") => match Self::find_monitor_source() {
@@ -232,17 +269,23 @@ impl DualCapture {
 
     /// Start both captures
     pub async fn start(&mut self) -> Result<(), AudioError> {
-        let mut mic_rx = self.mic_capture.start().await?;
-        // The capture already sends each block it records on this channel
-        // (dropping blocks rather than waiting when it is full); reading it
-        // here gives the microphone meter the same audio, at no cost to the
-        // capture.
-        let mic_meter = self.meters.mic.clone();
-        self.mic_meter_task = Some(tokio::spawn(async move {
-            while let Some(block) = mic_rx.recv().await {
-                mic_meter.feed(&block);
+        match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => {
+                let mut mic_rx = mic.start().await?;
+                // cpal already sends each block it records on this channel
+                // (dropping blocks rather than waiting when it is full);
+                // reading it here gives the microphone meter the same audio,
+                // at no cost to the capture. The parec mic feeds its meter
+                // from its reader thread.
+                let mic_meter = self.meters.mic.clone();
+                self.mic_meter_task = Some(tokio::spawn(async move {
+                    while let Some(block) = mic_rx.recv().await {
+                        mic_meter.feed(&block);
+                    }
+                }));
             }
-        }));
+            MicCapture::Parec(ref mut mic) => mic.start()?,
+        }
 
         if let Some(ref mut loopback) = self.loopback {
             if let Err(e) = loopback.start() {
@@ -265,7 +308,14 @@ impl DualCapture {
         if let Some(task) = self.mic_meter_task.take() {
             task.abort();
         }
-        let mic_samples = self.mic_capture.stop().await?;
+        let mic_samples = match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => mic.stop().await?,
+            MicCapture::Parec(ref mut mic) => {
+                let samples = mic.get_samples();
+                mic.stop();
+                samples
+            }
+        };
 
         let loopback_samples = if let Some(ref mut loopback) = self.loopback {
             let samples = loopback.get_samples();
@@ -283,7 +333,10 @@ impl DualCapture {
 
     /// Get current samples without stopping (for continuous recording)
     pub async fn get_samples(&mut self) -> DualSamples {
-        let mic = self.mic_capture.get_samples().await;
+        let mic = match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => mic.get_samples().await,
+            MicCapture::Parec(ref mic) => mic.get_samples(),
+        };
 
         let loopback = if let Some(ref loopback) = self.loopback {
             loopback.get_samples()

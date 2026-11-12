@@ -1650,6 +1650,25 @@ No result is shown for cancelled recordings, accidental taps, or
 
 ## Meeting Audio and Post-Meeting Command
 
+### The other side shows up under You on speakers
+
+On speakers your microphone hears what the speakers play, so the other side of the call, or a video playing during the meeting, can be transcribed as You. Voxtype removes it with PipeWire's echo canceller when the meeting's output is speakers (`[meeting.audio] echo_cancel = "auto"`, the default).
+
+Check which echo handling the meeting used:
+
+```bash
+voxtype meeting status --json      # "echo_cancel": "aec", "gtcrn" or "off"
+journalctl --user -u voxtype | grep -i "echo"
+```
+
+- **`gtcrn` on speakers with "the output is headphones"**: voxtype read your default output as headphones (its active port, its form factor, or Bluetooth). Set `echo_cancel = "aec"` to use the canceller anyway.
+- **`gtcrn` with "Echo cancellation could not start"**: the canceller needs PipeWire's echo-cancel module and its WebRTC plugin. On Arch and Omarchy they come with `libpipewire` and `pipewire-audio`; elsewhere, check that `libpipewire-module-echo-cancel.so` and `aec/libspa-aec-webrtc.so` exist under your PipeWire library directories. PipeWire releases too old for the canceller's monitor mode also fall back. `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own error.
+- **`gtcrn` with "mic_device names a specific device"**: with `auto`, a specific `meeting.audio.mic_device` keeps the canceller off. Use `echo_cancel = "aec"` and set `mic_device` to a PipeWire source name from `pactl list short sources`.
+- **`off`**: `echo_cancel` is `off` or `disabled`, or it is `gtcrn` and the GTCRN model is missing.
+
+The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
+
+
 ### Meeting audio is saved as WAV instead of Opus
 
 With `[meeting] retain_audio = true`, voxtype encodes the audio with
@@ -1681,6 +1700,24 @@ done
 ```
 
 `meeting.json` lists whichever files are there the next time it is rewritten.
+
+### `meeting import` or `meeting retranscribe` fails
+
+- **"need ffmpeg and ffprobe"**: install ffmpeg; ffprobe comes with it.
+- **"Cannot read ..."**: ffprobe could not find an audio stream. Check the
+  file plays (`ffprobe file`); a folder is only accepted when it is an Omarchy
+  Meeting Recorder meeting folder.
+- **"Invalid --channels ..."**: name one side per channel, in order. The
+  message says how many channels the file has; `ffprobe -show_streams file`
+  shows the layout. Leave `--channels` out to mix everything.
+- **"recorded without keeping audio"**: `meeting retranscribe` needs the
+  meeting's audio. Meetings recorded with `retain_audio = true`, and every
+  imported meeting, have it.
+- **A model or engine is refused**: the same checks as `meeting start
+  --model` apply; download the model first (`voxtype setup model`).
+- **Speaker names look swapped after transcribing again with `ml`
+  diarization**: the speaker numbers come from a new clustering. Rename them
+  with `voxtype meeting label`.
 
 ### `meeting play` fails or plays nothing
 
@@ -1718,6 +1755,22 @@ journalctl --user -u voxtype | grep post_meeting_command
 The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
 `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
 terminal: anything that prompts for input fails.
+
+## Meetings: The Remote Side Shows Up Under "You"
+
+With speakers instead of headphones, your microphone hears the call. Voxtype removes that echo from your lines, but what is left can still show up:
+
+- **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track, including the guard's. Check `[meeting.audio] echo_guard` is on (the default). Keep `echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones. A line that mixes your voice with the echo stays yours, echo included: the guard only removes lines that are nothing but echo.
+- **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. The guard drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
+- **A remote line shows up twice, once under the remote speaker from your microphone.** The guard moved an echo line to the remote side because the loopback's transcript did not have its words. Delete the copy with `voxtype meeting delete-line`.
+- **A line of yours went missing or moved to the remote.** The guard keeps a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud call can still read as echo. Speak up or lower the call volume; move a line back with `voxtype meeting reassign <meeting> <line> You`; or set `echo_guard = false` to keep only exact-word matching.
+
+The log counts what the guard did per chunk ("Echo guard: dropped N microphone line(s) ..., moved N ...", "Removed N bleed-through word(s) via dedup"); at debug level it names each line:
+
+```bash
+systemctl --user stop voxtype
+RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -iE "echo"
+```
 
 ---
 

@@ -2807,6 +2807,8 @@ show_view_on_start = true        # Omarchy: open the live meeting view when a me
 mic_device = "default"           # Microphone (uses audio.device if not set)
 loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
 echo_cancel = "auto"             # GTCRN neural enhancement + transcript dedup
+echo_guard = true                # Keep the call heard through speakers out of your lines
+echo_fuzzy_max_words = 4         # Longest line the misheard-words check looks at
 vad_threshold = 0.01             # Lower to 0.001 for quiet mics; 0.0 disables meeting VAD
 
 [meeting.diarization]
@@ -2849,6 +2851,8 @@ Once an agent is allowed, each meeting is also summarized when it stops (`summar
 When `loopback_device` is enabled, meeting mode captures both your microphone and system audio (remote participants) on separate channels. Without echo cancellation, the remote participants' audio bleeds into your microphone recording and gets transcribed as your speech.
 
 Voxtype uses GTCRN, a lightweight neural speech enhancement model, to clean the mic signal before transcription. The model removes background noise and speaker bleed-through while preserving your voice. A second pass at the transcript level strips any residual echoed phrases.
+
+The echo guard (`echo_guard`, on by default) catches what gets through. A microphone line whose sound is all explained by the loopback is echo at any length: it is dropped when the loopback has the same words, or moved to the remote speaker when it does not. A short line that is a misheard copy of the remote, such as "Omarky problem." while the loopback said "the Omarchy package ... without any problems", is dropped too. It compares the audio levels of both tracks first, so your own lines, even a short reply ("yes", "only one?") said over the other side, are kept. See [CONFIGURATION.md](CONFIGURATION.md#echo_guard).
 
 The GTCRN model (~523 KB) is downloaded automatically the first time you run `voxtype meeting start`. To disable echo cancellation (e.g., if you have PipeWire's `echo-cancel` module configured):
 

@@ -6,6 +6,7 @@
 pub mod cpal_capture;
 pub mod devices;
 pub mod dual_capture;
+pub mod echo_cancel;
 #[cfg(feature = "onnx-common")]
 pub mod enhance;
 pub mod feedback;

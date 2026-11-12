@@ -251,7 +251,7 @@ const FEEDBACK_THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const OUTPUT_MODE_CHOICES: &[&str] = &["type", "clipboard", "paste", "file"];
 const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
-const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
+const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "aec", "gtcrn", "off", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
@@ -1392,7 +1392,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(ECHO_CANCEL_CHOICES),
         "Meeting",
         "Echo cancellation",
-        "auto runs GTCRN enhancement plus transcript dedup on the mic track. Set disabled if PipeWire already cancels echo.",
+        "auto cancels speaker echo with PipeWire's WebRTC canceller on speakers, GTCRN otherwise. aec forces it, gtcrn is the old behaviour, off is neither.",
     ),
     spec(
         "meeting.diarization.enabled",
@@ -2271,6 +2271,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Where meetings are stored. auto uses ~/.local/share/voxtype/meetings.",
     ),
     spec(
+        "meeting.audio.echo_guard",
+        "meeting.audio",
+        "echo_guard",
+        KeyType::Bool,
+        "Meeting",
+        "Echo guard",
+        "Keep the call heard through your speakers out of your lines: drop mic lines that are only its echo, unless the mic level shows you speaking.",
+    ),
+    spec(
+        "meeting.audio.echo_fuzzy_max_words",
+        "meeting.audio",
+        "echo_fuzzy_max_words",
+        KeyType::Int { min: 1, max: 12 },
+        "Meeting",
+        "Misheard echo length",
+        "Longest mic line, in words, checked for misheard echo.",
+    ),
+    spec(
         "meeting.audio.mic_device",
         "meeting.audio",
         "mic_device",
@@ -3136,6 +3154,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
+        "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),
+        "meeting.audio.echo_fuzzy_max_words" => json!(cfg.meeting.audio.echo_fuzzy_max_words),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
         "meeting.diarization.backend" => json!(cfg.meeting.diarization.backend),
         "meeting.diarization.max_speakers" => json!(cfg.meeting.diarization.max_speakers),
