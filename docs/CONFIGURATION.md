@@ -3830,6 +3830,18 @@ How opaque the meeting view's background is, so it reads as an overlay on the wi
 voxtype config set meeting.view_opacity 0.6
 ```
 
+### auto_label_from_title
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Name the speakers of a two-person meeting from its title. In a meeting titled "Pete <> Andrew standup", "Pete / Chris", "Pete and Chris 1:1" or "Chris - Pete sync", the side that is you names your microphone (`You`) and the other side names every remote voice. You are recognized by your account's full name (the GECOS field), and a first-name match is enough. If neither side of the title is you, if both could be, or if the title names three or more people, nothing is named. A name you give with `voxtype meeting label` is never replaced. It applies to live meetings, imports with separate microphone and remote channels, and `voxtype meeting retranscribe`. See [Naming Speakers from the Title](MEETING_MODE.md#naming-speakers-from-the-title).
+
+```bash
+voxtype config set meeting.auto_label_from_title false
+```
+
 ---
 
 ## [meeting.audio]
