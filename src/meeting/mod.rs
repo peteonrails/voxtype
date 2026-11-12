@@ -23,6 +23,7 @@
 //! - **Phase 5 (v0.6.1):** AI summarization with action items
 
 pub mod assistant;
+pub mod calendar;
 pub mod chunk;
 pub mod data;
 pub mod detect;
@@ -39,6 +40,7 @@ pub mod notice;
 pub mod playback;
 pub mod repeat;
 pub mod retained_audio;
+pub mod retitle;
 pub mod retranscribe;
 pub mod start;
 pub mod state;
@@ -334,15 +336,7 @@ impl MeetingDaemon {
         let meeting_id = meeting.metadata.id;
         let title = meeting.metadata.title.clone();
         let started_at = meeting.metadata.started_at;
-        self.title_labels = self.me.as_ref().and_then(|me| {
-            let labels = title_labels::labels_for(title.as_deref()?, me)?;
-            tracing::info!(
-                "Naming speakers from the title: You as {:?}, every remote voice as {:?}",
-                labels.you,
-                labels.other
-            );
-            Some(labels)
-        });
+        self.title_labels = self.labels_for_title(title.as_deref());
         let (diarization_enabled, diarization_backend) = match &self.config.diarization {
             Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
             None => (false, None),
@@ -851,6 +845,42 @@ impl MeetingDaemon {
     /// the meeting so far and `new` segments, leaving any speaker that has a
     /// name alone. A speaker heard before but only named now has its earlier
     /// lines updated on the live feed.
+    /// The speaker names `title` gives, logged when it gives any.
+    fn labels_for_title(&self, title: Option<&str>) -> Option<title_labels::TitleLabels> {
+        let labels = title_labels::labels_for(title?, self.me.as_ref()?)?;
+        tracing::info!(
+            "Naming speakers from the title: You as {:?}, every remote voice as {:?}",
+            labels.you,
+            labels.other
+        );
+        Some(labels)
+    }
+
+    /// Give the running meeting a new title (and its call link, when it has
+    /// none): stored at once, and the speakers the new title names are
+    /// labelled from now on and on the lines already there, unless they
+    /// have a name. The folder keeps its name. Returns false when no
+    /// meeting is running.
+    pub async fn retitle(&mut self, title: &str, url: Option<&str>) -> bool {
+        let Some(ref mut meeting) = self.current_meeting else {
+            return false;
+        };
+        meeting.metadata.title = Some(title.to_string());
+        if meeting.metadata.url.is_none() {
+            meeting.metadata.url = url.map(str::to_string);
+        }
+        if let Err(e) = self.storage.update_meeting(&meeting.metadata) {
+            tracing::warn!("Failed to store the meeting's new title: {}", e);
+        }
+        tracing::info!("Meeting {} retitled {:?}", meeting.metadata.id, title);
+        self.title_labels = self.labels_for_title(Some(title));
+        // Rewrites transcript.md under the new title, and names the
+        // speakers already heard.
+        self.label_from_title(&[]).await;
+        self.persist_transcript();
+        true
+    }
+
     async fn label_from_title(&mut self, new: &[TranscriptSegment]) {
         let (Some(labels), Some(meeting)) = (&self.title_labels, &self.current_meeting) else {
             return;
@@ -2617,6 +2647,72 @@ mod tests {
                 ("Remote 3", "Chris"),
             ])
         );
+    }
+
+    /// Retitling mid-call to a 1:1 title names the speakers already heard,
+    /// on the live feed and on disk, and every voice heard from then on,
+    /// but never a speaker named by hand.
+    #[tokio::test]
+    async fn retitling_mid_meeting_names_speakers_from_then_and_before() {
+        let mut h = titled_harness("Zoom call").await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(live_names(&mut h.events), ["You: You", "Remote: Remote"]);
+
+        assert!(h.daemon.retitle("Pete <> Chad Bi-Weekly", None).await);
+        assert_eq!(
+            live_names(&mut h.events),
+            ["updated You: Pete Jackson", "updated Remote: Chad"]
+        );
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        assert_eq!(
+            live_names(&mut h.events),
+            ["You: Pete Jackson", "Remote 2: Chad"]
+        );
+        h.daemon.stop().await.unwrap();
+        let saved = h.saved();
+        assert_eq!(
+            saved.metadata.title.as_deref(),
+            Some("Pete <> Chad Bi-Weekly")
+        );
+        let names: Vec<String> = saved
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(names, ["Pete Jackson", "Chad", "Pete Jackson", "Chad"]);
+        let md = std::fs::read_to_string(h.folder().join("transcript.md")).unwrap();
+        assert!(md.starts_with("# Pete <> Chad Bi-Weekly"), "{md}");
+    }
+
+    #[tokio::test]
+    async fn retitling_keeps_hand_labels_and_the_link() {
+        let mut h = titled_harness("Zoom call").await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Sam").unwrap();
+        h.daemon.apply_segment_edits().await;
+        let _ = live_names(&mut h.events);
+
+        assert!(
+            h.daemon
+                .retitle("Pete / Chad", Some("https://zoom.us/j/9"))
+                .await
+        );
+        assert_eq!(live_names(&mut h.events), ["updated You: Pete Jackson"]);
+        h.daemon.stop().await.unwrap();
+        let saved = h.saved();
+        assert_eq!(saved.metadata.url.as_deref(), Some("https://zoom.us/j/9"));
+        let names: Vec<String> = saved
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(names, ["Pete Jackson", "Sam"]);
+        // With no meeting running there is nothing to retitle.
+        assert!(!h.daemon.retitle("Anything", None).await);
     }
 
     /// A name given by hand stays, on the speaker it was given to, while

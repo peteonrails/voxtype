@@ -28,6 +28,7 @@
 //! {"event":"hello","status":"recording","meeting_id":"...","title":"...","started_at":"...","chunk_count":7,"diarization":{"enabled":true,"backend":"simple"},"segments":[...],"recording_notice":false}
 //! {"event":"segments","chunk_id":8,"segments":[...]}
 //! {"event":"status","status":"paused","recording_notice":false}
+//! {"event":"title_changed","meeting_id":"...","title":"Pete <> Chad"}
 //! {"event":"error","message":"..."}
 //! ```
 //!
@@ -181,6 +182,10 @@ enum WireEvent {
     SegmentDeleted {
         meeting_id: String,
         segment_id: u32,
+    },
+    TitleChanged {
+        meeting_id: String,
+        title: String,
     },
     NotesUpdated {
         meeting_id: String,
@@ -383,6 +388,15 @@ impl MeetingEventHub {
         self.publish(WireEvent::NotesUpdated {
             meeting_id: notes.meeting_id.clone(),
             updated_at: notes.updated_at,
+        });
+    }
+
+    /// Broadcast a `title_changed` event: the meeting was retitled, by hand
+    /// or from the calendar.
+    pub fn publish_title_changed(&self, meeting_id: &str, title: &str) {
+        self.publish(WireEvent::TitleChanged {
+            meeting_id: meeting_id.to_string(),
+            title: title.to_string(),
         });
     }
 
@@ -1019,6 +1033,13 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({"event": "notes_updated", "meeting_id": "abc", "updated_at": "2026-11-11T20:00:00Z"})
+        );
+
+        hub.publish_title_changed("abc", "Pete <> Chad");
+        let value = read_line(&mut client).await;
+        assert_eq!(
+            value,
+            serde_json::json!({"event": "title_changed", "meeting_id": "abc", "title": "Pete <> Chad"})
         );
 
         hub.cleanup();
