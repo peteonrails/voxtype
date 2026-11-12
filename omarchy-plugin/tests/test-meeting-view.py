@@ -134,6 +134,9 @@ Scenarios:
               proposed `meeting waveform`); a click plays from that point
               (`play --at`), the playhead follows, Stop audio
   waveform-missing  a voxtype without `meeting waveform`: no strip, no error
+  recovery-real  `meeting recover` answered by a real voxtype (REAL_VOXTYPE,
+              run only when set) over a store seeded with two interrupted
+              meetings: both cards, Finish and Discard for real
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -154,6 +157,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -170,6 +174,7 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-gt
              "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
+             "recovery-real",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -250,6 +255,27 @@ def running_meeting(seconds_ago=65):
                 seg(3, 21, "Great, let's start with the release.", "microphone", "You", 0),
                 seg(4, 35, "The build went green overnight.", "loopback", "Remote", 1),
             ]}
+
+
+def seed_interrupted(real, data_home):
+    """A real voxtype's meetings store holding the two STALE meetings, marked
+    interrupted as the daemon's startup pass leaves them. The real binary
+    makes the schema; the rows and folders are written here."""
+    env = dict(os.environ, XDG_DATA_HOME=str(data_home))
+    subprocess.run([real, "meeting", "list", "--json"], env=env, capture_output=True, check=True)
+    store = data_home / "voxtype" / "meetings"
+    db = sqlite3.connect(store / "index.db")
+    now = int(time.time())
+    for mid, title, ago in ((STALE[0], "Planning", 7200), (STALE[1], "Vendor call", 10800)):
+        folder = store / mid
+        folder.mkdir(parents=True)
+        (folder / "transcript.json").write_text(json.dumps({"segments": [
+            seg(0, 1, "Let's plan the week.", "microphone", "You", 0),
+            seg(1, 31, "Sounds good.", "loopback", "Remote", 1)], "total_chunks": 2}))
+        db.execute("INSERT INTO meetings (id, title, started_at, status, chunk_count, storage_path, audio_retained) "
+                   "VALUES (?, ?, ?, 'interrupted', 2, ?, 0)", (mid, title, now - ago, str(folder)))
+    db.commit()
+    db.close()
 
 
 def scroll_meeting():
@@ -346,7 +372,9 @@ STATE = {
     "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
     "search": {"search_delay": 0.6},
     "recovery-old": {"recover_missing": True},
-    "recovery": {"recoverable": [
+    "recovery-socket": {"recover_array": True},
+    "recovery": {"recover_summary": {"state": "failed", "message": "the local model answered 500"},
+                 "recoverable": [
         {"id": STALE[0], "title": "Planning", "started_at": "2026-11-11T09:00:00Z", "last_chunk_ms": 760000,
          "has_audio": True, "untranscribed_chunks": 2},
         {"id": STALE[1], "title": "Vendor call", "started_at": "2026-11-11T08:00:00Z", "last_chunk_ms": 300000,
@@ -492,6 +520,11 @@ def run(scenario, host, shell, evidence):
             shots = str((evidence / label).resolve())
             Path(shots).mkdir(parents=True, exist_ok=True)
 
+        real_env = {}
+        if scenario == "recovery-real":
+            real = os.environ["REAL_VOXTYPE"]
+            seed_interrupted(real, r.root / "xdg-data")
+            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data")}
         server = subprocess.Popen([sys.executable, "-I", str(FAKE_SOCK), str(sock), str(ctl), str(srv_log),
                                    str(snapshot)])
         try:
@@ -518,7 +551,8 @@ def run(scenario, host, shell, evidence):
                     "FAKE_MEETING_LOG": str(srv_log), "FAKE_MEETING_SNAPSHOT": str(snapshot),
                     "FAKE_MEETING_DATA": str(data),
                     "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
-                    "XDG_DOCUMENTS_DIR": str(documents), "XDG_STATE_HOME": str(r.root / "state")}, timeout=120)
+                    "XDG_DOCUMENTS_DIR": str(documents), "XDG_STATE_HOME": str(r.root / "state"),
+                    **real_env}, timeout=120)
         finally:
             with open(ctl, "a") as f:
                 f.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -730,7 +764,10 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [play_from("3"), play_from("1"), ["meeting", "play", "--stop", "--json"]], "meeting commands")
     elif scenario == "recovery":
         expect(meeting, [["meeting", "recover", "--finish", STALE[0], "--json"],
-                         ["meeting", "recover", "--discard", STALE[1]]], "meeting commands")
+                         ["meeting", "recover", "--discard", STALE[1], "--json"]], "meeting commands")
+    elif scenario == "recovery-real":
+        expect(meeting, [["meeting", "recover", "--finish", STALE[0], "--json"],
+                         ["meeting", "recover", "--discard", STALE[1], "--json"]], "meeting commands")
     elif scenario == "recovery-socket":
         expect(meeting, [], "meeting commands")
     elif scenario == "recovery-old":
@@ -788,6 +825,9 @@ def main():
     for host in args.host or HOSTS:
         for scenario in args.scenario or SCENARIOS:
             if host != "omarchy" and scenario in OMARCHY_ONLY:
+                continue
+            # Needs a real voxtype with `meeting recover`.
+            if scenario == "recovery-real" and not os.environ.get("REAL_VOXTYPE"):
                 continue
             output, problems, calls = run(scenario, host, args.shell, args.evidence)
             if problems:

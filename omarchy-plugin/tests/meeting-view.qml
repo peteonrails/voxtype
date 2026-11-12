@@ -154,6 +154,7 @@ Item {
           else if (s === "waveform-missing") tc.driveWaveformMissing()
           else if (s === "recovery-old") tc.driveRecoveryOld()
           else if (s === "recovery-socket") tc.driveRecoverySocket()
+          else if (s === "recovery-real") tc.driveRecoveryReal()
           else if (s === "search") tc.driveSearch()
           else if (s === "search-old") tc.driveSearchOld()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
@@ -1963,6 +1964,10 @@ Item {
       shot("recovery")
       click(find(first, "recoveryFinish"), "Finish it")
       waitFor(function() { return !shown(find(view(), "recoveryCard_1")) && shown(find(view(), "recoveryCard_0")) }, "one left", 6000)
+      // Finished, but its summary failed: said, with what to do.
+      waitFor(function() { return shown(find(view(), "recoveryError")) }, "summary failure noted")
+      check(txt("recoveryError") === "Planning is finished, but its summary failed: the local model answered 500. Summarize it again from the meeting.",
+            "note: " + txt("recoveryError"))
       var card = find(view(), "recoveryCard_0")
       check(String(find(card, "recoveryText").text).indexOf("Vendor call") === 0, "the other one: " + find(card, "recoveryText").text)
       click(find(card, "recoveryDiscard"), "Discard")
@@ -1974,6 +1979,25 @@ Item {
       click(find(card, "recoveryDiscardConfirm"), "Discard for good")
       waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "no unfinished recordings left", 6000)
       check(!shown(find(view(), "recoveryError")), "no error")
+    }
+
+    // `meeting recover` from a real voxtype over a seeded store.
+    function driveRecoveryReal() {
+      openView()
+      waitFor(function() { return shown(find(view(), "recoveryCard_1")) }, "both interrupted meetings", 8000)
+      var first = find(view(), "recoveryCard_0")
+      var text = String(find(first, "recoveryText").text)
+      check(text.indexOf("Planning, started ") === 0 && text.indexOf("stopped 0:32 in") !== -1, "the real entry: " + text)
+      check(text.indexOf("Finish keeps what was recorded") !== -1, "nothing left to transcribe: " + text)
+      shot("recovery-real")
+      click(find(first, "recoveryFinish"), "Finish it")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_1")) && shown(find(view(), "recoveryCard_0")) }, "finished for real", 8000)
+      check(!shown(find(view(), "recoveryError")), "no error (summary skipped): " + txt("recoveryError"))
+      var card = find(view(), "recoveryCard_0")
+      check(String(find(card, "recoveryText").text).indexOf("Vendor call") === 0, "the other one")
+      click(find(card, "recoveryDiscard"), "Discard")
+      click(find(card, "recoveryDiscardConfirm"), "Discard for good")
+      waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "discarded for real", 8000)
     }
 
     function driveRecoverySocket() {

@@ -161,13 +161,19 @@ Item {
   // (`voxtype meeting recover`):
   //
   //   voxtype meeting recover --json
-  //     [{"id", "title", "started_at", "last_chunk_ms", "has_audio",
-  //       "untranscribed_chunks"}]
+  //     {"meetings": [{"id", "title" (absent when untitled), "started_at",
+  //       "last_chunk_ms", "has_audio", "untranscribed_chunks", "lines",
+  //       "stopped_at", "duration_secs"}]}, newest first (a bare array is
+  //       read too)
   //   voxtype meeting recover --finish <id> --json   closes it, transcribing
-  //                                                 what was left; prints the
-  //                                                 metadata
-  //   voxtype meeting recover --discard <id>         deletes it
-  //   socket: {"event": "recoverable", "meetings": [...]} after hello
+  //       what was left; prints the metadata plus "recovered":
+  //       {transcribed_chunks, summary: {state: written|skipped|failed, ...},
+  //        post_meeting_command}
+  //   voxtype meeting recover --discard <id> --json  {"discarded": "<id>"}
+  //   socket: {"event": "recoverable", "meetings": [...]} after hello on
+  //       every connection while there are any, and to everyone (maybe [])
+  //       after a finish or discard
+  //   A finished or recording meeting is refused (exit 1).
   //
   // The daemon's startup pass marks these "interrupted", so they are found
   // from recover, not from a status. A voxtype without `recover` (its
@@ -211,6 +217,8 @@ Item {
     root.recoveryBusy = id
     recoveryProc.kind = "finish"
     recoveryProc.err = ""
+    recoveryProc.out = ""
+    recoveryProc.title = root.titleOfStale(id)
     recoveryProc.launch([root.bin, "meeting", "recover", "--finish", id, "--json"])
   }
 
@@ -220,9 +228,16 @@ Item {
     root.recoveryBusy = id
     recoveryProc.kind = "discard"
     recoveryProc.err = ""
+    recoveryProc.out = ""
     recoveryProc.launch(root.recoverSupported === false
       ? [root.bin, "meeting", "delete", id, "--force"]
-      : [root.bin, "meeting", "recover", "--discard", id])
+      : [root.bin, "meeting", "recover", "--discard", id, "--json"])
+  }
+
+  function titleOfStale(id) {
+    for (var i = 0; i < root.staleMeetings.length; i++)
+      if (String(root.staleMeetings[i].id) === id && root.staleMeetings[i].title) return String(root.staleMeetings[i].title)
+    return "The meeting"
   }
 
   function finishLaterText() {
@@ -251,7 +266,8 @@ Item {
       }
       var data = null
       try { data = JSON.parse(recoverListProc.out) } catch (e) {}
-      if (!data || data.length === undefined) return
+      if (data && !Array.isArray(data) && data.meetings !== undefined) data = data.meetings
+      if (!data || !Array.isArray(data)) return
       root.recoverSupported = true
       root.recoverable = data
     }
@@ -261,10 +277,24 @@ Item {
     id: recoveryProc
     property string kind: ""
     property string err: ""
+    property string out: ""
+    property string title: ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: recoveryProc.out = String(text || "") }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: recoveryProc.err = String(text || "").trim() }
     onExited: function(code) {
       root.recoveryBusy = ""
       if (code === 0) {
+        // Finished: say so if its summary could not be written; the
+        // meeting itself is safe either way.
+        if (recoveryProc.kind === "finish") {
+          var done = null
+          try { done = JSON.parse(recoveryProc.out) } catch (e) {}
+          var summary = done && done.recovered && done.recovered.summary ? done.recovered.summary : null
+          if (summary && summary.state === "failed")
+            root.recoveryError = recoveryProc.title + " is finished, but its summary failed"
+              + (summary.message ? ": " + String(summary.message).replace(/[.!]*$/, ".") : ".")
+              + " Summarize it again from the meeting."
+        }
         root.refreshList()
         root.refreshRecoverable()
         return

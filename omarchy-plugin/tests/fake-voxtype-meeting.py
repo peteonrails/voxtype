@@ -752,6 +752,10 @@ def recover(state, args):
     if state.get("recover_missing"):
         print("error: unrecognized subcommand 'recover'", file=sys.stderr)
         return 2
+    # A real voxtype to answer instead (the recovery-real scenario).
+    real = os.environ.get("REAL_VOXTYPE")
+    if real:
+        os.execv(real, [real, "meeting", "recover"] + args)
     rec = state.setdefault("recoverable", [])
     if "--finish" in args or "--discard" in args:
         finishing = "--finish" in args
@@ -760,7 +764,7 @@ def recover(state, args):
             print("Error: " + state["recover_error"], file=sys.stderr)
             return 1
         if not any(r["id"] == mid for r in rec):
-            print("Error: %s is not an unfinished meeting" % mid, file=sys.stderr)
+            print("Error: meeting %s is not interrupted" % mid, file=sys.stderr)
             return 1
         state["recoverable"] = [r for r in rec if r["id"] != mid]
         if finishing:
@@ -770,13 +774,18 @@ def recover(state, args):
                     m.update(status="completed", duration_secs=1260, ended_at="2026-11-11T09:21:00Z")
                     meta = m
             save(state)
-            print(json.dumps(meta or {"id": mid, "status": "completed"}))
+            out = dict(meta or {"id": mid, "status": "completed"})
+            out["recovered"] = {"transcribed_chunks": 0, "post_meeting_command": None,
+                                "summary": state.get("recover_summary", {"state": "skipped"})}
+            print(json.dumps(out))
         else:
             state["meetings"] = [m for m in state.get("meetings", []) if m["id"] != mid]
             save(state)
-            print("Discarded meeting " + mid)
+            print(json.dumps({"discarded": mid}))
         return 0
-    print(json.dumps(rec))
+    # The real shape is an object; state["recover_array"] answers with the
+    # bare array of an earlier draft.
+    print(json.dumps(rec if state.get("recover_array") else {"meetings": rec}))
     return 0
 
 
