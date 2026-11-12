@@ -2763,6 +2763,8 @@ Recordings where speech falls below the detection threshold are rejected before 
 
 Meeting mode provides continuous transcription for meetings, with chunked processing, speaker diarization, and export capabilities. Unlike push-to-talk (which transcribes short clips), meeting mode runs continuously and processes audio in chunks for the duration of a meeting.
 
+**Recording consent.** Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant. Until you run `voxtype meeting notice --ack` (or press **Got it** in the meeting view), `meeting start` prints this on stderr and the meeting view shows it. See [Recording Consent](MEETING_MODE.md#recording-consent).
+
 ### Commands
 
 ```bash
