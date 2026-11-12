@@ -439,15 +439,15 @@ impl Transcriber for WhisperTranscriber {
 
 /// One segment as whisper.cpp reports it: times in centiseconds.
 #[derive(Debug, Clone, PartialEq)]
-struct RawSegment {
-    start_cs: i64,
-    end_cs: i64,
-    text: String,
+pub(super) struct RawSegment {
+    pub(super) start_cs: i64,
+    pub(super) end_cs: i64,
+    pub(super) text: String,
 }
 
 /// Whisper's segments as [`TimedSegment`]s: text trimmed, times clamped to
 /// the audio, and segments with no words (degenerate decodes) dropped.
-fn timed_segments(raw: &[RawSegment], duration_secs: f32) -> Vec<TimedSegment> {
+pub(super) fn timed_segments(raw: &[RawSegment], duration_secs: f32) -> Vec<TimedSegment> {
     raw.iter()
         .filter_map(|r| {
             let text = r.text.trim();
