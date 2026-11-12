@@ -2,7 +2,7 @@
 //!
 //! Draws [`crate::meeting::view::MeetingView`], fed by the daemon's
 //! `meeting.sock`, with ratatui. Every action runs the matching `voxtype
-//! meeting` command (pause, stop, reassign, annotate, ask) as a child
+//! meeting` command (pause, stop, label, reassign, annotate, ask) as a child
 //! process, so it gets the same checks and messages as typing it, and the
 //! screen never blocks on one.
 //!
@@ -12,7 +12,7 @@
 use crate::meeting::data::TranscriptSegment;
 use crate::meeting::storage::MeetingListEntry;
 use crate::meeting::view::client::{spawn_feed, Feed};
-use crate::meeting::view::{clock, Change, MeetingView, ViewState};
+use crate::meeting::view::{clock, meter, Change, LineMarks, MeetingView, SpeakerChip, ViewState};
 use crate::meeting::MeetingConfig;
 use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -60,6 +60,12 @@ pub enum Screen {
 pub enum Modal {
     None,
     ConfirmStop,
+    /// Pick a speaker chip, then type the name to give it.
+    Label {
+        chips: Vec<SpeakerChip>,
+        selected: usize,
+        typing: Option<String>,
+    },
     /// Pick a speaker for the selected line; the last choice types a new one.
     Reassign {
         choices: Vec<String>,
@@ -88,6 +94,9 @@ pub enum Outcome {
         ok: bool,
         message: String,
         reload: bool,
+        /// Speaker keys and the name `meeting label` gave them, for the
+        /// live view to apply (the socket does not carry labels).
+        label: Option<(Vec<String>, String)>,
     },
     AskLine(String),
     AskExited(bool),
@@ -258,6 +267,14 @@ pub enum Action {
         args: Vec<String>,
         reload: bool,
     },
+    /// Name a speaker: one `meeting label` per key, in order, stopping at
+    /// the first that fails.
+    Label {
+        what: String,
+        commands: Vec<Vec<String>>,
+        keys: Vec<String>,
+        name: String,
+    },
     Ask(String),
     OpenSelected,
     Refresh,
@@ -372,7 +389,9 @@ fn meeting_key(app: &mut WatchApp, key: KeyEvent) -> Action {
             }
             Action::None
         }
-        KeyCode::Char('r') | KeyCode::Char('n') | KeyCode::Char('a') if id.is_none() => {
+        KeyCode::Char('r') | KeyCode::Char('n') | KeyCode::Char('a') | KeyCode::Char('l')
+            if id.is_none() =>
+        {
             app.message = Some("No meeting to act on".into());
             Action::None
         }
@@ -387,6 +406,24 @@ fn meeting_key(app: &mut WatchApp, key: KeyEvent) -> Action {
             app.modal = Modal::Reassign {
                 choices,
                 selected: 0,
+                typing: None,
+            };
+            Action::None
+        }
+        KeyCode::Char('l') => {
+            let chips = app.view().speakers();
+            if chips.is_empty() {
+                app.message = Some("No speakers yet".into());
+                return Action::None;
+            }
+            // Start on the selected line's speaker.
+            let selected = app
+                .selected_segment()
+                .and_then(|s| app.view().speaker_index(s))
+                .unwrap_or(0);
+            app.modal = Modal::Label {
+                chips,
+                selected,
                 typing: None,
             };
             Action::None
@@ -431,6 +468,51 @@ fn handle_modal_key(app: &mut WatchApp, key: KeyEvent) -> Action {
             },
             _ => Action::None,
         },
+        Modal::Label {
+            chips,
+            mut selected,
+            typing,
+        } => {
+            if let Some(mut name) = typing {
+                match key.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter if !name.trim().is_empty() => {
+                        return label(&id, &chips[selected], name.trim());
+                    }
+                    _ => {
+                        edit(&mut name, key);
+                        app.modal = Modal::Label {
+                            chips,
+                            selected,
+                            typing: Some(name),
+                        };
+                    }
+                }
+                return Action::None;
+            }
+            match key.code {
+                KeyCode::Esc => return Action::None,
+                KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1).min(chips.len() - 1)
+                }
+                KeyCode::Enter => {
+                    app.modal = Modal::Label {
+                        chips,
+                        selected,
+                        typing: Some(String::new()),
+                    };
+                    return Action::None;
+                }
+                _ => {}
+            }
+            app.modal = Modal::Label {
+                chips,
+                selected,
+                typing: None,
+            };
+            Action::None
+        }
         Modal::Reassign {
             choices,
             mut selected,
@@ -529,6 +611,29 @@ fn handle_modal_key(app: &mut WatchApp, key: KeyEvent) -> Action {
     }
 }
 
+/// Name a speaker chip: one `meeting label` per diarizer ID behind it, as
+/// the Quickshell view does, so a merged chip stays merged.
+fn label(id: &str, chip: &SpeakerChip, name: &str) -> Action {
+    Action::Label {
+        what: format!("Name {}", chip.name),
+        keys: chip.keys.clone(),
+        name: name.to_string(),
+        commands: chip
+            .keys
+            .iter()
+            .map(|key| {
+                vec![
+                    "meeting".into(),
+                    "label".into(),
+                    id.to_string(),
+                    key.clone(),
+                    name.to_string(),
+                ]
+            })
+            .collect(),
+    }
+}
+
 fn reassign(app: &mut WatchApp, id: &str, segment: Option<u32>, name: &str) -> Action {
     let Some(seg) = segment else {
         app.message = Some("Select a line first".into());
@@ -559,7 +664,11 @@ pub fn on_outcome(
             ok,
             message,
             reload: wants_reload,
+            label,
         } => {
+            if let (true, Some((keys, name))) = (ok, label.as_ref()) {
+                app.live.apply_label(keys, name);
+            }
             app.message = Some(if ok {
                 format!("{what}: done")
             } else {
@@ -632,6 +741,30 @@ pub fn draw(f: &mut Frame, app: &mut WatchApp, now: DateTime<Utc>) {
             "Stop meeting",
             Text::from("Stop the meeting? y to stop, any other key to keep recording."),
         ),
+        Modal::Label {
+            chips,
+            selected,
+            typing,
+        } => {
+            let mut lines: Vec<Line> = Vec::new();
+            if let Some(name) = typing {
+                lines.push(Line::from(format!(
+                    "New name for {}:",
+                    chips[*selected].name
+                )));
+                lines.push(Line::from(format!("> {name}_")));
+            } else {
+                for (i, c) in chips.iter().enumerate() {
+                    let style = if i == *selected {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(Line::styled(format!(" {} ", c.name), style));
+                }
+            }
+            popup(f, area, "Name a speaker", Text::from(lines));
+        }
         Modal::Reassign {
             choices,
             selected,
@@ -730,6 +863,31 @@ fn draw_meeting(f: &mut Frame, app: &mut WatchApp, area: Rect, now: DateTime<Utc
     if let Some(d) = view.elapsed(now) {
         header.push(Span::raw(format!("  {}", clock(d))));
     }
+    if let Some(p) = view.progress.as_ref().filter(|p| p.running()) {
+        let what = if p.operation == "import" {
+            "Importing"
+        } else {
+            "Transcribing again"
+        };
+        header.push(Span::styled(
+            format!("  {what} {:.0}%", p.fraction() * 100.0),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    if let Some(l) = view.current_levels(now) {
+        header.push(Span::raw("  "));
+        header.extend(level_spans("mic", l.mic));
+        if l.loopback.is_some() {
+            header.push(Span::raw(" "));
+            header.extend(level_spans("call", l.loopback));
+        }
+    }
+    if view.playback.is_some() {
+        header.push(Span::styled(
+            "  ▶ playing",
+            Style::default().fg(Color::Green),
+        ));
+    }
     if view.live && !view.connected {
         header.push(Span::styled(
             "  reconnecting…",
@@ -748,7 +906,7 @@ fn draw_meeting(f: &mut Frame, app: &mut WatchApp, area: Rect, now: DateTime<Utc
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(30), Constraint::Length(28)])
         .split(rows[1]);
-    draw_transcript(f, app, cols[0]);
+    draw_transcript(f, app, cols[0], now);
     draw_side(f, app, cols[1]);
 
     if let Some(pane) = &app.ask {
@@ -781,9 +939,9 @@ fn draw_meeting(f: &mut Frame, app: &mut WatchApp, area: Rect, now: DateTime<Utc
     }
 
     let help = if app.stored.is_some() {
-        "↑↓ select  r reassign  n note  a ask  Esc back  q quit"
+        "↑↓ select  l name speaker  r move line  n note  a ask  Esc back  q quit"
     } else {
-        "↑↓ select  End follow  p pause/resume  s stop  r reassign  n note  a ask  Esc list  q quit"
+        "↑↓ select  End follow  p pause/resume  s stop  l name speaker  r move line  n note  a ask  Esc list  q quit"
     };
     let footer = match &app.message {
         Some(m) => Line::from(vec![
@@ -796,8 +954,23 @@ fn draw_meeting(f: &mut Frame, app: &mut WatchApp, area: Rect, now: DateTime<Utc
     f.render_widget(Paragraph::new(footer), rows[3]);
 }
 
+/// A five-cell meter for one track's level.
+fn level_spans(label: &'static str, db: Option<f32>) -> Vec<Span<'static>> {
+    let filled = (meter(db) * 5.0).round() as usize;
+    vec![
+        Span::styled(format!("{label} "), Style::default().fg(Color::DarkGray)),
+        Span::styled("▮".repeat(filled), Style::default().fg(Color::Green)),
+        Span::styled("▯".repeat(5 - filled), Style::default().fg(Color::DarkGray)),
+    ]
+}
+
 /// One transcript line (plus its annotation) as text.
-fn line_text(view: &MeetingView, seg: &TranscriptSegment, selected: bool) -> Text<'static> {
+fn line_text(
+    view: &MeetingView,
+    seg: &TranscriptSegment,
+    selected: bool,
+    playing: bool,
+) -> Text<'static> {
     let color = view
         .speaker_index(seg)
         .map(|i| PALETTE[i % PALETTE.len()])
@@ -807,7 +980,12 @@ fn line_text(view: &MeetingView, seg: &TranscriptSegment, selected: bool) -> Tex
     } else {
         Style::default()
     };
-    let mut lines = vec![Line::from(vec![
+    let marks = LineMarks::of(seg);
+    let mut first = vec![
+        Span::styled(
+            if playing { "▶ " } else { "" },
+            base.fg(Color::Green).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("[{}] ", clock(Duration::from_millis(seg.start_ms))),
             base.fg(Color::DarkGray),
@@ -816,8 +994,26 @@ fn line_text(view: &MeetingView, seg: &TranscriptSegment, selected: bool) -> Tex
             seg.speaker_display(),
             base.fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(": {}", seg.text.trim()), base),
-    ])];
+    ];
+    if let Some(from) = seg.original_speaker.as_deref().filter(|_| marks.moved) {
+        first.push(Span::styled(
+            format!(" (was {from})"),
+            base.fg(Color::DarkGray),
+        ));
+    }
+    let text_style = if marks.highlighted {
+        base.fg(Color::Yellow)
+    } else {
+        base
+    };
+    first.push(Span::styled(format!(": {}", seg.text.trim()), text_style));
+    if marks.edited {
+        first.push(Span::styled(
+            " (edited)",
+            base.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        ));
+    }
+    let mut lines = vec![Line::from(first)];
     if let Some(a) = &seg.annotation {
         lines.push(Line::styled(
             format!("    ✎ {}", crate::meeting::export::annotation_line(a)),
@@ -829,7 +1025,7 @@ fn line_text(view: &MeetingView, seg: &TranscriptSegment, selected: bool) -> Tex
     Text::from(lines)
 }
 
-fn draw_transcript(f: &mut Frame, app: &mut WatchApp, area: Rect) {
+fn draw_transcript(f: &mut Frame, app: &mut WatchApp, area: Rect, now: DateTime<Utc>) {
     let block = Block::default().borders(Borders::RIGHT);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -848,11 +1044,12 @@ fn draw_transcript(f: &mut Frame, app: &mut WatchApp, area: Rect) {
     }
 
     let width = inner.width.max(1);
+    let playing = view.playing_line(now);
     let mut text = Text::default();
     let mut tops = Vec::with_capacity(view.lines().len());
     let mut row = 0usize;
     for (i, seg) in view.lines().iter().enumerate() {
-        let t = line_text(view, seg, Some(i) == app.selected);
+        let t = line_text(view, seg, Some(i) == app.selected, playing == Some(seg.id));
         let height = Paragraph::new(t.clone())
             .wrap(Wrap { trim: false })
             .line_count(width);
@@ -1019,44 +1216,70 @@ fn draw_list(f: &mut Frame, app: &mut WatchApp, area: Rect) {
 // The loop
 // ---------------------------------------------------------------------------
 
-fn run_command(
+/// Run `commands` in order on a thread, stopping at the first failure, and
+/// report the last one run.
+fn run_commands(
     opts: &WatchOptions,
     what: String,
-    args: Vec<String>,
+    commands: Vec<Vec<String>>,
     reload: bool,
+    label: Option<(Vec<String>, String)>,
     tx: Sender<Outcome>,
 ) {
-    let mut cmd = Command::new(&opts.exe);
-    cmd.args(&opts.global_args).args(&args);
+    let exe = opts.exe.clone();
+    let global = opts.global_args.clone();
     std::thread::spawn(move || {
-        let outcome = match cmd.stdin(Stdio::null()).output() {
-            Ok(o) => {
-                let text = if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).into_owned()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).into_owned()
-                };
-                Outcome::Done {
-                    what,
-                    ok: o.status.success(),
-                    message: text
-                        .lines()
-                        .map(|l| l.trim_start_matches("Error: ").trim())
-                        .find(|l| !l.is_empty())
-                        .unwrap_or_default()
-                        .to_string(),
-                    reload,
-                }
+        let mut outcome = None;
+        for args in commands {
+            let mut cmd = Command::new(&exe);
+            cmd.args(&global).args(&args);
+            let result = run_one(cmd, what.clone(), reload, label.clone());
+            let failed = matches!(result, Outcome::Done { ok: false, .. });
+            outcome = Some(result);
+            if failed {
+                break;
             }
-            Err(e) => Outcome::Done {
-                what,
-                ok: false,
-                message: e.to_string(),
-                reload: false,
-            },
-        };
-        let _ = tx.send(outcome);
+        }
+        if let Some(outcome) = outcome {
+            let _ = tx.send(outcome);
+        }
     });
+}
+
+fn run_one(
+    mut cmd: Command,
+    what: String,
+    reload: bool,
+    label: Option<(Vec<String>, String)>,
+) -> Outcome {
+    match cmd.stdin(Stdio::null()).output() {
+        Ok(o) => {
+            let text = if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            } else {
+                String::from_utf8_lossy(&o.stderr).into_owned()
+            };
+            Outcome::Done {
+                what,
+                ok: o.status.success(),
+                message: text
+                    .lines()
+                    .map(|l| l.trim_start_matches("Error: ").trim())
+                    .find(|l| !l.is_empty())
+                    .unwrap_or_default()
+                    .to_string(),
+                reload,
+                label,
+            }
+        }
+        Err(e) => Outcome::Done {
+            what,
+            ok: false,
+            message: e.to_string(),
+            reload: false,
+            label: None,
+        },
+    }
 }
 
 fn run_ask(opts: &WatchOptions, meeting_id: String, question: String, tx: Sender<Outcome>) {
@@ -1138,7 +1361,17 @@ pub fn run(opts: WatchOptions) -> anyhow::Result<()> {
                 Action::None => {}
                 Action::Run { what, args, reload } => {
                     app.message = Some(format!("{what}…"));
-                    run_command(&opts, what, args, reload, out_tx.clone());
+                    run_commands(&opts, what, vec![args], reload, None, out_tx.clone());
+                }
+                Action::Label {
+                    what,
+                    commands,
+                    keys,
+                    name,
+                } => {
+                    app.message = Some(format!("{what}…"));
+                    let label = Some((keys, name));
+                    run_commands(&opts, what, commands, true, label, out_tx.clone());
                 }
                 Action::Ask(question) => {
                     if let Some(id) = app.view().meeting_id.clone() {
@@ -1487,6 +1720,7 @@ mod tests {
                 ok: true,
                 message: String::new(),
                 reload: true,
+                label: None,
             },
             &|id| {
                 assert_eq!(id, "m1");
@@ -1514,5 +1748,112 @@ mod tests {
         assert!(app.on_feed(Feed::Line(
             r#"{"event":"status","status":"recording"}"#.into()
         )));
+    }
+
+    #[test]
+    fn l_names_a_speaker_chip_with_one_label_per_key() {
+        let mut app = WatchApp::new();
+        let mut a = seg(0, 1, "Remote 1", "x");
+        a["speaker_label"] = "Dana".into();
+        let mut b = seg(1, 2, "Remote 2", "y");
+        b["speaker_label"] = "Dana".into();
+        app.on_feed(hello("recording", vec![seg(2, 0, "You", "hi"), a, b]));
+        // The selected (newest) line is Dana's, so the picker starts there.
+        handle_key(&mut app, key(KeyCode::Char('l')));
+        let screen = render(&mut app, 90, 14);
+        assert!(screen.contains("Name a speaker"), "{screen}");
+        assert!(matches!(app.modal, Modal::Label { selected: 1, .. }));
+        handle_key(&mut app, key(KeyCode::Enter));
+        for c in "Dana Lee".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        assert!(render(&mut app, 90, 14).contains("New name for Dana:"));
+        let action = handle_key(&mut app, key(KeyCode::Enter));
+        let Action::Label {
+            commands,
+            keys,
+            name,
+            ..
+        } = action
+        else {
+            panic!("expected a label action, got {action:?}");
+        };
+        assert_eq!(
+            commands,
+            vec![
+                ["meeting", "label", "m1", "Remote 1", "Dana Lee"]
+                    .map(String::from)
+                    .to_vec(),
+                ["meeting", "label", "m1", "Remote 2", "Dana Lee"]
+                    .map(String::from)
+                    .to_vec(),
+            ]
+        );
+        // The daemon does not announce labels; success applies it here.
+        let none = |_: &str| None;
+        on_outcome(
+            &mut app,
+            Outcome::Done {
+                what: "Name Dana".into(),
+                ok: true,
+                message: String::new(),
+                reload: true,
+                label: Some((keys, name)),
+            },
+            &none,
+        );
+        let screen = render(&mut app, 100, 10);
+        assert!(screen.contains("Dana Lee (2)"), "{screen}");
+        assert!(screen.contains("l name speaker"), "{screen}");
+    }
+
+    #[test]
+    fn lines_show_edits_moves_playback_and_levels() {
+        let mut app = WatchApp::new();
+        let mut edited = seg(0, 1, "You", "We ship Friday.");
+        edited["original_text"] = "we ship fry day".into();
+        let mut moved = seg(1, 3, "Remote 2", "moved line");
+        moved["original_speaker"] = "Remote 1".into();
+        app.on_feed(hello("recording", vec![edited, moved]));
+        app.on_feed(Feed::Line(
+            r#"{"event":"levels","meeting_id":"m1","t_ms":1,"mic":-30.0,"loopback":-60.0}"#.into(),
+        ));
+        app.on_feed(Feed::Line(
+            r#"{"event":"playback","meeting_id":"m1","track":"mixed","state":"playing","from_ms":1000}"#
+                .into(),
+        ));
+        // Draw at the moment the events arrived.
+        let now = app.live.levels_at.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(110, 8)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, now)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let screen: String = (0..8)
+            .map(|y| {
+                (0..110)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(screen.contains("We ship Friday. (edited)"), "{screen}");
+        assert!(
+            screen.contains("Remote 2 (was Remote 1): moved line"),
+            "{screen}"
+        );
+        assert!(screen.contains("▶ [00:01] You"), "{screen}");
+        assert!(screen.contains("mic ▮▮▮▯▯ call ▯▯▯▯▯"), "{screen}");
+        assert!(screen.contains("▶ playing"), "{screen}");
+    }
+
+    #[test]
+    fn a_deleted_line_leaves_the_screen() {
+        let mut app = live_app(3);
+        app.on_feed(Feed::Line(
+            r#"{"event":"segment_deleted","meeting_id":"m1","segment_id":1}"#.into(),
+        ));
+        let screen = render(&mut app, 90, 10);
+        assert!(!screen.contains("line number 1"), "{screen}");
+        assert!(screen.contains("line number 2"), "{screen}");
+        assert_eq!(app.selected, Some(1));
     }
 }

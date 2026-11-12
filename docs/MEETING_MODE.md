@@ -398,14 +398,15 @@ Exports and `transcript.md` show the notes at the top, under "Notes".
 voxtype meeting watch
 ```
 
-- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time.
-- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
+- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time. While a meeting records it also shows a level meter for your microphone and the call, if the daemon sends levels; while its audio plays (`voxtype meeting play`) it says "▶ playing" and marks the line being heard; and while `meeting import` or `meeting retranscribe` works on it, how far it has got.
+- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. A corrected line is marked "(edited)", a line moved to another speaker shows who the diarizer gave it to ("(was Remote 1)"), highlighted lines are yellow, and deleted lines disappear (and come back if restored). It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
 - The side panel lists the speakers, merged by the names you gave them, and the summary once it is written.
 
 | Key | Action |
 |-----|--------|
 | `p` | Pause or resume |
 | `s` | Stop (asks first) |
+| `l` | Name a speaker: pick one, type the name (`meeting label`, once for each speaker merged under that name) |
 | `r` | Move the selected line to another speaker: pick one, or "New speaker…" and type a name (`meeting reassign`) |
 | `n` | Add a note to the selected line (`meeting annotate`) |
 | `a` | Ask the assistant about the meeting; the answer streams into a pane at the bottom (`meeting ask`) |
