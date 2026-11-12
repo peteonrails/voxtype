@@ -157,6 +157,11 @@ Item {
           else if (s === "recovery-old") tc.driveRecoveryOld()
           else if (s === "recovery-socket") tc.driveRecoverySocket()
           else if (s === "recovery-real") tc.driveRecoveryReal()
+          else if (s === "share") tc.driveShare()
+          else if (s === "share-unavailable") tc.driveShareUnavailable()
+          else if (s === "share-old") tc.driveShareOld()
+          else if (s === "share-real") tc.driveShareReal()
+          else if (s === "share-real-unavailable") tc.driveShareRealUnavailable()
           else if (s === "search") tc.driveSearch()
           else if (s === "search-old") tc.driveSearchOld()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
@@ -2090,6 +2095,103 @@ Item {
       click(find(card, "recoveryDiscardConfirm"), "Discard for good")
       waitFor(function() { return !shown(find(view(), "recoveryCard_0")) }, "no unfinished recordings left", 6000)
       check(!shown(find(view(), "recoveryError")), "no error")
+    }
+
+    function openShareSheet() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var menu = find(view(), "moreMenu")
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return menu.visible }, "More menu")
+      click(find(menu, "shareOption"), "Share…")
+      waitFor(function() { return shown(find(view(), "shareSheet")) }, "the share sheet")
+    }
+
+    function shareState() { return host.ctrl().share === undefined ? view().share : host.ctrl().share }
+
+    function driveShare() {
+      openShareSheet()
+      waitFor(function() { return txt("sharePreview").indexOf("## Overview") !== -1 }, "the preview: " + txt("sharePreview"))
+      check(txt("shareTitle") === "Share “Standup (Nov 12, 2026)”", "title: " + txt("shareTitle"))
+      check(txt("shareIncludes") === "Includes overview, decisions, action items, your notes.", "includes: " + txt("shareIncludes"))
+      check(!shown(find(view(), "shareCommand")) && !shown(find(view(), "shareUnavailable")), "no command, nothing greyed")
+      check(!shown(find(view(), "shareStatus")), "nothing sent on opening")
+      shot("share")
+      click(find(view(), "shareTranscript"), "Include the transcript")
+      waitFor(function() { return txt("sharePreview").indexOf("## Transcript") !== -1 }, "previewed with the transcript")
+      check(txt("shareIncludes").indexOf("the transcript") !== -1 && txt("shareTranscript").indexOf("(4 lines)") !== -1,
+            "says it: " + txt("shareIncludes") + " / " + txt("shareTranscript"))
+      click(find(view(), "shareCopy"), "Copy")
+      waitFor(function() { return txt("shareStatus") === "Copied to the clipboard." }, "copied: " + txt("shareStatus"))
+      click(find(view(), "shareSave"), "Save…")
+      waitFor(function() { return txt("shareStatus") === "Saved to /home/u/Documents/Voxtype/2026-11-12 Standup.md." }, "saved: " + txt("shareStatus"))
+      click(find(view(), "shareOpenFolder"), "Open folder")
+      click(find(view(), "shareEmail"), "Email…")
+      waitFor(function() { return txt("shareStatus").indexOf("Email draft opened. Attach the transcript: ") === 0 }, "email: " + txt("shareStatus"))
+      shot("share-sent")
+      find(view(), "shareSheet").forceActiveFocus()
+      keyClick(Qt.Key_Escape)
+      waitFor(function() { return !shown(find(view(), "shareSheet")) }, "closed with Escape")
+      check(host.viewOpen(), "the view stays open")
+    }
+
+    function driveShareUnavailable() {
+      openShareSheet()
+      waitFor(function() { return txt("sharePreview").indexOf("## Overview") !== -1 }, "the preview")
+      check(!find(view(), "shareCopy").enabled && !find(view(), "shareEmail").enabled && find(view(), "shareSave").enabled, "greyed where unavailable")
+      var why = txt("shareUnavailable")
+      check(why.indexOf("wl-copy is not installed. Install wl-clipboard.") !== -1 && why.indexOf("Email needs xdg-open") !== -1,
+            "says why: " + why)
+      check(shown(find(view(), "shareCommand")) && txt("shareCommand") === "Send with post-standup", "the command: " + txt("shareCommand"))
+      shot("share-unavailable")
+      click(find(view(), "shareCommand"), "Send with")
+      waitFor(function() { return txt("shareStatus") === "Sent. Posted to #standup" }, "the command's word: " + txt("shareStatus"))
+      click(find(view(), "shareSave"), "Save…")
+      waitFor(function() { return txt("shareStatus") === "Documents/Voxtype is not writable. Check its permissions." }, "refusal: " + txt("shareStatus"))
+      check(find(view(), "shareStatus").color === view().theme.urgent, "in the urgent colour")
+    }
+
+    // Against a real voxtype: its own preview, sections and results.
+    function driveShareReal() {
+      openShareSheet()
+      waitFor(function() { return txt("sharePreview").indexOf("A short standup about the release.") !== -1 }, "the real preview: " + txt("sharePreview"), 8000)
+      check(txt("shareTitle").indexOf("Share “Standup") === 0, "title: " + txt("shareTitle"))
+      check(txt("shareIncludes").indexOf("overview") !== -1 && txt("shareIncludes").indexOf("your notes") !== -1, "includes: " + txt("shareIncludes"))
+      check(find(view(), "shareCopy").enabled && find(view(), "shareEmail").enabled && !shown(find(view(), "shareUnavailable")), "all reachable")
+      shot("share-real")
+      click(find(view(), "shareTranscript"), "Include the transcript")
+      waitFor(function() { return txt("sharePreview").indexOf("Morning. Can everyone hear me?") !== -1 }, "with the transcript", 8000)
+      check(txt("shareIncludes").indexOf("the transcript") !== -1 && /\(4 lines\)/.test(txt("shareTranscript")), "says it: " + txt("shareTranscript"))
+      click(find(view(), "shareCopy"), "Copy")
+      waitFor(function() { return txt("shareStatus") === "Copied to the clipboard." }, "copied: " + txt("shareStatus"), 8000)
+      click(find(view(), "shareSave"), "Save…")
+      waitFor(function() { return txt("shareStatus").indexOf("Saved to " + __DOCUMENTS__ + "/Voxtype/") === 0 }, "saved: " + txt("shareStatus"), 8000)
+      click(find(view(), "shareOpenFolder"), "Open folder")
+      click(find(view(), "shareEmail"), "Email…")
+      waitFor(function() { return txt("shareStatus").indexOf("Email draft opened.") === 0 }, "email: " + txt("shareStatus"), 8000)
+      shot("share-real-sent")
+    }
+
+    function driveShareRealUnavailable() {
+      openShareSheet()
+      waitFor(function() { return txt("sharePreview").indexOf("A short standup about the release.") !== -1 }, "the real preview", 8000)
+      check(!find(view(), "shareCopy").enabled && !find(view(), "shareEmail").enabled, "no wl-copy, no xdg-open: greyed")
+      check(txt("shareUnavailable").indexOf("wl-copy") !== -1 && txt("shareUnavailable").indexOf("xdg-open") !== -1, "says why: " + txt("shareUnavailable"))
+      check(shown(find(view(), "shareCommand")) && txt("shareCommand") === "Send with cat", "the configured command: " + txt("shareCommand"))
+      shot("share-real-unavailable")
+      click(find(view(), "shareCommand"), "Send with cat")
+      waitFor(function() { return txt("shareStatus").indexOf("Sent.") === 0 }, "sent by the command: " + txt("shareStatus"), 8000)
+      click(find(view(), "shareSave"), "Save…")
+      waitFor(function() { return find(view(), "shareStatus").color === view().theme.urgent && txt("shareStatus") !== "" }, "a refused save", 8000)
+      check(txt("shareStatus").indexOf("Could not write ") === 0 && txt("shareStatus").indexOf("Permission denied") !== -1,
+            "the CLI's reason, without its prefix: " + txt("shareStatus"))
+      shot("share-real-refused")
+    }
+
+    function driveShareOld() {
+      openShareSheet()
+      waitFor(function() { return txt("sharePreview").indexOf("This voxtype is too old for sharing meetings") === 0 }, "too old: " + txt("sharePreview"))
+      check(!find(view(), "shareCopy").enabled && !find(view(), "shareSave").enabled, "nothing to send")
     }
 
     // `meeting recover` from a real voxtype over a seeded store.

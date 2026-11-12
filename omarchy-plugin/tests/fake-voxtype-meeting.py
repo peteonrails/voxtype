@@ -829,6 +829,56 @@ def waveform(state, args):
     return 0
 
 
+def share(state, args):
+    """meeting share M --preview --json [--transcript] | --to DEST [--transcript] --json
+
+    The feat/1.3.1-meeting-share contract. The body is a small stand-in;
+    state: share_available (overrides per destination), share_why,
+    share_command, share_fail {dest: stderr line}. Sends nothing anywhere."""
+    # A real voxtype to answer instead (the share-real scenarios), on the
+    # PATH the scenario chose for it (which tools it can find).
+    real = os.environ.get("REAL_VOXTYPE")
+    if real:
+        if os.environ.get("REAL_SHARE_PATH") is not None:
+            os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
+        os.execv(real, [real, "meeting", "share"] + args)
+    meeting = resolve(state, args[0])
+    transcript = "--transcript" in args
+    segs = segments_of(state, meeting) or []
+    sections = ["overview", "decisions", "action_items", "notes"] + (["transcript"] if transcript else [])
+    body = "# Standup\n\n## Overview\nA short standup about the release.\n\n## Decisions\n- Ship today.\n\n" \
+           "## Action items\n- [ ] Cut the tag (Pete)\n\n## Notes\nfollow up with Steve\n"
+    if transcript:
+        body += "\n## Transcript\n" + "".join("%s: %s\n" % (s.get("speaker_id") or s["source"], s["text"]) for s in segs)
+    available = {"clipboard": True, "file": True, "email": True, "command": bool(state.get("share_command"))}
+    available.update(state.get("share_available", {}))
+    folder = "/home/u/Documents/Voxtype"
+    if "--preview" in args:
+        out = {"meeting_id": meeting, "title": "Standup", "subject": "Standup (Nov 12, 2026)", "format": "markdown",
+               "transcript": transcript, "sections": sections, "transcript_lines": len(segs) if transcript else 0,
+               "chars": len(body), "body": body, "available": available,
+               "command": state.get("share_command"), "folder": folder}
+        if state.get("share_why"):
+            out["why"] = state["share_why"]
+        print(json.dumps(out))
+        return 0
+    to = args[args.index("--to") + 1]
+    fail = state.get("share_fail", {}).get(to)
+    if fail:
+        print("Error: " + fail, file=sys.stderr)
+        return 1
+    out = {"meeting_id": meeting, "to": to, "format": "text" if to == "email" else "markdown",
+           "transcript": transcript, "sections": sections, "chars": len(body)}
+    if to == "file":
+        out["path"] = folder + "/2026-11-12 Standup.md"
+    if to == "email" and transcript:
+        out["path"] = folder + "/2026-11-12 Standup transcript.md"
+    if to == "command":
+        out["command_status"] = "Posted to #standup\n"
+    print(json.dumps(out))
+    return 0
+
+
 def soundcheck(state, args):
     """meeting soundcheck [--seconds N] [--json] | --stop
 
@@ -912,7 +962,7 @@ def main():
 
     if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
             "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line",
-            "soundcheck", "search", "waveform", "recover"):
+            "soundcheck", "search", "waveform", "recover", "share"):
         print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
         return 2
 
@@ -966,6 +1016,8 @@ def main():
         return recover(state, args[2:])
     elif action == "delete" and "--force" in args:
         return delete_meeting(state, args[2:])
+    elif action == "share":
+        return share(state, args[2:])
     elif action == "search":
         return search(state, args[2:])
     elif action == "soundcheck":
