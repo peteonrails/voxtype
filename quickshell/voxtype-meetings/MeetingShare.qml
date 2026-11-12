@@ -121,7 +121,10 @@ Item {
       var data = null
       try { data = JSON.parse(sendProc.out) } catch (e) {}
       if (code !== 0 || !data) {
-        root.sendError = MT.cliProblem(sendProc.err, "sharing meetings") || "voxtype meeting share exited " + code
+        // The CLI prefixes its one line with "Error sharing meeting: ";
+        // the sheet already says that much.
+        root.sendError = (MT.cliProblem(sendProc.err, "sharing meetings") || "voxtype meeting share exited " + code)
+          .replace(/^Error sharing meeting:\s*/, "")
         return
       }
       root.result = data

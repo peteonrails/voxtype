@@ -154,6 +154,13 @@ Scenarios:
               they need), the configured command offered and run, a refused
               send shown as the CLI words it
   share-old   a voxtype without `meeting share` is called too old
+  share-real  Share against a real voxtype (REAL_VOXTYPE, run only when set)
+              over a stored copy of the meeting with a summary and notes:
+              the real preview, Copy into the clipboard, Save... writing a
+              real file, Email... opening a mailto: draft
+  share-real-unavailable  the real voxtype with no wl-copy or xdg-open on
+              its PATH and a share command configured: greyed Copy and
+              Email, the command run for real, a refused save shown
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -192,6 +199,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
+             "share-real", "share-real-unavailable",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -305,6 +313,37 @@ def hybrid_meeting():
     return m
 
 
+def seed_shared_meeting(real, data_home, config_home, folder, command=None):
+    """The running meeting (MEETING_ID) stored the way a real voxtype keeps
+    one, with a summary and notes, for `meeting share` to read; and a
+    config naming the share folder (never the real ~/Documents)."""
+    env = dict(os.environ, XDG_DATA_HOME=str(data_home), XDG_CONFIG_HOME=str(config_home))
+    (config_home / "voxtype").mkdir(parents=True)
+    conf = "[meeting.share]\nfolder = %s\n" % json.dumps(str(folder))
+    if command:
+        conf += "command = %s\n" % json.dumps(command)
+    (config_home / "voxtype" / "config.toml").write_text(conf)
+    subprocess.run([real, "meeting", "list", "--json"], env=env, capture_output=True, check=True)
+    store = data_home / "voxtype" / "meetings"
+    meeting_dir = store / MEETING_ID
+    meeting_dir.mkdir(parents=True)
+    segs = running_meeting()["segments"]
+    (meeting_dir / "transcript.json").write_text(json.dumps({"segments": segs, "total_chunks": 2}))
+    (meeting_dir / "notes.md").write_text("follow up with Steve\n")
+    summary = {"summary": "A short standup about the release.", "key_points": [], "decisions": ["Ship today."],
+               "action_items": [{"description": "Cut the tag", "assignee": "Pete", "completed": False}],
+               "generated_at": "2026-11-12T16:00:00Z", "model": "claude"}
+    now = int(time.time())
+    db = sqlite3.connect(store / "index.db")
+    db.execute("INSERT INTO meetings (id, title, started_at, ended_at, duration_secs, status, chunk_count, storage_path, "
+               "audio_retained) VALUES (?, 'Standup', ?, ?, 70, 'completed', 2, ?, 0)",
+               (MEETING_ID, now - 600, now - 530, str(meeting_dir)))
+    db.execute("INSERT INTO meeting_summaries (meeting_id, summary_json, generated_by, generated_at) VALUES (?, ?, ?, ?)",
+               (MEETING_ID, json.dumps(summary), "claude", now - 500))
+    db.commit()
+    db.close()
+
+
 def scroll_meeting():
     m = running_meeting()
     m["segments"] = [seg(i + 1, i * 3, "Line number %d of a long meeting, long enough to wrap onto a second "
@@ -360,6 +399,8 @@ INITIAL = {
     "share": lambda: [running_meeting()],
     "share-unavailable": lambda: [running_meeting()],
     "share-old": lambda: [running_meeting()],
+    "share-real": lambda: [running_meeting()],
+    "share-real-unavailable": lambda: [running_meeting()],
     "undo-edit": lambda: [running_meeting()],
     "undo-reassign": lambda: [running_meeting()],
     "seek": lambda: [running_meeting()],
@@ -558,6 +599,25 @@ def run(scenario, host, shell, evidence):
             Path(shots).mkdir(parents=True, exist_ok=True)
 
         real_env = {}
+        if scenario.startswith("share-real"):
+            real = os.environ["REAL_VOXTYPE"]
+            tools = r.root / "real-tools"
+            tools.mkdir()
+            if scenario == "share-real":
+                # The scenario's own wl-copy and xdg-open, which record.
+                shutil.copy(bindir / "wl-copy", tools / "wl-copy")
+                shutil.copy(bindir / "xdg-open", tools / "xdg-open")
+            for prog in ("sh", "cat"):
+                (tools / prog).symlink_to(shutil.which(prog))
+            share_folder = documents / "Voxtype"
+            command = None
+            if scenario == "share-real-unavailable":
+                command = "cat > " + str(r.root / "shared-by-command.txt")
+                share_folder.mkdir(parents=True)
+                share_folder.chmod(0o500)
+            seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", share_folder, command)
+            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
+                        "XDG_CONFIG_HOME": str(r.root / "xdg-config"), "REAL_SHARE_PATH": str(tools)}
         if scenario == "recovery-real":
             real = os.environ["REAL_VOXTYPE"]
             seed_interrupted(real, r.root / "xdg-data")
@@ -611,6 +671,11 @@ def run(scenario, host, shell, evidence):
         exports = sorted(str(p.relative_to(documents)) for p in documents.rglob("*") if p.is_file()) \
             if documents.exists() else []
         export_head = [(documents / e).read_text().splitlines()[0] for e in exports]
+        export_text = {e: (documents / e).read_text() for e in exports}
+        shared_by_command = r.root / "shared-by-command.txt"
+        shared_by_command = shared_by_command.read_text() if shared_by_command.exists() else ""
+        if (documents / "Voxtype").exists():
+            (documents / "Voxtype").chmod(0o700)
 
     problems = h.driver_problems(output, code, "MEETING_VIEW", scenario)
     problems += check_calls(scenario, calls, runtime_notes=str(runtime / "voxtype"))
@@ -618,6 +683,23 @@ def run(scenario, host, shell, evidence):
         problems.append("notes on disk: %r, expected 'Mine'" % saved_notes)
     if scenario == "share" and opened_paths != ["/home/u/Documents/Voxtype"]:
         problems.append("opened: %s" % opened_paths)
+    if scenario == "share-real":
+        # Save... wrote the share; Email... with the transcript saved the
+        # transcript to attach beside it.
+        saved = [e for e in exports if e.startswith("Voxtype/") and e.endswith(".md")]
+        shares = [e for e in saved if not e.endswith(" transcript.md")]
+        attach = [e for e in saved if e.endswith(" transcript.md")]
+        if len(shares) != 1 or len(attach) != 1 or "A short standup about the release." not in export_text[shares[0]]:
+            problems.append("saved share: %s" % saved)
+        if not copied or "A short standup about the release." not in copied or "Morning. Can everyone hear me?" not in copied:
+            problems.append("clipboard: %r" % copied)
+        drafts = [p for p in opened_paths if p.startswith("mailto:")]
+        if len(drafts) != 1 or str(documents / "Voxtype") not in opened_paths:
+            problems.append("opened: %s" % opened_paths)
+    if scenario == "share-real-unavailable":
+        sent = shared_by_command
+        if "A short standup about the release." not in sent:
+            problems.append("command got: %r" % sent)
     if scenario == "export":
         name = "Voxtype/" + time.strftime("%Y-%m-%d", time.localtime()) + " Standup.md"
         if exports != [name] or export_head != ["FAKE EXPORT %s markdown --timestamps --speakers --metadata" % MEETING_ID]:
@@ -817,6 +899,15 @@ def check_calls(scenario, calls, runtime_notes=""):
         sh = ["meeting", "share", MEETING_ID]
         expect(meeting, [sh + ["--preview", "--json"], sh + ["--to", "command", "--json"], sh + ["--to", "file", "--json"]],
                "meeting commands")
+    elif scenario == "share-real":
+        sh = ["meeting", "share", MEETING_ID]
+        expect(meeting, [sh + ["--preview", "--json"], sh + ["--preview", "--json", "--transcript"],
+                         sh + ["--to", "clipboard", "--transcript", "--json"], sh + ["--to", "file", "--transcript", "--json"],
+                         sh + ["--to", "email", "--transcript", "--json"]], "meeting commands")
+    elif scenario == "share-real-unavailable":
+        sh = ["meeting", "share", MEETING_ID]
+        expect(meeting, [sh + ["--preview", "--json"], sh + ["--to", "command", "--json"], sh + ["--to", "file", "--json"]],
+               "meeting commands")
     elif scenario == "share-old":
         expect(meeting, [["meeting", "share", MEETING_ID, "--preview", "--json"]], "meeting commands")
     elif scenario == "recovery-real":
@@ -883,8 +974,9 @@ def main():
         for scenario in args.scenario or SCENARIOS:
             if host != "omarchy" and scenario in OMARCHY_ONLY:
                 continue
-            # Needs a real voxtype with `meeting recover`.
-            if scenario == "recovery-real" and not os.environ.get("REAL_VOXTYPE"):
+            # Needs a real voxtype with `meeting recover` / `meeting share`.
+            if scenario in ("recovery-real", "share-real", "share-real-unavailable") \
+                    and not os.environ.get("REAL_VOXTYPE"):
                 continue
             output, problems, calls = run(scenario, host, args.shell, args.evidence)
             if problems:

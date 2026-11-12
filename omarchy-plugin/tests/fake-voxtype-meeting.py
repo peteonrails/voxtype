@@ -835,6 +835,13 @@ def share(state, args):
     The feat/1.3.1-meeting-share contract. The body is a small stand-in;
     state: share_available (overrides per destination), share_why,
     share_command, share_fail {dest: stderr line}. Sends nothing anywhere."""
+    # A real voxtype to answer instead (the share-real scenarios), on the
+    # PATH the scenario chose for it (which tools it can find).
+    real = os.environ.get("REAL_VOXTYPE")
+    if real:
+        if os.environ.get("REAL_SHARE_PATH") is not None:
+            os.environ["PATH"] = os.environ["REAL_SHARE_PATH"]
+        os.execv(real, [real, "meeting", "share"] + args)
     meeting = resolve(state, args[0])
     transcript = "--transcript" in args
     segs = segments_of(state, meeting) or []
