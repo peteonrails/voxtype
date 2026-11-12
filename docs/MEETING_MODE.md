@@ -548,6 +548,8 @@ voxtype meeting soundcheck --seconds 60
 
 It opens the meeting's microphone and loopback the way a meeting would (the same devices, and on speakers the same echo canceller), records and transcribes nothing, and shows a meter for each. Speak: the mic meter should move. Play something on the computer: the loopback meter should move, and with speakers the mic meter should stay low, because the echo canceller takes the speakers out of the mic. The first line says which echo handling the next meeting will use.
 
+While the daemon runs the check, the meeting views show its meters too: `voxtype meeting watch` beside **Meetings** ("Sound check  mic ▮▮▮▯▯ call ▮▮▮▮▯") and the GTK4 window in its title bar, under **Sound check**, while no meeting records.
+
 During a meeting the levels are already live in `voxtype meeting watch --levels` and the meeting view, so the sound check refuses to run then. Starting a meeting ends a sound check.
 
 ### Keeping the Audio

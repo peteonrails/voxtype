@@ -441,7 +441,12 @@ fn refresh(ui: &Ui, st: &mut State) {
     let showing_list = ui.stack.visible_child_name().as_deref() == Some("list");
 
     let view = st.view().clone();
-    ui.state_label.set_markup(state_markup(view.state));
+    if showing_list && st.live.soundcheck {
+        ui.state_label
+            .set_markup("<span foreground=\"#1c71d8\"><b>Sound check</b></span>");
+    } else {
+        ui.state_label.set_markup(state_markup(view.state));
+    }
     ui.title_label.set_text(if showing_list {
         "Meetings"
     } else {
@@ -469,7 +474,11 @@ fn refresh(ui: &Ui, st: &mut State) {
     }
     ui.elapsed_label.set_text(&elapsed);
     let now = chrono::Utc::now();
-    match view.current_levels(now).filter(|_| !showing_list) {
+    // The meeting's levels, or a sound check's on the list.
+    match view
+        .current_levels(now)
+        .filter(|l| !showing_list || l.soundcheck)
+    {
         Some(l) => {
             ui.mic_level.set_value(meter(l.mic));
             ui.call_level.set_value(meter(l.loopback));
@@ -1200,6 +1209,8 @@ fn smoke_report(ui: &Ui, st: &State) -> serde_json::Value {
         "notes_editable": ui.notes.is_editable(),
         "chip_buttons": ui.chips.first_child().is_some_and(|c| c.is::<gtk4::Button>()),
         "levels_visible": ui.levels.is_visible(),
+        "mic_level": ui.mic_level.value(),
+        "call_level": ui.call_level.value(),
         "elapsed": ui.elapsed_label.text().to_string(),
     })
 }
