@@ -155,6 +155,10 @@ fn the_preview_shows_exactly_what_would_leave() {
     );
     assert_eq!(preview["available"]["file"], true);
     assert_eq!(preview["available"]["command"], false);
+    assert!(preview["why"]["command"]
+        .as_str()
+        .unwrap()
+        .contains("meeting.share.command"));
     assert_eq!(preview["folder"], s.path("out").display().to_string());
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("**Attendees:** Pete, Dana"), "{body}");

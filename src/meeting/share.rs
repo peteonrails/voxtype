@@ -556,6 +556,35 @@ impl Tools {
             "command": command.is_some_and(|c| !c.trim().is_empty()),
         })
     }
+
+    /// For each destination that cannot work here, one line saying what
+    /// to do about it, so a menu can say why an item is greyed out.
+    pub fn why(&self, command: Option<&str>) -> serde_json::Value {
+        let mut why = serde_json::Map::new();
+        if !on_path(&self.wl_copy) {
+            why.insert(
+                "clipboard".into(),
+                missing(&self.wl_copy, "Install wl-clipboard.")
+                    .to_string()
+                    .into(),
+            );
+        }
+        if !on_path(&self.xdg_open) {
+            why.insert(
+                "email".into(),
+                missing(&self.xdg_open, "Install xdg-utils.")
+                    .to_string()
+                    .into(),
+            );
+        }
+        if !command.is_some_and(|c| !c.trim().is_empty()) {
+            why.insert(
+                "command".into(),
+                "No share command is set. Set one with: voxtype config set meeting.share.command \"<command>\"".into(),
+            );
+        }
+        why.into()
+    }
 }
 
 fn on_path(program: &Path) -> bool {
@@ -1241,5 +1270,17 @@ mod tests {
         assert_eq!(available["file"], true);
         assert_eq!(available["command"], false);
         assert_eq!(tools.available(Some("cat"))["command"], true);
+        let why = tools.why(None);
+        assert_eq!(
+            why["clipboard"],
+            "/nonexistent/wl-copy is not installed. Install wl-clipboard."
+        );
+        assert!(why["email"].as_str().unwrap().contains("xdg-utils"));
+        assert!(why["command"]
+            .as_str()
+            .unwrap()
+            .contains("voxtype config set meeting.share.command"));
+        assert!(why.get("file").is_none(), "only what is unavailable");
+        assert!(tools.why(Some("cat")).get("command").is_none());
     }
 }
