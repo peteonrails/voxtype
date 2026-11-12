@@ -42,6 +42,9 @@ pub(crate) async fn run_meeting_command(
             language,
             url,
             window_title,
+            announce,
+            no_announce,
+            announcement_file,
         } => {
             let title_from_window = title.is_none() && window_title.is_some();
             let title = title.or(window_title);
@@ -63,11 +66,28 @@ pub(crate) async fn run_meeting_command(
                 language,
                 url: url.filter(|u| !u.trim().is_empty()),
                 title_from_window,
+                ..Default::default()
             };
             if let Err(e) = meeting::start::meeting_transcription_config(config, &options) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
+            // Resolved here, from the config this command just read, so a
+            // change in Settings applies to the next meeting without a
+            // daemon restart.
+            let options = match meeting::announce::resolve_start_options(
+                &config.meeting,
+                options,
+                announce,
+                no_announce,
+                announcement_file.as_deref(),
+            ) {
+                Ok(options) => options,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
 
             // Check if daemon is running
             check_daemon_running()?;
@@ -304,12 +324,17 @@ pub(crate) async fn run_meeting_command(
                 let id = meeting::MeetingId::parse(id).ok()?;
                 storage.get_context(&id).ok()?.echo_cancel
             });
+            // The recording announcement, when this meeting has one.
+            let announcement = active
+                .then(|| meeting::announce::read_status(&config::Config::runtime_dir()))
+                .flatten();
             if json {
                 let payload = serde_json::json!({
                     "active": active,
                     "status": phase.as_str(),
                     "meeting_id": meeting_id,
                     "echo_cancel": echo_cancel,
+                    "announcement": announcement.as_ref().map(meeting::announce::Status::to_json),
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if !active {
@@ -323,6 +348,9 @@ pub(crate) async fn run_meeting_command(
                 }
                 if let Some(path) = echo_cancel {
                     println!("Echo handling: {}", path);
+                }
+                if let Some(status) = announcement {
+                    println!("Announcement: {}", status.describe());
                 }
             }
         }

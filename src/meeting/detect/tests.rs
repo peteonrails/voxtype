@@ -468,3 +468,42 @@ fn real_meeting_names_are_kept() {
         assert_eq!(meeting_title(app, title), want, "{app} {title:?}");
     }
 }
+
+/// The announcement's targets: the call app's own capture streams, never
+/// voxtype's, another dictation app's or the camera-effects mic.
+#[test]
+fn call_streams_are_the_call_apps_own_streams() {
+    let s = snap("pw-zoom.json", Some("clients-zoom.json"));
+    let found = call_streams(&s, &config());
+    assert!(!found.is_empty(), "{:?}", s.streams);
+    for (call, stream) in &found {
+        assert_eq!(call.app, "Zoom");
+        assert!(stream.ignore_reason().is_none(), "{stream:?}");
+    }
+    // The always-open streams in the idle graph are in the snapshot but
+    // never targeted.
+    assert!(s.streams.len() > found.len());
+}
+
+#[test]
+fn a_browser_stream_is_a_target_only_with_a_call_window() {
+    let with_call = snap("pw-chromium-mic.json", Some("clients-meet-chromium.json"));
+    let found = call_streams(&with_call, &config());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0.app, "Google Meet");
+
+    // The same mic stream while browsing, or off Hyprland, is no call, so
+    // the announcement plays only locally rather than into a random tab.
+    let browsing = snap("pw-chromium-mic.json", Some("clients-browsing.json"));
+    assert!(call_streams(&browsing, &config()).is_empty());
+    let no_titles = snap("pw-chromium-mic.json", None);
+    assert!(call_streams(&no_titles, &config()).is_empty());
+}
+
+#[test]
+fn no_call_means_no_targets() {
+    for pw in ["pw-idle.json", "pw-voxtype.json", "pw-plain-mic.json"] {
+        let s = snap(pw, Some("clients-browsing.json"));
+        assert!(call_streams(&s, &config()).is_empty(), "{pw}");
+    }
+}

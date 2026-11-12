@@ -23,6 +23,14 @@ pub struct MeetingStartOptions {
     /// The title is the call window's, which the calendar's replaces
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_from_window: bool,
+    /// Play the recording announcement (`--announce`/`--no-announce`);
+    /// unset keeps `[meeting] announce_recording`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announce: Option<bool>,
+    /// The announcement's audio file for this meeting; unset keeps
+    /// `[meeting] announcement_file`, or the built-in clip
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcement_file: Option<String>,
 }
 
 /// Meeting transcription configuration
@@ -87,6 +95,18 @@ pub struct MeetingConfig {
     /// never replaced.
     #[serde(default = "default_true")]
     pub auto_label_from_title: bool,
+
+    /// Announce that the meeting is being recorded, once, when it starts:
+    /// the clip is mixed into the call app's microphone stream so the other
+    /// people on the call hear it, and played locally. Off by default. A
+    /// courtesy, not consent: the laws on recording calls still apply.
+    #[serde(default)]
+    pub announce_recording: bool,
+
+    /// Audio file played instead of the built-in announcement (WAV, FLAC or
+    /// Ogg), for your own wording or language. Unset uses the built-in clip.
+    #[serde(default)]
+    pub announcement_file: Option<String>,
 
     /// Meeting audio configuration
     #[serde(default)]
@@ -480,6 +500,8 @@ impl Default for MeetingConfig {
             show_view_on_start: true,
             view_opacity: default_view_opacity(),
             auto_label_from_title: true,
+            announce_recording: false,
+            announcement_file: None,
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
@@ -518,6 +540,38 @@ mod tests {
         let config: Config =
             toml::from_str("[meeting]\nenabled = true\nshow_view_on_start = false\n").unwrap();
         assert!(!config.meeting.show_view_on_start);
+    }
+
+    #[test]
+    fn test_announce_recording_is_off_for_old_configs_and_can_be_set() {
+        assert!(!MeetingConfig::default().announce_recording);
+        assert!(MeetingConfig::default().announcement_file.is_none());
+
+        // A config written before the keys existed never announces.
+        let config: Config = toml::from_str("[meeting]\nenabled = true\n").unwrap();
+        assert!(!config.meeting.announce_recording);
+        assert!(config.meeting.announcement_file.is_none());
+
+        let config: Config = toml::from_str(
+            "[meeting]\nannounce_recording = true\nannouncement_file = \"~/announce-de.wav\"\n",
+        )
+        .unwrap();
+        assert!(config.meeting.announce_recording);
+        assert_eq!(
+            config.meeting.announcement_file.as_deref(),
+            Some("~/announce-de.wav")
+        );
+    }
+
+    #[test]
+    fn test_start_options_without_announce_fields_still_parse() {
+        // A trigger written by an older CLI has neither field.
+        let options: MeetingStartOptions = serde_json::from_str(r#"{"engine":"whisper"}"#).unwrap();
+        assert_eq!(options.announce, None);
+        assert_eq!(options.announcement_file, None);
+        // Unset fields stay off the wire.
+        let json = serde_json::to_string(&MeetingStartOptions::default()).unwrap();
+        assert_eq!(json, "{}");
     }
 
     #[test]

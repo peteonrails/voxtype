@@ -98,6 +98,8 @@ pub struct MeetingHudState {
     /// The recording-consent notice has not been acknowledged yet
     /// (`voxtype meeting notice --ack`), so views should show it.
     pub recording_notice: bool,
+    /// The recording announcement's outcome, when this meeting announces
+    pub announcement: Option<crate::meeting::announce::Status>,
 }
 
 impl MeetingHudState {
@@ -167,6 +169,19 @@ enum WireEvent {
         echo_cancel: Option<String>,
         segments: Vec<TranscriptSegment>,
         recording_notice: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        announcement: Option<serde_json::Value>,
+    },
+    /// The recording announcement changed: waiting for the call, played
+    /// into it, played locally only, or failed.
+    Announcement {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meeting_id: Option<String>,
+        state: crate::meeting::announce::State,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        detail: String,
+        text: String,
     },
     Segments {
         chunk_id: u32,
@@ -237,6 +252,10 @@ impl WireEvent {
             echo_cancel: state.echo_cancel.clone(),
             segments: state.segments.clone(),
             recording_notice: state.recording_notice,
+            announcement: state
+                .announcement
+                .as_ref()
+                .map(crate::meeting::announce::Status::to_json),
         }
     }
 
@@ -397,6 +416,21 @@ impl MeetingEventHub {
         self.publish(WireEvent::TitleChanged {
             meeting_id: meeting_id.to_string(),
             title: title.to_string(),
+        });
+    }
+
+    /// Broadcast an `announcement` event.
+    pub fn publish_announcement(
+        &self,
+        meeting_id: Option<&str>,
+        status: &crate::meeting::announce::Status,
+    ) {
+        self.publish(WireEvent::Announcement {
+            meeting_id: meeting_id.map(str::to_string),
+            state: status.state,
+            app: status.app.clone(),
+            detail: status.detail.clone(),
+            text: status.describe(),
         });
     }
 

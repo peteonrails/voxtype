@@ -22,6 +22,7 @@
 //! - **Phase 4 (v0.6.0):** Remote server sync for corporate deployments
 //! - **Phase 5 (v0.6.1):** AI summarization with action items
 
+pub mod announce;
 pub mod assistant;
 pub mod calendar;
 pub mod chunk;
@@ -181,6 +182,9 @@ pub struct MeetingDaemon {
     me: Option<title_labels::Me>,
     /// The names the running meeting's title gives its two sides
     title_labels: Option<title_labels::TitleLabels>,
+    /// When the recording announcement played, to keep it out of the
+    /// transcript
+    announcement: Option<announce::Window>,
 }
 
 impl MeetingDaemon {
@@ -266,6 +270,7 @@ impl MeetingDaemon {
             assistant: Some(assistant::AssistantSettings::from_config(app_config)),
             me,
             title_labels: None,
+            announcement: None,
         })
     }
 
@@ -298,6 +303,7 @@ impl MeetingDaemon {
             assistant: None,
             me: None,
             title_labels: None,
+            announcement: None,
         }
     }
 
@@ -514,6 +520,17 @@ impl MeetingDaemon {
         if let Err(e) = result {
             tracing::warn!("Failed to record the meeting's echo handling: {}", e);
         }
+    }
+
+    /// Note when the recording announcement plays, on this meeting's
+    /// timeline, so chunks covering it leave it out of the transcript.
+    pub fn set_announcement(&mut self, window: announce::Window) {
+        self.announcement = Some(window);
+    }
+
+    /// When the recording announcement played, once it has.
+    pub fn announcement(&self) -> Option<&announce::Window> {
+        self.announcement.as_ref()
     }
 
     /// Get current meeting state
@@ -1007,6 +1024,19 @@ impl MeetingDaemon {
                     segment.text.split_whitespace().count()
                 );
                 segment.text = collapsed;
+            }
+        }
+
+        // The recording announcement comes back on the loopback and maybe
+        // the mic; it is not something anyone on the call said.
+        if let Some(ref window) = self.announcement {
+            let changed = window.scrub(&mut result.segments);
+            if changed > 0 {
+                tracing::info!(
+                    "Kept the recording announcement out of {} {} line(s)",
+                    changed,
+                    source
+                );
             }
         }
 
@@ -1715,6 +1745,63 @@ mod tests {
         let mut live_said = said(&live);
         live_said.sort();
         assert_eq!(live_said, expected);
+        assert_eq!(said(&h.saved().transcript.segments), expected);
+    }
+
+    /// Hears the announcement at full level (the clip on the loopback and,
+    /// through the speakers, the mic) and the user's reply at 0.3.
+    struct AnnouncementHeard;
+
+    impl Transcriber for AnnouncementHeard {
+        fn short_clips_are_cheap(&self) -> bool {
+            true
+        }
+
+        fn transcribe(&self, samples: &[f32]) -> std::result::Result<String, TranscribeError> {
+            let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            Ok(if peak > 0.4 {
+                "This meeting is being recorded and transcribed with Vox type.".to_string()
+            } else if peak > 0.2 {
+                "Sounds good, let's get started.".to_string()
+            } else {
+                String::new()
+            })
+        }
+    }
+
+    /// The recording announcement comes back on both tracks; neither the
+    /// live feed nor the saved transcript may hold it, and what was said
+    /// after it stays.
+    #[tokio::test]
+    async fn the_recording_announcement_stays_out_of_the_transcript() {
+        let mut h = harness().await;
+        h.daemon.transcriber = Some(Arc::new(AnnouncementHeard));
+        h.daemon.set_announcement(announce::Window {
+            start_ms: 2_000,
+            end_ms: 5_200,
+            phrase: Some(announce::ANNOUNCEMENT_TEXT.to_string()),
+        });
+
+        let mut mic = track(30.0, &[(2.1, 5.3)]);
+        for (m, ours) in mic.iter_mut().zip(track(30.0, &[(9.0, 11.0)])) {
+            *m += ours * 0.6;
+        }
+        let loopback = track(30.0, &[(2.0, 5.2)]);
+        h.daemon.process_pair(mic, loopback).await;
+
+        let mut live = Vec::new();
+        while let Ok(event) = h.events.try_recv() {
+            if let MeetingEvent::ChunkProcessed { segments, .. } = event {
+                live.extend(segments);
+            }
+        }
+        let said = |segs: &[TranscriptSegment]| {
+            segs.iter()
+                .map(|s| format!("{}: {}", s.speaker_display(), s.text))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec!["You: Sounds good, let's get started.".to_string()];
+        assert_eq!(said(&live), expected);
         assert_eq!(said(&h.saved().transcript.segments), expected);
     }
 

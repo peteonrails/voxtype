@@ -19,7 +19,9 @@ pub enum MeetingAction {
         voxtype meeting start --title Standup\n  \
         voxtype meeting start --title 'Planning' --url https://meet.example.com/abc-defg-hij\n  \
         voxtype meeting start --model large-v3-turbo --language de\n  \
-        voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf")]
+        voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf\n  \
+        voxtype meeting start --announce\n  \
+        voxtype meeting start --announce --announcement-file ~/announce-de.wav")]
     Start {
         /// Meeting title (optional)
         #[arg(long, short)]
@@ -66,6 +68,29 @@ pub enum MeetingAction {
             env = "VOXTYPE_MEETING_DIARIZATION",
         )]
         diarization: Option<String>,
+
+        /// Announce the recording when the meeting starts: "This meeting is
+        /// being recorded and transcribed with Voxtype", mixed into the call
+        /// app's microphone so the others on the call hear it, and played on
+        /// your speakers. Waits up to two minutes for a call app to open the
+        /// mic; without one it plays only on your speakers, and `meeting
+        /// status` says so. A courtesy, not consent: you remain responsible
+        /// for the laws on recording calls.
+        ///
+        /// When omitted, falls back to `[meeting] announce_recording`
+        /// (VOXTYPE_MEETING_ANNOUNCE_RECORDING), off by default.
+        #[arg(long, overrides_with = "no_announce")]
+        announce: bool,
+
+        /// Do not announce this meeting, whatever the config says
+        #[arg(long, overrides_with = "announce")]
+        no_announce: bool,
+
+        /// Audio file (WAV, FLAC or Ogg) to announce with instead of the
+        /// built-in clip, for your own wording or language. Falls back to
+        /// `[meeting] announcement_file` (VOXTYPE_MEETING_ANNOUNCEMENT_FILE).
+        #[arg(long, value_name = "FILE")]
+        announcement_file: Option<std::path::PathBuf>,
     },
     /// Stop the current meeting
     Stop,
@@ -824,6 +849,36 @@ mod tests {
             }
             _ => panic!("Expected Meeting Start command"),
         }
+    }
+
+    #[test]
+    fn meeting_start_announce_flags() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["voxtype", "meeting", "start"];
+            argv.extend_from_slice(args);
+            match Cli::parse_from(argv).command {
+                Some(Commands::Meeting {
+                    action:
+                        MeetingAction::Start {
+                            announce,
+                            no_announce,
+                            announcement_file,
+                            ..
+                        },
+                }) => (announce, no_announce, announcement_file),
+                _ => panic!("Expected Meeting Start command"),
+            }
+        };
+        assert_eq!(parse(&[]), (false, false, None));
+        assert_eq!(parse(&["--announce"]), (true, false, None));
+        assert_eq!(parse(&["--no-announce"]), (false, true, None));
+        // The last of the pair wins, so a wrapper's default can be overridden.
+        assert_eq!(parse(&["--announce", "--no-announce"]), (false, true, None));
+        assert_eq!(parse(&["--no-announce", "--announce"]), (true, false, None));
+        assert_eq!(
+            parse(&["--announce", "--announcement-file", "/tmp/de.wav"]),
+            (true, false, Some("/tmp/de.wav".into()))
+        );
     }
 
     #[test]
