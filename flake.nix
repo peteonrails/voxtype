@@ -147,7 +147,15 @@
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
-            nativeCheckInputs = with pkgs; [ dbus python3 ];
+            # The meeting assistant tests resolve codex only when bwrap is on
+            # PATH.
+            nativeCheckInputs = with pkgs; [ dbus python3 bubblewrap ];
+
+            # This test runs codex inside the real bwrap jail, which bind-mounts
+            # the host's /usr. The Nix build sandbox has no /usr.
+            checkFlags = [
+              "--skip=meeting::assistant::tests::codex_runs_in_a_jail_that_hides_home"
+            ];
 
             # Required for whisper-rs bindgen
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
