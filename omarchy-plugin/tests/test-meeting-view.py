@@ -170,6 +170,11 @@ Scenarios:
               then Send appears; no reminder app, no Remind me; a refused
               send shown in the urgent colour
   actions-old a voxtype without `meeting actions` keeps the summary as it was
+  waveform-real  the waveform from a real voxtype (REAL_VOXTYPE) over kept
+              mic and loopback WAVs: loud where each side spoke, silent
+              between, a click playing from there
+  waveform-real-mixed  only mixed.wav kept (an import): one centred track,
+              no call track
   actions-real  against a real voxtype (REAL_VOXTYPE) and a fake Todoist API:
               Connect Todoist... through a stand-in browser that clicks
               Allow, Send to Todoist for one ticked item, Remind me... in 15
@@ -219,7 +224,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
-             "actions", "actions-connect", "actions-old", "actions-real",
+             "actions", "actions-connect", "actions-old", "actions-real", "waveform-real", "waveform-real-mixed",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -371,6 +376,24 @@ class FakeTodoist:
         self.server.shutdown()
 
 
+def write_tone_wav(path, seconds, bursts, rate=16000):
+    """A mono 16-bit WAV: silence with a 440 Hz tone (about -6 dBFS) over
+    each (start_s, end_s) burst, standing in for a kept track."""
+    import math
+    import struct
+    import wave
+    frames = bytearray()
+    for i in range(int(seconds * rate)):
+        t = i / rate
+        on = any(a <= t < b for a, b in bursts)
+        frames += struct.pack("<h", int(16000 * math.sin(2 * math.pi * 440 * t)) if on else 0)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+
+
 def seed_shared_meeting(real, data_home, config_home, folder, command=None):
     """The running meeting (MEETING_ID) stored the way a real voxtype keeps
     one, with a summary and notes, for `meeting share` to read; and a
@@ -462,6 +485,8 @@ INITIAL = {
     "actions-connect": lambda: [running_meeting()],
     "actions-old": lambda: [running_meeting()],
     "actions-real": lambda: [running_meeting()],
+    "waveform-real": lambda: [running_meeting()],
+    "waveform-real-mixed": lambda: [running_meeting()],
     "share-real": lambda: [running_meeting()],
     "share-real-unavailable": lambda: [running_meeting()],
     "undo-edit": lambda: [running_meeting()],
@@ -527,6 +552,8 @@ STATE = {
          "has_audio": False, "untranscribed_chunks": 1}]},
     "seek": {"play_speed": 10},
     "waveform": {"play_speed": 10},
+    "waveform-real": {"play_speed": 10},
+    "waveform-real-mixed": {"play_speed": 10},
     "waveform-missing": {"waveform_missing": True},
     "search-old": {"old": True},
     "soundcheck-error": {"sc_error": "Audio connection failed: no such device 'usb-mic'"},
@@ -686,6 +713,18 @@ def run(scenario, host, shell, evidence):
             seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", share_folder, command)
             real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
                         "XDG_CONFIG_HOME": str(r.root / "xdg-config"), "REAL_SHARE_PATH": str(tools)}
+        if scenario in ("waveform-real", "waveform-real-mixed"):
+            real = os.environ["REAL_VOXTYPE"]
+            seed_shared_meeting(real, r.root / "xdg-data", r.root / "xdg-config", documents / "Voxtype")
+            folder = r.root / "xdg-data" / "voxtype" / "meetings" / MEETING_ID
+            if scenario == "waveform-real":
+                # You at 4 s and 21 s, the call at 9 s and 35 s, a minute long.
+                write_tone_wav(folder / "mic.wav", 60, [(4, 6), (21, 23)])
+                write_tone_wav(folder / "loopback.wav", 60, [(9, 11), (35, 37)])
+            else:
+                write_tone_wav(folder / "mixed.wav", 60, [(4, 6), (9, 11)])
+            real_env = {"REAL_VOXTYPE": real, "XDG_DATA_HOME": str(r.root / "xdg-data"),
+                        "XDG_CONFIG_HOME": str(r.root / "xdg-config")}
         todoist = None
         if scenario == "actions-real":
             real = os.environ["REAL_VOXTYPE"]
@@ -1014,6 +1053,12 @@ def check_calls(scenario, calls, runtime_notes=""):
                          ac + ["--send", "todoist", "--all", "--json"]], "meeting commands")
     elif scenario == "actions-old":
         expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "waveform-real":
+        expect(meeting, [["meeting", "stop"],
+                         ["meeting", "play", MEETING_ID, "--at", "20", "--track", "mixed", "--json"],
+                         ["meeting", "play", "--stop", "--json"]], "meeting commands")
+    elif scenario == "waveform-real-mixed":
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
     elif scenario == "actions-real":
         ac = ["meeting", "actions", MEETING_ID]
         expect(meeting, [["meeting", "stop"], ["meeting", "todoist", "connect", "--json"],
@@ -1096,7 +1141,8 @@ def main():
             if host != "omarchy" and scenario in OMARCHY_ONLY:
                 continue
             # Needs a real voxtype with `meeting recover` / `meeting share`.
-            if scenario in ("recovery-real", "share-real", "share-real-unavailable", "actions-real") \
+            if scenario in ("recovery-real", "share-real", "share-real-unavailable", "actions-real", "waveform-real",
+                            "waveform-real-mixed") \
                     and not os.environ.get("REAL_VOXTYPE"):
                 continue
             output, problems, calls = run(scenario, host, args.shell, args.evidence)

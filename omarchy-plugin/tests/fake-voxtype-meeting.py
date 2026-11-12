@@ -812,6 +812,9 @@ def waveform(state, args):
     if state.get("waveform_missing"):
         print("error: unrecognized subcommand 'waveform'", file=sys.stderr)
         return 2
+    real = os.environ.get("REAL_VOXTYPE")
+    if real:
+        os.execv(real, [real, "meeting", "waveform"] + args)
     if state.get("audio_retained") is False:
         print("Error: This meeting was recorded without keeping audio.", file=sys.stderr)
         return 1

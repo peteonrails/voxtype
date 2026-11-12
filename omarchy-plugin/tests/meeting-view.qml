@@ -154,6 +154,8 @@ Item {
           else if (s === "seek") tc.driveSeek()
           else if (s === "waveform") tc.driveWaveform()
           else if (s === "waveform-missing") tc.driveWaveformMissing()
+          else if (s === "waveform-real") tc.driveWaveformReal()
+          else if (s === "waveform-real-mixed") tc.driveWaveformRealMixed()
           else if (s === "recovery-old") tc.driveRecoveryOld()
           else if (s === "recovery-socket") tc.driveRecoverySocket()
           else if (s === "recovery-real") tc.driveRecoveryReal()
@@ -2114,6 +2116,48 @@ Item {
       shot("waveform")
       click(find(view(), "transportStop"), "Stop audio")
       waitFor(function() { return !shown(find(view(), "waveformPlayhead")) }, "playhead gone")
+    }
+
+    // The bucket holding a time, from the real duration.
+    function bucketAt(ms) { var w = view().waveform; return Math.floor(ms / w.durationMs * w.mic.length) }
+
+    function driveWaveformReal() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      waitFor(function() { return shown(find(view(), "waveform")) }, "the real waveform", 15000)
+      var w = view().waveform
+      check(w.durationMs === 60000 && w.mic.length === 160 && w.loopback !== null && w.micTrack === "mic",
+            "shape: " + w.durationMs + " " + w.mic.length + " " + w.micTrack)
+      check(w.mic[bucketAt(5000)] > -10 && w.mic[bucketAt(15000)] === -100, "you at 0:05, silence at 0:15: " + w.mic[bucketAt(5000)] + " " + w.mic[bucketAt(15000)])
+      check(w.loopback[bucketAt(10000)] > -10 && w.loopback[bucketAt(5000)] === -100, "the call at 0:10 only: " + w.loopback[bucketAt(10000)] + " " + w.loopback[bucketAt(5000)])
+      var strip = find(view(), "waveformArea")
+      waitFor(function() { return strip.width > 100 }, "laid out")
+      wait(100)
+      var x = (20.4 * 1000) / w.durationMs * strip.width
+      mouseMove(strip, Math.max(1, x - 6), strip.height / 2)
+      wait(80)
+      mouseMove(strip, x, strip.height / 2)
+      waitFor(function() { return txt("waveformHoverTime") === "0:20" }, "hover time")
+      mouseClick(strip, x, strip.height / 2)
+      waitFor(function() { return shown(find(view(), "transportStop")) }, "playing from there")
+      mouseMove(view(), -40, -40)
+      shot("waveform-real", true)
+      click(find(view(), "transportStop"), "Stop audio")
+      waitFor(function() { return !shown(find(view(), "waveformPlayhead")) }, "stopped")
+    }
+
+    function driveWaveformRealMixed() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return shown(find(view(), "waveform")) }, "the mixed waveform", 15000)
+      var w = view().waveform
+      check(w.micTrack === "mixed" && w.loopback === null, "one mixed track: " + w.micTrack)
+      check(w.mic[bucketAt(5000)] > -10 && w.mic[bucketAt(10000)] > -10 && w.mic[bucketAt(30000)] === -100, "both sides in it")
+      mouseMove(view(), -40, -40)
+      shot("waveform-real-mixed", true)
     }
 
     function driveWaveformMissing() {
