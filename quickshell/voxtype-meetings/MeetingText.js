@@ -35,6 +35,10 @@ function cliProblem(stderr, what) {
   var err = String(stderr || "").trim()
   if (/unrecognized subcommand|unexpected argument|unknown config key/i.test(err))
     return "This voxtype is too old for " + what + ". Update voxtype (1.3.0 or newer), then reopen this view."
+  // Progress lines ("Summarizing...") come before the error on stderr:
+  // the error starts at its "Error:" line when there is one.
+  var at = err.search(/^Error:/m)
+  if (at > 0) err = err.slice(at)
   return err.replace(/^Error:\s*/, "")
 }
 

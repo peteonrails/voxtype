@@ -143,6 +143,9 @@ Item {
           else if (s === "export") tc.driveExport()
           else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
+          else if (s === "summary-local-error") tc.driveSummaryLocalError()
+          else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
+          else if (s === "summary-stale") tc.driveSummaryStale()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -1692,16 +1695,112 @@ Item {
       shot("ask-error")
     }
 
+    // The error card, alone at the top of the Summary pane: above any
+    // summary text, Summarizing gone, the actions as wanted.
+    function checkErrorCard(message, useAgent) {
+      // Let the layout place the card it has just shown.
+      wait(150)
+      var card = find(view(), "summaryErrorCard")
+      check(shown(card), "error card shown")
+      check(!shown(find(view(), "summarizingRow")), "Summarizing cleared")
+      check(txt("summaryErrorTitle") === "Couldn't write the summary", "title: " + txt("summaryErrorTitle"))
+      check(txt("summaryError") === message, "message: " + txt("summaryError"))
+      var pane = find(view(), "summaryPane")
+      var flick = find(pane, "summaryFlick")
+      var head = find(pane, "regenerateButton").mapToItem(pane, 0, 0).y + find(pane, "regenerateButton").height
+      var cardY = card.mapToItem(pane, 0, 0).y
+      check(cardY >= head && cardY < head + 40, "card right under the header: " + cardY + " (header ends " + head + ")")
+      if (shown(flick)) check(cardY < flick.mapToItem(pane, 0, 0).y, "card above the summary text")
+      check(shown(find(view(), "summaryRetry")), "Retry offered")
+      check(shown(find(view(), "summaryUseAgent")) === (useAgent !== ""), "Use agent offered: " + shown(find(view(), "summaryUseAgent")))
+      if (useAgent !== "") check(txt("summaryUseAgent") === "Use " + useAgent + " instead", "use: " + txt("summaryUseAgent"))
+      check(shown(find(view(), "summarySettings")) === view().canOpenSettings, "Settings offered where the host has it")
+      check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+    }
+
     function driveSummaryError() {
       ctl({ cmd: "autosummary", error: { code: "agent_failed", message: "Summary failed: Claude exited with status 1." } })
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
       click(find(view(), "stopButton"), "Stop")
       waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing", 6000)
-      waitFor(function() { return shown(find(view(), "summaryError")) }, "the failure", 6000)
-      check(txt("summaryError") === "Summary failed: Claude exited with status 1.", "message: " + txt("summaryError"))
-      check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+      check(txt("summarizing") === "Summarizing with Claude…", "summarizing: " + txt("summarizing"))
+      wait(100)
+      var spane = find(view(), "summaryPane")
+      var shead = find(spane, "regenerateButton").mapToItem(spane, 0, 0).y + find(spane, "regenerateButton").height
+      var rowY = find(view(), "summarizingRow").mapToItem(spane, 0, 0).y
+      check(rowY >= shead && rowY < shead + 40, "summarizing right under the header: " + rowY + " (header ends " + shead + ")")
+      shot("summarizing-with")
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the failure", 6000)
+      // An agent failed: nothing to offer instead of it.
+      checkErrorCard("Summary failed: Claude exited with status 1.", "")
       shot("summary-error")
+      click(find(view(), "summaryRetry"), "Retry")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "retried summary", 8000)
+      check(!shown(find(view(), "summaryErrorCard")) && !shown(find(view(), "summarizingRow")), "card and spinner gone")
+    }
+
+    function driveSummaryLocalError() {
+      ctl({ cmd: "autosummary", error: { code: "local_failed",
+        message: "Local model (llama3.2 at http://localhost:11434) failed: LLM request failed: http://localhost:11434/api/generate: status code 500" } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      waitFor(function() { return assistant().status !== null }, "status read")
+      tab("ask")
+      check(chipLabel() === "Claude  ▾", "Ask chip names what answers: " + chipLabel())
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return view().currentTab === "summary" && shown(find(view(), "summarizing")) }, "summarizing", 6000)
+      check(chipLabel() === "Local (llama3.2)  ▾", "Summary chip names what summarizes: " + chipLabel())
+      check(txt("summarizing") === "Summarizing with Local (llama3.2)…", "summarizing: " + txt("summarizing"))
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the failure", 6000)
+      checkErrorCard("Local model (llama3.2 at http://localhost:11434) failed: LLM request failed: http://localhost:11434/api/generate: status code 500", "Claude")
+      shot("summary-local-error")
+      click(find(view(), "summaryUseAgent"), "Use Claude instead")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing again")
+      check(txt("summarizing") === "Summarizing with Claude…", "summarizing with: " + txt("summarizing"))
+      check(!shown(find(view(), "summaryErrorCard")), "card gone while it runs")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary by Claude", 8000)
+      check(!shown(find(view(), "summaryErrorCard")) && !shown(find(view(), "summarizingRow")), "card and spinner gone")
+      tab("ask")
+      check(chipLabel() === "Claude  ▾", "Ask chip unchanged: " + chipLabel())
+    }
+
+    function driveSummaryErrorCli() {
+      var message = "Local model (llama3.2 at http://localhost:11434) failed: LLM request failed: http://localhost:11434/api/generate: status code 500"
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      tab("summary")
+      waitFor(function() { return assistant().status !== null }, "status read")
+      check(chipLabel() === "Local (llama3.2)  ▾", "local_only chip: " + chipLabel())
+      click(find(view(), "regenerateButton"), "Summarize")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing")
+      check(txt("summarizing") === "Summarizing with Local (llama3.2)…", "summarizing: " + txt("summarizing"))
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the CLI failure", 6000)
+      // local_only: the user said nothing goes to an agent.
+      checkErrorCard(message, "")
+      shot("summary-error-cli")
+      click(find(view(), "summaryRetry"), "Retry")
+      waitFor(function() { return shown(find(view(), "summarizingRow")) }, "retrying")
+      check(!shown(find(view(), "summaryErrorCard")), "card gone while retrying")
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "failed again", 6000)
+      checkErrorCard(message, "")
+    }
+
+    function driveSummaryStale() {
+      ctl({ cmd: "autosummary", anonymous: true, error: { code: "summary_failed", message: "Summary failed: no backend answered." } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing", 6000)
+      // No summary_backend in this status: the chip falls back to backend_name.
+      check(chipLabel() === "Claude  ▾", "fallback chip: " + chipLabel())
+      check(txt("summarizing") === "Summarizing with Claude…", "summarizing: " + txt("summarizing"))
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the unnamed error ends it", 6000)
+      checkErrorCard("Summary failed: no backend answered.", "")
+      check(feed().lastError === "", "not repeated in the banner: " + feed().lastError)
+      shot("summary-stale")
     }
 
     function driveScroll() {

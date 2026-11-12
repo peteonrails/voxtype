@@ -58,6 +58,31 @@ Item {
   }
   readonly property var candidates: status && status.candidates && status.candidates.length !== undefined
     ? status.candidates : []
+
+  // Summaries can go elsewhere than questions (a legacy [meeting.summary]
+  // backend such as Ollama): `summary_backend`/`summary_backend_name`, and the
+  // Ask chip's backend where a status predates them.
+  readonly property string summaryLabel: {
+    if (status !== null && status.summary_backend_name) return String(status.summary_backend_name)
+    return root.agentLabel
+  }
+  readonly property bool summaryIsLocal: {
+    if (status === null) return false
+    var b = status.summary_backend !== undefined && status.summary_backend !== null ? String(status.summary_backend)
+      : String(status.backend || "")
+    return b === "local" || b === "ollama" || b === "remote" || b.indexOf("local") === 0
+  }
+  // An agent the user has allowed, found and usable: what "Use … instead"
+  // runs a failed local summary with. null when there is none, and when
+  // local_only says nothing goes to an agent.
+  readonly property var allowedAgent: {
+    if (status !== null && status.local_only === true) return null
+    for (var i = 0; i < root.candidates.length; i++) {
+      var c = root.candidates[i]
+      if (c.found === true && c.supported === true && c.consent === true) return c
+    }
+    return null
+  }
   // The agents worth offering: found and supported.
   readonly property var usableCandidates: {
     var out = []
@@ -261,6 +286,12 @@ Item {
   property string summaryMarkdown: ""
   property string summaryError: ""
   property string summaryMeeting: ""
+  // The backend a summary in progress (or the failed one) went to, and the
+  // failure's code ("local_failed", …) when there is one.
+  property string summaryWith: ""
+  property string summaryErrorCode: ""
+  // A failure came from a local backend: offering an allowed agent instead.
+  property bool summaryFailedLocal: false
 
   function regenerate() {
     if (!root.feed || root.feed.meetingId === "") return
@@ -274,17 +305,47 @@ Item {
 
   // `meeting summarize` prints a saved summary as it is; --regenerate writes
   // a new one, which is what the button means once one exists.
-  function runSummary() {
+  // `agent`: run with that agent for this summary only (`--agent`), the
+  // way out of a local model that failed.
+  function runSummary(agent) {
     if (summaryProc.running) return
     var regenerate = root.summaryMarkdown !== "" && root.summaryMeeting === root.feed.meetingId
     root.summaryMeeting = root.feed.meetingId
-    root.summaryState = "summarizing"
-    root.summaryError = ""
+    root.beginSummarizing(agent ? root.nameOf(agent) : root.summaryLabel)
+    summaryProc.local = !agent && root.summaryIsLocal
     summaryProc.out = ""
     summaryProc.err = ""
     var args = [root.bin, "meeting", "summarize", root.feed.meetingId, "--format", "json"]
     if (regenerate) args.push("--regenerate")
+    if (agent) args.push("--agent", String(agent))
     summaryProc.launch(args)
+  }
+
+  function nameOf(agentId) {
+    for (var i = 0; i < root.candidates.length; i++)
+      if (root.candidates[i].id === agentId) return String(root.candidates[i].name || agentId)
+    return String(agentId)
+  }
+
+  function beginSummarizing(withName) {
+    root.summaryState = "summarizing"
+    root.summaryWith = withName
+    root.summaryError = ""
+    root.summaryErrorCode = ""
+    root.summaryFailedLocal = false
+  }
+
+  // Every way a summary can fail ends here, so "Summarizing…" never outlives
+  // the attempt.
+  function failSummary(message, code, local) {
+    root.summaryState = "error"
+    root.summaryError = message !== "" ? message : "The summary failed" + (code ? " (" + code + ")" : "") + "."
+    root.summaryErrorCode = code || ""
+    root.summaryFailedLocal = local === true || code === "local_failed"
+  }
+
+  function useAgentInstead() {
+    if (root.allowedAgent) root.runSummary(String(root.allowedAgent.id))
   }
 
   // A summary that came with the meeting (`meeting show --json`).
@@ -408,6 +469,9 @@ Item {
     function onSummaryReady(meetingId, markdown, summary) {
       if (meetingId !== root.feed.meetingId) return
       root.summaryMeeting = meetingId
+      root.summaryError = ""
+      root.summaryErrorCode = ""
+      root.summaryFailedLocal = false
       var md = markdown !== "" ? markdown : root.summaryToMarkdown(summary)
       if (md !== "") {
         root.summaryMarkdown = md
@@ -420,13 +484,17 @@ Item {
     function onSummarizing(meetingId) {
       if (meetingId !== root.feed.meetingId) return
       root.summaryMeeting = meetingId
-      root.summaryState = "summarizing"
-      root.summaryError = ""
+      root.beginSummarizing(root.summaryLabel)
+      summaryProc.local = root.summaryIsLocal
     }
+    // An error naming this meeting, or one naming none (an older daemon)
+    // while a summary is being written, is the summary's failure: it goes on
+    // the Summary tab, not in the banner.
     function onMeetingError(meetingId, code, message) {
-      if (meetingId !== root.feed.meetingId || root.summaryState !== "summarizing") return
-      root.summaryState = "error"
-      root.summaryError = message !== "" ? message : "The summary failed (" + code + ")."
+      if (root.summaryState !== "summarizing") return
+      if (meetingId !== "" && meetingId !== root.feed.meetingId) return
+      root.failSummary(message, code, root.summaryIsLocal)
+      if (meetingId === "") root.feed.lastError = ""
     }
   }
 
@@ -582,6 +650,10 @@ Item {
         threadModel.setProperty(r, "pending", false)
         if (code !== 0 && threadModel.get(r).error === "")
           threadModel.setProperty(r, "error", MT.cliProblem(askProc.err, "the meeting assistant (Ask)") || "voxtype meeting ask exited " + code)
+        // Finished without an answer or an error: say so rather than leave a
+        // blank reply under the question.
+        else if (code === 0 && !consent && threadModel.get(r).text === "" && threadModel.get(r).error === "")
+          threadModel.setProperty(r, "error", "The assistant finished without an answer.")
       }
       askProc.answerRow = -1
       askProc.errorCode = ""
@@ -642,6 +714,8 @@ Item {
     id: summaryProc
     property string out: ""
     property string err: ""
+    // This run went to a local backend.
+    property bool local: false
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: summaryProc.out = String(text || "") }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: summaryProc.err = String(text || "").trim() }
     onExited: function(code) {
@@ -654,25 +728,22 @@ Item {
           root.consentNeeded()
           return
         }
-        root.summaryState = "error"
-        root.summaryError = MT.cliProblem(summaryProc.err, "summaries") || "voxtype meeting summarize exited " + code
+        var code2 = /local_failed|local model|ollama|11434/i.test(summaryProc.err) ? "local_failed" : ""
+        root.failSummary(MT.cliProblem(summaryProc.err, "summaries") || "voxtype meeting summarize exited " + code, code2,
+                         summaryProc.local)
         return
       }
       var parsed = null
       try { parsed = JSON.parse(summaryProc.out) } catch (e) {}
       var md = root.summaryToMarkdown(parsed)
       if (md === "") {
-        root.summaryState = "error"
-        root.summaryError = "voxtype meeting summarize printed no summary."
+        root.failSummary("voxtype meeting summarize printed no summary.", "", false)
         return
       }
       root.summaryMarkdown = md
       root.summaryState = "ready"
     }
-    onFailedToStart: {
-      root.summaryState = "error"
-      root.summaryError = MT.missingCli(root.bin)
-    }
+    onFailedToStart: root.failSummary(MT.missingCli(root.bin), "", false)
   }
 
   MeetingProcess {
@@ -684,8 +755,7 @@ Item {
       try { data = JSON.parse(showProc.out) } catch (e) {}
       var md = data && data.metadata ? root.summaryToMarkdown(data.metadata.summary) : ""
       if (code !== 0 || md === "") {
-        root.summaryState = "error"
-        root.summaryError = "The summary is ready but could not be read."
+        root.failSummary("The summary is ready but could not be read.", "", false)
         return
       }
       root.summaryMarkdown = md

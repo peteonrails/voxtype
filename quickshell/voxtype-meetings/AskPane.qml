@@ -77,7 +77,12 @@ Item {
       spacing: root.theme.lg
       model: root.assistant ? root.assistant.thread : null
       boundsBehavior: Flickable.StopAtBounds
-      onCountChanged: Qt.callLater(thread.positionViewAtEnd)
+      // Follow the newest answer as it streams, fails or finishes, unless the
+      // user has scrolled up to read something older.
+      property bool following: true
+      onMovementEnded: thread.following = thread.atYEnd
+      onCountChanged: { thread.following = true; Qt.callLater(thread.positionViewAtEnd) }
+      onContentHeightChanged: if (thread.following) Qt.callLater(thread.positionViewAtEnd)
 
       Text {
         anchors.centerIn: parent
@@ -172,15 +177,41 @@ Item {
             font.pixelSize: root.theme.bodySmall
           }
 
-          Text {
-            objectName: "answerError"
+          Rectangle {
+            objectName: "answerErrorCard"
             width: parent.width
             visible: entry.error !== ""
-            text: entry.error
-            color: root.theme.urgent
-            font.family: root.theme.fontFamily
-            font.pixelSize: root.theme.bodySmall
-            wrapMode: Text.WordWrap
+            implicitHeight: answerErrorColumn.implicitHeight + root.theme.padX * 2
+            height: implicitHeight
+            radius: Math.min(root.theme.radius, 6)
+            color: root.theme.alpha(root.theme.urgent, 0.12)
+            border.width: 1
+            border.color: root.theme.alpha(root.theme.urgent, 0.5)
+            Column {
+              id: answerErrorColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: root.theme.padX
+              spacing: root.theme.xs
+              Text {
+                width: parent.width
+                text: "Couldn't answer"
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
+                font.bold: true
+              }
+              Text {
+                objectName: "answerError"
+                width: parent.width
+                text: entry.error
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
+                wrapMode: Text.WordWrap
+              }
+            }
           }
 
           Row {
