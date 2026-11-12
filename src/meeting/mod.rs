@@ -30,10 +30,13 @@ pub mod diarization;
 pub mod events;
 pub mod export;
 pub mod hook;
+pub mod import;
 pub mod manifest;
+pub mod meeting_recorder;
 pub mod notes;
 pub mod playback;
 pub mod retained_audio;
+pub mod retranscribe;
 pub mod start;
 pub mod state;
 pub mod status_notice;
@@ -238,7 +241,7 @@ impl MeetingDaemon {
     /// A daemon around a given transcriber, for tests that drive chunks
     /// without loading a model.
     #[cfg(test)]
-    fn for_test(
+    pub(crate) fn for_test(
         config: MeetingConfig,
         transcriber: Arc<dyn Transcriber>,
         diarizer: Option<Box<dyn diarization::Diarizer>>,
@@ -266,6 +269,17 @@ impl MeetingDaemon {
 
     /// Start a new meeting
     pub async fn start(&mut self, title: Option<String>, url: Option<String>) -> Result<MeetingId> {
+        self.start_at(title, url, None).await
+    }
+
+    /// Start a new meeting dated `started_at` instead of now, as an
+    /// imported recording is.
+    pub async fn start_at(
+        &mut self,
+        title: Option<String>,
+        url: Option<String>,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<MeetingId> {
         if !self.state.is_idle() {
             return Err(MeetingError::AlreadyInProgress.into());
         }
@@ -274,6 +288,9 @@ impl MeetingDaemon {
         let mut meeting = MeetingData::new(title);
         meeting.metadata.model = Some(self.engine_name.clone());
         meeting.metadata.url = url;
+        if let Some(started_at) = started_at {
+            meeting.metadata.started_at = started_at;
+        }
 
         // Create storage directory
         let storage_path = self

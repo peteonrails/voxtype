@@ -289,6 +289,7 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
+| `import_progress` | `meeting import` or `meeting retranscribe` finished a chunk |
 | `error` | Something failed |
 
 #### `hello`
@@ -401,6 +402,17 @@ when the daemon sends it, so changes in quick succession can arrive as one
 event with the latest state. It is sent whether or not a meeting is
 recording, and not at all while the daemon is down; ask
 `voxtype meeting play --status --json` when you need certainty.
+
+#### `import_progress`
+
+```json
+{"event": "import_progress", "meeting_id": "...", "operation": "import", "state": "transcribing", "chunks_done": 2, "chunks_total": 5, "position_ms": 60000, "duration_ms": 150000}
+```
+
+Follows `voxtype meeting import` and `meeting retranscribe`, which run
+outside the daemon and hand it their progress: see
+[Importing and transcribing again](#importing-and-transcribing-again-meeting-import-and-meeting-retranscribe)
+below. It is not sent while the daemon is down.
 
 #### `error`
 
@@ -690,6 +702,45 @@ A failure exits 1 with the reason on stderr: the meeting kept no audio, the
 track is missing (a meeting without loopback has no `loopback` track), the
 segment is unknown, or `ffmpeg` or a player is not installed.
 
+### Importing and transcribing again: `meeting import` and `meeting retranscribe`
+
+```sh
+voxtype meeting import <file|meeting-recorder-folder> [--title T] [--engine E] [--model M] [--language L]
+                       [--date RFC3339] [--channels mono|mic,loopback,...] [--diarization B] [--json]
+voxtype meeting retranscribe <meeting> [--engine E] [--model M] [--language L] [--diarization B]
+                             [--keep-edits | --discard-edits] [--json]
+```
+
+Both run in the calling process, not in the daemon, and can take minutes.
+With `--json` they print one JSON object per line on stdout: a `progress`
+line when they start, one after each chunk and one at the end, then the
+result. Logs go to stderr.
+
+```json
+{"event": "progress", "meeting_id": "...", "operation": "import", "state": "transcribing", "chunks_done": 3, "chunks_total": 5, "position_ms": 89000, "duration_ms": 150000}
+{"event": "progress", "meeting_id": "...", "operation": "import", "state": "done", "chunks_done": 5, "chunks_total": 5, "position_ms": 150000, "duration_ms": 150000}
+{"event": "imported", "meeting_id": "...", "title": "Client call", "folder": "/home/me/.local/share/voxtype/meetings/2026-11-02-client-call", "started_at": "2026-11-02T15:00:00Z", "duration_ms": 150000, "channels": "mic,loopback", "segments": 42, "engine": "whisper", "model": "base.en", "audio_files": ["mic.opus", "loopback.opus", "mixed.opus"]}
+```
+
+```json
+{"event": "retranscribed", "meeting_id": "...", "previous_transcript": "transcript.v1.json", "segments": 40, "engine": "whisper", "model": "large-v3-turbo", "channels": "mic,loopback", "edits": {"edits_carried": 3, "edits_dropped": 1, "edits_discarded": 0, "annotations_carried": 2, "annotations_dropped": 0}}
+```
+
+- `operation` is `import` or `retranscribe`; `state` is `transcribing`,
+  `done` or `failed`.
+- `chunks_total` is estimated from the duration and settles at the end, when
+  it equals `chunks_done`. `position_ms` is how far through the audio it is.
+- The same object, with `"event": "import_progress"`, goes to `meeting.sock`
+  when the daemon is running, so a view can show the progress of an import
+  started elsewhere.
+- `channels` is `mono`, the `--channels` map, or `meeting-recorder` for a
+  Meeting Recorder folder (imported as it is, with nothing transcribed).
+- `previous_transcript` is `null` when the meeting had no transcript.
+  `edits` counts speaker moves, text corrections and deleted lines
+  (`edits_*`) and annotations separately; `edits_discarded` is non-zero
+  only with `--discard-edits`.
+- A failure exits 1 with the reason on stderr.
+
 ### The meeting folder and `meeting.json`
 
 Every meeting has a folder under the storage path
@@ -761,8 +812,9 @@ The fields:
   same name keep separate entries.
 - `files`: the meeting's files that exist, in the order shown, with their
   size when the manifest was written. `kind` is one of `transcript`,
-  `transcript_markdown`, `notes`, `summary`, `audio_mic`, `audio_loopback` or
-  `audio_mixed`. Names are relative to the folder. Audio is `.opus` (Ogg
+  `transcript_markdown`, `notes`, `summary`, `transcript_previous` (a
+  transcript `meeting retranscribe` replaced, `transcript.v1.json` and on,
+  oldest first), `audio_mic`, `audio_loopback` or `audio_mixed`. Names are relative to the folder. Audio is `.opus` (Ogg
   Opus, 16 kHz mono), or `.wav` (16-bit PCM, 16 kHz mono) when ffmpeg was
   missing; match on `kind`, not on the name.
 - `echo_cancel`: the echo handling the meeting used: `aec` (PipeWire's

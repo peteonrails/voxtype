@@ -105,6 +105,19 @@ fn speaker_list(speakers: &[String]) -> String {
     }
 }
 
+/// How a meeting's per-line edits fared when its transcript was replaced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SegmentEditCarry {
+    /// Speaker moves, text edits and deleted lines moved to a new line
+    pub edits_carried: usize,
+    /// Those with no new line to go to
+    pub edits_dropped: usize,
+    /// Those removed because they were not to be kept
+    pub edits_discarded: usize,
+    pub annotations_carried: usize,
+    pub annotations_dropped: usize,
+}
+
 /// Meeting storage configuration
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
@@ -683,7 +696,10 @@ impl MeetingStorage {
     /// Load the transcript with deleted lines still in it, marked `deleted`.
     /// Anything that saves the transcript back must start from this, or the
     /// deleted lines would be lost for good.
-    fn load_transcript_all(&self, meeting_id: &MeetingId) -> Result<Transcript, StorageError> {
+    pub(crate) fn load_transcript_all(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<Transcript, StorageError> {
         let metadata = self
             .get_meeting(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
@@ -1196,6 +1212,82 @@ impl MeetingStorage {
         if let Err(e) = result {
             tracing::warn!("Failed to refresh transcript.md: {}", e);
         }
+    }
+
+    /// Move the meeting's per-line edits from old segment IDs to new ones,
+    /// after its transcript was replaced (`meeting retranscribe`).
+    ///
+    /// Annotations always follow `mapping`. Speaker moves, text edits and
+    /// deleted lines follow it with `keep_edits`, and are dropped without.
+    /// An edit whose line has no entry in `mapping`, or whose new line
+    /// already took another edit of the same kind, is dropped. One
+    /// transaction: a failure leaves the edits as they were.
+    pub fn remap_segment_edits(
+        &self,
+        meeting_id: &MeetingId,
+        mapping: &std::collections::HashMap<u32, u32>,
+        keep_edits: bool,
+    ) -> Result<SegmentEditCarry, StorageError> {
+        // Moved rows are parked above every real ID first, so a new ID that
+        // equals an old one not yet moved cannot collide with it.
+        const PARKED: i64 = 1 << 40;
+        let id = meeting_id.to_string();
+        let tx = self.conn.unchecked_transaction()?;
+        let remap = |table: &str| -> Result<(usize, usize), StorageError> {
+            let olds: Vec<i64> = tx
+                .prepare(&format!(
+                    "SELECT segment_id FROM {table} WHERE meeting_id = ?1"
+                ))?
+                .query_map(params![id], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            let mut carried = 0;
+            for old in olds {
+                if let Some(&new) = u32::try_from(old).ok().and_then(|o| mapping.get(&o)) {
+                    carried += tx.execute(
+                        &format!(
+                            "UPDATE OR IGNORE {table} SET segment_id = ?3 \
+                             WHERE meeting_id = ?1 AND segment_id = ?2"
+                        ),
+                        params![id, old, new as i64 + PARKED],
+                    )?;
+                }
+            }
+            let dropped = tx.execute(
+                &format!("DELETE FROM {table} WHERE meeting_id = ?1 AND segment_id < ?2"),
+                params![id, PARKED],
+            )?;
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET segment_id = segment_id - ?2 \
+                     WHERE meeting_id = ?1 AND segment_id >= ?2"
+                ),
+                params![id, PARKED],
+            )?;
+            Ok((carried, dropped))
+        };
+
+        let mut carry = SegmentEditCarry::default();
+        for table in [
+            "segment_speaker_overrides",
+            "segment_text_edits",
+            "segment_deletions",
+        ] {
+            if keep_edits {
+                let (carried, dropped) = remap(table)?;
+                carry.edits_carried += carried;
+                carry.edits_dropped += dropped;
+            } else {
+                carry.edits_discarded += tx.execute(
+                    &format!("DELETE FROM {table} WHERE meeting_id = ?1"),
+                    params![id],
+                )?;
+            }
+        }
+        let (carried, dropped) = remap("segment_annotations")?;
+        carry.annotations_carried = carried;
+        carry.annotations_dropped = dropped;
+        tx.commit()?;
+        Ok(carry)
     }
 
     /// Record what the meeting is recorded with, and rewrite its manifest.
