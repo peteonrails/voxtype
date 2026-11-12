@@ -12,6 +12,9 @@
 pub mod client;
 pub mod commands;
 pub mod frontend;
+pub mod markup;
+
+pub use markup::{escape_markup, line_markup, summary_markup, SPEAKER_COLORS};
 
 use crate::meeting::data::{MeetingData, MeetingSummary, TranscriptSegment};
 use chrono::{DateTime, Utc};
@@ -281,6 +284,15 @@ pub struct SummaryInfo {
     pub summary: MeetingSummary,
 }
 
+impl SummaryInfo {
+    /// The summary as written to the meeting's `summary.md`, when that file
+    /// can be read.
+    pub fn markdown(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.path.as_ref()?).ok()?;
+        (!text.trim().is_empty()).then_some(text)
+    }
+}
+
 /// One speaker as the view shows it: every diarizer speaker displayed under
 /// the same name is one chip.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,7 +338,7 @@ pub struct MeetingView {
     pub levels: Option<Levels>,
     /// When the latest levels arrived
     pub levels_at: Option<DateTime<Utc>>,
-    /// Bumped on every change, for viewers that cache rendering
+    /// Bumped on every change but levels, for viewers that cache rendering
     pub revision: u64,
 }
 
@@ -474,7 +486,9 @@ impl MeetingView {
     /// Apply one event.
     pub fn apply(&mut self, event: ViewEvent) -> Change {
         let change = self.apply_inner(event);
-        if change != Change::Nothing {
+        // Levels come ten times a second and are read each frame; they do
+        // not make a viewer draw the transcript again.
+        if !matches!(change, Change::Nothing | Change::Levels) {
             self.revision += 1;
         }
         change
@@ -1362,7 +1376,9 @@ mod tests {
         // Nothing to meter before a meeting.
         assert_eq!(v.apply_line(levels), Change::Nothing);
         v.apply_line(&hello("recording", "m1", vec![]));
+        let revision = v.revision;
         assert_eq!(v.apply_line(levels), Change::Levels);
+        assert_eq!(v.revision, revision, "levels do not redraw the transcript");
         let l = v.levels.as_ref().unwrap();
         assert!((meter(l.mic) - 0.5).abs() < 1e-6);
         assert_eq!(meter(l.loopback), 0.0);
@@ -1445,75 +1461,5 @@ mod tests {
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].name, "Ann");
         assert_eq!(chips[0].lines, 2);
-    }
-}
-
-/// Speaker colors, by chip index, for views that color names. Picked to
-/// read on light and dark backgrounds.
-pub const SPEAKER_COLORS: [&str; 8] = [
-    "#1c71d8", "#c061cb", "#e5a50a", "#2ec27e", "#3584e4", "#e01b24", "#26a269", "#9141ac",
-];
-
-/// Escape text for Pango markup.
-pub fn escape_markup(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// One transcript line as Pango markup: dimmed time, the speaker's name in
-/// their color, the text, and the annotation on a second line.
-pub fn line_markup(view: &MeetingView, segment: &TranscriptSegment) -> String {
-    let color = view
-        .speaker_index(segment)
-        .map(|i| SPEAKER_COLORS[i % SPEAKER_COLORS.len()])
-        .unwrap_or("#808080");
-    let mut m = format!(
-        "<span alpha=\"60%\">[{}]</span> <b><span foreground=\"{}\">{}</span></b>: {}",
-        clock(Duration::from_millis(segment.start_ms)),
-        color,
-        escape_markup(&segment.speaker_display()),
-        escape_markup(segment.text.trim())
-    );
-    if let Some(a) = &segment.annotation {
-        m.push_str(&format!(
-            "\n<i><span foreground=\"#c64600\">✎ {}</span></i>",
-            escape_markup(&crate::meeting::export::annotation_line(a))
-        ));
-    }
-    m
-}
-
-#[cfg(test)]
-mod markup_tests {
-    use super::*;
-
-    #[test]
-    fn markup_escapes_and_colors_by_speaker() {
-        let mut v = MeetingView::live();
-        v.apply_line(
-            &serde_json::json!({
-                "event": "hello", "status": "recording", "meeting_id": "m", "segments": [
-                    {"id": 0, "start_ms": 61000, "end_ms": 62000, "text": "a < b & c", "source": "loopback",
-                     "speaker_id": "Remote", "speaker_label": "Dana <PM>", "chunk_id": 0,
-                     "annotation": {"text": "check", "highlight": true}}
-                ]
-            })
-            .to_string(),
-        );
-        let m = line_markup(&v, &v.lines()[0]);
-        assert_eq!(
-            m,
-            "<span alpha=\"60%\">[01:01]</span> <b><span foreground=\"#1c71d8\">Dana &lt;PM&gt;</span></b>: a &lt; b &amp; c\n<i><span foreground=\"#c64600\">✎ Highlight: check</span></i>"
-        );
     }
 }

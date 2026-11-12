@@ -134,6 +134,92 @@ pub fn resolve(configured: ViewFrontend, probe: &dyn OsdProbe) -> ViewResolution
     }
 }
 
+/// What the daemon does about a view when a meeting starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartAction {
+    /// Nothing: `show_view_on_start` is off, nothing can open, or the
+    /// Quickshell view, which opens itself, is the one in use.
+    Nothing,
+    /// Launch the GTK4 window at this path.
+    Gtk4(PathBuf),
+    /// Run `voxtype meeting watch` in a terminal through this
+    /// `xdg-terminal-exec`. Only for an explicit `view = "terminal"`.
+    Terminal(PathBuf),
+}
+
+/// Decide what to open when a meeting starts. `terminal_exec` is
+/// `xdg-terminal-exec` when it is installed.
+pub fn start_action(
+    show_view_on_start: bool,
+    resolution: &ViewResolution,
+    terminal_exec: Option<PathBuf>,
+) -> StartAction {
+    if !show_view_on_start {
+        return StartAction::Nothing;
+    }
+    match (resolution.active, &resolution.path) {
+        (ViewFrontend::Gtk4, Some(path)) => StartAction::Gtk4(path.clone()),
+        (ViewFrontend::Terminal, _) => terminal_exec
+            .map(StartAction::Terminal)
+            .unwrap_or(StartAction::Nothing),
+        _ => StartAction::Nothing,
+    }
+}
+
+/// Open the meeting view for a meeting that just started, as
+/// `[meeting] show_view_on_start` and `[meeting] view` ask, from the daemon.
+/// Returns a line for the log. Blocking: it probes the system and spawns.
+pub fn open_on_start(view: &str, show_view_on_start: bool) -> String {
+    use crate::osd::frontend::SystemProbe;
+    use std::process::{Command, Stdio};
+
+    if !show_view_on_start {
+        return "show_view_on_start is off".into();
+    }
+    let resolution = resolve(effective_configured(view), &SystemProbe);
+    let terminal = which::which("xdg-terminal-exec").ok();
+    let config_args: Vec<std::ffi::OsString> = crate::config::Config::path_override()
+        .map(|p| vec!["--config".into(), p.into_os_string()])
+        .unwrap_or_default();
+    let mut cmd = match start_action(true, &resolution, terminal) {
+        StartAction::Nothing => {
+            return format!("nothing to open ({})", resolution.reason);
+        }
+        StartAction::Gtk4(path) => {
+            let mut cmd = Command::new(path);
+            cmd.args(&config_args);
+            cmd
+        }
+        StartAction::Terminal(term) => {
+            let Ok(exe) = std::env::current_exe() else {
+                return "cannot find the voxtype binary for the terminal view".into();
+            };
+            let mut cmd = Command::new(term);
+            cmd.arg(exe).args(&config_args).args(["meeting", "watch"]);
+            cmd
+        }
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group: a signal meant for the daemon's group
+        // (Ctrl+C in a foreground daemon) does not close the window.
+        cmd.process_group(0);
+    }
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Reap it whenever it closes.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            format!("opened ({})", resolution.reason)
+        }
+        Err(e) => format!("could not open it: {e} ({})", resolution.reason),
+    }
+}
+
 /// `[meeting] view` after the `VOXTYPE_MEETING_VIEW` override. An unknown
 /// value reads as `auto`.
 pub fn effective_configured(config_value: &str) -> ViewFrontend {
@@ -236,6 +322,36 @@ mod tests {
         assert_eq!(r.active, ViewFrontend::None);
         let r = resolve(ViewFrontend::Quickshell, &Fake::default());
         assert_eq!(r.active, ViewFrontend::Quickshell);
+    }
+
+    #[test]
+    fn a_meeting_start_opens_the_gtk4_window_or_an_explicit_terminal_only() {
+        let mut p = quickshell_desktop();
+        p.programs.clear();
+        let gtk = resolve(ViewFrontend::Auto, &p);
+        let exec = PathBuf::from("/usr/bin/xdg-terminal-exec");
+        let term = Some(exec.clone());
+        assert_eq!(
+            start_action(true, &gtk, None),
+            StartAction::Gtk4(PathBuf::from("/usr/lib/voxtype/voxtype-meetings-gtk4"))
+        );
+        assert_eq!(start_action(false, &gtk, None), StartAction::Nothing);
+        // Quickshell opens its own view.
+        let qs = resolve(ViewFrontend::Auto, &quickshell_desktop());
+        assert_eq!(start_action(true, &qs, term.clone()), StartAction::Nothing);
+        // Nothing to open, and auto never picks the terminal.
+        let none = resolve(ViewFrontend::Auto, &Fake::default());
+        assert_eq!(
+            start_action(true, &none, term.clone()),
+            StartAction::Nothing
+        );
+        // An explicit terminal opens one when it can.
+        let t = resolve(ViewFrontend::Terminal, &Fake::default());
+        assert_eq!(
+            start_action(true, &t, term.clone()),
+            StartAction::Terminal(exec)
+        );
+        assert_eq!(start_action(true, &t, None), StartAction::Nothing);
     }
 
     #[test]

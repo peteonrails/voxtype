@@ -154,6 +154,20 @@ pub fn resume() -> Request {
     }
 }
 
+/// Start a meeting, titled `title` when it is not empty.
+pub fn start(title: &str) -> Request {
+    let mut args = args(["meeting", "start"]);
+    if !title.trim().is_empty() {
+        args.extend(["--title".to_string(), title.trim().to_string()]);
+    }
+    Request {
+        what: "Start".into(),
+        args,
+        stdin: None,
+        reload: false,
+    }
+}
+
 pub fn stop() -> Request {
     Request {
         what: "Stop".into(),
@@ -344,5 +358,14 @@ mod tests {
         let out = cli.run(&label("m1", "fail", "x"));
         assert!(!out.ok);
         assert_eq!(out.status_line(), "Rename failed: no such meeting");
+    }
+
+    #[test]
+    fn start_passes_a_title_only_when_given() {
+        assert_eq!(start("  ").args, vec!["meeting", "start"]);
+        assert_eq!(
+            start(" Standup ").args,
+            vec!["meeting", "start", "--title", "Standup"]
+        );
     }
 }

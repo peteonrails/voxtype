@@ -411,6 +411,56 @@ voxtype meeting watch --json | head -3
 
 Expected: the first line is a `hello` event, as on the socket itself.
 
+## 15. The GTK4 window (3 minutes)
+
+The window for desktops without Quickshell. On Omarchy, point the view at it
+for this step; GNOME, Plasma or Sway without Quickshell resolve to it with the
+default `auto`.
+
+```bash
+ls /usr/lib/voxtype/voxtype-meetings-gtk4
+voxtype config set meeting.view gtk4
+omarchy-restart-shell     # Omarchy only: the shell reads meeting.view
+voxtype meeting view
+```
+
+Expected, with no meeting running:
+
+- An ordinary window titled "Meetings - Voxtype" that tiles, moves and
+  alt-tabs like any other. **Start meeting** with a title field above
+  **Recent meetings**, newest first, with `· summary` on those that have one.
+- Pick a meeting with a summary: its transcript, speakers and notes, marked
+  "Past meeting: read-only", with no Move or Note buttons, and its summary as
+  `summary.md` reads (headings, bullets). Ask still answers.
+- **Meetings** goes back to the list.
+
+Type `GTK check` in the title field and press **Start meeting**. Talk for a
+minute.
+
+Expected:
+
+- The Quickshell view does not open; the window switches to **● Recording
+  GTK check** and the elapsed time, with two level meters that move while you
+  speak.
+- Lines arrive once per chunk in speaker colors. Click **You**, type `Me`,
+  OK: the button and every line say **Me**.
+- Select a line, **Move line to…**, pick another speaker: it reads
+  "(was You)". In a terminal, `voxtype meeting edit latest <id> "Fixed."`
+  marks it "(edited)" and `voxtype meeting delete-line latest <id>` removes it.
+- **Pause** shows **❚❚ Paused** and the meters disappear; **Resume**.
+- Close the window, stop the meeting with `voxtype meeting stop`, and start
+  another with `voxtype meeting start --title "Auto open"`: the window opens
+  by itself. The daemon log says so:
+  `journalctl --user -u voxtype | grep "Meeting view on start"`.
+- **Stop**, confirm: **Finalizing…**, then the summary under **Summary**.
+
+Put the view back:
+
+```bash
+voxtype config set meeting.view auto
+omarchy-restart-shell     # Omarchy only
+```
+
 ## Clean up
 
 ```bash
@@ -439,3 +489,4 @@ systemctl --user restart voxtype
 | 12 Standalone host | | |
 | 13 Speaker echo | | |
 | 14 Terminal view | | |
+| 15 GTK4 window | | |

@@ -11,6 +11,10 @@
 //!
 //! One instance per session: a second launch (from `voxtype meeting view`)
 //! hands its arguments to the running window through GApplication.
+//!
+//! The live meeting (and one that has just ended) can be fixed from here:
+//! rename speakers, move a line, add a note, edit the notes. A past meeting
+//! opened from the list is read-only and shows its `summary.md`.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -26,7 +30,8 @@ use voxtype::meeting::storage::MeetingListEntry;
 use voxtype::meeting::view::client::{spawn_feed, Feed, FeedHandle};
 use voxtype::meeting::view::commands::{self, AskAnswer, Cli, Outcome, Request};
 use voxtype::meeting::view::{
-    clock, escape_markup, line_markup, Change, MeetingView, ViewState, SPEAKER_COLORS,
+    clock, escape_markup, line_markup, meter, summary_markup, Change, MeetingView, SpeakerChip,
+    ViewState, SPEAKER_COLORS,
 };
 use voxtype::meeting::{MeetingConfig, StorageConfig};
 
@@ -74,7 +79,9 @@ fn parse_launch(args: &[String]) -> Launch {
 enum Msg {
     Done(Outcome),
     /// A speaker chip was clicked.
-    Rename(String),
+    Rename(SpeakerChip),
+    /// `meeting label` named these keys; the socket does not say so.
+    Labeled(Vec<String>, String),
     AskLine(String),
     AskExited(bool),
 }
@@ -86,18 +93,27 @@ struct Ui {
     state_label: gtk4::Label,
     title_label: gtk4::Label,
     elapsed_label: gtk4::Label,
+    levels: gtk4::Box,
+    mic_level: gtk4::LevelBar,
+    call_level: gtk4::LevelBar,
     back_button: gtk4::Button,
     pause_button: gtk4::Button,
     stop_button: gtk4::Button,
     transcript: gtk4::ListBox,
     transcript_scroll: gtk4::ScrolledWindow,
     follow_button: gtk4::Button,
+    move_button: gtk4::Button,
+    note_button: gtk4::Button,
+    read_only: gtk4::Label,
     chips: gtk4::Box,
     notes: gtk4::TextView,
+    save_notes: gtk4::Button,
     summary: gtk4::Label,
     ask_entry: gtk4::Entry,
     ask_answer: gtk4::Label,
     list: gtk4::ListBox,
+    start_title: gtk4::Entry,
+    start_button: gtk4::Button,
     status: gtk4::Label,
 }
 
@@ -107,11 +123,16 @@ struct State {
     cli: Cli,
     live: MeetingView,
     stored: Option<MeetingView>,
+    /// `stored` is a past meeting opened from the list (read-only), not the
+    /// meeting that just ended, read again after a change.
+    past: bool,
     list: Vec<MeetingListEntry>,
     follow: bool,
     /// Segment id of the selected line.
     selected: Option<u32>,
-    rendered_revision: Option<(bool, u64, Option<String>)>,
+    /// What the transcript and side panel were last drawn from: stored or
+    /// live, the view's revision, its meeting, and the line playing.
+    rendered_revision: Option<(bool, u64, Option<String>, Option<u32>)>,
     ask: Option<AskAnswer>,
     notes_dirty: bool,
     notes_loaded_for: Option<String>,
@@ -135,6 +156,43 @@ impl State {
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Done(cli.run(&request)));
         });
+    }
+
+    /// Name a speaker chip: one `meeting label` per key behind it, in
+    /// order, stopping at the first that fails; then apply it here.
+    fn label(&self, chip: &SpeakerChip, name: &str) {
+        let Some(id) = self.meeting_id() else {
+            return;
+        };
+        let requests: Vec<Request> = chip
+            .keys
+            .iter()
+            .map(|key| commands::label(&id, key, name))
+            .collect();
+        let (cli, tx) = (self.cli.clone(), self.tx.clone());
+        let (keys, name) = (chip.keys.clone(), name.to_string());
+        std::thread::spawn(move || {
+            let mut last = None;
+            for r in &requests {
+                let out = cli.run(r);
+                let ok = out.ok;
+                last = Some(out);
+                if !ok {
+                    break;
+                }
+            }
+            if let Some(out) = last {
+                if out.ok {
+                    let _ = tx.send(Msg::Labeled(keys, name));
+                }
+                let _ = tx.send(Msg::Done(out));
+            }
+        });
+    }
+
+    /// A past meeting opened from the list: shown, not edited.
+    fn read_only(&self) -> bool {
+        self.past && self.stored.is_some()
     }
 }
 
@@ -203,6 +261,20 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     title_box.append(&state_label);
     title_box.append(&title_label);
     title_box.append(&elapsed_label);
+    // Level meters, while the daemon sends levels for a recording meeting.
+    let levels = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    levels.set_valign(gtk4::Align::Center);
+    let level = |name: &str| {
+        let bar = gtk4::LevelBar::for_interval(0.0, 1.0);
+        bar.set_width_request(60);
+        bar.set_tooltip_text(Some(name));
+        levels.append(&bar);
+        bar
+    };
+    let mic_level = level("Your microphone");
+    let call_level = level("The call");
+    levels.set_visible(false);
+    title_box.append(&levels);
     header.set_title_widget(Some(&title_box));
     window.set_titlebar(Some(&header));
 
@@ -218,8 +290,11 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     let move_button = gtk4::Button::with_label("Move line to…");
     let note_button = gtk4::Button::with_label("Note on line…");
     let follow_button = gtk4::Button::with_label("Follow new lines");
+    let read_only = label("Past meeting: read-only");
+    read_only.add_css_class("dim-label");
     line_bar.append(&move_button);
     line_bar.append(&note_button);
+    line_bar.append(&read_only);
     line_bar.append(&follow_button);
     let left = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     left.append(&transcript_scroll);
@@ -242,11 +317,6 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     right.append(&notes_scroll);
     let save_notes = gtk4::Button::with_label("Save notes");
     right.append(&save_notes);
-    right.append(&heading("Summary"));
-    let summary = label("");
-    summary.set_wrap(true);
-    summary.set_selectable(true);
-    right.append(&summary);
     right.append(&heading("Ask"));
     let ask_entry = gtk4::Entry::new();
     ask_entry.set_placeholder_text(Some("Ask about this meeting"));
@@ -256,9 +326,18 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     ask_answer.set_selectable(true);
     let ask_scroll = gtk4::ScrolledWindow::builder()
         .child(&ask_answer)
-        .vexpand(true)
+        .min_content_height(80)
         .build();
     right.append(&ask_scroll);
+    // The summary last: once a meeting has one, it is most of the panel.
+    right.append(&heading("Summary"));
+    let summary = label("");
+    summary.set_wrap(true);
+    summary.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    summary.set_selectable(true);
+    summary.set_valign(gtk4::Align::Start);
+    summary.set_vexpand(true);
+    right.append(&summary);
     let right_scroll = gtk4::ScrolledWindow::builder()
         .child(&right)
         .hscrollbar_policy(gtk4::PolicyType::Never)
@@ -270,15 +349,33 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     paned.set_resize_end_child(false);
     paned.set_shrink_end_child(false);
 
-    // Past meetings.
+    // No meeting: start one, or open a past one.
+    let start_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    start_bar.set_margin_top(8);
+    start_bar.set_margin_bottom(4);
+    start_bar.set_margin_start(8);
+    start_bar.set_margin_end(8);
+    let start_title = gtk4::Entry::new();
+    start_title.set_placeholder_text(Some("Title (optional)"));
+    start_title.set_hexpand(true);
+    let start_button = gtk4::Button::with_label("Start meeting");
+    start_button.add_css_class("suggested-action");
+    start_bar.append(&start_title);
+    start_bar.append(&start_button);
     let list = gtk4::ListBox::new();
     let list_scroll = gtk4::ScrolledWindow::builder()
         .child(&list)
         .vexpand(true)
         .build();
+    let list_page = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    list_page.append(&start_bar);
+    let recent = heading("Recent meetings");
+    recent.set_margin_start(8);
+    list_page.append(&recent);
+    list_page.append(&list_scroll);
 
     let stack = gtk4::Stack::new();
-    stack.add_named(&list_scroll, Some("list"));
+    stack.add_named(&list_page, Some("list"));
     stack.add_named(&paned, Some("meeting"));
 
     let status = label("");
@@ -289,29 +386,33 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     root.append(&status);
     window.set_child(Some(&root));
 
-    // Keep the save and line buttons reachable from callbacks.
-    save_notes.set_widget_name("save-notes");
-    move_button.set_widget_name("move-line");
-    note_button.set_widget_name("note-line");
-
     Ui {
         window,
         stack,
         state_label,
         title_label,
         elapsed_label,
+        levels,
+        mic_level,
+        call_level,
         back_button,
         pause_button,
         stop_button,
         transcript,
         transcript_scroll,
         follow_button,
+        move_button,
+        note_button,
+        read_only,
         chips,
         notes,
+        save_notes,
         summary,
         ask_entry,
         ask_answer,
         list,
+        start_title,
+        start_button,
         status,
     }
 }
@@ -353,12 +454,41 @@ fn refresh(ui: &Ui, st: &mut State) {
             .map(clock)
             .unwrap_or_default()
     };
-    let elapsed = if view.live && !view.connected && !showing_list {
+    let mut elapsed = if view.live && !view.connected && !showing_list {
         format!("{elapsed}  reconnecting…")
     } else {
         elapsed
     };
+    if let Some(p) = view.progress.as_ref().filter(|p| p.running()) {
+        let what = if p.operation == "import" {
+            "importing"
+        } else {
+            "transcribing again"
+        };
+        elapsed.push_str(&format!("  {what} {:.0}%", p.fraction() * 100.0));
+    }
     ui.elapsed_label.set_text(&elapsed);
+    let now = chrono::Utc::now();
+    match view.current_levels(now).filter(|_| !showing_list) {
+        Some(l) => {
+            ui.mic_level.set_value(meter(l.mic));
+            ui.call_level.set_value(meter(l.loopback));
+            ui.call_level.set_visible(l.loopback.is_some());
+            ui.levels.set_visible(true);
+        }
+        None => ui.levels.set_visible(false),
+    }
+    let read_only = st.read_only();
+    ui.move_button.set_visible(!read_only);
+    ui.note_button.set_visible(!read_only);
+    ui.read_only.set_visible(read_only);
+    ui.save_notes.set_visible(!read_only);
+    ui.notes.set_editable(!read_only);
+    ui.transcript.set_selection_mode(if read_only {
+        gtk4::SelectionMode::None
+    } else {
+        gtk4::SelectionMode::Single
+    });
     let live = st.stored.is_none() && st.live.state.is_live();
     ui.pause_button.set_visible(live && !showing_list);
     ui.stop_button.set_visible(live && !showing_list);
@@ -369,9 +499,23 @@ fn refresh(ui: &Ui, st: &mut State) {
             "Pause"
         });
     ui.back_button.set_visible(!showing_list);
-    ui.follow_button.set_visible(!st.follow);
+    // Following only means something while lines still arrive.
+    ui.follow_button
+        .set_visible(!st.follow && st.stored.is_none() && view.state.is_live());
+    ui.start_button
+        .set_sensitive(st.live.connected && !st.live.state.is_live());
+    ui.start_button.set_tooltip_text(if st.live.connected {
+        None
+    } else {
+        Some("The voxtype daemon is not running")
+    });
 
-    let key = (st.stored.is_some(), view.revision, view.meeting_id.clone());
+    let key = (
+        st.stored.is_some(),
+        view.revision,
+        view.meeting_id.clone(),
+        view.playing_line(now),
+    );
     if st.rendered_revision.as_ref() != Some(&key) {
         st.rendered_revision = Some(key);
         render_transcript(ui, st, &view);
@@ -411,9 +555,10 @@ fn render_transcript(ui: &Ui, st: &State, view: &MeetingView) {
         ui.transcript.append(&l);
         return;
     }
+    let playing = view.playing_line(chrono::Utc::now());
     for seg in view.lines() {
         let l = label("");
-        l.set_markup(&line_markup(view, seg));
+        l.set_markup(&line_markup(view, seg, playing == Some(seg.id)));
         l.set_wrap(true);
         l.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
         l.set_margin_top(2);
@@ -436,8 +581,8 @@ fn render_side(ui: &Ui, st: &mut State, view: &MeetingView) {
     while let Some(child) = ui.chips.first_child() {
         ui.chips.remove(&child);
     }
+    let read_only = st.read_only();
     for (i, chip) in view.speakers().iter().enumerate() {
-        let b = gtk4::Button::new();
         let l = label("");
         l.set_markup(&format!(
             "<span foreground=\"{}\">●</span> {} <span alpha=\"60%\">({})</span>",
@@ -445,18 +590,31 @@ fn render_side(ui: &Ui, st: &mut State, view: &MeetingView) {
             escape_markup(&chip.name),
             chip.lines
         ));
+        if read_only {
+            l.set_widget_name(&chip.name);
+            l.set_margin_start(10);
+            ui.chips.append(&l);
+            continue;
+        }
+        let b = gtk4::Button::new();
         b.set_child(Some(&l));
         b.set_tooltip_text(Some("Rename this speaker"));
         b.set_widget_name(&chip.name);
         b.add_css_class("flat");
-        let (tx, name) = (st.tx.clone(), chip.name.clone());
+        let (tx, chip) = (st.tx.clone(), chip.clone());
         b.connect_clicked(move |_| {
-            let _ = tx.send(Msg::Rename(name.clone()));
+            let _ = tx.send(Msg::Rename(chip.clone()));
         });
         ui.chips.append(&b);
     }
 
     let summary = match (&view.summary, view.state) {
+        // The summary as saved, when its file is there.
+        (Some(s), _) if s.markdown().is_some() => format!(
+            "{}\n\n<span alpha=\"60%\">by {}</span>",
+            summary_markup(&s.markdown().unwrap_or_default()),
+            escape_markup(&s.agent_name)
+        ),
         (Some(s), _) => {
             let mut t = format!(
                 "{}\n<span alpha=\"60%\">by {}</span>",
@@ -518,14 +676,21 @@ fn render_list(ui: &Ui, st: &State) {
         ));
         l.set_widget_name("live");
         l.set_margin_top(6);
+        l.set_margin_start(8);
         l.set_margin_bottom(6);
         ui.list.append(&l);
     }
     if st.list.is_empty() && !(st.live.state.is_live() || st.live.state == ViewState::Summarizing) {
-        let l = label("No meetings yet. Start one with: voxtype meeting start");
+        let l = label("No meetings yet.");
+        l.add_css_class("dim-label");
         l.set_widget_name("empty");
         l.set_margin_top(6);
+        l.set_margin_start(8);
         ui.list.append(&l);
+        if let Some(row) = ui.list.row_at_index(0) {
+            row.set_activatable(false);
+            row.set_selectable(false);
+        }
     }
     for e in &st.list {
         let m = &e.metadata;
@@ -545,6 +710,7 @@ fn render_list(ui: &Ui, st: &State) {
         ));
         l.set_widget_name(&m.id.to_string());
         l.set_margin_top(6);
+        l.set_margin_start(8);
         l.set_margin_bottom(6);
         ui.list.append(&l);
     }
@@ -603,11 +769,15 @@ fn prompt(
 
 fn open_meeting(ui: &Ui, st: &mut State, id: Option<&str>) {
     let live_id = st.live.meeting_id.clone();
+    st.past = false;
     match id {
         None => st.stored = None,
         Some(id) if Some(id) == live_id.as_deref() || id == "current" => st.stored = None,
         Some(id) => match load_stored(&st.meetings, id) {
-            Some(v) => st.stored = Some(v),
+            Some(v) => {
+                st.past = true;
+                st.stored = Some(v);
+            }
             None => {
                 ui.status.set_text(&format!("Could not load meeting {id}"));
                 return;
@@ -713,6 +883,18 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
             );
         });
     }
+    // Start a meeting from the list.
+    {
+        let (s, u) = (shared.clone(), ui.clone());
+        let start = move || {
+            let title = u.start_title.text().to_string();
+            u.start_title.set_text("");
+            s.borrow().run(commands::start(&title));
+        };
+        let start2 = start.clone();
+        ui.start_button.connect_clicked(move |_| start2());
+        ui.start_title.connect_activate(move |_| start());
+    }
     // Back to the list.
     {
         let (s, u) = (shared.clone(), ui.clone());
@@ -792,9 +974,9 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
         });
     }
     // Move the selected line / note on it.
-    if let Some(move_button) = find_button(&ui.window, "move-line") {
+    {
         let (s, u) = (shared.clone(), ui.clone());
-        move_button.connect_clicked(move |_| {
+        ui.move_button.connect_clicked(move |_| {
             let st = s.borrow();
             let (Some(id), Some(seg)) = (st.meeting_id(), selected_segment(&u, &st)) else {
                 u.status.set_text("Select a line first");
@@ -813,9 +995,9 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
             );
         });
     }
-    if let Some(note_button) = find_button(&ui.window, "note-line") {
+    {
         let (s, u) = (shared.clone(), ui.clone());
-        note_button.connect_clicked(move |_| {
+        ui.note_button.connect_clicked(move |_| {
             let st = s.borrow();
             let (Some(id), Some(seg)) = (st.meeting_id(), selected_segment(&u, &st)) else {
                 u.status.set_text("Select a line first");
@@ -836,9 +1018,9 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
             }
         });
     }
-    if let Some(save) = find_button(&ui.window, "save-notes") {
+    {
         let (s, u) = (shared.clone(), ui.clone());
-        save.connect_clicked(move |_| {
+        ui.save_notes.connect_clicked(move |_| {
             let mut st = s.borrow_mut();
             let Some(id) = st.meeting_id() else {
                 return;
@@ -872,6 +1054,7 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
         let mut st = s.borrow_mut();
         let mut resync = false;
         let mut list_changed = false;
+        let mut started = false;
         while let Ok(feed) = feed_rx.try_recv() {
             match feed {
                 Feed::Connected => {}
@@ -887,8 +1070,16 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                     if was_live != st.live.state.is_live() {
                         list_changed = true;
                     }
+                    if !was_live && st.live.state.is_live() {
+                        started = true;
+                    }
                 }
             }
+        }
+        // A meeting that starts takes over the window, as in the Quickshell
+        // view, whatever was on screen.
+        if started {
+            open_meeting(&u, &mut st, None);
         }
         if resync {
             if let Some(f) = st.feed.as_ref() {
@@ -908,19 +1099,20 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                         }
                     }
                 }
-                Msg::Rename(name) => {
-                    if let Some(id) = st.meeting_id() {
+                Msg::Rename(chip) => {
+                    if st.meeting_id().is_some() && !st.read_only() {
                         let s2 = s.clone();
                         prompt(
                             &u.window,
-                            &format!("Rename {name}"),
+                            &format!("Rename {}", chip.name),
                             &[],
                             "Name",
-                            move |new_name| {
-                                s2.borrow().run(commands::label(&id, &name, &new_name));
-                            },
+                            move |new_name| s2.borrow().label(&chip, &new_name),
                         );
                     }
+                }
+                Msg::Labeled(keys, name) => {
+                    st.live.apply_label(&keys, &name);
                 }
                 Msg::AskLine(line) => {
                     if let Some(a) = st.ask.as_mut() {
@@ -942,23 +1134,27 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
     });
 }
 
-fn find_button(window: &gtk4::ApplicationWindow, name: &str) -> Option<gtk4::Button> {
-    fn walk(w: &gtk4::Widget, name: &str) -> Option<gtk4::Button> {
-        if w.widget_name() == name {
-            if let Ok(b) = w.clone().downcast::<gtk4::Button>() {
-                return Some(b);
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(b) = walk(&c, name) {
-                return Some(b);
-            }
-            child = c.next_sibling();
-        }
-        None
+/// With the smoke test, also save the window as a PNG here, to look at.
+const SHOT_ENV: &str = "VOXTYPE_MEETINGS_GTK4_SHOT";
+
+/// Draw the window into a PNG.
+fn save_png(window: &gtk4::ApplicationWindow, path: &std::path::Path) {
+    let (w, h) = (window.width(), window.height());
+    let paintable = gtk4::WidgetPaintable::new(Some(window));
+    let snapshot = gtk4::Snapshot::new();
+    paintable.snapshot(&snapshot, w as f64, h as f64);
+    let (Some(node), Some(native)) = (snapshot.to_node(), window.native()) else {
+        eprintln!("could not save {}: nothing drawn", path.display());
+        return;
+    };
+    let Some(renderer) = native.renderer() else {
+        eprintln!("could not save {}: no renderer", path.display());
+        return;
+    };
+    let texture = renderer.render_texture(node, None);
+    if let Err(e) = texture.save_to_png(path) {
+        eprintln!("could not save {}: {e}", path.display());
     }
-    walk(window.upcast_ref(), name)
 }
 
 /// The smoke test's view of the window.
@@ -997,6 +1193,14 @@ fn smoke_report(ui: &Ui, st: &State) -> serde_json::Value {
         "chips": chips,
         "summary": ui.summary.text().to_string(),
         "list_rows": list_rows,
+        "start_sensitive": ui.start_button.is_sensitive(),
+        "follow_visible": ui.follow_button.is_visible(),
+        "read_only": ui.read_only.is_visible(),
+        "move_visible": ui.move_button.is_visible(),
+        "notes_editable": ui.notes.is_editable(),
+        "chip_buttons": ui.chips.first_child().is_some_and(|c| c.is::<gtk4::Button>()),
+        "levels_visible": ui.levels.is_visible(),
+        "elapsed": ui.elapsed_label.text().to_string(),
     })
 }
 
@@ -1046,6 +1250,7 @@ fn main() -> glib::ExitCode {
             }),
             live: MeetingView::live(),
             stored: None,
+            past: false,
             follow: true,
             selected: None,
             rendered_revision: None,
@@ -1077,7 +1282,24 @@ fn main() -> glib::ExitCode {
             let (u, s, app) = (ui.clone(), shared.clone(), app.clone());
             glib::timeout_add_local_once(Duration::from_secs(secs), move || {
                 println!("{}", smoke_report(&u, &s.borrow()));
-                app.quit();
+                let Some(path) = std::env::var_os(SHOT_ENV) else {
+                    app.quit();
+                    return;
+                };
+                // Draw it once it has been painted, so it is laid out.
+                let Some(clock) = u.window.frame_clock() else {
+                    app.quit();
+                    return;
+                };
+                let (w, app) = (u.window.clone(), app.clone());
+                let done = std::cell::Cell::new(false);
+                clock.connect_after_paint(move |_| {
+                    if !done.replace(true) {
+                        save_png(&w, std::path::Path::new(&path));
+                        app.quit();
+                    }
+                });
+                u.window.queue_draw();
             });
         }
         ui.window.present();

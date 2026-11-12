@@ -233,14 +233,18 @@ voxtype config set meeting.show_view_on_start false
 
 ### Without Quickshell: the meeting window
 
-On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, `voxtype meeting view` opens the meeting in an ordinary window, `voxtype-meetings-gtk4`, which you can move, resize and alt-tab to like any other. It shows the same meeting the same way:
+On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, the meeting opens in an ordinary window, `voxtype-meetings-gtk4`, which you can move, resize and alt-tab to like any other. It opens by itself when a meeting starts (`show_view_on_start`, as above), and `voxtype meeting view` opens it or brings it forward. It shows the meeting as the Quickshell view's Transcript tab does:
 
-- the title, state and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar;
-- the transcript, one colored line per utterance with annotations under their lines, following new lines until you scroll up (**Follow new lines** goes back);
-- **Move line to…** and **Note on line…** for the selected line, speaker buttons that rename a speaker, your **Notes** with **Save notes**, the **Summary** once it is written, and an **Ask** box whose answer streams in under it;
-- with no meeting running, your recent meetings; **Meetings** in the title bar goes back to that list.
+- the state, title and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar, and a level meter for your microphone and the call while the daemon sends levels;
+- the transcript, one colored line per utterance in the order it was spoken, following new lines until you scroll up (**Follow new lines** goes back). A corrected line is marked "(edited)", a moved line says who the diarizer gave it to ("(was Remote 1)"), highlighted lines are tinted, notes sit under their lines, deleted lines disappear, and while the meeting's audio plays (`voxtype meeting play`) the line being heard has a ▶;
+- a button per speaker that renames them (`voxtype meeting label`, once for each speaker merged under that name); **Move line to…** and **Note on line…** for the selected line; your **Notes** with **Save notes**; an **Ask** box whose answer streams in under it; and the **Summary** once it is written;
+- with no meeting running, **Start meeting** with an optional title, and your recent meetings. **Meetings** in the title bar goes back to that list.
 
-Every button runs the matching `voxtype meeting` command, so it behaves as the command line does. A second `voxtype meeting view` brings the open window forward instead of opening another.
+A past meeting opened from the list is read-only: its transcript, speakers and notes, and its summary as saved in `summary.md`. Ask still works on it. To fix a past meeting, use the `voxtype meeting` commands, the Quickshell view or `voxtype meeting watch`. A meeting that starts while you are reading one takes over the window.
+
+Every button runs the matching `voxtype meeting` command, so it behaves as the command line does. A second `voxtype meeting view` brings the open window forward instead of opening another. A window the daemon opened at the start of a meeting closes if the daemon is stopped or restarted (it runs as part of the voxtype service); one you opened yourself reconnects.
+
+Choosing `gtk4` (or `terminal` or `none`) on a Quickshell desktop keeps the Quickshell view from opening on its own, and `voxtype meeting view` opens the chosen view instead.
 
 Which view opens is `[meeting] view`:
 

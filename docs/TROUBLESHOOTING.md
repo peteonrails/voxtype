@@ -1791,13 +1791,16 @@ RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -iE "echo"
 
 ## No Meeting Window Appears
 
-`voxtype meeting view` opens the view `[meeting] view` resolves to, and when nothing can open it says why:
+When a meeting starts, the daemon opens the view `[meeting] view` resolves to (the Quickshell view opens itself), and `voxtype meeting view` opens it by hand. Run `voxtype meeting view` first: when nothing can open it says why.
 
 - **"No meeting view to open (auto: no Quickshell; voxtype-meetings-gtk4 is not installed)".** Install the deb/rpm, which ship the window in `/usr/lib/voxtype/`, or watch in a terminal with `voxtype meeting watch`.
 - **"…voxtype-meetings-gtk4 is installed but libgtk-4 is missing".** Install GTK 4: `libgtk-4-1` (Debian, Ubuntu), `gtk4` (Fedora, Arch).
 - **"no display".** The command ran without `WAYLAND_DISPLAY` or `DISPLAY` (over SSH, or from a service started before the desktop). Run `voxtype meeting watch` there instead.
 - **Quickshell is installed but you want the window.** `voxtype config set meeting.view gtk4`.
 - **On Quickshell, nothing happens.** The Quickshell view opens only in a running Omarchy shell or voxtype's standalone shell (`voxtype setup quickshell`).
+- **`voxtype meeting view` works, but nothing opens when a meeting starts.** Check `voxtype config get meeting.show_view_on_start` (it must be `true`), then the daemon's log, which says what it decided for each meeting: `journalctl --user -u voxtype | grep "Meeting view on start"`. "no display" there means the service has no `WAYLAND_DISPLAY` or `DISPLAY`: import them into the user session (`systemctl --user import-environment WAYLAND_DISPLAY DISPLAY`, which most compositors' autostart does) and restart the daemon.
+- **Both the Quickshell view and the window open.** The Quickshell view opens on its own unless `[meeting] view` is `gtk4`, `terminal` or `none`; set one of those, and run `omarchy-restart-shell` (or restart your Quickshell shell) once after upgrading so it reads the setting.
+- **The window closed when the daemon restarted.** A window the daemon opened runs as part of the voxtype service and stops with it. Open it again with `voxtype meeting view`, which starts it on its own.
 
 ## Meeting Assistant: Summaries Don't Appear
 

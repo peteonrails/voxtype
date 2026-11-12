@@ -5932,6 +5932,15 @@ impl Daemon {
                             // diarization info, started_at), ahead of this
                             // event reaching the select loop. Nothing to do.
                             tracing::info!("Meeting event: started {}", meeting_id);
+                            #[cfg(unix)]
+                            {
+                                let view = self.config.meeting.view.clone();
+                                let show = self.config.meeting.show_view_on_start;
+                                tokio::task::spawn_blocking(move || {
+                                    let what = crate::meeting::view::frontend::open_on_start(&view, show);
+                                    tracing::info!("Meeting view on start: {}", what);
+                                });
+                            }
                         }
                         Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
                             tracing::debug!("Meeting event: chunk {} processed with {} segments",
