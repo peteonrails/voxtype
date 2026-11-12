@@ -191,6 +191,11 @@ pub struct EchoLines {
     pub moved: Vec<u32>,
 }
 
+/// [`Transcript::drop_opening_echoes`]: the longest line it looks at...
+pub const OPENING_ECHO_MAX_WORDS: usize = 8;
+/// ...and how many of its first words must be the remote's, in a row.
+pub const OPENING_ECHO_WORDS: usize = 3;
+
 impl Transcript {
     /// Create a new empty transcript
     pub fn new() -> Self {
@@ -324,6 +329,56 @@ impl Transcript {
                 dropped.push(seg.id);
             }
             !hallucination
+        });
+        dropped
+    }
+
+    /// Drop short microphone lines among `quiet_ids` (lines whose audio
+    /// showed no voice of yours) that open with words a loopback line
+    /// overlapping them holds: at most [`OPENING_ECHO_MAX_WORDS`] words, the
+    /// first [`OPENING_ECHO_WORDS`] of them in a row in that loopback line.
+    /// Returns the ids dropped.
+    ///
+    /// A decoder fed a faint echo can start on the remote's words and then
+    /// run off into a phrase of its own ("I don't know what you're talking
+    /// about." over the remote's "...I don't know if you've followed..."),
+    /// so the four-word phrase match never sees enough of the remote in it.
+    pub fn drop_opening_echoes(&mut self, quiet_ids: &std::collections::HashSet<u32>) -> Vec<u32> {
+        use crate::meeting::echo::{normalize_word, ECHO_TOLERANCE_MS};
+        let words = |text: &str| -> Vec<String> {
+            text.split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect()
+        };
+        let remote: Vec<(u64, u64, Vec<String>)> = self
+            .segments
+            .iter()
+            .filter(|s| s.source == AudioSource::Loopback && !s.deleted)
+            .map(|s| (s.start_ms, s.end_ms, words(&s.text)))
+            .collect();
+        let mut dropped = Vec::new();
+        self.segments.retain(|seg| {
+            let mine = words(&seg.text);
+            let echo = seg.source == AudioSource::Microphone
+                && !seg.deleted
+                && quiet_ids.contains(&seg.id)
+                && (OPENING_ECHO_WORDS..=OPENING_ECHO_MAX_WORDS).contains(&mine.len())
+                && remote.iter().any(|(start, end, said)| {
+                    seg.start_ms < end + ECHO_TOLERANCE_MS
+                        && *start < seg.end_ms + ECHO_TOLERANCE_MS
+                        && said
+                            .windows(OPENING_ECHO_WORDS)
+                            .any(|w| w == &mine[..OPENING_ECHO_WORDS])
+                });
+            if echo {
+                tracing::debug!(
+                    "Dropping a short line that opens with the remote's words: {:?}",
+                    seg.text
+                );
+                dropped.push(seg.id);
+            }
+            !echo
         });
         dropped
     }
@@ -1518,6 +1573,44 @@ mod tests {
         assert_eq!(t.drop_no_speech_lines(&quiet), vec![1]);
         let ids: Vec<u32> = t.segments.iter().map(|s| s.id).collect();
         assert_eq!(ids, vec![0, 2, 3, 4]);
+    }
+
+    /// The lines from Pete's call with Chad, after the loop collapsed.
+    #[test]
+    fn a_short_quiet_line_opening_with_the_remote_words_is_dropped() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            250,
+            899_940,
+            922_080,
+            AudioSource::Loopback,
+            "All right. Next big item on here is the Priola law opt out. I don't know if \
+             you've followed the channel or if you're in the Priola law.",
+        ));
+        let line = |id, text: &str| said(id, 903_520, 919_670, AudioSource::Microphone, text);
+        // Quiet, short, opens with "I don't know": dropped.
+        t.add_segment(line(248, "I don't know what you're talking about."));
+        // The same, but your voice: not quiet, kept.
+        t.add_segment(line(1, "I don't know what you're talking about."));
+        // Quiet but longer than eight words: kept.
+        t.add_segment(line(
+            2,
+            "I don't know what you are talking about here at all, Chad.",
+        ));
+        // Quiet, short, but only two of the remote's words open it: kept.
+        t.add_segment(line(3, "I don't think so."));
+        // Quiet, short, opens with the remote's words, but long after: kept.
+        t.add_segment(said(
+            4,
+            990_000,
+            992_000,
+            AudioSource::Microphone,
+            "I don't know what.",
+        ));
+        let quiet = [248, 2, 3, 4].into_iter().collect();
+        assert_eq!(t.drop_opening_echoes(&quiet), vec![248]);
+        let ids: Vec<u32> = t.segments.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![250, 1, 2, 3, 4]);
     }
 
     #[test]

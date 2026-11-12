@@ -37,6 +37,7 @@ pub mod meeting_recorder;
 pub mod notes;
 pub mod notice;
 pub mod playback;
+pub mod repeat;
 pub mod retained_audio;
 pub mod retranscribe;
 pub mod start;
@@ -685,6 +686,18 @@ impl MeetingDaemon {
                         }
                     }
                 }
+                if !quiet_ids.is_empty() {
+                    let dropped = meeting.transcript.drop_opening_echoes(&quiet_ids);
+                    if !dropped.is_empty() {
+                        tracing::info!(
+                            "Echo guard: dropped {} short microphone line(s) that open with the remote's words",
+                            dropped.len()
+                        );
+                        for id in dropped {
+                            echo_ids.remove(&id);
+                        }
+                    }
+                }
                 if !echo_ids.is_empty() {
                     let settled = meeting.transcript.resolve_echo_lines(&echo_ids);
                     if !settled.dropped.is_empty() || !settled.moved.is_empty() {
@@ -950,6 +963,20 @@ impl MeetingDaemon {
             // segment to avoid losing useful context when a chunk ends with silence
             if let Some(last_seg) = result.segments.iter().rfind(|s| !s.text.is_empty()) {
                 self.last_chunk_text.insert(source, last_seg.text.clone());
+            }
+        }
+
+        // A decoder stuck repeating a phrase, which no one says three
+        // times running: keep one instance.
+        for segment in &mut result.segments {
+            if let Some(collapsed) = repeat::collapse(&segment.text) {
+                tracing::info!(
+                    "Collapsed a repeated phrase in a {} line: {:?} (was {} words)",
+                    source,
+                    collapsed,
+                    segment.text.split_whitespace().count()
+                );
+                segment.text = collapsed;
             }
         }
 
@@ -1826,6 +1853,7 @@ mod tests {
     /// A line of yours added to the demo: said at `at` seconds, with the
     /// level of the demo's own voice from `from_ms` for `frames` frames,
     /// times `gain`.
+    #[derive(Clone, Copy)]
     struct Reply<'a> {
         at: f32,
         text: &'a str,
@@ -2216,6 +2244,75 @@ mod tests {
             .await;
         let mut expected = demo_lines(&[]);
         expected.insert(3, "Remote: Thank you.".to_string());
+        assert_eq!(saved, expected, "{saved:#?}");
+        assert_eq!(live, saved);
+    }
+
+    /// Pete's call with Chad: the faint echo of Chad's line sent the engine
+    /// into a loop on the mic, "I don't know what you're talking about."
+    /// six times, sharing only "I don't know" with Chad's line. Here the
+    /// echo of Dana's second line (".. I think we can ship with that ..")
+    /// comes out as a seven-word phrase five times over, too quiet to read
+    /// as echo by level. The loop collapses to one instance, and that opens
+    /// with three of Dana's words in a row, so it goes.
+    fn looping_room() -> Room {
+        Room {
+            gain: Some(0.05),
+            delay_ms: Some(60),
+            reverb: false,
+            heard: Some(Box::new(|n, _| {
+                (n == 1).then(|| {
+                    "I think we should not do that. "
+                        .repeat(5)
+                        .trim()
+                        .to_string()
+                })
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decoder_loop_on_faint_echo_collapses_and_goes() {
+        let mut h = harness().await;
+        let (saved, live) = ReleaseSync::load_in(&looping_room(), &[]).run(&mut h).await;
+        assert_eq!(saved, demo_lines(&[]), "{saved:#?}");
+        assert_eq!(live, saved);
+
+        // Without the guard the line stays, collapsed all the same.
+        let mut h = harness().await;
+        h.daemon.config.echo_rules.guard = false;
+        let (saved, _) = ReleaseSync::load_in(&looping_room(), &[]).run(&mut h).await;
+        assert!(
+            saved.contains(&"You: I think we should not do that.".to_string()),
+            "{saved:#?}"
+        );
+    }
+
+    /// Your own words over the remote stay yours even when they open with
+    /// the remote's ("I think we should wait." while Dana says "I think we
+    /// can ship"), and a phrase said twice is left as said.
+    #[tokio::test]
+    async fn your_lines_that_open_like_the_remote_or_repeat_twice_stay() {
+        let mut h = harness().await;
+        let replies = [
+            Reply {
+                at: 26.0,
+                text: "I think we should wait.",
+                from_ms: 18150,
+                frames: 15,
+                gain: 1.5,
+            },
+            thank_you(13.0, 1.0),
+        ];
+        let mut replies = replies.to_vec();
+        replies[1].text = "Ship it now. Ship it now.";
+        let (saved, live) = ReleaseSync::load_in(&cancelled_room(), &replies)
+            .run(&mut h)
+            .await;
+        let expected = demo_lines(&[
+            ("You: Ship it now. Ship it now.", 3),
+            ("You: I think we should wait.", 5),
+        ]);
         assert_eq!(saved, expected, "{saved:#?}");
         assert_eq!(live, saved);
     }
