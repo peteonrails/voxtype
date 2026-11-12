@@ -158,6 +158,30 @@ fn without_the_daemon_the_command_opens_the_audio_itself() {
     assert_two_second_check(&events(&out.stdout));
 }
 
+/// With info logging asked for, the standalone check's logs (the echo
+/// canceller, the loopback source, the parec captures) still stay off its
+/// NDJSON: every stdout line is an event.
+#[test]
+fn the_ndjson_holds_events_only_whatever_the_log_level() {
+    let Some(w) = World::new() else {
+        return;
+    };
+    let out = w
+        .command(&["meeting", "soundcheck", "--seconds", "1", "--json"])
+        .env("RUST_LOG", "info")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // events() panics on any line that is not JSON.
+    let events = events(&out.stdout);
+    assert!(events.iter().all(|e| e["event"].is_string()), "{events:?}");
+    assert_eq!(events.last().unwrap()["state"], "stopped");
+}
+
 #[test]
 fn with_the_daemon_running_the_daemon_does_the_check() {
     let Some(w) = World::new() else {
