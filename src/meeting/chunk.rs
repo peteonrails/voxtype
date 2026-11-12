@@ -820,6 +820,40 @@ mod tests {
             eprintln!("skipping: VOXTYPE_TEST_PARAKEET_MODEL is not set");
             return;
         };
+        timed_lines_beat_one_line_per_utterance(Arc::new(
+            crate::transcribe::parakeet::ParakeetTranscriber::new(&crate::config::ParakeetConfig {
+                model,
+                ..Default::default()
+            })
+            .unwrap(),
+        ));
+    }
+
+    /// The same through voxtype-gguf-worker and transcribe.cpp's word times:
+    /// `VOXTYPE_TEST_PARAKEET_GGUF_MODEL=/path/model.gguf
+    /// VOXTYPE_GGUF_WORKER=target/debug/voxtype-gguf-worker cargo test
+    /// --features parakeet-gguf parakeet_gguf_meeting -- --nocapture`.
+    #[cfg(feature = "parakeet-gguf")]
+    #[test]
+    fn parakeet_gguf_meeting_lines_follow_its_word_times() {
+        let Ok(model) = std::env::var("VOXTYPE_TEST_PARAKEET_GGUF_MODEL") else {
+            eprintln!("skipping: VOXTYPE_TEST_PARAKEET_GGUF_MODEL is not set");
+            return;
+        };
+        timed_lines_beat_one_line_per_utterance(Arc::new(
+            crate::transcribe::gguf_subprocess::GgufSubprocessTranscriber::parakeet(
+                &crate::config::ParakeetConfig {
+                    model,
+                    gguf_backend: "cpu".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ));
+    }
+
+    #[cfg(any(feature = "parakeet", feature = "parakeet-gguf"))]
+    fn timed_lines_beat_one_line_per_utterance(parakeet: Arc<dyn Transcriber>) {
         let read = |path: &str| -> Vec<f32> {
             hound::WavReader::open(path)
                 .unwrap()
@@ -827,13 +861,6 @@ mod tests {
                 .map(|s| s.unwrap() as f32 / 32768.0)
                 .collect()
         };
-        let parakeet: Arc<dyn Transcriber> = Arc::new(
-            crate::transcribe::parakeet::ParakeetTranscriber::new(&crate::config::ParakeetConfig {
-                model,
-                ..Default::default()
-            })
-            .unwrap(),
-        );
         /// The engine as meetings saw it before: one line per utterance.
         struct Untimed(Arc<dyn Transcriber>);
         impl Transcriber for Untimed {

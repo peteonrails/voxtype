@@ -49,6 +49,39 @@ use error::TranscribeError;
 /// One loaded GGUF model, ready to transcribe 16 kHz mono audio.
 pub(crate) trait Transcriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError>;
+
+    /// The transcript and, when the model times them, its words. Models
+    /// without word times (Cohere's GGUF has none) answer with text only.
+    fn transcribe_words(&self, samples: &[f32]) -> Result<Reply, TranscribeError> {
+        Ok(Reply {
+            text: self.transcribe(samples)?,
+            words: Vec::new(),
+        })
+    }
+}
+
+/// One answer to voxtype: the text, and the words with their times in
+/// milliseconds from the start of the clip (empty when there are none).
+pub(crate) struct Reply {
+    pub text: String,
+    pub words: Vec<(String, i64, i64)>,
+}
+
+impl Reply {
+    /// The protocol line. `words` is only sent when there are some, so a
+    /// voxtype that predates it reads the same `{"ok":true,"text":..}` as
+    /// ever, and a voxtype that knows it sees no field from an old worker.
+    fn to_json(&self) -> serde_json::Value {
+        let mut line = serde_json::json!({ "ok": true, "text": self.text });
+        if !self.words.is_empty() {
+            line["words"] = self
+                .words
+                .iter()
+                .map(|(text, t0, t1)| serde_json::json!({ "text": text, "t0": t0, "t1": t1 }))
+                .collect();
+        }
+        line
+    }
 }
 
 const READY_SIGNAL: &str = "READY";
@@ -154,8 +187,8 @@ fn main() {
             .map(|c| f32::from_le_bytes(*c))
             .collect();
 
-        let response = match transcriber.transcribe(&samples) {
-            Ok(text) => serde_json::json!({ "ok": true, "text": text }),
+        let response = match transcriber.transcribe_words(&samples) {
+            Ok(reply) => reply.to_json(),
             Err(e) => {
                 eprintln!("[gguf-worker] transcription failed: {e}");
                 failure(&e)
@@ -175,6 +208,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_travel_only_when_there_are_some() {
+        let plain = Reply {
+            text: "Hello there.".into(),
+            words: Vec::new(),
+        };
+        assert_eq!(
+            plain.to_json(),
+            serde_json::json!({ "ok": true, "text": "Hello there." })
+        );
+        let timed = Reply {
+            text: "Hello there.".into(),
+            words: vec![("Hello".into(), 320, 560), ("there.".into(), 600, 980)],
+        };
+        assert_eq!(
+            timed.to_json(),
+            serde_json::json!({ "ok": true, "text": "Hello there.", "words": [
+                { "text": "Hello", "t0": 320, "t1": 560 },
+                { "text": "there.", "t0": 600, "t1": 980 },
+            ]})
+        );
+    }
 
     #[test]
     fn rejects_an_unknown_engine() {
