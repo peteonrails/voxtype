@@ -9,6 +9,10 @@
 # This runs only when a maintainer changes the clip. Voxtype itself never
 # calls ElevenLabs: the WAV ships in the binary and plays offline.
 #
+# Afterwards, update the size and sha256 in assets/sounds/README.md, which
+# also holds the credit and licensing notes for the clip. Commit the WAV as
+# rendered: never strip provenance metadata or watermarks from it.
+#
 # Usage:
 #   ELEVENLABS_API_KEY=... scripts/render-meeting-announcement.sh [out.wav]
 #
@@ -54,3 +58,5 @@ with wave.open(sys.argv[2], "wb") as w:
     w.writeframes(pcm)
 print(f"Wrote {sys.argv[2]}: {len(pcm) / 48000:.1f} s")
 EOF
+sha256sum "$out"
+echo "Update the size and sha256 in assets/sounds/README.md."

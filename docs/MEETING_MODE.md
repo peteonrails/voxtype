@@ -140,7 +140,7 @@ announcement_file = "~/.config/voxtype/announcement-de.wav"
 
 `--announcement-file` and `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` do the same. A file that does not exist refuses the start, with the fix. Voxtype does not know what your clip says, so it keeps out of the transcript any line that falls mostly within the time the clip played.
 
-The built-in clip is in the voxtype binary and plays offline; voxtype never calls a speech service for it.
+The built-in clip is in the voxtype binary and plays offline; voxtype never calls a speech service for it. It is AI-generated speech: the announcement voice was rendered with ElevenLabs text-to-speech (voice: Jessica). See `assets/sounds/README.md`.
 
 ---
 
