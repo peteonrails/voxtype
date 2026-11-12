@@ -1650,6 +1650,25 @@ No result is shown for cancelled recordings, accidental taps, or
 
 ## Meeting Audio and Post-Meeting Command
 
+### The other side shows up under You on speakers
+
+On speakers your microphone hears what the speakers play, so the other side of the call, or a video playing during the meeting, can be transcribed as You. Voxtype removes it with PipeWire's echo canceller when the meeting's output is speakers (`[meeting.audio] echo_cancel = "auto"`, the default).
+
+Check which echo handling the meeting used:
+
+```bash
+voxtype meeting status --json      # "echo_cancel": "aec", "gtcrn" or "off"
+journalctl --user -u voxtype | grep -i "echo"
+```
+
+- **`gtcrn` on speakers with "the output is headphones"**: voxtype read your default output as headphones (its active port, its form factor, or Bluetooth). Set `echo_cancel = "aec"` to use the canceller anyway.
+- **`gtcrn` with "Echo cancellation could not start"**: the canceller needs PipeWire's echo-cancel module and its WebRTC plugin. On Arch and Omarchy they come with `libpipewire` and `pipewire-audio`; elsewhere, check that `libpipewire-module-echo-cancel.so` and `aec/libspa-aec-webrtc.so` exist under your PipeWire library directories. PipeWire releases too old for the canceller's monitor mode also fall back. `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own error.
+- **`gtcrn` with "mic_device names a specific device"**: with `auto`, a specific `meeting.audio.mic_device` keeps the canceller off. Use `echo_cancel = "aec"` and set `mic_device` to a PipeWire source name from `pactl list short sources`.
+- **`off`**: `echo_cancel` is `off` or `disabled`, or it is `gtcrn` and the GTCRN model is missing.
+
+The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
+
+
 ### Meeting audio is saved as WAV instead of Opus
 
 With `[meeting] retain_audio = true`, voxtype encodes the audio with

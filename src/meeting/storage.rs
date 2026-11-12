@@ -285,6 +285,16 @@ impl MeetingStorage {
             self.conn
                 .execute_batch("ALTER TABLE meetings ADD COLUMN url TEXT;")?;
         }
+        let has_echo_cancel = self
+            .conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('meeting_context') WHERE name = 'echo_cancel'",
+            )?
+            .exists([])?;
+        if !has_echo_cancel {
+            self.conn
+                .execute_batch("ALTER TABLE meeting_context ADD COLUMN echo_cancel TEXT;")?;
+        }
         Ok(())
     }
 
@@ -1197,8 +1207,8 @@ impl MeetingStorage {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO meeting_context
-                (meeting_id, engine, model, diarization, voxtype_version)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+                (meeting_id, engine, model, diarization, voxtype_version, echo_cancel)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
             params![
                 meeting_id.to_string(),
@@ -1206,6 +1216,7 @@ impl MeetingStorage {
                 context.model,
                 context.diarization,
                 context.voxtype_version,
+                context.echo_cancel,
             ],
         )?;
         self.refresh_manifest(meeting_id);
@@ -1219,7 +1230,7 @@ impl MeetingStorage {
             .conn
             .query_row(
                 r#"
-                SELECT engine, model, diarization, voxtype_version
+                SELECT engine, model, diarization, voxtype_version, echo_cancel
                 FROM meeting_context WHERE meeting_id = ?1
                 "#,
                 params![meeting_id.to_string()],
@@ -1229,6 +1240,7 @@ impl MeetingStorage {
                         model: row.get(1)?,
                         diarization: row.get(2)?,
                         voxtype_version: row.get(3)?,
+                        echo_cancel: row.get(4)?,
                     })
                 },
             )
