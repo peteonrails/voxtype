@@ -426,7 +426,8 @@ The fields:
 - `engine`, `model`: the transcription engine and model the meeting used,
   including a `meeting start --engine` or `--model` override.
   `voxtype_version` is the version that recorded the meeting.
-- `speakers`: each speaker in the transcript, sorted by `id`. `id` is the
+- `speakers`: each speaker with at least one line in the transcript, sorted
+  by `id`; lines deleted with `meeting delete-line` do not count. `id` is the
   speaker as the diarizer named it (the `speaker_id` in `transcript.json`, or
   `You`/`Remote` without diarization); `name` is the name given with
   `voxtype meeting label`, or `id` when there is none. Two speakers given the
@@ -440,9 +441,10 @@ The fields:
   name.
 - `audio_retained`: whether the meeting kept its audio (`retain_audio`).
 
-The manifest is written when a meeting starts and rewritten when it stops,
-when its notes or summary change, and when a daemon restart completes a
-meeting a crash left open. To act once a meeting is finished, use
+The manifest is written when a meeting starts and rewritten after every
+chunk, when it stops, when its transcript is edited (labels, moves, text
+edits, deleted lines), when its notes or summary change, and when a daemon
+restart completes a meeting a crash left open. To act once a meeting is finished, use
 `post_meeting_command` (see [Meeting Mode](MEETING_MODE.md#running-a-command-after-a-meeting)),
 which runs after the final rewrite and gets the folder and the manifest's
 path in `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST`.

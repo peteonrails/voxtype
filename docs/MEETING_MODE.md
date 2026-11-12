@@ -308,7 +308,7 @@ Each meeting folder holds:
 | `mic.opus`, `loopback.opus`, `mixed.opus` | The meeting's audio, with `retain_audio = true` (below) |
 | `metadata.json` | Voxtype's own record of the meeting; read `meeting.json` instead |
 
-`meeting.json` is written when the meeting starts and rewritten when it stops, when its notes or summary change, and when a daemon restart finishes a meeting a crash left open.
+`meeting.json` is written when the meeting starts and kept current after every chunk, every edit, and every change to the notes or summary; a daemon restart finishes a meeting a crash left open.
 
 ### Keeping the Audio
 
