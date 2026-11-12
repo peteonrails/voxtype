@@ -631,8 +631,15 @@ impl MeetingDaemon {
         let mut echo_ids = std::collections::HashSet::new();
         // Lines the audio measured and found no voice of yours in.
         let mut quiet_ids = std::collections::HashSet::new();
+        // Loopback lines with no speech on the loopback under them.
+        let mut silent_remote_ids = std::collections::HashSet::new();
         if let Some(probe) = &probe {
             for seg in done.iter().flat_map(|(_, segments)| segments) {
+                if seg.source == AudioSource::Loopback
+                    && !probe.remote_speech(seg.start_ms, seg.end_ms)
+                {
+                    silent_remote_ids.insert(seg.id);
+                }
                 if seg.source != AudioSource::Microphone {
                     continue;
                 }
@@ -648,10 +655,22 @@ impl MeetingDaemon {
         }
         if !rules.guard {
             quiet_ids.clear();
+            silent_remote_ids.clear();
         }
         if had_loopback || !echo_ids.is_empty() || !quiet_ids.is_empty() {
             let own = &self.own_voice_ids;
             if let Some(ref mut meeting) = self.current_meeting {
+                if !silent_remote_ids.is_empty() {
+                    let dropped = meeting
+                        .transcript
+                        .drop_remote_no_speech_lines(&silent_remote_ids);
+                    if !dropped.is_empty() {
+                        tracing::info!(
+                            "Echo guard: dropped {} no-speech phrase(s) on the loopback with no remote speech under them",
+                            dropped.len()
+                        );
+                    }
+                }
                 // A no-speech phrase is no one's line: dropped before an
                 // echo line could move it to the remote speaker.
                 if !quiet_ids.is_empty() {
@@ -2136,6 +2155,68 @@ mod tests {
             .run(&mut h)
             .await;
         assert_eq!(saved, demo_lines(&[("You: Thank you.", 5)]), "{saved:#?}");
+        assert_eq!(live, saved);
+    }
+
+    impl ReleaseSync {
+        /// A line on the loopback, `text`, at `at` seconds for `frames`
+        /// frames at a steady `level`, with no echo of it on the mic (the
+        /// canceller took it out).
+        fn with_remote_line(mut self, at: f32, text: &str, frames: usize, level: f32) -> Self {
+            let freq = 4100.0 + 200.0 * self.lines.len() as f32;
+            let first = (at / 0.03) as usize * Self::FRAME;
+            for n in first..(first + frames * Self::FRAME).min(self.loopback.len()) {
+                let t = n as f32 / 16000.0;
+                self.loopback[n] += std::f32::consts::SQRT_2
+                    * level
+                    * (2.0 * std::f32::consts::PI * freq * t).sin();
+            }
+            self.lines.push(DemoLine {
+                freq,
+                text: Some(text.to_string()),
+            });
+            self
+        }
+    }
+
+    /// Pete's Zoom call had a "Thank you." on the far side at 00:56, as the
+    /// call was joined, with nobody speaking: the engine's no-speech phrase
+    /// for near-silence or a tone on the loopback. Here it comes from sound
+    /// just under the meeting's VAD level, between two remote lines, and
+    /// the guard drops it; so does a "you" the same way.
+    #[tokio::test]
+    async fn a_no_speech_phrase_on_a_silent_loopback_is_dropped() {
+        let load = || {
+            ReleaseSync::load_in(&cancelled_room(), &[])
+                .with_remote_line(18.0, "Thank you.", 20, 0.008)
+                .with_remote_line(20.5, "you", 10, 0.008)
+        };
+        let mut h = harness().await;
+        let (saved, live) = load().run(&mut h).await;
+        assert_eq!(saved, demo_lines(&[]), "{saved:#?}");
+        assert_eq!(live, saved);
+
+        let mut h = harness().await;
+        h.daemon.config.echo_rules.guard = false;
+        let (saved, _) = load().run(&mut h).await;
+        assert!(
+            saved.contains(&"Remote: Thank you.".to_string()),
+            "{saved:#?}"
+        );
+        assert!(saved.contains(&"Remote: you".to_string()), "{saved:#?}");
+    }
+
+    /// A "Thank you." the far side really says, at speaking level, stays.
+    #[tokio::test]
+    async fn a_thank_you_the_remote_says_stays() {
+        let mut h = harness().await;
+        let (saved, live) = ReleaseSync::load_in(&cancelled_room(), &[])
+            .with_remote_line(18.0, "Thank you.", 20, 0.08)
+            .run(&mut h)
+            .await;
+        let mut expected = demo_lines(&[]);
+        expected.insert(3, "Remote: Thank you.".to_string());
+        assert_eq!(saved, expected, "{saved:#?}");
         assert_eq!(live, saved);
     }
 
