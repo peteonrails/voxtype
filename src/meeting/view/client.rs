@@ -177,10 +177,13 @@ mod tests {
             Feed::Line(r#"{"event":"status","status":"paused"}"#.into())
         );
 
-        // The daemon goes away and comes back.
-        drop(conn);
+        // The daemon goes away and comes back. Close the listening socket
+        // before the connection: the other order lets the reader, seeing
+        // end of file, reconnect to the old listener in between and report
+        // a Connected and a Disconnected that belong to no daemon.
         drop(listener);
         std::fs::remove_file(&path).unwrap();
+        drop(conn);
         assert_eq!(recv(&rx), Feed::Disconnected);
         let listener = UnixListener::bind(&path).unwrap();
         let (mut conn, _) = listener.accept().unwrap();
