@@ -127,11 +127,18 @@ impl MeetingHudState {
         }
     }
 
-    /// Replace the backlog's copy of a segment that changed after it was sent.
+    /// Replace the backlog's copy of a segment that changed after it was
+    /// sent, or put back one that was deleted and is now restored.
     pub fn update_segment(&mut self, segment: &TranscriptSegment) {
-        if let Some(existing) = self.segments.iter_mut().find(|s| s.id == segment.id) {
-            *existing = segment.clone();
+        match self.segments.iter_mut().find(|s| s.id == segment.id) {
+            Some(existing) => *existing = segment.clone(),
+            None => self.push_segments(std::slice::from_ref(segment)),
         }
+    }
+
+    /// Drop a deleted segment from the backlog.
+    pub fn remove_segment(&mut self, segment_id: u32) {
+        self.segments.retain(|s| s.id != segment_id);
     }
 }
 
@@ -162,6 +169,10 @@ enum WireEvent {
     },
     SegmentUpdated {
         segment: TranscriptSegment,
+    },
+    SegmentDeleted {
+        meeting_id: String,
+        segment_id: u32,
     },
     NotesUpdated {
         meeting_id: String,
@@ -326,6 +337,15 @@ impl MeetingEventHub {
     pub fn publish_segment_updated(&self, segment: &TranscriptSegment) {
         self.publish(WireEvent::SegmentUpdated {
             segment: segment.clone(),
+        });
+    }
+
+    /// Broadcast a `segment_deleted` event: a segment already sent was
+    /// deleted with `meeting delete-line`.
+    pub fn publish_segment_deleted(&self, meeting_id: &str, segment_id: u32) {
+        self.publish(WireEvent::SegmentDeleted {
+            meeting_id: meeting_id.to_string(),
+            segment_id,
         });
     }
 
@@ -875,6 +895,13 @@ mod tests {
         assert_eq!(value["segment"]["annotation"]["text"], "check this");
         assert_eq!(value["segment"]["annotation"]["highlight"], true);
 
+        hub.publish_segment_deleted("abc", 28);
+        let value = read_line(&mut client).await;
+        assert_eq!(
+            value,
+            serde_json::json!({"event": "segment_deleted", "meeting_id": "abc", "segment_id": 28})
+        );
+
         let updated_at = chrono::DateTime::parse_from_rfc3339("2026-11-11T20:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -890,6 +917,24 @@ mod tests {
         );
 
         hub.cleanup();
+    }
+
+    #[test]
+    fn hud_backlog_drops_a_deleted_line_and_takes_it_back_in_order() {
+        let seg =
+            |id: u32, start: u64| TranscriptSegment::new(id, start, start + 500, String::new(), 0);
+        let mut hud = MeetingHudState::idle();
+        hud.push_segments(&[seg(0, 0), seg(1, 1_000), seg(2, 2_000)]);
+        hud.remove_segment(1);
+        assert_eq!(
+            hud.segments.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        hud.update_segment(&seg(1, 1_000));
+        assert_eq!(
+            hud.segments.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]

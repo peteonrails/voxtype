@@ -127,6 +127,11 @@ Item {
           else if (s === "agent-missing") tc.driveAgentMissing()
           else if (s === "old-voxtype") tc.driveOldVoxtype()
           else if (s === "copy") tc.driveCopy()
+          else if (s === "line-edit") tc.driveLineEdit()
+          else if (s === "line-delete") tc.driveLineDelete(false)
+          else if (s === "line-delete-flag") tc.driveLineDelete(true)
+          else if (s === "export") tc.driveExport()
+          else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
@@ -243,6 +248,8 @@ Item {
         lv.cacheBuffer = 100000
         wait(60)
       }
+      // Rows removed or inserted this turn are laid out before reading.
+      lv.forceLayout()
       var out = []
       for (var i = 0; i < lv.count; i++) {
         var item = lv.itemAtIndex(i)
@@ -1267,6 +1274,126 @@ Item {
       click(scopy, "Copy without wl-copy")
       waitFor(function() { return shown(find(view(), "actionError")) }, "the reason")
       check(view().actionError === "Copying needs /nonexistent/wl-copy (the wl-clipboard package), which is not installed.", "message: " + view().actionError)
+    }
+
+    // ------------------------------------------------------------ after the call
+
+    function lineAction(i, name) {
+      var item = lineItem(i)
+      mouseMove(item, 30, 4)
+      var act = find(item, name)
+      waitFor(function() { return act && shown(act) }, name + " on hover of line " + i)
+      mouseClick(act, act.width / 2, act.height / 2)
+    }
+
+    function driveLineEdit() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "lineEditButton")
+      var field = find(lineItem(1), "lineEditField")
+      waitFor(function() { return field.visible && field.activeFocus }, "inline editor focused")
+      check(field.text === "Yes, loud and clear.", "editor holds the text: " + field.text)
+      check(!find(lineItem(1), "lineActions").visible, "no actions while editing")
+      shot("editing")
+      field.text = "Yes, very loud and clear."
+      keyClick(Qt.Key_Return)
+      check(!field.visible && lines()[1][2] === "Yes, very loud and clear.", "saved at once: " + JSON.stringify(lines()[1]))
+      waitFor(idleCli, "edit finished")
+      wait(300)
+      check(lines()[1][2] === "Yes, very loud and clear.", "kept after the daemon: " + lines()[1][2])
+
+      // Escape leaves it as it was.
+      lineAction(2, "lineEditButton")
+      field = find(lineItem(2), "lineEditField")
+      waitFor(function() { return field.activeFocus }, "second editor focused")
+      field.text = "Something else"
+      keyClick(Qt.Key_Escape)
+      check(!field.visible && lines()[2][2] === "Great, let's start with the release.", "Escape cancels: " + lines()[2][2])
+      check(host.viewOpen(), "Escape in the editor does not close the view")
+
+      // A refused edit goes back.
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ fail: { edit: "Error: segment 4 is locked." } })])
+      lineAction(3, "lineEditButton")
+      field = find(lineItem(3), "lineEditField")
+      waitFor(function() { return field.activeFocus }, "third editor focused")
+      field.text = "It went red again."
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      check(view().actionError === "segment 4 is locked.", "message: " + view().actionError)
+      check(lines()[3][2] === "The build went green overnight.", "rolled back: " + lines()[3][2])
+    }
+
+    function driveLineDelete(flag) {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "lineDeleteButton")
+      check(lines().length === 3 && lines()[1][2] === "Great, let's start with the release.", "gone at once: " + JSON.stringify(lines()))
+      var bar = find(view(), "undoBar")
+      check(shown(bar), "Undo offered")
+      if (!flag) shot("undo")
+      click(find(bar, "undoButton"), "Undo")
+      check(lines().length === 4 && lines()[1][2] === "Yes, loud and clear.", "back in its place")
+      check(!shown(bar), "Undo bar gone")
+      wait(300)
+      check(idleCli(), "nothing ran for an undone delete")
+
+      lineAction(1, "lineDeleteButton")
+      check(lines().length === 3, "deleted again")
+      if (flag) {
+        // Closing the view accepts it at once.
+        var close = find(view(), "closeButton")
+        tc.parent = host
+        click(close, "Close")
+        waitFor(function() { return !host.viewOpen() }, "closed")
+        waitFor(function() { return idleCli() && host.ctrl().cli.busy === "" }, "delete ran on close")
+        wait(400)
+        openView()
+        waitFor(function() { return lines().length === 3 }, "still gone after reopening (hello without it)")
+      } else {
+        waitFor(function() { return !shown(bar) }, "the window closed", 8000)
+        waitFor(idleCli, "delete ran")
+        wait(400)
+        check(lines().length === 3, "stays gone when the daemon confirms")
+      }
+      // A line deleted elsewhere goes too, whichever shape the daemon uses.
+      ctl({ cmd: "delete", segment_id: 4, shape: flag ? "flag" : "event" })
+      waitFor(function() { return lines().length === 2 }, "deleted elsewhere")
+      check(lines()[1][2] === "Great, let's start with the release.", "the right line went: " + JSON.stringify(lines()))
+    }
+
+    function driveExport() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var menu = find(view(), "moreMenu")
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return menu.visible }, "More menu")
+      waitFor(function() { return find(menu, "openMeetingFolder").enabled }, "the meeting's folder is known")
+      shot("more-menu")
+      click(find(menu, "exportOption_markdown"), "Markdown")
+      waitFor(function() { return shown(find(view(), "exportNotice")) }, "export notice", 8000)
+      check(txt("exportNoticeText").indexOf("Exported to " + __DOCUMENTS__ + "/Voxtype/") === 0, "notice: " + txt("exportNoticeText"))
+      shot("exported")
+      click(find(view(), "exportOpenFolder"), "Open folder")
+      wait(500)
+      click(find(view(), "moreButton"), "More again")
+      waitFor(function() { return menu.visible }, "More menu again")
+      click(find(menu, "openMeetingFolder"), "Open meeting folder")
+      wait(500)
+    }
+
+    function driveExportPast() {
+      openList()
+      openPast(0, "Design review")
+      var menu = find(view(), "moreMenu")
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return menu.visible && find(menu, "openMeetingFolder").enabled }, "More menu with the folder")
+      click(find(menu, "exportOption_srt"), "SRT")
+      waitFor(function() { return shown(find(view(), "exportNotice")) }, "export notice", 8000)
+      check(txt("exportNoticeText") === "Exported to " + __DOCUMENTS__ + "/Voxtype/2026-11-10 Design review.srt", "notice: " + txt("exportNoticeText"))
+      click(find(view(), "moreButton"), "More again")
+      waitFor(function() { return menu.visible }, "menu")
+      click(find(menu, "openMeetingFolder"), "Open meeting folder")
+      wait(500)
     }
 
     function driveAskError() {

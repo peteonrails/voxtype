@@ -129,7 +129,13 @@ the agents found, their notes (codex's bwrap jail), Local model only, and
 Change in Settings. `blocked: "consent_required"` opens the consent dialog
 (one button per usable agent when `choice_required`). Transcript lines get
 "Add note" on hover (`voxtype meeting annotate`, note and/or `--highlight`),
-and annotated or highlighted lines a margin marker. A question asked while the
+and annotated or highlighted lines a margin marker; Edit (inline, `voxtype
+meeting edit`) and Delete (with a five-second Undo before `voxtype meeting
+delete-line` runs; a deletion arrives as `segment_deleted` or as
+`segment_updated` with `"deleted": true`, and both are handled) sit beside it.
+The header's More menu exports through `voxtype meeting export` into
+`$XDG_DOCUMENTS_DIR/Voxtype` (default `~/Documents/Voxtype`) and opens folders
+with `xdg-open`. A question asked while the
 view is closed (`voxtype meeting view --ask last-5m --no-open`) runs with
 `--notify`; with `[meeting.assistant] open_command = "voxtype meeting view"`,
 the notification's Open writes `$XDG_RUNTIME_DIR/voxtype/meeting-view.request`

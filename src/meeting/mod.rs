@@ -36,8 +36,10 @@ pub mod playback;
 pub mod retained_audio;
 pub mod start;
 pub mod state;
+pub mod status_notice;
 pub mod storage;
 pub mod summary;
+pub mod view_presence;
 
 pub use chunk::{ChunkBuffer, ChunkConfig, ChunkProcessor, ProcessedChunk, VoiceActivityDetector};
 pub use data::{
@@ -112,6 +114,8 @@ pub enum MeetingEvent {
     /// A segment already published changed speaker, as when the user moves
     /// a line to someone else with `meeting reassign`
     SegmentUpdated { segment: TranscriptSegment },
+    /// A segment already published was deleted with `meeting delete-line`
+    SegmentDeleted { segment_id: u32 },
     /// Meeting paused
     Paused,
     /// Meeting resumed
@@ -593,20 +597,27 @@ impl MeetingDaemon {
     }
 
     /// Re-read what the user changed line by line (`meeting reassign`,
-    /// `meeting annotate`), apply it to the running meeting, save, and
-    /// publish each line that changed. Returns how many did.
+    /// `annotate`, `edit`, `delete-line`), apply it to the running meeting,
+    /// save, and publish each line that changed: `SegmentDeleted` for a line
+    /// just deleted, `SegmentUpdated` for any other change, a restored line
+    /// included. Returns how many lines changed.
     pub async fn apply_segment_edits(&mut self) -> usize {
         let Some(ref mut meeting) = self.current_meeting else {
             return 0;
         };
         let id = meeting.metadata.id;
-        let (overrides, labels, annotations) = match (
-            self.storage.get_speaker_overrides(&id),
-            self.storage.get_speaker_labels(&id),
-            self.storage.get_annotations(&id),
-        ) {
-            (Ok(o), Ok(l), Ok(a)) => (o, l, a),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+        let read = || -> std::result::Result<_, StorageError> {
+            Ok((
+                self.storage.get_speaker_overrides(&id)?,
+                self.storage.get_speaker_labels(&id)?,
+                self.storage.get_annotations(&id)?,
+                self.storage.get_text_edits(&id)?,
+                self.storage.get_deletions(&id)?,
+            ))
+        };
+        let (overrides, labels, annotations, edits, deletions) = match read() {
+            Ok(all) => all,
+            Err(e) => {
                 tracing::warn!("Failed to read transcript edits: {}", e);
                 return 0;
             }
@@ -615,39 +626,40 @@ impl MeetingDaemon {
         let before = meeting.transcript.segments.clone();
         meeting.transcript.apply_speaker_overrides(&overrides);
         meeting.transcript.apply_annotations(&annotations);
-        // Only the changed lines are published; names they now carry are
-        // applied to those copies alone.
-        let changed: Vec<TranscriptSegment> = meeting
-            .transcript
-            .segments
-            .iter()
-            .zip(&before)
-            .filter(|(now, was)| {
-                now.speaker_id != was.speaker_id
-                    || now.original_speaker != was.original_speaker
-                    || now.annotation != was.annotation
-            })
-            .map(|(now, _)| {
+        meeting.transcript.apply_text_edits(&edits);
+        meeting.transcript.apply_deletions(&deletions);
+
+        let mut events = Vec::new();
+        for (now, was) in meeting.transcript.segments.iter().zip(&before) {
+            if now.deleted {
+                if !was.deleted {
+                    events.push(MeetingEvent::SegmentDeleted { segment_id: now.id });
+                }
+                continue;
+            }
+            let changed = was.deleted
+                || now.speaker_id != was.speaker_id
+                || now.original_speaker != was.original_speaker
+                || now.annotation != was.annotation
+                || now.text != was.text;
+            if changed {
+                // Names the line now carries are applied to this copy alone.
                 let mut segment = now.clone();
                 segment.speaker_label = labels.get(&segment.speaker_key()).cloned();
-                segment
-            })
-            .collect();
+                events.push(MeetingEvent::SegmentUpdated { segment });
+            }
+        }
 
-        if changed.is_empty() {
+        if events.is_empty() {
             return 0;
         }
         self.persist_transcript();
-        for segment in &changed {
-            tracing::info!("Segment {} changed by hand", segment.id);
-            let _ = self
-                .event_tx
-                .send(MeetingEvent::SegmentUpdated {
-                    segment: segment.clone(),
-                })
-                .await;
+        let count = events.len();
+        for event in events {
+            let _ = self.event_tx.send(event).await;
         }
-        changed.len()
+        tracing::info!("{} transcript line(s) changed by hand", count);
+        count
     }
 
     /// Persist after every chunk, not just on stop(): a crash mid-meeting
@@ -1575,6 +1587,68 @@ mod tests {
         h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
         h.daemon.stop().await.unwrap();
         assert!(h.saved().transcript.segments[1].annotation.is_some());
+    }
+
+    /// `meeting edit` and `meeting delete-line` mid-meeting: the daemon
+    /// publishes them, and the next chunk and stop keep them.
+    #[tokio::test]
+    async fn edits_and_deletions_mid_meeting_are_published_and_kept() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0), (10.0, 12.0)], &[(5.0, 7.0)]).await;
+        drain(&mut h.events);
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.edit_segment_text(&id, 0, "Corrected", false).unwrap();
+        cli.delete_segment(&id, 2, false).unwrap();
+        assert_eq!(h.daemon.apply_segment_edits().await, 2);
+
+        let events: Vec<MeetingEvent> = std::iter::from_fn(|| h.events.try_recv().ok()).collect();
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            MeetingEvent::SegmentUpdated { segment } => {
+                assert_eq!(segment.id, 0);
+                assert_eq!(segment.text, "Corrected");
+                assert!(segment.original_text.is_some());
+            }
+            other => panic!("expected SegmentUpdated, got {other:?}"),
+        }
+        assert!(matches!(
+            events[1],
+            MeetingEvent::SegmentDeleted { segment_id: 2 }
+        ));
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+        let saved = h.saved();
+        assert_eq!(saved.transcript.segments[0].text, "Corrected");
+        assert!(saved.transcript.segments.iter().all(|s| s.id != 2));
+        assert_eq!(saved.transcript.segments.len(), 4);
+
+        // --restore after stop brings it back.
+        let back = cli.restore_segment(&id, 2, true).unwrap();
+        assert!(!back.deleted);
+        assert_eq!(h.saved().transcript.segments.len(), 5);
+    }
+
+    /// A restored line comes back to a live subscriber as segment_updated.
+    #[tokio::test]
+    async fn a_line_restored_mid_meeting_is_published_as_updated() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.delete_segment(&id, 1, false).unwrap();
+        h.daemon.apply_segment_edits().await;
+        drain(&mut h.events);
+        cli.restore_segment(&id, 1, false).unwrap();
+        assert_eq!(h.daemon.apply_segment_edits().await, 1);
+        match h.events.try_recv().unwrap() {
+            MeetingEvent::SegmentUpdated { segment } => {
+                assert_eq!(segment.id, 1);
+                assert!(!segment.deleted);
+            }
+            other => panic!("expected SegmentUpdated, got {other:?}"),
+        }
     }
 
     #[tokio::test]

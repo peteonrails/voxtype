@@ -2961,6 +2961,17 @@ impl Daemon {
         }
     }
 
+    /// Drop a deleted segment from the HUD snapshot and tell meeting.sock
+    /// subscribers.
+    fn publish_segment_deleted(&mut self, segment_id: u32) {
+        self.meeting_hud.remove_segment(segment_id);
+        if let Some(ref hub) = self.meeting_event_hub {
+            let meeting_id = self.meeting_hud.meeting_id.clone().unwrap_or_default();
+            hub.publish_segment_deleted(&meeting_id, segment_id);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
@@ -3133,17 +3144,15 @@ impl Daemon {
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
 
-                        // Notification
-                        if self.config.output.notification.on_recording_start {
-                            send_notification(
-                                "Meeting Started",
-                                &format!("ID: {}", meeting_id),
-                                false,
-                                self.config.engine,
-                                &self.config.output.notification.urgency,
-                            )
-                            .await;
-                        }
+                        let title = meeting::status_notice::display_title(
+                            self.meeting_hud.title.as_deref(),
+                            self.meeting_hud.started_at,
+                        );
+                        self.meeting_status_notice(
+                            meeting::status_notice::MeetingNotice::Started { title },
+                            self.config.output.notification.on_recording_start,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to start meeting: {}", e);
@@ -3211,9 +3220,23 @@ impl Daemon {
                     MeetingEvent::SegmentUpdated { segment } => {
                         self.publish_segment_updated(&segment);
                     }
+                    MeetingEvent::SegmentDeleted { segment_id } => {
+                        self.publish_segment_deleted(segment_id);
+                    }
                     _ => {}
                 }
             }
+
+            // Read before "idle" resets the HUD snapshot they come from.
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            let elapsed = self
+                .meeting_hud
+                .started_at
+                .and_then(|t| (chrono::Utc::now() - t).to_std().ok())
+                .unwrap_or_default();
 
             let mut daemon = self.meeting_daemon.take().expect("checked above");
             match daemon.stop().await {
@@ -3244,19 +3267,22 @@ impl Daemon {
 
                     self.play_feedback(SoundEvent::RecordingStop);
 
-                    if self.config.output.notification.on_recording_stop {
-                        send_notification(
-                            "Meeting Ended",
-                            &format!("ID: {}", meeting_id),
-                            false,
-                            self.config.engine,
-                            &self.config.output.notification.urgency,
-                        )
-                        .await;
-                    }
+                    self.meeting_status_notice(
+                        meeting::status_notice::MeetingNotice::Ended { title, elapsed },
+                        self.config.output.notification.on_recording_stop,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::error!("Error stopping meeting: {}", e);
+                    send_notification(
+                        "Meeting Error",
+                        &format!("Could not stop the meeting cleanly: {}", e),
+                        false,
+                        self.config.engine,
+                        "critical",
+                    )
+                    .await;
                 }
             }
 
@@ -3268,6 +3294,31 @@ impl Daemon {
         Ok(())
     }
 
+    /// Post a meeting status notification, unless `[meeting]
+    /// status_notifications` says not to or (in auto mode) a meeting view is
+    /// already showing the same thing. Errors never come through here.
+    async fn meeting_status_notice(
+        &self,
+        notice: meeting::status_notice::MeetingNotice,
+        enabled: bool,
+    ) {
+        use meeting::status_notice::{should_notify, StatusMode};
+        let mode = StatusMode::parse(&self.config.meeting.status_notifications);
+        if !should_notify(mode, enabled, meeting::view_presence::view_visible) {
+            tracing::debug!(?notice, "Meeting status notification skipped");
+            return;
+        }
+        let (summary, body) = notice.text();
+        send_notification(
+            summary,
+            &body,
+            false,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+        )
+        .await;
+    }
+
     /// Pause the current meeting
     async fn pause_meeting(&mut self) -> Result<()> {
         if let Some(ref mut daemon) = self.meeting_daemon {
@@ -3276,16 +3327,15 @@ impl Daemon {
             self.update_meeting_state("paused", meeting_id.as_deref());
             tracing::info!("Meeting paused");
 
-            if self.config.output.notification.on_recording_stop {
-                send_notification(
-                    "Meeting Paused",
-                    "Recording paused",
-                    false,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            self.meeting_status_notice(
+                meeting::status_notice::MeetingNotice::Paused { title },
+                self.config.output.notification.on_recording_stop,
+            )
+            .await;
         }
         Ok(())
     }
@@ -3298,16 +3348,15 @@ impl Daemon {
             self.update_meeting_state("recording", meeting_id.as_deref());
             tracing::info!("Meeting resumed");
 
-            if self.config.output.notification.on_recording_start {
-                send_notification(
-                    "Meeting Resumed",
-                    "Recording resumed",
-                    false,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            self.meeting_status_notice(
+                meeting::status_notice::MeetingNotice::Resumed { title },
+                self.config.output.notification.on_recording_start,
+            )
+            .await;
         }
         Ok(())
     }
@@ -3332,6 +3381,14 @@ impl Daemon {
                     .await
                 {
                     tracing::error!("Failed to start meeting: {}", e);
+                    send_notification(
+                        "Meeting Error",
+                        &format!("The meeting could not start: {}", e),
+                        false,
+                        self.config.engine,
+                        "critical",
+                    )
+                    .await;
                 }
                 changed = true;
             }
@@ -5702,6 +5759,9 @@ impl Daemon {
                         }
                         Some(MeetingEvent::SegmentUpdated { segment }) => {
                             self.publish_segment_updated(&segment);
+                        }
+                        Some(MeetingEvent::SegmentDeleted { segment_id }) => {
+                            self.publish_segment_deleted(segment_id);
                         }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via

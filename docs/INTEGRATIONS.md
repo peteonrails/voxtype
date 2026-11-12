@@ -161,6 +161,7 @@ needed:
 {"event": "segments", "chunk_id": 8, "segments": [ /* TranscriptSegment[] for this chunk only */ ]}
 {"event": "speaker_renamed", "from": "Remote", "to": "Remote 1"}
 {"event": "segment_updated", "segment": { /* one TranscriptSegment, same shape as in segments */ }}
+{"event": "segment_deleted", "meeting_id": "...", "segment_id": 31}
 {"event": "notes_updated", "meeting_id": "...", "updated_at": "2026-11-11T20:00:00Z"}
 {"event": "status", "status": "paused"}
 {"event": "playback", "meeting_id": "...", "track": "mixed", "state": "playing", "from_ms": 61250}
@@ -200,6 +201,18 @@ A segment the user annotated (`voxtype meeting annotate`) carries
 `"annotation": {"text": "...", "highlight": true}`; the field is absent when
 there is none, and `text` is empty for a bare highlight. Adding, changing or
 removing an annotation during a meeting sends `segment_updated`.
+
+A segment whose text the user corrected (`voxtype meeting edit`) has the
+correction in `text` and what was transcribed in `original_text`; the field
+is absent on unedited lines and after `--reset`. A correction during a
+meeting sends `segment_updated`.
+
+`segment_deleted` means the user hid that segment (`voxtype meeting
+delete-line`): drop it. `--restore` sends `segment_updated` with the whole
+segment, to be put back in order of `start_ms`. Deleted segments never
+appear in `hello`, `meeting show --json` or exports. Only `transcript.json`
+keeps them, marked `"deleted": true`, so a reader of that file should skip
+them.
 
 `notes_updated` means the meeting's notes (`notes.md`) changed. It carries
 no text: read it with `voxtype meeting notes <meeting_id> --json`, which

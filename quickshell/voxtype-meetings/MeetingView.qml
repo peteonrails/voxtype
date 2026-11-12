@@ -36,6 +36,10 @@ Item {
   // The daemon answers `voxtype status` although meeting.sock cannot be
   // reached: it is running without the socket.
   property bool daemonRunning: false
+  // A deleted line is waiting out its undo window.
+  property bool pendingDelete: false
+  // The last export, {path, folder}, or null.
+  property var lastExport: null
 
   // Which Copy just worked ("summary", "answer:<row>"), for its "Copied".
   property string copiedKey: ""
@@ -62,6 +66,13 @@ Item {
   // From an ended or past meeting back to the list.
   signal backRequested()
   signal copyRequested(string text, string key)
+  signal editTextRequested(int segId, string text)
+  signal deleteLineRequested(int segId)
+  signal undoDeleteRequested()
+  // "markdown", "text", "json", "srt" or "vtt".
+  signal exportRequested(string format)
+  signal openFolderRequested(string path)
+  signal exportNoticeDismissed()
   signal closeRequested()
   signal errorDismissed()
 
@@ -102,6 +113,7 @@ Item {
   focus: true
   Keys.onEscapePressed: {
     if (consent.visible) consent.dismiss()
+    else if (moreMenu.visible) moreMenu.close()
     else if (agentMenu.visible) agentMenu.close()
     else if (reassignPopup.visible) reassignPopup.close()
     else if (noteEditor.visible) noteEditor.close()
@@ -295,6 +307,16 @@ Item {
           font.pixelSize: root.theme.heading
           font.bold: true
           elide: Text.ElideRight
+        }
+
+        // Export and the meeting's folder, for any meeting on screen.
+        MeetingButton {
+          id: moreButton
+          objectName: "moreButton"
+          theme: root.theme
+          visible: root.hasMeeting
+          text: "More ▾"
+          onClicked: moreMenu.openAt(moreButton)
         }
 
         MeetingButton {
@@ -499,6 +521,51 @@ Item {
         }
       }
 
+      Rectangle {
+        objectName: "exportNotice"
+        Layout.fillWidth: true
+        visible: root.lastExport !== null
+        implicitHeight: exportText.implicitHeight + root.theme.padX * 2
+        radius: Math.min(root.theme.radius, 6)
+        color: root.theme.alpha(root.theme.accent, 0.12)
+        border.width: 1
+        border.color: root.theme.alpha(root.theme.accent, 0.45)
+
+        Text {
+          id: exportText
+          objectName: "exportNoticeText"
+          anchors.left: parent.left
+          anchors.right: exportButtons.left
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: root.theme.padX
+          anchors.rightMargin: root.theme.gap
+          text: root.lastExport ? "Exported to " + root.lastExport.shown : ""
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WrapAnywhere
+        }
+
+        Row {
+          id: exportButtons
+          anchors.right: parent.right
+          anchors.rightMargin: root.theme.sm
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: root.theme.xs
+          MeetingButton {
+            objectName: "exportOpenFolder"
+            theme: root.theme
+            text: "Open folder"
+            onClicked: root.openFolderRequested(root.lastExport.folder)
+          }
+          MeetingButton {
+            theme: root.theme
+            text: "Dismiss"
+            onClicked: root.exportNoticeDismissed()
+          }
+        }
+      }
+
       // ------------------------------------------------------- tabs
 
       Row {
@@ -536,6 +603,8 @@ Item {
           onRenameRequested: function(keys, name) { root.renameRequested(keys, name) }
           onSpeakerClicked: function(line, anchor) { root.openReassign(line, anchor) }
           onNoteClicked: function(line, anchor) { root.openNoteEditor(line, anchor) }
+          onEditRequested: function(segId, text) { root.editTextRequested(segId, text) }
+          onDeleteRequested: function(segId) { root.deleteLineRequested(segId) }
         }
 
         NotesPane {
@@ -661,13 +730,132 @@ Item {
   MouseArea {
     objectName: "overlayScrim"
     anchors.fill: parent
-    visible: reassignPopup.visible || noteEditor.visible || agentMenu.visible || consent.visible
+    visible: reassignPopup.visible || noteEditor.visible || agentMenu.visible || moreMenu.visible || consent.visible
     z: 9
     onClicked: {
       if (consent.visible) return
       reassignPopup.close()
       noteEditor.close()
       agentMenu.close()
+      moreMenu.close()
+    }
+  }
+
+  // A deleted line can be had back for a few seconds; then it is gone.
+  Rectangle {
+    objectName: "undoBar"
+    visible: root.pendingDelete && root.hasMeeting
+    z: 8
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.bottom: parent.bottom
+    anchors.bottomMargin: root.theme.padding
+    width: undoRow.implicitWidth + root.theme.padX * 2
+    height: undoRow.implicitHeight + root.theme.md * 2
+    radius: Math.min(root.theme.radius, 6)
+    color: Qt.rgba(root.theme.bg.r, root.theme.bg.g, root.theme.bg.b, 1)
+    border.width: 1
+    border.color: root.theme.border
+
+    Row {
+      id: undoRow
+      anchors.centerIn: parent
+      spacing: root.theme.gap
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: "Line deleted."
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+      }
+      MeetingButton {
+        objectName: "undoButton"
+        theme: root.theme
+        text: "Undo"
+        bordered: true
+        onClicked: root.undoDeleteRequested()
+      }
+    }
+  }
+
+  // The header's More menu: export in each format, and the meeting's folder.
+  MeetingSurface {
+    id: moreMenu
+    objectName: "moreMenu"
+    theme: root.theme
+    visible: false
+    z: 10
+    width: 240
+    height: moreColumn.implicitHeight + root.theme.padX * 2
+
+    function openAt(anchor) {
+      var p = anchor.mapToItem(root, 0, 0)
+      moreMenu.x = Math.max(root.theme.lg, Math.min(p.x + anchor.width - moreMenu.width, root.width - moreMenu.width - root.theme.lg))
+      moreMenu.y = p.y + anchor.height + root.theme.xs
+      moreMenu.visible = true
+      moreMenu.forceActiveFocus()
+    }
+    function close() {
+      moreMenu.visible = false
+      root.forceActiveFocus()
+    }
+    Keys.onEscapePressed: moreMenu.close()
+
+    MouseArea { anchors.fill: parent; onClicked: {} }
+
+    Column {
+      id: moreColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.theme.padX
+      spacing: root.theme.xxs
+
+      Text {
+        width: parent.width
+        text: "Export to Documents/Voxtype"
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+      }
+
+      Repeater {
+        model: [
+          { format: "markdown", label: "Markdown (.md)" },
+          { format: "text", label: "Plain text (.txt)" },
+          { format: "json", label: "JSON (.json)" },
+          { format: "srt", label: "Subtitles (.srt)" },
+          { format: "vtt", label: "WebVTT (.vtt)" }
+        ]
+        MeetingButton {
+          required property var modelData
+          objectName: "exportOption_" + modelData.format
+          theme: root.theme
+          width: moreColumn.width
+          text: modelData.label
+          onClicked: {
+            moreMenu.close()
+            root.exportRequested(modelData.format)
+          }
+        }
+      }
+
+      Rectangle {
+        width: parent.width
+        height: 1
+        color: root.theme.alpha(root.theme.fg, 0.12)
+      }
+
+      MeetingButton {
+        objectName: "openMeetingFolder"
+        theme: root.theme
+        width: moreColumn.width
+        text: "Open meeting folder"
+        enabled: root.assistant !== null && root.assistant.meetingFolder !== ""
+        onClicked: {
+          moreMenu.close()
+          root.openFolderRequested(root.assistant.meetingFolder)
+        }
+      }
     }
   }
 

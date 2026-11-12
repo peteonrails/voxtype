@@ -51,6 +51,9 @@ pub enum StorageError {
         last: Option<u32>,
     },
 
+    #[error("A line's text cannot be empty; use `meeting delete-line` to remove it")]
+    EmptyText,
+
     #[error("An annotation needs text, --highlight, or both")]
     EmptyAnnotation,
 
@@ -213,6 +216,23 @@ impl MeetingStorage {
                 segment_id INTEGER NOT NULL,
                 speaker_key TEXT NOT NULL,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, segment_id)
+            );
+
+            -- A line's text as the user corrected it, and lines the user
+            -- deleted (kept, so they can be restored). Applied like the
+            -- speaker overrides above.
+            CREATE TABLE IF NOT EXISTS segment_text_edits (
+                meeting_id TEXT NOT NULL,
+                segment_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, segment_id)
+            );
+            CREATE TABLE IF NOT EXISTS segment_deletions (
+                meeting_id TEXT NOT NULL,
+                segment_id INTEGER NOT NULL,
+                deleted_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (meeting_id, segment_id)
             );
 
@@ -604,10 +624,13 @@ impl MeetingStorage {
         self.apply_edits(meeting_id, &mut edited)?;
         let transcript_path = storage_path.join("transcript.json");
         std::fs::write(transcript_path, serde_json::to_string_pretty(&edited)?)?;
-        self.store_speaker_count(meeting_id, &edited)?;
 
         // transcript.md beside it, so the folder reads without voxtype.
+        // Deleted lines stay in transcript.json as tombstones but count for
+        // nothing: not in the markdown, and not toward speaker_count.
         let notes = self.load_notes(meeting_id)?.notes;
+        edited.remove_deleted();
+        self.store_speaker_count(meeting_id, &edited)?;
         let data = MeetingData {
             metadata,
             transcript: edited,
@@ -631,11 +654,23 @@ impl MeetingStorage {
         transcript.apply_speaker_overrides(&self.get_speaker_overrides(meeting_id)?);
         transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
         transcript.apply_annotations(&self.get_annotations(meeting_id)?);
+        transcript.apply_text_edits(&self.get_text_edits(meeting_id)?);
+        transcript.apply_deletions(&self.get_deletions(meeting_id)?);
         Ok(())
     }
 
-    /// Load transcript from filesystem
+    /// Load the transcript as voxtype shows it: every edit applied and
+    /// deleted lines left out.
     pub fn load_transcript(&self, meeting_id: &MeetingId) -> Result<Transcript, StorageError> {
+        let mut transcript = self.load_transcript_all(meeting_id)?;
+        transcript.remove_deleted();
+        Ok(transcript)
+    }
+
+    /// Load the transcript with deleted lines still in it, marked `deleted`.
+    /// Anything that saves the transcript back must start from this, or the
+    /// deleted lines would be lost for good.
+    fn load_transcript_all(&self, meeting_id: &MeetingId) -> Result<Transcript, StorageError> {
         let metadata = self
             .get_meeting(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
@@ -703,6 +738,12 @@ impl MeetingStorage {
             "DELETE FROM meeting_stats WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
+        for table in ["segment_text_edits", "segment_deletions"] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE meeting_id = ?1"),
+                params![meeting_id.to_string()],
+            )?;
+        }
 
         // Delete files if storage path exists
         if let Some(metadata) = metadata {
@@ -786,7 +827,7 @@ impl MeetingStorage {
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
 
         // A meeting that has not finished its first chunk has no file yet.
-        let transcript = match self.load_transcript(meeting_id) {
+        let transcript = match self.load_transcript_all(meeting_id) {
             Ok(t) => t,
             Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 Transcript::new()
@@ -951,6 +992,107 @@ impl MeetingStorage {
             params![meeting_id.to_string(), segment_id],
         )?;
         self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Replace one line's text with a correction. The transcribed text is
+    /// kept and shown as `original_text`; [`MeetingStorage::reset_segment_text`]
+    /// restores it. `rewrite` as for [`MeetingStorage::reassign_segment`].
+    pub fn edit_segment_text(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        text: &str,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(StorageError::EmptyText);
+        }
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO segment_text_edits (meeting_id, segment_id, text, updated_at) \
+             VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+            params![meeting_id.to_string(), segment_id, text],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Give a line back the text it was transcribed with.
+    pub fn reset_segment_text(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "DELETE FROM segment_text_edits WHERE meeting_id = ?1 AND segment_id = ?2",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Hide one line. It stays in transcript.json, marked deleted, so
+    /// [`MeetingStorage::restore_segment`] can bring it back; everything that
+    /// reads the meeting through voxtype leaves it out. Returns the line,
+    /// marked deleted.
+    pub fn delete_segment(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO segment_deletions (meeting_id, segment_id) VALUES (?1, ?2)",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Bring back a deleted line.
+    pub fn restore_segment(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "DELETE FROM segment_deletions WHERE meeting_id = ?1 AND segment_id = ?2",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// The user's text corrections: segment ID to text.
+    pub fn get_text_edits(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<std::collections::HashMap<u32, String>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT segment_id, text FROM segment_text_edits WHERE meeting_id = ?1")?;
+        let edits = stmt
+            .query_map(params![meeting_id.to_string()], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        Ok(edits)
+    }
+
+    /// The segment IDs the user deleted.
+    pub fn get_deletions(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<std::collections::HashSet<u32>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT segment_id FROM segment_deletions WHERE meeting_id = ?1")?;
+        let deleted = stmt
+            .query_map(params![meeting_id.to_string()], |row| row.get::<_, u32>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        Ok(deleted)
     }
 
     /// The user's notes and highlights: segment ID to annotation.
@@ -1152,7 +1294,7 @@ impl MeetingStorage {
     ) -> Result<Transcript, StorageError> {
         self.get_meeting(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
-        let transcript = match self.load_transcript(meeting_id) {
+        let transcript = match self.load_transcript_all(meeting_id) {
             Ok(t) => t,
             Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 Transcript::new()
@@ -1419,6 +1561,21 @@ mod tests {
             json[0].get("title").is_some(),
             "metadata stays flat: {json}"
         );
+    }
+
+    #[test]
+    fn a_deleted_line_does_not_count_its_speaker() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(&storage, &[("You", "hi"), ("Remote", "hello")]);
+        assert_eq!(entry(&storage, &id), (false, 2));
+
+        // Deleting Remote's only line leaves You alone, even though the
+        // tombstone stays in transcript.json.
+        storage.delete_segment(&id, 1, true).unwrap();
+        assert_eq!(entry(&storage, &id), (false, 1));
+
+        storage.restore_segment(&id, 1, true).unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
     }
 
     #[test]
@@ -2399,6 +2556,118 @@ mod tests {
             max_meetings: 0,
         })
         .unwrap();
+    }
+
+    fn raw_file(storage: &MeetingStorage, id: &MeetingId) -> Transcript {
+        let path = storage
+            .get_meeting_path(id)
+            .unwrap()
+            .join("transcript.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn edit_replaces_a_lines_text_and_reset_restores_it() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+
+        let seg = storage
+            .edit_segment_text(&id, 2, " We ship Friday. ", true)
+            .unwrap();
+        assert_eq!(seg.text, "We ship Friday.");
+        assert_eq!(seg.original_text.as_deref(), Some("line 2"));
+        assert_eq!(
+            storage.load_transcript(&id).unwrap().segments[2].text,
+            "We ship Friday."
+        );
+
+        let seg = storage.reset_segment_text(&id, 2, true).unwrap();
+        assert_eq!(seg.text, "line 2");
+        assert_eq!(seg.original_text, None);
+
+        assert!(matches!(
+            storage.edit_segment_text(&id, 2, "  ", true),
+            Err(StorageError::EmptyText)
+        ));
+        assert!(matches!(
+            storage.edit_segment_text(&id, 9, "x", true),
+            Err(StorageError::UnknownSegment { segment: 9, .. })
+        ));
+    }
+
+    #[test]
+    fn an_edit_survives_the_daemons_next_save() {
+        let (storage, _temp) = create_test_storage();
+        let (id, in_memory) = hybrid_meeting(&storage);
+        storage
+            .edit_segment_text(&id, 1, "Corrected", false)
+            .unwrap();
+        storage.save_transcript(&id, &in_memory).unwrap();
+        let line = &storage.load_transcript(&id).unwrap().segments[1];
+        assert_eq!(line.text, "Corrected");
+        assert_eq!(line.original_text.as_deref(), Some("line 1"));
+    }
+
+    /// A deleted line is gone from everything that reads the meeting, but
+    /// kept in the file so it can come back, even across later saves.
+    #[test]
+    fn delete_hides_a_line_everywhere_but_keeps_it_for_restore() {
+        let (storage, _temp) = create_test_storage();
+        let (id, in_memory) = hybrid_meeting(&storage);
+
+        let seg = storage.delete_segment(&id, 2, true).unwrap();
+        assert!(seg.deleted);
+        let shown: Vec<u32> = storage
+            .load_transcript(&id)
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(shown, vec![0, 1, 3]);
+        assert_eq!(
+            storage
+                .load_meeting_data(&id)
+                .unwrap()
+                .transcript
+                .segments
+                .len(),
+            3
+        );
+        let md = std::fs::read_to_string(
+            storage
+                .get_meeting_path(&id)
+                .unwrap()
+                .join(TRANSCRIPT_MARKDOWN_FILE),
+        )
+        .unwrap();
+        assert!(!md.contains("line 2"), "{md}");
+
+        // The daemon's next save, and other edits, keep the tombstone.
+        storage.save_transcript(&id, &in_memory).unwrap();
+        storage.set_speaker_label(&id, "You", "Pete").unwrap();
+        storage.reassign_segment(&id, 3, "You", true).unwrap();
+        let file = raw_file(&storage, &id);
+        assert_eq!(file.segments.len(), 4);
+        assert!(file.segments[2].deleted);
+        assert_eq!(storage.load_transcript(&id).unwrap().segments.len(), 3);
+
+        let seg = storage.restore_segment(&id, 2, true).unwrap();
+        assert!(!seg.deleted);
+        assert_eq!(seg.text, "line 2");
+        assert_eq!(storage.load_transcript(&id).unwrap().segments.len(), 4);
+        assert!(!raw_file(&storage, &id).segments[2].deleted);
+    }
+
+    #[test]
+    fn deleting_a_meeting_drops_its_edits_and_deletions() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+        storage.edit_segment_text(&id, 1, "x", true).unwrap();
+        storage.delete_segment(&id, 2, true).unwrap();
+        storage.delete_meeting(&id).unwrap();
+        assert!(storage.get_text_edits(&id).unwrap().is_empty());
+        assert!(storage.get_deletions(&id).unwrap().is_empty());
     }
 
     #[test]

@@ -3732,6 +3732,20 @@ Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands bec
 
 While meeting mode is off, the tray shows **Turn on meetings...**, and a notification offers Turn on, Not now, and "No, don't ask again" at most once a day on daemon start. "No, don't ask again" is remembered in `~/.local/state/voxtype/meeting_offer.json`. Set `offer_enable = false` to turn the offer off entirely. Nothing is ever turned on without your click.
 
+### status_notifications
+
+**Type:** String (`"auto"`, `"always"`, `"never"`)
+**Default:** `"auto"`
+**Required:** No
+
+The Meeting Started, Paused, Resumed and Ended notifications. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
+
+- `"auto"` - Skip them while a meeting view is on screen, minimized or not, since it already shows the same thing.
+- `"always"` - Always show them.
+- `"never"` - Never show them.
+
+`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. Changing it needs a daemon restart.
+
 ### chunk_duration_secs
 
 **Type:** Integer

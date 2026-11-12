@@ -95,6 +95,7 @@ Item {
 
   // Back to the list from an ended or past meeting.
   function back() {
+    root.commitDelete()
     feed.clearEnded()
     root.refreshList()
   }
@@ -215,6 +216,14 @@ Item {
       }
       if (segment) feed.updateSegment(segment)
     }
+    onSegmentActionFinished: function(action, extra, ok, message, segment) {
+      if (action === "edit") {
+        if (!ok && extra && feed.textOf(extra.segId) !== null) feed.setText(extra.segId, extra.before)
+        else if (ok && segment) feed.updateSegment(segment)
+      } else if (action === "delete-line" && !ok && extra && extra.meeting === feed.meetingId) {
+        feed.restoreRow(extra.row)
+      }
+    }
     onAnnotateFinished: function(extra, ok, message, segment) {
       if (!ok) {
         var snap = extra ? extra.snapshot : null
@@ -268,6 +277,114 @@ Item {
     meetingCli.annotate(feed.meetingId, segId, text, highlight, { snapshot: snap })
   }
 
+  // ------------------------------------------------------------ line edits
+
+  // A line's text, shown at once and put back if the CLI refuses it.
+  function editText(segId, text) {
+    var before = feed.textOf(segId)
+    var next = String(text).trim()
+    if (before === null || next === "" || next === before) return
+    root.actionError = ""
+    feed.setText(segId, next)
+    meetingCli.editText(feed.meetingId, segId, next, { segId: segId, before: before })
+  }
+
+  // Delete with an undo window: the line goes at once, and the CLI only runs
+  // when the window closes (or another delete, Back, or closing the view
+  // accepts it). Undo inside the window needs no command at all.
+  property var pendingDelete: null
+  readonly property int undoMs: 5000
+
+  function deleteLine(segId) {
+    root.commitDelete()
+    var row = feed.removeRow(segId)
+    if (!row) return
+    root.actionError = ""
+    root.pendingDelete = { segId: segId, row: row, meeting: feed.meetingId }
+    undoTimer.restart()
+  }
+
+  function undoDelete() {
+    undoTimer.stop()
+    var p = root.pendingDelete
+    root.pendingDelete = null
+    if (p && p.meeting === feed.meetingId) feed.restoreRow(p.row)
+  }
+
+  function commitDelete() {
+    undoTimer.stop()
+    var p = root.pendingDelete
+    root.pendingDelete = null
+    if (p) meetingCli.deleteLine(p.meeting, p.segId, p)
+  }
+
+  Timer { id: undoTimer; interval: root.undoMs; onTriggered: root.commitDelete() }
+
+  Connections {
+    target: feed
+    function onMeetingIdChanged() { if (root.pendingDelete && root.pendingDelete.meeting !== feed.meetingId) root.commitDelete() }
+  }
+
+  // ------------------------------------------------------------ export, folders
+
+  // Exports go to the user's documents, where they will look for them, not
+  // the meeting's own folder under ~/.local/share.
+  readonly property string exportDir: {
+    var docs = Quickshell.env("XDG_DOCUMENTS_DIR")
+    return (docs ? String(docs) : String(Quickshell.env("HOME")) + "/Documents") + "/Voxtype"
+  }
+  // The last export: {path, folder}, for the notice and its Open folder.
+  property var lastExport: null
+
+  function exportName(format) {
+    var started = Date.parse(String(feed.startedAt || "").replace(/(\.\d{3})\d+/, "$1"))
+    var day = isNaN(started) ? Qt.formatDate(new Date(), "yyyy-MM-dd") : Qt.formatDate(new Date(started), "yyyy-MM-dd")
+    var title = String(feed.title || "Meeting").replace(/[\/\\:*?"<>|\x00-\x1f]+/g, "-").trim().slice(0, 80)
+    var ext = { markdown: "md", text: "txt", json: "json", srt: "srt", vtt: "vtt" }[format]
+    return day + " " + (title !== "" ? title : "Meeting") + "." + ext
+  }
+
+  function exportMeeting(format) {
+    if (feed.meetingId === "" || exportProc.running || exportProc.startPending) return
+    root.actionError = ""
+    root.lastExport = null
+    var path = root.exportDir + "/" + root.exportName(format)
+    var args = [root.bin, "meeting", "export", feed.meetingId, "--format", format, "--output", path]
+    // The readable formats carry who said what, and when.
+    if (format === "markdown" || format === "text") args.push("--timestamps", "--speakers", "--metadata")
+    exportProc.path = path
+    exportProc.err = ""
+    exportProc.launch(["sh", "-c", 'mkdir -p "$1" && shift && exec "$@"', "sh", root.exportDir].concat(args))
+  }
+
+  MeetingProcess {
+    id: exportProc
+    property string path: ""
+    property string err: ""
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: exportProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (code === 0) {
+        var home = String(Quickshell.env("HOME") || "")
+        var shown = home !== "" && exportProc.path.indexOf(home + "/") === 0 ? "~" + exportProc.path.slice(home.length) : exportProc.path
+        root.lastExport = { path: exportProc.path, folder: root.exportDir, shown: shown }
+      }
+      else root.actionError = MT.cliProblem(exportProc.err, "exports") || "voxtype meeting export exited " + code
+    }
+    onFailedToStart: root.actionError = MT.missingCli(root.bin)
+  }
+
+  // xdg-open, which opens a folder in the desktop's file manager.
+  property string openCommand: "xdg-open"
+  function openFolder(path) {
+    if (!path || openProc.running || openProc.startPending) return
+    openProc.launch([root.openCommand, String(path)])
+  }
+  MeetingProcess {
+    id: openProc
+    onExited: function(code) { if (code !== 0) root.actionError = "Could not open the folder (" + root.openCommand + " exited " + code + ")." }
+    onFailedToStart: root.actionError = "Opening folders needs " + root.openCommand + " (the xdg-utils package), which is not installed."
+  }
+
   // A host's own open request with a payload ({"tab", "meeting_id"}), such as
   // Omarchy's `{"view":"meetings","tab":"ask"}`.
   function select(payload) {
@@ -303,6 +420,7 @@ Item {
   onShownChanged: {
     // A finished meeting stays on screen until the view is closed.
     if (!root.shown) {
+      root.commitDelete()
       feed.clearEnded()
       return
     }
@@ -387,6 +505,8 @@ Item {
       view.listError = Qt.binding(function() { return root.listError })
       view.listHasMore = Qt.binding(function() { return root.listHasMore })
       view.daemonRunning = Qt.binding(function() { return root.daemonRunning })
+      view.pendingDelete = Qt.binding(function() { return root.pendingDelete !== null })
+      view.lastExport = Qt.binding(function() { return root.lastExport })
       if (root.pendingTab !== "") view.selectTab(root.pendingTab)
       root.pendingTab = ""
       w.visible = true
@@ -413,6 +533,12 @@ Item {
     function onMoreMeetingsRequested() { root.loadMoreMeetings() }
     function onBackRequested() { root.back() }
     function onCopyRequested(text, key) { root.copyText(text, key) }
+    function onEditTextRequested(segId, text) { root.editText(segId, text) }
+    function onDeleteLineRequested(segId) { root.deleteLine(segId) }
+    function onUndoDeleteRequested() { root.undoDelete() }
+    function onExportRequested(format) { root.exportMeeting(format) }
+    function onOpenFolderRequested(path) { root.openFolder(path) }
+    function onExportNoticeDismissed() { root.lastExport = null }
     function onCloseRequested() { root.closeRequested() }
     function onErrorDismissed() { root.actionError = "" }
   }
