@@ -22,7 +22,7 @@ Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 # which links transcribe.cpp; the daemon only carries the client.
 %global vt_gguf gguf,cohere-gguf,parakeet-gguf
 
-# Same AVX-512/GFNI floor for every build except the AVX-512 variant.
+# Same AVX-512/GFNI floor for every build.
 # CMAKE_*_FLAGS replace the flags the cmake crate would pass to whisper.cpp,
 # -fPIC included. Ubuntu's and Arch's GCC build PIE by default so the loss
 # goes unnoticed there; Fedora's does not, and the link fails with
@@ -73,12 +73,11 @@ Features:
 Recommended: Use compositor keybindings (no special permissions needed).
 See post-install instructions for setup.
 
-This package includes tiered binaries:
+This package includes two builds:
 - voxtype-avx2: CPU - Compatible with most CPUs from 2013+ (Intel Haswell, AMD Zen)
-- voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
 - voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
 
-The appropriate CPU binary is selected automatically at install time.
+The CPU build is used by default.
 GPU acceleration can be enabled with: voxtype setup gpu --enable
 
 It also includes the OSD launcher (voxtype-osd), the Quickshell OSD
@@ -111,15 +110,10 @@ export CARGO_HOME=%{_builddir}/cargo
 %{vt_haswell_env} cargo build --release --locked --features %{vt_gguf}
 install -D -m 755 target/release/voxtype variants/voxtype-avx2
 
-# CPU GGUF worker, shared by the AVX2 and AVX-512 binaries. .cargo/config.toml
+# CPU GGUF worker for the AVX2 binary. .cargo/config.toml
 # holds its transcribe.cpp ISA floor (TRANSCRIBE_CMAKE_ARGS).
 %{vt_haswell_env} cargo build --release --locked -p voxtype-gguf-worker
 install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker
-
-# Build AVX-512 optimized binary (for Zen 4+, some Intel)
-cargo clean
-cargo build --release --locked --features %{vt_gguf}
-install -D -m 755 target/release/voxtype variants/voxtype-avx512
 
 # Build Vulkan GPU binary (for GPU acceleration)
 cargo clean
@@ -144,7 +138,6 @@ cargo xtask man target/man
 %install
 # Install tiered binaries to /usr/lib/voxtype/
 install -D -m 755 variants/voxtype-avx2 %{buildroot}%{vt_libdir}/voxtype-avx2
-install -D -m 755 variants/voxtype-avx512 %{buildroot}%{vt_libdir}/voxtype-avx512
 install -D -m 755 variants/voxtype-vulkan %{buildroot}%{vt_libdir}/voxtype-vulkan
 install -D -m 755 variants/voxtype-gguf-worker %{buildroot}%{vt_libdir}/voxtype-gguf-worker
 install -D -m 755 variants/voxtype-gguf-worker-vulkan %{buildroot}%{vt_libdir}/voxtype-gguf-worker-vulkan
@@ -235,7 +228,7 @@ if [ "$1" -eq 1 ]; then
     echo ""
     echo "=== Voxtype Post-Installation ==="
     echo ""
-    echo "The AVX2 or AVX-512 build is selected for your CPU automatically."
+    echo "CPU build: voxtype-avx2"
 
     if [ -n "$GPU_DETECTED" ]; then
         echo ""
@@ -262,6 +255,10 @@ if [ "$1" -eq 1 ]; then
     echo "     systemctl --user enable --now voxtype"
     echo ""
 fi
+echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"
+echo "  voxtype setup skill"
+echo "to teach it to configure voxtype for this machine."
+echo ""
 
 %posttrans
 # /usr/bin/voxtype is a symlink to the variant in use. Runs in %%posttrans
@@ -270,15 +267,12 @@ fi
 #
 # An existing link that still resolves is kept: `voxtype setup gpu --enable`
 # points it at voxtype-vulkan, and an upgrade must not undo that. A missing
-# or dangling one (older packages put the binaries in /usr/lib64/voxtype) is
-# recreated for this CPU.
+# or dangling one is recreated: older packages put the binaries in
+# /usr/lib64/voxtype, and 1.2.2-rc3 shipped a voxtype-avx512 variant that
+# this package no longer has.
 if [ ! -e %{_bindir}/voxtype ]; then
     rm -f %{_bindir}/voxtype
-    if grep -qw avx512f /proc/cpuinfo 2>/dev/null; then
-        ln -s %{vt_libdir}/voxtype-avx512 %{_bindir}/voxtype
-    else
-        ln -s %{vt_libdir}/voxtype-avx2 %{_bindir}/voxtype
-    fi
+    ln -s %{vt_libdir}/voxtype-avx2 %{_bindir}/voxtype
     if command -v restorecon >/dev/null 2>&1; then
         restorecon %{_bindir}/voxtype 2>/dev/null || true
     fi
@@ -301,7 +295,6 @@ fi
 %{_docdir}/%{name}/THIRD_PARTY.md
 %dir %{vt_libdir}
 %{vt_libdir}/voxtype-avx2
-%{vt_libdir}/voxtype-avx512
 %{vt_libdir}/voxtype-vulkan
 %{vt_libdir}/voxtype-gguf-worker
 %{vt_libdir}/voxtype-gguf-worker-vulkan
@@ -337,6 +330,9 @@ fi
 - Add the Vulkan build dependencies voxtype-vulkan needs
 - Build the GGUF client into every variant and ship the CPU and Vulkan
   GGUF workers, so Parakeet and Cohere .gguf models work
+- Drop the voxtype-avx512 variant: package builds set SOURCE_DATE_EPOCH,
+  which turns off ggml's native tuning, so it carried no AVX-512 code
+- Point users with a coding agent at voxtype setup skill after install
 
 * Sat Dec 20 2025 Peter Jackson <pete@peteonrails.com> - 0.4.1-1
 - Replace reqwest/rustls with curl for model downloads

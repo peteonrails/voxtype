@@ -3,8 +3,8 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export CARGO_HOME = $(CURDIR)/debian/cargo_home
 
-# Same AVX-512/GFNI floor as the release builds, for every binary except the
-# AVX-512 variant. CMAKE_*_FLAGS replace the flags the cmake crate would pass
+# Same AVX-512/GFNI floor as the release builds, for every binary.
+# CMAKE_*_FLAGS replace the flags the cmake crate would pass
 # to whisper.cpp, -fPIC included, so it has to be put back: compilers that
 # don't default to PIE otherwise fail the link with "relocation R_X86_64_32S
 # against .bss".
@@ -29,13 +29,9 @@ override_dh_auto_build:
 	# AVX2 baseline (most CPUs from 2013+)
 	$(HASWELL_ENV) cargo build --release --locked --features $(GGUF)
 	install -D -m 755 target/release/voxtype variants/voxtype-avx2
-	# CPU GGUF worker, shared by the AVX2 and AVX-512 binaries
+	# CPU GGUF worker for the AVX2 binary
 	$(HASWELL_ENV) cargo build --release --locked -p voxtype-gguf-worker
 	install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker
-	# AVX-512 (Zen 4+, some Intel)
-	cargo clean
-	cargo build --release --locked --features $(GGUF)
-	install -D -m 755 target/release/voxtype variants/voxtype-avx512
 	# Vulkan GPU build, and the Vulkan GGUF worker it looks for beside itself
 	cargo clean
 	$(HASWELL_ENV) cargo build --release --locked --features gpu-vulkan
@@ -52,7 +48,7 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	# Binaries live in /usr/lib/voxtype; postinst links /usr/bin/voxtype
-	for f in voxtype-avx2 voxtype-avx512 voxtype-vulkan voxtype-gguf-worker voxtype-gguf-worker-vulkan; do \
+	for f in voxtype-avx2 voxtype-vulkan voxtype-gguf-worker voxtype-gguf-worker-vulkan; do \
 		install -D -m 755 variants/$$f $(LIB)/$$f; \
 	done
 	# OSD. The launcher finds its frontends in its own directory, so only it
