@@ -22,6 +22,8 @@ Item {
   id: root
 
   property var theme: MeetingTheme {}
+  // Position, size, compact and minimized (MeetingPlacement).
+  property var placement: null
   property var feed: null
   property var assistant: null
   // The action running now, from MeetingCli.busy.
@@ -33,6 +35,100 @@ Item {
   property bool listLoading: false
   property string listError: ""
   property bool listHasMore: false
+  // The daemon answers `voxtype status` although meeting.sock cannot be
+  // reached: it is running without the socket.
+  property bool daemonRunning: false
+  // This meeting's audio is playing; the track, and the line being heard.
+  property bool playingHere: false
+  property string playTrack: "mixed"
+  property int playingSegId: -1
+  signal playRequested(int segId)
+  signal stopPlaybackRequested()
+
+  // A deleted line is waiting out its undo window.
+  property bool pendingDelete: false
+  // The last export, {path, folder}, or null.
+  property var lastExport: null
+
+  // ------------------------------------------------------- overlay look
+  //
+  // The card is translucent so it reads as an overlay on whatever is behind
+  // it (`[meeting] view_opacity`), and fully opaque while the pointer is on it
+  // or a field is being typed in; it eases back 1.5 s after that ends. Only
+  // the background's alpha changes: text and the theme's colours do not.
+  property real restingOpacity: 0.8
+  readonly property bool engaged: cardHover.hovered || pillHover.hovered || root.theme.inputDemand > 0
+    || reassignPopup.visible || noteEditor.visible || agentMenu.visible || moreMenu.visible || consent.visible
+  property bool lingering: false
+  readonly property real cardAlpha: root.engaged || root.lingering ? 1.0 : Math.max(0.3, Math.min(1.0, root.restingOpacity))
+  onEngagedChanged: {
+    if (root.engaged) {
+      root.lingering = false
+      lingerTimer.stop()
+    } else {
+      root.lingering = true
+      lingerTimer.restart()
+    }
+  }
+  Timer { id: lingerTimer; interval: 1500; onTriggered: root.lingering = false }
+  property real shownAlpha: root.cardAlpha
+  Behavior on shownAlpha { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
+
+  readonly property bool minimized: root.placement !== null && root.placement.minimized
+
+  function closeOverlays() {
+    reassignPopup.visible = false
+    noteEditor.visible = false
+    agentMenu.visible = false
+    moreMenu.visible = false
+  }
+  signal minimizeRequested()
+  signal expandRequested()
+
+  // The newest line, for the pill: "Primagen: buckle up…".
+  readonly property string lastLine: {
+    if (!root.feed || root.feed.segments.count === 0) return ""
+    var r = root.feed.segments.get(root.feed.segments.count - 1)
+    return root.feed.displayName(r.speaker) + ": " + r.text
+  }
+
+  // A press-and-drag that moves the card (or pill). The window follows the
+  // margins, so each event's travel from the press point is the step to take.
+  component DragArea: MouseArea {
+    id: drag
+    property real pressX: 0
+    property real pressY: 0
+    property bool moved: false
+    signal tapped()
+    acceptedButtons: Qt.LeftButton
+    cursorShape: drag.moved ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+    onPressed: function(mouse) {
+      drag.pressX = mouse.x
+      drag.pressY = mouse.y
+      drag.moved = false
+    }
+    onPositionChanged: function(mouse) {
+      if (!drag.pressed || !root.placement) return
+      var dx = mouse.x - drag.pressX
+      var dy = mouse.y - drag.pressY
+      if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return
+      drag.moved = true
+      root.placement.moveBy(dx, dy)
+    }
+    onReleased: {
+      if (drag.moved) root.placement.endMove()
+      else drag.tapped()
+      drag.moved = false
+    }
+  }
+
+  // Which Copy just worked ("summary", "answer:<row>"), for its "Copied".
+  property string copiedKey: ""
+  function noteCopied(key) {
+    root.copiedKey = key
+    copiedTimer.restart()
+  }
+  Timer { id: copiedTimer; interval: 1500; onTriggered: root.copiedKey = "" }
 
   signal pauseRequested()
   signal resumeRequested()
@@ -50,6 +146,15 @@ Item {
   signal moreMeetingsRequested()
   // From an ended or past meeting back to the list.
   signal backRequested()
+  signal copyRequested(string text, string key)
+  signal editTextRequested(int segId, string text)
+  signal resetTextRequested(int segId)
+  signal deleteLineRequested(int segId)
+  signal undoDeleteRequested()
+  // "markdown", "text", "json", "srt" or "vtt".
+  signal exportRequested(string format)
+  signal openFolderRequested(string path)
+  signal exportNoticeDismissed()
   signal closeRequested()
   signal errorDismissed()
 
@@ -90,6 +195,7 @@ Item {
   focus: true
   Keys.onEscapePressed: {
     if (consent.visible) consent.dismiss()
+    else if (moreMenu.visible) moreMenu.close()
     else if (agentMenu.visible) agentMenu.close()
     else if (reassignPopup.visible) reassignPopup.close()
     else if (noteEditor.visible) noteEditor.close()
@@ -245,13 +351,114 @@ Item {
 
   // ------------------------------------------------------------- surface
 
+  // ------------------------------------------------------------- the pill
+
+  Rectangle {
+    id: pill
+    objectName: "pill"
+    anchors.fill: parent
+    visible: root.minimized
+    radius: height / 2
+    color: Qt.rgba(root.theme.bg.r, root.theme.bg.g, root.theme.bg.b, root.shownAlpha)
+    border.width: 1
+    border.color: root.theme.border
+
+    HoverHandler { id: pillHover }
+
+    DragArea {
+      objectName: "pillDrag"
+      anchors.fill: parent
+      onTapped: root.expandRequested()
+    }
+
+    Row {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: root.theme.lg + 4
+      anchors.rightMargin: root.theme.lg + 4
+      spacing: root.theme.md
+
+      Rectangle {
+        anchors.verticalCenter: parent.verticalCenter
+        width: 8
+        height: 8
+        radius: 4
+        visible: root.hasMeeting
+        color: root.status === "recording" ? root.theme.urgent : root.theme.dim
+      }
+      Text {
+        objectName: "pillState"
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.hasMeeting ? root.stateLabel : "Meetings"
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+        font.bold: true
+      }
+      Text {
+        objectName: "pillElapsed"
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.hasMeeting && text !== ""
+        text: root.elapsedText
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+      }
+      Text {
+        objectName: "pillLine"
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.max(0, parent.width - x)
+        text: root.lastLine
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+        elide: Text.ElideRight
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- the card
+
   MeetingSurface {
     id: card
     theme: root.theme
     anchors.fill: parent
+    visible: !root.minimized
+    color: Qt.rgba(root.theme.bg.r, root.theme.bg.g, root.theme.bg.b, root.shownAlpha)
+
+    HoverHandler { id: cardHover }
 
     // Focus for Escape once the card is clicked.
     MouseArea { anchors.fill: parent; onClicked: root.forceActiveFocus() }
+
+    // The inner edge (facing the middle of the screen) changes the width.
+    MouseArea {
+      id: resizeHandle
+      objectName: "resizeHandle"
+      z: 5
+      width: 8
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      // By x, not by switching anchors: a moment with both set stretches the
+      // handle across the card and it swallows every click.
+      x: root.placement && !root.placement.handleOnLeft ? parent.width - width : 0
+      cursorShape: Qt.SizeHorCursor
+      hoverEnabled: true
+      property real pressX: 0
+      onPressed: function(mouse) { resizeHandle.pressX = mouse.x }
+      onPositionChanged: function(mouse) {
+        if (resizeHandle.pressed && root.placement) root.placement.resizeBy(mouse.x - resizeHandle.pressX)
+      }
+      onReleased: if (root.placement) root.placement.endResize()
+      Rectangle {
+        anchors.centerIn: parent
+        width: 2
+        height: 36
+        radius: 1
+        color: root.theme.alpha(root.theme.fg, resizeHandle.containsMouse || resizeHandle.pressed ? 0.6 : 0.2)
+      }
+    }
 
     ColumnLayout {
       anchors.fill: parent
@@ -260,9 +467,20 @@ Item {
 
       // ------------------------------------------------------- header
 
-      RowLayout {
+      // The header doubles as the card's handle: drag it to move the card.
+      Item {
         Layout.fillWidth: true
-        spacing: root.theme.gap
+        implicitHeight: headerRow.implicitHeight
+
+      DragArea {
+        objectName: "headerDrag"
+        anchors.fill: parent
+      }
+
+      RowLayout {
+        id: headerRow
+        anchors.fill: parent
+        spacing: root.theme.sm
 
         MeetingButton {
           objectName: "backButton"
@@ -285,12 +503,36 @@ Item {
           elide: Text.ElideRight
         }
 
+        // Export, folders and Reset position.
+        MeetingButton {
+          id: moreButton
+          objectName: "moreButton"
+          theme: root.theme
+          text: "⋯"
+          onClicked: moreMenu.openAt(moreButton)
+        }
+
+        MeetingButton {
+          objectName: "heightToggle"
+          theme: root.theme
+          text: root.placement && root.placement.compact ? "↧" : "↥"
+          onClicked: if (root.placement) root.placement.toggleCompact()
+        }
+
+        MeetingButton {
+          objectName: "minimizeButton"
+          theme: root.theme
+          text: "–"
+          onClicked: root.minimizeRequested()
+        }
+
         MeetingButton {
           objectName: "closeButton"
           theme: root.theme
-          text: "Close"
+          text: "✕"
           onClicked: root.closeRequested()
         }
+      }
       }
 
       RowLayout {
@@ -359,6 +601,32 @@ Item {
           bordered: true
           enabled: root.connected && root.busy === "" && (root.status === "recording" || root.status === "paused")
           onClicked: root.stopRequested()
+        }
+      }
+
+      // While this meeting's audio plays: what is playing, and Stop. A row of
+      // its own, so a narrow card does not push the header's buttons off.
+      RowLayout {
+        objectName: "transport"
+        Layout.fillWidth: true
+        visible: root.playingHere
+        spacing: root.theme.gap
+        Text {
+          objectName: "transportTrack"
+          Layout.fillWidth: true
+          text: "▶ Playing " + (root.playTrack === "mic" ? "your side" : root.playTrack === "loopback" ? "the others" : "both sides")
+          color: root.theme.accent
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          elide: Text.ElideRight
+        }
+        MeetingButton {
+          objectName: "transportStop"
+          theme: root.theme
+          // Not just "Stop": the meeting's own Stop is one row up.
+          text: "■ Stop audio"
+          bordered: true
+          onClicked: root.stopPlaybackRequested()
         }
       }
 
@@ -487,6 +755,51 @@ Item {
         }
       }
 
+      Rectangle {
+        objectName: "exportNotice"
+        Layout.fillWidth: true
+        visible: root.lastExport !== null
+        implicitHeight: exportText.implicitHeight + root.theme.padX * 2
+        radius: Math.min(root.theme.radius, 6)
+        color: root.theme.alpha(root.theme.accent, 0.12)
+        border.width: 1
+        border.color: root.theme.alpha(root.theme.accent, 0.45)
+
+        Text {
+          id: exportText
+          objectName: "exportNoticeText"
+          anchors.left: parent.left
+          anchors.right: exportButtons.left
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: root.theme.padX
+          anchors.rightMargin: root.theme.gap
+          text: root.lastExport ? "Exported to " + root.lastExport.shown : ""
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WrapAnywhere
+        }
+
+        Row {
+          id: exportButtons
+          anchors.right: parent.right
+          anchors.rightMargin: root.theme.sm
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: root.theme.xs
+          MeetingButton {
+            objectName: "exportOpenFolder"
+            theme: root.theme
+            text: "Open folder"
+            onClicked: root.openFolderRequested(root.lastExport.folder)
+          }
+          MeetingButton {
+            theme: root.theme
+            text: "Dismiss"
+            onClicked: root.exportNoticeDismissed()
+          }
+        }
+      }
+
       // ------------------------------------------------------- tabs
 
       Row {
@@ -524,6 +837,15 @@ Item {
           onRenameRequested: function(keys, name) { root.renameRequested(keys, name) }
           onSpeakerClicked: function(line, anchor) { root.openReassign(line, anchor) }
           onNoteClicked: function(line, anchor) { root.openNoteEditor(line, anchor) }
+          onEditRequested: function(segId, text) { root.editTextRequested(segId, text) }
+          onResetTextRequested: function(segId) { root.resetTextRequested(segId) }
+          canPlay: !root.assistant || root.assistant.audioRetained !== false
+          audioKnownMissing: root.assistant !== null && root.assistant.audioRetained === false
+          canOpenSettings: root.canOpenSettings
+          playingSegId: root.playingSegId
+          onPlayRequested: function(segId) { root.playRequested(segId) }
+          onSettingsRequested: root.settingsRequested()
+          onDeleteRequested: function(segId) { root.deleteLineRequested(segId) }
         }
 
         NotesPane {
@@ -538,8 +860,10 @@ Item {
           theme: root.theme
           assistant: root.assistant
           feed: root.feed
+          copiedKey: root.copiedKey
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
+          onCopyRequested: function(text, key) { root.copyRequested(text, key) }
         }
 
         SummaryPane {
@@ -548,8 +872,12 @@ Item {
           theme: root.theme
           assistant: root.assistant
           feed: root.feed
+          copiedKey: root.copiedKey
+          canOpenSettings: root.canOpenSettings
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
+          onCopyRequested: function(text, key) { root.copyRequested(text, key) }
+          onSettingsRequested: root.settingsRequested()
         }
       }
 
@@ -567,7 +895,9 @@ Item {
         Text {
           objectName: "idleTitle"
           Layout.fillWidth: true
-          text: root.connected ? "No meeting in progress" : "Voxtype is not running"
+          text: root.connected ? "No meeting in progress"
+            : root.daemonRunning ? "Voxtype is running without its meeting socket"
+            : "Voxtype is not running"
           color: root.theme.fg
           font.family: root.theme.fontFamily
           font.pixelSize: root.theme.title
@@ -577,7 +907,10 @@ Item {
           objectName: "idleDetail"
           Layout.fillWidth: true
           visible: !root.connected
-          text: "Waiting for the voxtype daemon to start a meeting. Past meetings are still here."
+          text: root.daemonRunning
+            ? "Live meetings need a daemon that publishes $XDG_RUNTIME_DIR/voxtype/meeting.sock (voxtype 1.3.0 or newer). "
+              + "After updating, restart it: systemctl --user restart voxtype. Past meetings are still here."
+            : "Start it with systemctl --user start voxtype (or voxtype daemon). This view connects as soon as it is running. Past meetings are still here."
           color: root.theme.dim
           font.family: root.theme.fontFamily
           font.pixelSize: root.theme.bodySmall
@@ -640,13 +973,153 @@ Item {
   MouseArea {
     objectName: "overlayScrim"
     anchors.fill: parent
-    visible: reassignPopup.visible || noteEditor.visible || agentMenu.visible || consent.visible
+    visible: reassignPopup.visible || noteEditor.visible || agentMenu.visible || moreMenu.visible || consent.visible
     z: 9
     onClicked: {
       if (consent.visible) return
       reassignPopup.close()
       noteEditor.close()
       agentMenu.close()
+      moreMenu.close()
+    }
+  }
+
+  // A deleted line can be had back for a few seconds; then it is gone.
+  Rectangle {
+    objectName: "undoBar"
+    visible: root.pendingDelete && root.hasMeeting
+    z: 8
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.bottom: parent.bottom
+    anchors.bottomMargin: root.theme.padding
+    width: undoRow.implicitWidth + root.theme.padX * 2
+    height: undoRow.implicitHeight + root.theme.md * 2
+    radius: Math.min(root.theme.radius, 6)
+    color: Qt.rgba(root.theme.bg.r, root.theme.bg.g, root.theme.bg.b, 1)
+    border.width: 1
+    border.color: root.theme.border
+
+    Row {
+      id: undoRow
+      anchors.centerIn: parent
+      spacing: root.theme.gap
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: "Line deleted."
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+      }
+      MeetingButton {
+        objectName: "undoButton"
+        theme: root.theme
+        text: "Undo"
+        bordered: true
+        onClicked: root.undoDeleteRequested()
+      }
+    }
+  }
+
+  // The header's More menu: export in each format, and the meeting's folder.
+  MeetingSurface {
+    id: moreMenu
+    objectName: "moreMenu"
+    theme: root.theme
+    visible: false
+    z: 10
+    width: 240
+    height: moreColumn.implicitHeight + root.theme.padX * 2
+
+    function openAt(anchor) {
+      var p = anchor.mapToItem(root, 0, 0)
+      moreMenu.x = Math.max(root.theme.lg, Math.min(p.x + anchor.width - moreMenu.width, root.width - moreMenu.width - root.theme.lg))
+      moreMenu.y = p.y + anchor.height + root.theme.xs
+      moreMenu.visible = true
+      moreMenu.forceActiveFocus()
+    }
+    function close() {
+      moreMenu.visible = false
+      root.forceActiveFocus()
+    }
+    Keys.onEscapePressed: moreMenu.close()
+
+    MouseArea { anchors.fill: parent; onClicked: {} }
+
+    Column {
+      id: moreColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.theme.padX
+      spacing: root.theme.xxs
+
+      MeetingButton {
+        objectName: "resetPosition"
+        theme: root.theme
+        width: moreColumn.width
+        text: "Reset position and size"
+        onClicked: {
+          moreMenu.close()
+          if (root.placement) root.placement.reset()
+        }
+      }
+
+      Rectangle {
+        width: parent.width
+        height: 1
+        visible: root.hasMeeting
+        color: root.theme.alpha(root.theme.fg, 0.12)
+      }
+
+      Text {
+        width: parent.width
+        visible: root.hasMeeting
+        text: "Export to Documents/Voxtype"
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+      }
+
+      Repeater {
+        // What `meeting export --format` accepts (srt and vtt are not yet).
+        model: [
+          { format: "markdown", label: "Markdown (.md)" },
+          { format: "text", label: "Plain text (.txt)" },
+          { format: "json", label: "JSON (.json)" }
+        ]
+        MeetingButton {
+          required property var modelData
+          objectName: "exportOption_" + modelData.format
+          theme: root.theme
+          visible: root.hasMeeting
+          width: moreColumn.width
+          text: modelData.label
+          onClicked: {
+            moreMenu.close()
+            root.exportRequested(modelData.format)
+          }
+        }
+      }
+
+      Rectangle {
+        width: parent.width
+        height: 1
+        visible: root.hasMeeting
+        color: root.theme.alpha(root.theme.fg, 0.12)
+      }
+
+      MeetingButton {
+        objectName: "openMeetingFolder"
+        visible: root.hasMeeting
+        theme: root.theme
+        width: moreColumn.width
+        text: "Open meeting folder"
+        enabled: root.assistant !== null && root.assistant.meetingFolder !== ""
+        onClicked: {
+          moreMenu.close()
+          root.openFolderRequested(root.assistant.meetingFolder)
+        }
+      }
     }
   }
 

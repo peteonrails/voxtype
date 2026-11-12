@@ -34,7 +34,13 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
                                    as the daemon does after a meeting,
                                    {"event":"status","status":"summarizing",
                                    meeting_id} and summary_ready (or, with
-                                   `error`, an error event naming the meeting)
+                                   `error`, an error event naming the meeting,
+                                   or naming none with "anonymous": true)
+  {"cmd": "delete", "segment_id": N, "shape": "event"|"flag", "meeting_id": M?}
+                                   remove a line; announce it as segment_deleted
+                                   or as segment_updated with "deleted": true
+  {"cmd": "playback", "meeting_id", "track", "state", "from_ms"}
+                                   a playback event, as the daemon sends one
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -187,7 +193,10 @@ class Server:
                 auto, mid = self.autosummary, self.state.get("meeting_id")
                 self.autosummary = None
                 if auto.get("error"):
-                    done = dict(auto["error"], event="error", meeting_id=mid)
+                    done = dict(auto["error"], event="error")
+                    # `anonymous`: an older daemon whose error names no meeting.
+                    if not auto.get("anonymous"):
+                        done["meeting_id"] = mid
                 else:
                     done = {"event": "summary_ready", "meeting_id": mid, "agent": "claude", "agent_name": "Claude",
                             "path": "/tmp/meetings/%s/summary.md" % mid, "summary": auto["summary"]}
@@ -216,6 +225,20 @@ class Server:
                 target["segments"] = [seg if s["id"] == seg["id"] else s for s in target["segments"]]
                 if target is self.state:
                     self.broadcast({cmd.get("key", "event"): "segment_updated", "segment": seg})
+        elif kind == "delete":
+            mid = cmd.get("meeting_id") or self.state.get("meeting_id")
+            if mid == self.state.get("meeting_id"):
+                gone = [s for s in self.state["segments"] if s["id"] == cmd["segment_id"]]
+                self.state["segments"] = [s for s in self.state["segments"] if s["id"] != cmd["segment_id"]]
+                if cmd.get("shape") == "flag" and gone:
+                    self.broadcast({"event": "segment_updated", "segment": dict(gone[0], deleted=True)})
+                else:
+                    self.broadcast({"event": "segment_deleted", "meeting_id": mid, "segment_id": cmd["segment_id"]})
+            elif self.stored and mid == self.stored["meeting_id"]:
+                self.stored["segments"] = [s for s in self.stored["segments"] if s["id"] != cmd["segment_id"]]
+        elif kind == "playback":
+            self.broadcast({"event": "playback", "meeting_id": cmd["meeting_id"], "track": cmd["track"],
+                            "state": cmd["state"], "from_ms": cmd["from_ms"]})
         elif kind == "drop":
             self.drop()
         elif kind == "down":

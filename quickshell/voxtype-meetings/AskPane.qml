@@ -14,6 +14,8 @@ Item {
 
   signal agentMenuRequested(var anchor)
   signal citationActivated(real ms)
+  signal copyRequested(string text, string key)
+  property string copiedKey: ""
 
   // Show one answer (a notification's Open) and flash it.
   property int flashRow: -1
@@ -54,6 +56,18 @@ Item {
       }
     }
 
+    // Why nothing can answer (no agent, an old voxtype, the CLI missing).
+    Text {
+      objectName: "assistantProblem"
+      Layout.fillWidth: true
+      visible: text !== ""
+      text: root.assistant ? root.assistant.problem : ""
+      color: root.theme.urgent
+      font.family: root.theme.fontFamily
+      font.pixelSize: root.theme.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
     ListView {
       id: thread
       objectName: "askThread"
@@ -63,7 +77,12 @@ Item {
       spacing: root.theme.lg
       model: root.assistant ? root.assistant.thread : null
       boundsBehavior: Flickable.StopAtBounds
-      onCountChanged: Qt.callLater(thread.positionViewAtEnd)
+      // Follow the newest answer as it streams, fails or finishes, unless the
+      // user has scrolled up to read something older.
+      property bool following: true
+      onMovementEnded: thread.following = thread.atYEnd
+      onCountChanged: { thread.following = true; Qt.callLater(thread.positionViewAtEnd) }
+      onContentHeightChanged: if (thread.following) Qt.callLater(thread.positionViewAtEnd)
 
       Text {
         anchors.centerIn: parent
@@ -158,24 +177,75 @@ Item {
             font.pixelSize: root.theme.bodySmall
           }
 
-          Text {
-            objectName: "answerError"
+          Rectangle {
+            objectName: "answerErrorCard"
             width: parent.width
             visible: entry.error !== ""
-            text: entry.error
-            color: root.theme.urgent
-            font.family: root.theme.fontFamily
-            font.pixelSize: root.theme.bodySmall
-            wrapMode: Text.WordWrap
+            implicitHeight: answerErrorColumn.implicitHeight + root.theme.padX * 2
+            height: implicitHeight
+            radius: Math.min(root.theme.radius, 6)
+            color: root.theme.alpha(root.theme.urgent, 0.12)
+            border.width: 1
+            border.color: root.theme.alpha(root.theme.urgent, 0.5)
+            Column {
+              id: answerErrorColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: root.theme.padX
+              spacing: root.theme.xs
+              Text {
+                width: parent.width
+                text: "Couldn't answer"
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
+                font.bold: true
+              }
+              Text {
+                objectName: "answerError"
+                width: parent.width
+                text: entry.error
+                color: root.theme.fg
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.bodySmall
+                wrapMode: Text.WordWrap
+              }
+            }
           }
 
-          Text {
-            objectName: "answerBy"
-            visible: !entry.pending && entry.error === "" && entry.agent !== ""
-            text: "Answered by " + entry.agent
-            color: root.theme.dim
-            font.family: root.theme.fontFamily
-            font.pixelSize: root.theme.caption
+          Row {
+            spacing: root.theme.lg
+            visible: !entry.pending && entry.error === ""
+
+            Text {
+              objectName: "answerBy"
+              visible: entry.agent !== ""
+              text: "Answered by " + entry.agent
+              color: root.theme.dim
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.caption
+            }
+
+            Text {
+              id: copyAnswer
+              objectName: "answerCopy"
+              visible: entry.text !== ""
+              readonly property string key: "answer:" + entry.index
+              text: root.copiedKey === copyAnswer.key ? "Copied" : "Copy"
+              color: copyMouse.containsMouse ? root.theme.fg : root.theme.dim
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.caption
+              font.underline: copyMouse.containsMouse
+              MouseArea {
+                id: copyMouse
+                anchors.fill: parent
+                anchors.margins: -root.theme.sm
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.copyRequested(entry.text, copyAnswer.key)
+              }
+            }
           }
         }
       }

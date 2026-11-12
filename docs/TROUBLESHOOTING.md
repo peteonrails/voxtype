@@ -191,6 +191,37 @@ graphical frontend is installed, install a supported terminal or run
   availability, input devices, OSD styles) is left empty rather than showing old
   entries. Run the same command with `--json` in a terminal for the full error.
 
+## Meeting view
+
+The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says
+what is wrong instead of showing an empty pane:
+
+- **"Voxtype is not running"**: the daemon is down. Start it with
+  `systemctl --user start voxtype`. Past meetings still list and open.
+- **"Voxtype is running without its meeting socket"**: the daemon answers but
+  does not publish `$XDG_RUNTIME_DIR/voxtype/meeting.sock`, usually because it
+  is older than 1.3.0. Update voxtype and `systemctl --user restart voxtype`.
+- **"Could not run voxtype. Is voxtype installed and on PATH?"**: the shell
+  cannot start the voxtype command. In the Omarchy plugin, check `dev.json` as
+  for the Settings panel above.
+- **"This voxtype is too old for …"**: the command for notes, Ask, summaries or
+  moving lines does not exist in the installed voxtype. Update it, then reopen
+  the view (and restart the shell after an install, so it loads the new view).
+- **"No agent or local model was found"** on the Ask or Summary tab: questions
+  and summaries need Claude Code or Codex on `PATH`, or Ollama for a local
+  model. `voxtype meeting assistant status` shows what was found and why an
+  agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
+  agent menu shows it disabled, with the reason.
+- **"Copying needs wl-copy"**: install `wl-clipboard`.
+- **"Couldn't write the summary"** at the top of the Summary tab: the backend
+  that writes summaries failed, and the card says which and why. The chip in
+  the tab's header names that backend; it can be a local model (an older
+  `[meeting.summary]` backend such as Ollama) even when questions go to an
+  agent. "status code 500" from `localhost:11434` means Ollama is running but
+  failed: check `ollama list` for the model, or choose **Use Claude instead**
+  (shown when a local model failed and you have allowed an agent), which runs
+  `voxtype meeting summarize <id> --agent claude` for this meeting only.
+
 ## Table of Contents
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
@@ -209,6 +240,7 @@ graphical frontend is installed, install a supported terminal or run
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
+- [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [No Meeting Window Appears](#no-meeting-window-appears)
 - [Systemd Service Issues](#systemd-service-issues)
@@ -473,6 +505,18 @@ systemctl --user restart pipewire pipewire-pulse
 # Or for PulseAudio:
 systemctl --user restart pulseaudio
 ```
+
+### "No sound server answered within 5 s"
+
+Voxtype asked the audio system for the microphone and got no reply. This happens when PipeWire or PulseAudio is wedged (its socket exists but it does not answer), or in a sandbox, container or clean chroot with no sound server. Recording, `voxtype info devices` and the Settings panel's device list stop waiting after 5 seconds and report this instead of hanging.
+
+```bash
+systemctl --user status pipewire pipewire-pulse wireplumber
+systemctl --user restart pipewire pipewire-pulse wireplumber
+voxtype info devices
+```
+
+If `info devices` lists your microphone again, recording works too; the daemon does not need a restart.
 
 ### "Audio format not supported"
 
@@ -1613,6 +1657,138 @@ No result is shown for cancelled recordings, accidental taps, or
 
 ---
 
+## Meeting Audio and Post-Meeting Command
+
+### The other side shows up under You on speakers
+
+On speakers your microphone hears what the speakers play, so the other side of the call, or a video playing during the meeting, can be transcribed as You. Voxtype removes it with PipeWire's echo canceller unless the meeting's output is headphones (`[meeting.audio] echo_cancel = "auto"`, the default).
+
+Check which echo handling the meeting used:
+
+```bash
+voxtype meeting status --json      # "echo_cancel": "webrtc", "gtcrn" or "none"
+journalctl --user -u voxtype | grep -i "echo handling"
+```
+
+The log line gives the reason when it is not `webrtc`:
+
+- **"the output is headphones"**: voxtype read your default output as headphones (its active port, its form factor, or Bluetooth). If sound is in fact coming from speakers, set `echo_cancel = "webrtc"` to use the canceller anyway.
+- **"Echo cancellation could not start"**: the canceller needs PipeWire's echo-cancel module and its WebRTC plugin. On Arch and Omarchy they come with `libpipewire` and `pipewire-audio`; elsewhere, check that `libpipewire-module-echo-cancel.so` and `aec/libspa-aec-webrtc.so` exist under your PipeWire library directories. PipeWire releases too old for the canceller's monitor mode also fall back. `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own error.
+- **"the mic is a monitor of the output the canceller would cancel"**: your default microphone (or `mic_device`) is a monitor of the output whose sound the canceller removes, so cancelling would leave nothing. This happens with a virtual mic fed from the speakers. Pick your real microphone as the default, or name it in `mic_device`.
+- **"The echo canceller's mic has been silent for 3s"**: the canceller started but delivered nothing but digital silence, so the meeting switched to recording the microphone directly with GTCRN (the status then says `gtcrn`). Either the canceller is not receiving the microphone, or your microphone is a monitor of your default output (a virtual mic fed from the speakers), whose every sound the canceller treats as echo. Check that `pactl list short sources` shows your real microphone and that it is not muted; `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own output. `echo_cancel = "gtcrn"` skips the canceller.
+- **"mic_device is not a PipeWire source"**: `meeting.audio.mic_device` names an ALSA device. Set it to a PipeWire source name from `pactl list short sources`, or to `default`.
+- **"the default source is already an echo canceller"**: you run your own echo canceller as the default microphone, and voxtype records from it rather than adding a second one. If echo still gets through, check that canceller's setup, or name your real microphone in `mic_device` to have voxtype's canceller instead.
+- **`none`**: `echo_cancel` is `disabled`, or it is `gtcrn` and the GTCRN model is missing.
+
+With a filter as your default microphone (Camera Effects, a noise-suppression chain), the log also says "The default source … is a filter over …": the canceller records the real microphone under the filter, so the filter's effects are not in the meeting's mic track. That is expected.
+
+The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
+
+### Meeting audio is saved as WAV instead of Opus
+
+With `[meeting] retain_audio = true`, voxtype encodes the audio with
+`ffmpeg`. When `ffmpeg` is not on the daemon's `PATH`, or was built without
+libopus, the daemon logs one of these and keeps `mic.wav`, `loopback.wav` and
+`mixed.wav` instead (about 115 MB per hour per file, against about 10 MB for
+Opus):
+
+```
+ffmpeg not found; keeping meeting audio as WAV ...
+/usr/bin/ffmpeg has no libopus encoder; keeping meeting audio as WAV ...
+```
+
+Install `ffmpeg` (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`,
+`sudo dnf install ffmpeg-free`) and check it has the encoder:
+
+```bash
+ffmpeg -hide_banner -encoders | grep libopus
+```
+
+Then restart the daemon (`systemctl --user restart voxtype`); the check runs
+once per daemon. Meetings already saved as WAV stay WAV. To convert one:
+
+```bash
+cd ~/.local/share/voxtype/meetings/<meeting>
+for t in mic loopback mixed; do
+  [ -f $t.wav ] && ffmpeg -i $t.wav -c:a libopus -b:a 24k $t.opus && rm $t.wav
+done
+```
+
+`meeting.json` lists whichever files are there the next time it is rewritten.
+
+### `meeting import` or `meeting retranscribe` fails
+
+- **"need ffmpeg and ffprobe"**: install ffmpeg; ffprobe comes with it.
+- **"Cannot read ..."**: ffprobe could not find an audio stream. Check the
+  file plays (`ffprobe file`); a folder is only accepted when it is an Omarchy
+  Meeting Recorder meeting folder.
+- **"Invalid --channels ..."**: name one side per channel, in order. The
+  message says how many channels the file has; `ffprobe -show_streams file`
+  shows the layout. Leave `--channels` out to mix everything.
+- **"recorded without keeping audio"**: `meeting retranscribe` needs the
+  meeting's audio. Meetings recorded with `retain_audio = true`, and every
+  imported meeting, have it.
+- **A model or engine is refused**: the same checks as `meeting start
+  --model` apply; download the model first (`voxtype setup model`).
+- **Speaker names look swapped after transcribing again with `ml`
+  diarization**: the speaker numbers come from a new clustering. Rename them
+  with `voxtype meeting label`.
+
+### `meeting play` fails or plays nothing
+
+- **"needs ffmpeg and one of pw-play (PipeWire), paplay (PulseAudio) or
+  aplay (ALSA)"**: install what the message names as missing. `pw-play`
+  comes with PipeWire (`pipewire` or `pipewire-bin`), `paplay` with
+  `pulseaudio-utils` or `libpulse`, `aplay` with `alsa-utils`.
+- **"This meeting was recorded without keeping audio"**: the meeting was
+  recorded with `retain_audio` off. Turn it on for future meetings; there is
+  nothing to play for this one.
+- **It says it is playing but you hear nothing**: playback goes to your
+  default output. Check it with `wpctl status` (PipeWire) or
+  `pactl get-default-sink`, and look at
+  `$XDG_RUNTIME_DIR/voxtype/meeting_playback.log` for errors from ffmpeg or
+  the player.
+
+### The post-meeting command did not run, or did not finish
+
+`post_meeting_command` runs in the background once the meeting's folder is
+final, and its outcome is in the daemon log:
+
+```bash
+journalctl --user -u voxtype | grep post_meeting_command
+```
+
+- **"failed ... (exit status: 127)"**: the shell could not find the program.
+  The daemon's `PATH` under systemd is shorter than your terminal's; use an
+  absolute path.
+- **"ran past 300s and was killed"**: raise `post_meeting_timeout_secs`, or
+  have the command start its long work with `systemd-run --user` so it is no
+  longer the command's child.
+- **Nothing logged**: check that `post_meeting_command` is under `[meeting]`
+  and the daemon was restarted after you set it (`voxtype config` shows it).
+
+The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
+`VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
+terminal: anything that prompts for input fails.
+
+## Meetings: The Remote Side Shows Up Under "You"
+
+With speakers instead of headphones, your microphone hears the call. Voxtype removes that echo from your lines, but what is left can still show up:
+
+- **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track, including the guard's. Check `[meeting.audio] echo_guard` is on (the default). Keep `echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones. A line that mixes your voice with the echo stays yours, echo included: the guard only removes lines that are nothing but echo.
+- **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. The guard drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
+- **A remote line shows up twice, once under the remote speaker from your microphone.** The guard moved an echo line to the remote side because the loopback's transcript did not have its words. Delete the copy with `voxtype meeting delete-line`.
+- **A line of yours went missing or moved to the remote.** The guard keeps a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud call can still read as echo. Speak up or lower the call volume; move a line back with `voxtype meeting reassign <meeting> <line> You`; or set `echo_guard = false` to keep only exact-word matching.
+
+The log counts what the guard did per chunk ("Echo guard: dropped N microphone line(s) ..., moved N ...", "Removed N bleed-through word(s) via dedup"); at debug level it names each line:
+
+```bash
+systemctl --user stop voxtype
+RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -iE "echo"
+```
+
+---
+
 ## No Meeting Window Appears
 
 `voxtype meeting view` opens the view `[meeting] view` resolves to, and when nothing can open it says why:
@@ -1648,9 +1824,9 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 
 **Codex worked, then fails with an authentication error.** In the jail codex can read `~/.codex/auth.json` but not rewrite it, so it cannot save a refreshed login token there. Run `codex` once in a terminal to refresh the login, then retry.
 
-**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude` and `codex` can be run without tools that reach your files, so voxtype skips other agents and uses `claude` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
+**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude`, `codex` (jailed) and `pi` can be run without tools that reach your files or the network, so voxtype skips other agents and uses `claude` or `pi` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
 
-**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code or Codex, or start Ollama and `ollama pull llama3.2`.
+**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
 
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 

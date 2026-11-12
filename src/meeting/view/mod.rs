@@ -4,8 +4,10 @@
 //! from storage, it owns everything a meeting view needs that is not
 //! drawing: transcript lines in start-time order, speaker chips merged by
 //! the name they display, the meeting's state, and what to do after a
-//! reconnect. The terminal view (`voxtype meeting watch`) draws it today; a
-//! GTK window can reuse it unchanged.
+//! reconnect. Deleted lines are left out, edited and moved ones say so
+//! ([`LineMarks`]), and playback, import progress and levels are tracked for
+//! the meeting on screen. The terminal view (`voxtype meeting watch`) and the
+//! GTK4 window draw it; neither holds meeting logic of its own.
 
 pub mod client;
 pub mod commands;
@@ -80,6 +82,8 @@ pub enum ViewEvent {
         #[serde(default)]
         started_at: Option<DateTime<Utc>>,
         #[serde(default)]
+        echo_cancel: Option<String>,
+        #[serde(default)]
         segments: Vec<TranscriptSegment>,
     },
     Segments {
@@ -88,6 +92,11 @@ pub enum ViewEvent {
     },
     SegmentUpdated {
         segment: TranscriptSegment,
+    },
+    SegmentDeleted {
+        #[serde(default)]
+        meeting_id: Option<String>,
+        segment_id: u32,
     },
     SpeakerRenamed {
         from: String,
@@ -118,6 +127,16 @@ pub enum ViewEvent {
         #[serde(default)]
         code: Option<String>,
     },
+    Playback {
+        meeting_id: String,
+        #[serde(default)]
+        track: String,
+        state: String,
+        #[serde(default)]
+        from_ms: u64,
+    },
+    ImportProgress(ImportProgress),
+    Levels(Levels),
     #[serde(other)]
     Unknown,
 }
@@ -126,6 +145,112 @@ impl ViewEvent {
     /// Parse one NDJSON line. `None` for a line that is not an event.
     pub fn parse(line: &str) -> Option<Self> {
         serde_json::from_str(line).ok()
+    }
+}
+
+/// How far a `meeting import` or `meeting retranscribe` has got
+/// (`import_progress`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ImportProgress {
+    pub meeting_id: String,
+    /// `import` or `retranscribe`
+    #[serde(default)]
+    pub operation: String,
+    /// `transcribing`, `done` or `failed`
+    pub state: String,
+    #[serde(default)]
+    pub chunks_done: u32,
+    #[serde(default)]
+    pub chunks_total: u32,
+    #[serde(default)]
+    pub position_ms: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+impl ImportProgress {
+    /// Still transcribing.
+    pub fn running(&self) -> bool {
+        self.state == "transcribing"
+    }
+
+    /// 0.0 to 1.0, from the audio position.
+    pub fn fraction(&self) -> f64 {
+        if self.duration_ms == 0 {
+            return 0.0;
+        }
+        (self.position_ms as f64 / self.duration_ms as f64).clamp(0.0, 1.0)
+    }
+}
+
+/// Per-track levels of the last 100 ms (`levels`), in dBFS.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Levels {
+    #[serde(default)]
+    pub meeting_id: Option<String>,
+    #[serde(default)]
+    pub t_ms: u64,
+    #[serde(default)]
+    pub mic: Option<f32>,
+    #[serde(default)]
+    pub mic_peak: Option<f32>,
+    #[serde(default)]
+    pub loopback: Option<f32>,
+    #[serde(default)]
+    pub loopback_peak: Option<f32>,
+    #[serde(default)]
+    pub soundcheck: bool,
+}
+
+/// A 0 to 1 meter value for a dBFS level: -60 dB and below is empty.
+pub fn meter(db: Option<f32>) -> f64 {
+    db.map(|d| ((d as f64 + 60.0) / 60.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+/// The meeting's audio being played back (`playback`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playback {
+    /// `mixed`, `mic` or `loopback`
+    pub track: String,
+    pub from_ms: u64,
+    /// When the viewer heard it started, to estimate the position.
+    pub since: DateTime<Utc>,
+}
+
+impl Playback {
+    /// Roughly where the playback is now, in ms into the meeting.
+    pub fn position_ms(&self, now: DateTime<Utc>) -> u64 {
+        self.from_ms + (now - self.since).num_milliseconds().max(0) as u64
+    }
+}
+
+/// How a line differs from what the diarizer and engine produced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineMarks {
+    /// The text was corrected (`meeting edit`); `original_text` holds the
+    /// transcription.
+    pub edited: bool,
+    /// The line was moved to another speaker (`meeting reassign`);
+    /// `original_speaker` holds the diarizer's.
+    pub moved: bool,
+    /// The line has a note.
+    pub noted: bool,
+    /// The line is highlighted.
+    pub highlighted: bool,
+}
+
+impl LineMarks {
+    pub fn of(segment: &TranscriptSegment) -> Self {
+        Self {
+            edited: segment.original_text.is_some(),
+            moved: segment.original_speaker.is_some(),
+            noted: segment
+                .annotation
+                .as_ref()
+                .is_some_and(|a| !a.text.trim().is_empty()),
+            highlighted: segment.annotation.as_ref().is_some_and(|a| a.highlight),
+        }
     }
 }
 
@@ -140,6 +265,9 @@ pub enum Change {
     Notes,
     Summary,
     Error,
+    Playback,
+    Progress,
+    Levels,
     /// The socket's live events no longer describe a meeting this model
     /// knows (one started while it watched); reconnect for a fresh `hello`.
     Resync,
@@ -174,6 +302,8 @@ pub struct MeetingView {
     pub ended_at: Option<DateTime<Utc>>,
     pub duration_secs: Option<u64>,
     pub state: ViewState,
+    /// The meeting's echo handling (`webrtc`, `gtcrn`, `none`), when known.
+    pub echo_cancel: Option<String>,
     /// Connected to the daemon's socket. Always false for a stored meeting.
     pub connected: bool,
     /// Follows the live socket. False for a meeting loaded from storage,
@@ -182,8 +312,20 @@ pub struct MeetingView {
     lines: Vec<TranscriptSegment>,
     pub summary: Option<SummaryInfo>,
     pub last_error: Option<String>,
+    /// The `code` of the last error, such as `consent_required`.
+    pub last_error_code: Option<String>,
     /// When notes.md last changed, as the daemon reported it
     pub notes_updated_at: Option<DateTime<Utc>>,
+    /// This meeting's audio, while it plays.
+    pub playback: Option<Playback>,
+    /// An import or retranscribe of this meeting, while it runs and once it
+    /// has finished.
+    pub progress: Option<ImportProgress>,
+    /// The latest levels while recording; cleared when recording pauses or
+    /// stops, so a meter falls to silence.
+    pub levels: Option<Levels>,
+    /// When the latest levels arrived
+    pub levels_at: Option<DateTime<Utc>>,
     /// Bumped on every change, for viewers that cache rendering
     pub revision: u64,
 }
@@ -204,12 +346,18 @@ impl MeetingView {
             ended_at: None,
             duration_secs: None,
             state: ViewState::Idle,
+            echo_cancel: None,
             connected: false,
             live: true,
             lines: Vec::new(),
             summary: None,
             last_error: None,
+            last_error_code: None,
             notes_updated_at: None,
+            playback: None,
+            progress: None,
+            levels: None,
+            levels_at: None,
             revision: 0,
         }
     }
@@ -224,6 +372,7 @@ impl MeetingView {
             ended_at: m.ended_at,
             duration_secs: m.duration_secs,
             state: ViewState::Ended,
+            echo_cancel: None,
             connected: false,
             live: false,
             lines: Vec::new(),
@@ -233,14 +382,19 @@ impl MeetingView {
                 summary,
             }),
             last_error: None,
+            last_error_code: None,
             notes_updated_at: None,
+            playback: None,
+            progress: None,
+            levels: None,
+            levels_at: None,
             revision: 0,
         };
         view.set_lines(meeting.transcript.segments.clone());
         view
     }
 
-    /// Transcript lines, ordered by start time.
+    /// Transcript lines, ordered by start time. Deleted lines are not here.
     pub fn lines(&self) -> &[TranscriptSegment] {
         &self.lines
     }
@@ -251,14 +405,19 @@ impl MeetingView {
     }
 
     fn set_lines(&mut self, mut lines: Vec<TranscriptSegment>) {
+        lines.retain(|s| !s.deleted);
         lines.sort_by_key(|s| (s.start_ms, s.id));
         lines.dedup_by_key(|s| s.id);
         self.lines = lines;
     }
 
-    /// Insert or replace one line, keeping start-time order.
+    /// Insert or replace one line, keeping start-time order. A line marked
+    /// deleted is removed instead; one restored comes back in its place.
     fn upsert(&mut self, segment: TranscriptSegment) {
         self.lines.retain(|s| s.id != segment.id);
+        if segment.deleted {
+            return;
+        }
         let at = self
             .lines
             .partition_point(|s| (s.start_ms, s.id) <= (segment.start_ms, segment.id));
@@ -291,6 +450,27 @@ impl MeetingView {
         }
     }
 
+    /// The levels to meter at `now`: the latest, unless they stopped coming
+    /// half a second ago, when the meter should read silence.
+    pub fn current_levels(&self, now: DateTime<Utc>) -> Option<&Levels> {
+        let at = self.levels_at?;
+        if (now - at).num_milliseconds() > 500 {
+            return None;
+        }
+        self.levels.as_ref()
+    }
+
+    /// The line playing back now, if this meeting's audio is playing and
+    /// `now` falls in a line.
+    pub fn playing_line(&self, now: DateTime<Utc>) -> Option<u32> {
+        let at = self.playback.as_ref()?.position_ms(now);
+        self.lines
+            .iter()
+            .rev()
+            .find(|s| s.start_ms <= at && at < s.end_ms.max(s.start_ms + 1))
+            .map(|s| s.id)
+    }
+
     /// Apply one event.
     pub fn apply(&mut self, event: ViewEvent) -> Change {
         let change = self.apply_inner(event);
@@ -309,6 +489,23 @@ impl MeetingView {
     }
 
     fn apply_inner(&mut self, event: ViewEvent) -> Change {
+        // Playback and import progress name their meeting, live or stored.
+        let event = match event {
+            ViewEvent::Playback {
+                meeting_id,
+                track,
+                state,
+                from_ms,
+            } => return self.playback_event(&meeting_id, track, &state, from_ms),
+            ViewEvent::ImportProgress(progress) => {
+                if !self.is_ours(Some(&progress.meeting_id)) {
+                    return Change::Nothing;
+                }
+                self.progress = Some(progress);
+                return Change::Progress;
+            }
+            other => other,
+        };
         if !self.live {
             return self.apply_stored(event);
         }
@@ -318,6 +515,7 @@ impl MeetingView {
                 meeting_id,
                 title,
                 started_at,
+                echo_cancel,
                 segments,
             } => {
                 self.connected = true;
@@ -328,10 +526,15 @@ impl MeetingView {
                     }
                     self.title = title;
                     self.started_at = started_at;
+                    self.echo_cancel = echo_cancel;
                     self.state = state;
+                    if state != ViewState::Recording {
+                        self.levels = None;
+                    }
                     self.set_lines(segments);
                     return Change::Reset;
                 }
+                self.levels = None;
                 // Idle: a meeting we were showing ended while we were away
                 // (or the daemon restarted under it).
                 if self.meeting_id.is_some() || !self.lines.is_empty() {
@@ -358,10 +561,49 @@ impl MeetingView {
                 self.upsert(segment);
                 Change::Lines
             }
+            ViewEvent::SegmentDeleted {
+                meeting_id,
+                segment_id,
+            } => {
+                // The daemon names the meeting, but an empty ID means the
+                // one it is recording.
+                let named = meeting_id.as_deref().filter(|id| !id.is_empty());
+                if !self.is_ours(named) {
+                    return Change::Nothing;
+                }
+                let before = self.lines.len();
+                self.lines.retain(|s| s.id != segment_id);
+                if self.lines.len() == before {
+                    Change::Nothing
+                } else {
+                    Change::Lines
+                }
+            }
+            ViewEvent::Levels(levels) => {
+                if levels.soundcheck || self.state != ViewState::Recording {
+                    return Change::Nothing;
+                }
+                if levels.meeting_id.is_some() && !self.is_ours(levels.meeting_id.as_deref()) {
+                    return Change::Nothing;
+                }
+                self.levels = Some(levels);
+                self.levels_at = Some(Utc::now());
+                Change::Levels
+            }
             ViewEvent::SpeakerRenamed { from, to } => {
+                // A name the new ID already has wins over the old ID's, as
+                // the daemon decides for the saved labels.
+                let to_label = self
+                    .lines
+                    .iter()
+                    .find(|s| s.speaker_key() == to)
+                    .and_then(|s| s.speaker_label.clone());
                 for s in &mut self.lines {
                     if s.speaker_id.as_deref() == Some(from.as_str()) {
                         s.speaker_id = Some(to.clone());
+                        if to_label.is_some() {
+                            s.speaker_label = to_label.clone();
+                        }
                     }
                     if s.original_speaker.as_deref() == Some(from.as_str()) {
                         s.original_speaker = Some(to.clone());
@@ -393,6 +635,7 @@ impl MeetingView {
                         }
                     }
                     ViewState::Idle => {
+                        self.levels = None;
                         if self.state.is_live() {
                             self.end();
                             Change::State
@@ -403,6 +646,9 @@ impl MeetingView {
                     live => {
                         if self.state.is_live() {
                             self.state = live;
+                            if live != ViewState::Recording {
+                                self.levels = None;
+                            }
                             Change::State
                         } else {
                             // A meeting started while we watched: its title
@@ -421,10 +667,35 @@ impl MeetingView {
             ViewEvent::Error {
                 message,
                 meeting_id,
-                ..
-            } => self.error(meeting_id.as_deref(), message),
-            ViewEvent::Unknown => Change::Nothing,
+                code,
+            } => self.error(meeting_id.as_deref(), message, code),
+            ViewEvent::Unknown | ViewEvent::Playback { .. } | ViewEvent::ImportProgress(_) => {
+                Change::Nothing
+            }
         }
+    }
+
+    fn playback_event(
+        &mut self,
+        meeting_id: &str,
+        track: String,
+        state: &str,
+        from_ms: u64,
+    ) -> Change {
+        if self.meeting_id.as_deref() != Some(meeting_id) {
+            // Another meeting playing stops this one's.
+            return if self.playback.take().is_some() {
+                Change::Playback
+            } else {
+                Change::Nothing
+            };
+        }
+        self.playback = (state == "playing").then(|| Playback {
+            track,
+            from_ms,
+            since: Utc::now(),
+        });
+        Change::Playback
     }
 
     /// A stored meeting only listens for its own summary.
@@ -445,8 +716,8 @@ impl MeetingView {
             ViewEvent::Error {
                 message,
                 meeting_id: Some(id),
-                ..
-            } if self.is_ours(Some(&id)) => self.error(Some(&id), message),
+                code,
+            } if self.is_ours(Some(&id)) => self.error(Some(&id), message, code),
             _ => Change::Nothing,
         }
     }
@@ -466,17 +737,20 @@ impl MeetingView {
             path,
             summary,
         });
+        self.last_error = None;
+        self.last_error_code = None;
         if self.state == ViewState::Summarizing {
             self.state = ViewState::Ended;
         }
         Change::Summary
     }
 
-    fn error(&mut self, meeting_id: Option<&str>, message: String) -> Change {
+    fn error(&mut self, meeting_id: Option<&str>, message: String, code: Option<String>) -> Change {
         if meeting_id.is_some() && !self.is_ours(meeting_id) {
             return Change::Nothing;
         }
         self.last_error = Some(message);
+        self.last_error_code = code;
         if self.state == ViewState::Summarizing {
             self.state = ViewState::Ended;
         }
@@ -506,7 +780,25 @@ impl MeetingView {
         Some(Duration::from_secs(secs))
     }
 
-    /// Speakers in order of first line, merged by displayed name.
+    /// Name the speakers `keys` locally, after `meeting label` accepted it.
+    /// The daemon does not announce labels on the socket; lines that arrive
+    /// later carry the name in `speaker_label` themselves.
+    pub fn apply_label(&mut self, keys: &[String], name: &str) -> Change {
+        let name = name.trim();
+        if name.is_empty() {
+            return Change::Nothing;
+        }
+        for s in &mut self.lines {
+            if keys.contains(&s.speaker_key()) {
+                s.speaker_label = Some(name.to_string());
+            }
+        }
+        self.revision += 1;
+        Change::Lines
+    }
+
+    /// Speakers in order of first line, merged by displayed name, ignoring
+    /// case as `meeting label` matches names.
     pub fn speakers(&self) -> Vec<SpeakerChip> {
         let mut chips: Vec<SpeakerChip> = Vec::new();
         for s in &self.lines {
@@ -515,7 +807,10 @@ impl MeetingView {
             }
             let name = s.speaker_display();
             let key = s.speaker_key();
-            match chips.iter_mut().find(|c| c.name == name) {
+            match chips
+                .iter_mut()
+                .find(|c| c.name.to_lowercase() == name.to_lowercase())
+            {
                 Some(chip) => {
                     chip.lines += 1;
                     if !chip.keys.contains(&key) {
@@ -536,8 +831,10 @@ impl MeetingView {
     /// Index into [`MeetingView::speakers`] of the chip a line belongs to,
     /// for picking a stable color.
     pub fn speaker_index(&self, segment: &TranscriptSegment) -> Option<usize> {
-        let name = segment.speaker_display();
-        self.speakers().iter().position(|c| c.name == name)
+        let name = segment.speaker_display().to_lowercase();
+        self.speakers()
+            .iter()
+            .position(|c| c.name.to_lowercase() == name)
     }
 }
 
@@ -873,6 +1170,281 @@ mod tests {
         assert_eq!(v.elapsed(now), Some(Duration::from_secs(125)));
         assert_eq!(clock(Duration::from_secs(125)), "02:05");
         assert_eq!(clock(Duration::from_secs(3725)), "1:02:05");
+    }
+
+    #[test]
+    fn deleted_lines_leave_and_restored_lines_come_back_in_place() {
+        let mut v = MeetingView::live();
+        let mut gone = seg(1, 5, "Remote", "already hidden");
+        gone["deleted"] = true.into();
+        v.apply_line(&hello(
+            "recording",
+            "m1",
+            vec![seg(0, 1, "You", "a"), gone, seg(2, 9, "You", "c")],
+        ));
+        assert_eq!(
+            texts(&v),
+            vec!["You a", "You c"],
+            "hello leaves deleted out"
+        );
+
+        assert_eq!(
+            v.apply_line(r#"{"event":"segment_deleted","meeting_id":"m1","segment_id":2}"#),
+            Change::Lines
+        );
+        assert_eq!(texts(&v), vec!["You a"]);
+        // Another meeting's deletion, or one already gone, changes nothing.
+        assert_eq!(
+            v.apply_line(r#"{"event":"segment_deleted","meeting_id":"m2","segment_id":0}"#),
+            Change::Nothing
+        );
+        assert_eq!(
+            v.apply_line(r#"{"event":"segment_deleted","meeting_id":"m1","segment_id":2}"#),
+            Change::Nothing
+        );
+        // An empty meeting_id means the meeting being recorded.
+        v.apply_line(r#"{"event":"segment_deleted","meeting_id":"","segment_id":0}"#);
+        assert!(v.lines().is_empty());
+
+        // Restore comes as a segment_updated for a line the view lacks.
+        v.apply_line(&ev(
+            serde_json::json!({"event":"segment_updated","segment": seg(2, 9, "You", "c")}),
+        ));
+        v.apply_line(&ev(
+            serde_json::json!({"event":"segment_updated","segment": seg(0, 1, "You", "a")}),
+        ));
+        assert_eq!(texts(&v), vec!["You a", "You c"]);
+        // And a segment_updated that says deleted hides the line.
+        let mut hide = seg(0, 1, "You", "a");
+        hide["deleted"] = true.into();
+        v.apply_line(&ev(
+            serde_json::json!({"event":"segment_updated","segment": hide}),
+        ));
+        assert_eq!(texts(&v), vec!["You c"]);
+    }
+
+    #[test]
+    fn a_stored_meeting_leaves_deleted_lines_out() {
+        let mut data = MeetingData::new(Some("Retro".into()));
+        data.transcript
+            .add_segment(TranscriptSegment::new(0, 0, 900, "kept".into(), 0));
+        let mut gone = TranscriptSegment::new(1, 1000, 1900, "gone".into(), 0);
+        gone.deleted = true;
+        data.transcript.add_segment(gone);
+        let v = MeetingView::stored(&data);
+        assert_eq!(v.lines().len(), 1);
+        assert_eq!(v.lines()[0].text, "kept");
+    }
+
+    #[test]
+    fn line_marks_show_edits_moves_notes_and_highlights() {
+        let mut v = MeetingView::live();
+        let mut edited = seg(0, 1, "You", "We ship Friday.");
+        edited["original_text"] = "we ship fry day".into();
+        let mut moved = seg(1, 2, "Remote 2", "x");
+        moved["original_speaker"] = "Remote 1".into();
+        moved["annotation"] = serde_json::json!({"text": "", "highlight": true});
+        let mut noted = seg(2, 3, "You", "y");
+        noted["annotation"] = serde_json::json!({"text": "follow up", "highlight": false});
+        v.apply_line(&hello("recording", "m1", vec![edited, moved, noted]));
+        let marks: Vec<LineMarks> = v.lines().iter().map(LineMarks::of).collect();
+        assert_eq!(
+            marks,
+            vec![
+                LineMarks {
+                    edited: true,
+                    ..Default::default()
+                },
+                LineMarks {
+                    moved: true,
+                    highlighted: true,
+                    ..Default::default()
+                },
+                LineMarks {
+                    noted: true,
+                    ..Default::default()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reassigned_line_moves_between_chips() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello(
+            "recording",
+            "m1",
+            vec![seg(0, 1, "Remote 1", "x"), seg(1, 2, "Remote 1", "y")],
+        ));
+        assert_eq!(v.speakers().len(), 1);
+        let mut moved = seg(1, 2, "Remote 2", "y");
+        moved["original_speaker"] = "Remote 1".into();
+        v.apply_line(&ev(
+            serde_json::json!({"event":"segment_updated","segment": moved}),
+        ));
+        let chips = v.speakers();
+        assert_eq!(
+            chips
+                .iter()
+                .map(|c| (c.name.as_str(), c.lines))
+                .collect::<Vec<_>>(),
+            vec![("Remote 1", 1), ("Remote 2", 1)]
+        );
+        // Moving it back empties the second chip, which goes away.
+        v.apply_line(&ev(
+            serde_json::json!({"event":"segment_updated","segment": seg(1, 2, "Remote 1", "y")}),
+        ));
+        assert_eq!(v.speakers().len(), 1);
+        assert_eq!(v.speakers()[0].lines, 2);
+    }
+
+    #[test]
+    fn playback_lights_the_line_being_heard_for_this_meeting_only() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello(
+            "recording",
+            "m1",
+            vec![seg(0, 1, "You", "a"), seg(1, 5, "Remote", "b")],
+        ));
+        assert_eq!(
+            v.apply_line(r#"{"event":"playback","meeting_id":"other","track":"mixed","state":"playing","from_ms":0}"#),
+            Change::Nothing
+        );
+        assert_eq!(
+            v.apply_line(r#"{"event":"playback","meeting_id":"m1","track":"mixed","state":"playing","from_ms":5000}"#),
+            Change::Playback
+        );
+        let now = v.playback.as_ref().unwrap().since;
+        assert_eq!(v.playing_line(now), Some(1));
+        assert_eq!(v.playing_line(now + chrono::Duration::seconds(10)), None);
+        // Another meeting starting playback stops ours.
+        assert_eq!(
+            v.apply_line(r#"{"event":"playback","meeting_id":"other","track":"mixed","state":"playing","from_ms":0}"#),
+            Change::Playback
+        );
+        assert!(v.playback.is_none());
+        v.apply_line(
+            r#"{"event":"playback","meeting_id":"m1","track":"mic","state":"playing","from_ms":0}"#,
+        );
+        v.apply_line(
+            r#"{"event":"playback","meeting_id":"m1","track":"mic","state":"stopped","from_ms":0}"#,
+        );
+        assert!(v.playback.is_none());
+    }
+
+    #[test]
+    fn import_progress_reaches_the_meeting_it_names_even_when_stored() {
+        let data = MeetingData::new(Some("Imported".into()));
+        let id = data.metadata.id.to_string();
+        let mut v = MeetingView::stored(&data);
+        let line = |state: &str, pos: u64| {
+            serde_json::json!({
+                "event": "import_progress", "meeting_id": id, "operation": "retranscribe",
+                "state": state, "chunks_done": 1, "chunks_total": 4,
+                "position_ms": pos, "duration_ms": 120000
+            })
+            .to_string()
+        };
+        assert_eq!(v.apply_line(&line("transcribing", 30000)), Change::Progress);
+        let p = v.progress.as_ref().unwrap();
+        assert!(p.running());
+        assert!((p.fraction() - 0.25).abs() < 1e-9);
+        v.apply_line(&line("done", 120000));
+        assert!(!v.progress.as_ref().unwrap().running());
+        let mut other = MeetingView::live();
+        assert_eq!(other.apply_line(&line("transcribing", 0)), Change::Nothing);
+    }
+
+    #[test]
+    fn levels_feed_the_meter_only_while_recording() {
+        let mut v = MeetingView::live();
+        let levels = r#"{"event":"levels","meeting_id":"m1","t_ms":61200,"mic":-30.0,"mic_peak":-15.1,"loopback":null,"loopback_peak":null}"#;
+        // Nothing to meter before a meeting.
+        assert_eq!(v.apply_line(levels), Change::Nothing);
+        v.apply_line(&hello("recording", "m1", vec![]));
+        assert_eq!(v.apply_line(levels), Change::Levels);
+        let l = v.levels.as_ref().unwrap();
+        assert!((meter(l.mic) - 0.5).abs() < 1e-6);
+        assert_eq!(meter(l.loopback), 0.0);
+        let at = v.levels_at.unwrap();
+        assert!(v.current_levels(at).is_some());
+        assert!(
+            v.current_levels(at + chrono::Duration::seconds(1))
+                .is_none(),
+            "levels that stopped coming read as silence"
+        );
+        // A sound check's levels are not the meeting's.
+        assert_eq!(
+            v.apply_line(
+                r#"{"event":"levels","meeting_id":null,"t_ms":1,"mic":-1.0,"soundcheck":true}"#
+            ),
+            Change::Nothing
+        );
+        // Pausing drops the meter to silence.
+        v.apply_line(r#"{"event":"status","status":"paused"}"#);
+        assert!(v.levels.is_none());
+        assert_eq!(v.apply_line(levels), Change::Nothing);
+    }
+
+    #[test]
+    fn errors_keep_their_code_and_a_summary_clears_them() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello("recording", "m1", vec![]));
+        v.apply_line(r#"{"event":"status","status":"idle"}"#);
+        v.apply_line(r#"{"event":"error","message":"Allow first","meeting_id":"m1","code":"consent_required"}"#);
+        assert_eq!(v.last_error_code.as_deref(), Some("consent_required"));
+        v.apply_line(&ev(serde_json::json!({
+            "event": "summary_ready", "meeting_id": "m1", "agent": "claude", "agent_name": "Claude",
+            "summary": {"summary": "S", "generated_at": "2026-11-11T15:00:00Z"}
+        })));
+        assert!(v.last_error.is_none() && v.last_error_code.is_none());
+    }
+
+    #[test]
+    fn hello_reports_echo_handling() {
+        let mut v = MeetingView::live();
+        v.apply_line(r#"{"event":"hello","status":"recording","meeting_id":"m1","chunk_count":0,"echo_cancel":"webrtc","segments":[]}"#);
+        assert_eq!(v.echo_cancel.as_deref(), Some("webrtc"));
+    }
+
+    #[test]
+    fn a_label_names_every_key_of_a_chip_and_chips_merge_ignoring_case() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello(
+            "recording",
+            "m1",
+            vec![
+                seg(0, 1, "Remote 1", "x"),
+                seg(1, 2, "Remote 2", "y"),
+                seg(2, 3, "You", "z"),
+            ],
+        ));
+        assert_eq!(
+            v.apply_label(&["Remote 1".to_string()], " Dana "),
+            Change::Lines
+        );
+        v.apply_label(&["Remote 2".to_string()], "dana");
+        let chips = v.speakers();
+        assert_eq!(chips.len(), 2);
+        assert_eq!(chips[0].name, "Dana");
+        assert_eq!(chips[0].keys, vec!["Remote 1", "Remote 2"]);
+        assert_eq!(v.speaker_index(&v.lines()[1]), Some(0));
+        assert_eq!(v.apply_label(&["You".to_string()], "  "), Change::Nothing);
+    }
+
+    #[test]
+    fn a_rename_onto_a_named_speaker_takes_that_name() {
+        let mut v = MeetingView::live();
+        let mut a = seg(0, 1, "Remote 1", "x");
+        a["speaker_label"] = "Ann".into();
+        let mut b = seg(1, 2, "Remote 2", "y");
+        b["speaker_label"] = "Bo".into();
+        v.apply_line(&hello("recording", "m1", vec![a, b]));
+        v.apply_line(r#"{"event":"speaker_renamed","from":"Remote 2","to":"Remote 1"}"#);
+        let chips = v.speakers();
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].name, "Ann");
+        assert_eq!(chips[0].lines, 2);
     }
 }
 

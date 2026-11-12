@@ -28,6 +28,24 @@ function linkCitations(text, citationsJson, color) {
   return out
 }
 
+// A voxtype command's failure as something a user can act on. `what` names
+// the feature ("notes", "the meeting assistant"). A voxtype too old for a
+// command says "unrecognized subcommand"; say so plainly.
+function cliProblem(stderr, what) {
+  var err = String(stderr || "").trim()
+  if (/unrecognized subcommand|unexpected argument|unknown config key/i.test(err))
+    return "This voxtype is too old for " + what + ". Update voxtype (1.3.0 or newer), then reopen this view."
+  // Progress lines ("Summarizing...") come before the error on stderr:
+  // the error starts at its "Error:" line when there is one.
+  var at = err.search(/^Error:/m)
+  if (at > 0) err = err.slice(at)
+  return err.replace(/^Error:\s*/, "")
+}
+
+function missingCli(bin) {
+  return "Could not run " + bin + ". Is voxtype installed and on PATH?"
+}
+
 function stampToMs(stamp) {
   var parts = String(stamp).split(":")
   var secs = 0

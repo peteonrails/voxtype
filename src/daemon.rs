@@ -609,10 +609,12 @@ fn read_bool_override(name: &str) -> Option<bool> {
 
 // === Meeting Mode IPC ===
 
-/// A pending meeting-start trigger with optional title and diarization override.
+/// A pending meeting-start trigger with optional title, diarization override
+/// and the engine, model, language and URL choices.
 struct MeetingStartTrigger {
     title: Option<String>,
     diarization: Option<String>,
+    options: crate::config::MeetingStartOptions,
 }
 
 /// Read a file and return its trimmed contents, or None if missing or empty.
@@ -681,11 +683,28 @@ fn check_meeting_start() -> Option<MeetingStartTrigger> {
         read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
     let _ = std::fs::remove_file(&diarization_file);
 
+    // `meeting start --engine/--model/--language/--url`, written the same way.
+    let options_file = runtime_dir.join("meeting_start_options");
+    let options = read_trimmed_nonempty(&options_file)
+        .and_then(|json| match serde_json::from_str(&json) {
+            Ok(options) => Some(options),
+            Err(e) => {
+                tracing::warn!("Ignoring unreadable meeting start options: {}", e);
+                None
+            }
+        })
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&options_file);
+
     // The start trigger stays on disk until `ack_meeting_start`, once the
     // meeting is recording or refused. While it exists a second
     // `voxtype meeting start` sees a start in flight and refuses, which it
     // cannot tell from the state file until the meeting is up.
-    Some(MeetingStartTrigger { title, diarization })
+    Some(MeetingStartTrigger {
+        title,
+        diarization,
+        options,
+    })
 }
 
 /// Acknowledge a meeting start trigger read by `check_meeting_start`.
@@ -754,6 +773,7 @@ fn cleanup_meeting_files() {
     for name in &[
         "meeting_start",
         "meeting_start_diarization",
+        "meeting_start_options",
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
@@ -1169,6 +1189,15 @@ pub struct Daemon {
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
+    // Whether the running meeting's mic goes through GTCRN. The enhancer
+    // stays loaded between meetings; a meeting on the echo canceller skips it.
+    #[cfg_attr(not(feature = "onnx-common"), allow(dead_code))]
+    meeting_gtcrn: bool,
+    // PipeWire's echo canceller, while a meeting on speakers runs
+    meeting_echo_canceller: Option<audio::echo_cancel::EchoCanceller>,
+    // Watches the first seconds of the cancelled mic for a canceller that
+    // delivers nothing; set while that is still open
+    meeting_aec_liveness: Option<audio::echo_cancel::LivenessCheck>,
     // Media players that were paused when recording started (for resume on stop)
     paused_media_players: Vec<String>,
     // Audio streams that were ducked when recording started (for restore on recording stop)
@@ -1344,6 +1373,9 @@ impl Daemon {
             meeting_event_rx: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
+            meeting_gtcrn: false,
+            meeting_echo_canceller: None,
+            meeting_aec_liveness: None,
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
@@ -2876,6 +2908,10 @@ impl Daemon {
         if let Some(ref path) = self.meeting_state_file_path {
             write_meeting_state_file(path, state_name, meeting_id);
         }
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update_meeting(crate::tray::MeetingTrayState::from_state_name(state_name));
+        }
 
         // Mirror into the meeting HUD snapshot. "idle" always means the
         // meeting fully ended (or none is running): reset everything so a
@@ -2924,16 +2960,49 @@ impl Daemon {
         }
     }
 
+    /// Dictation's loaded transcriber, when a meeting configured as `meeting`
+    /// can use it instead of loading its own copy.
+    fn resident_transcriber_for(&mut self, meeting: &Config) -> Option<Arc<dyn Transcriber>> {
+        if !meeting::start::shares_dictation_transcriber(&self.config, meeting) {
+            return None;
+        }
+        if self.config.engine == crate::config::TranscriptionEngine::Whisper {
+            self.model_manager.as_mut()?.get_transcriber(None).ok()
+        } else {
+            self.transcriber_preloaded.clone()
+        }
+    }
+
+    /// Drop a deleted segment from the HUD snapshot and tell meeting.sock
+    /// subscribers.
+    fn publish_segment_deleted(&mut self, segment_id: u32) {
+        self.meeting_hud.remove_segment(segment_id);
+        if let Some(ref hub) = self.meeting_event_hub {
+            let meeting_id = self.meeting_hud.meeting_id.clone().unwrap_or_default();
+            hub.publish_segment_deleted(&meeting_id, segment_id);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Start a new meeting
     async fn start_meeting(
         &mut self,
         title: Option<String>,
         diarization_override: Option<String>,
+        options: crate::config::MeetingStartOptions,
     ) -> Result<()> {
         if self.meeting_daemon.is_some() {
             tracing::warn!("Meeting already in progress");
             return Ok(());
         }
+
+        // The CLI checked these before writing the trigger; check again, as
+        // anything can write the trigger file.
+        let meeting_app_config =
+            meeting::start::meeting_transcription_config(&self.config, &options).map_err(|e| {
+                tracing::error!("Refusing to start the meeting: {}", e);
+                crate::error::VoxtypeError::Config(e)
+            })?;
 
         // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
         let backend = diarization_override
@@ -2987,6 +3056,7 @@ impl Daemon {
             max_duration_mins: self.config.meeting.max_duration_mins,
             vad_threshold: self.config.meeting.audio.vad_threshold,
             diarization: diarization_config,
+            echo_rules: (&self.config.meeting.audio).into(),
         };
 
         // Start capturing before anything loads. Building the meeting daemon
@@ -2994,30 +3064,64 @@ impl Daemon {
         // the diarizer, and `meeting start` has already returned, so anyone
         // who starts talking then lost the opening of the meeting. The
         // capture buffers what arrives meanwhile, and the first chunk holds it.
-        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
-            "disabled" | "" => None,
-            other => Some(other),
-        };
-        let mut meeting_audio_config = self.config.audio.clone();
-        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
-        if !matches!(meeting_mic_device, "default" | "") {
+        let loopback_device = self.meeting_loopback_device();
+        let meeting_audio_config = self.meeting_mic_config();
+        if meeting_audio_config.device != self.config.audio.device {
             tracing::info!(
                 "Meeting mic override: {} (dictation uses {})",
-                meeting_mic_device,
+                meeting_audio_config.device,
                 self.config.audio.device
             );
-            meeting_audio_config.device = self.config.meeting.audio.mic_device.clone();
         }
-        let mut capture = match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
-            Ok(capture) => capture,
-            Err(e) => {
-                tracing::error!("Failed to create meeting audio capture: {}", e);
-                return Err(crate::error::VoxtypeError::Audio(e));
+        // On speakers the mic is recorded from PipeWire's echo canceller,
+        // so it starts first; anything that goes wrong falls back to GTCRN.
+        let echo_mode = audio::echo_cancel::Mode::parse(&self.config.meeting.audio.echo_cancel);
+        let mic_device = self.config.meeting.audio.mic_device.clone();
+        let loopback = self.config.meeting.audio.loopback_device.clone();
+        let (mut echo_path, mut echo_canceller) = tokio::task::spawn_blocking(move || {
+            audio::echo_cancel::begin(echo_mode, &mic_device, &loopback, &Config::runtime_dir())
+        })
+        .await
+        .unwrap_or((audio::echo_cancel::EchoPath::Gtcrn, None));
+        let mut aec_capture = None;
+        if let Some(ref aec) = echo_canceller {
+            match audio::DualCapture::with_mic_source(
+                aec.source(),
+                loopback_device.as_deref(),
+                audio::echo_cancel::MIC_DELAY_MS,
+            ) {
+                Ok(mut capture) => match capture.start().await {
+                    Ok(()) => aec_capture = Some(capture),
+                    Err(e) => {
+                        tracing::warn!("Cannot record the echo-cancelled mic ({}); using GTCRN", e)
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Cannot record the echo-cancelled mic ({}); using GTCRN", e)
+                }
+            }
+            if aec_capture.is_none() {
+                echo_canceller = None;
+                echo_path = audio::echo_cancel::EchoPath::Gtcrn;
+            }
+        }
+        let mut capture = match aec_capture {
+            Some(capture) => capture,
+            None => {
+                match audio::DualCapture::new(&meeting_audio_config, loopback_device.as_deref()) {
+                    Ok(capture) => capture,
+                    Err(e) => {
+                        tracing::error!("Failed to create meeting audio capture: {}", e);
+                        return Err(crate::error::VoxtypeError::Audio(e));
+                    }
+                }
             }
         };
-        if let Err(e) = capture.start().await {
-            tracing::error!("Failed to start meeting audio: {}", e);
-            return Err(crate::error::VoxtypeError::Audio(e));
+        if echo_canceller.is_none() {
+            if let Err(e) = capture.start().await {
+                tracing::error!("Failed to start meeting audio: {}", e);
+                return Err(crate::error::VoxtypeError::Audio(e));
+            }
         }
         if capture.has_loopback() {
             tracing::info!("Dual audio capture: mic + loopback");
@@ -3029,10 +3133,12 @@ impl Daemon {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         self.meeting_event_rx = Some(rx);
 
-        // Create meeting daemon
-        match MeetingDaemon::new(meeting_config, &self.config, tx) {
+        // Create meeting daemon, on dictation's loaded model when it is the
+        // same one (#808: loading a second copy took most of a slow start).
+        let resident = self.resident_transcriber_for(&meeting_app_config);
+        match MeetingDaemon::new(meeting_config, &meeting_app_config, tx, resident) {
             Ok(mut daemon) => {
-                match daemon.start(title).await {
+                match daemon.start(title, options.url).await {
                     Ok(meeting_id) => {
                         let id_str = meeting_id.to_string();
                         self.meeting_hud = meeting::MeetingHudState {
@@ -3045,37 +3151,25 @@ impl Daemon {
                                 enabled: diar_enabled_for_hud,
                                 backend: diar_backend_for_hud,
                             },
+                            // Set once GTCRN has loaded or not, below.
+                            echo_cancel: None,
                             segments: Vec::new(),
                         };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
                         self.meeting_audio_capture = Some(capture);
 
-                        // Load GTCRN speech enhancer for echo cancellation
-                        #[cfg(feature = "onnx-common")]
-                        if self.speech_enhancer.is_none()
-                            && self.config.meeting.audio.echo_cancel != "disabled"
-                        {
-                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
-                            if model_path.exists() {
-                                match audio::enhance::GtcrnEnhancer::load(&model_path) {
-                                    Ok(enhancer) => {
-                                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
-                                        tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to load GTCRN enhancer, continuing without: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(
-                                    "GTCRN model not found at {:?}, skipping speech enhancement",
-                                    model_path
-                                );
-                            }
+                        let used = self.meeting_echo_path_in_use(echo_path);
+                        self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
+                        self.meeting_aec_liveness = echo_canceller
+                            .is_some()
+                            .then(|| audio::echo_cancel::LivenessCheck::new(16000));
+                        self.meeting_echo_canceller = echo_canceller.take();
+                        tracing::info!("Meeting {} echo handling: {}", meeting_id, used.as_str());
+                        daemon.record_echo_cancel(used.as_str());
+                        self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
+                        if let Some(ref hub) = self.meeting_event_hub {
+                            hub.update_snapshot(&self.meeting_hud);
                         }
 
                         self.meeting_daemon = Some(daemon);
@@ -3085,17 +3179,15 @@ impl Daemon {
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
 
-                        // Notification
-                        if self.config.output.notification.on_recording_start {
-                            send_notification(
-                                "Meeting Started",
-                                &format!("ID: {}", meeting_id),
-                                false,
-                                self.config.engine,
-                                &self.config.output.notification.urgency,
-                            )
-                            .await;
-                        }
+                        let title = meeting::status_notice::display_title(
+                            self.meeting_hud.title.as_deref(),
+                            self.meeting_hud.started_at,
+                        );
+                        self.meeting_status_notice(
+                            meeting::status_notice::MeetingNotice::Started { title },
+                            self.config.output.notification.on_recording_start,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to start meeting: {}", e);
@@ -3129,6 +3221,11 @@ impl Daemon {
                     }
                 }
             }
+            if let Some(mut canceller) = self.meeting_echo_canceller.take() {
+                canceller.stop();
+            }
+            self.meeting_aec_liveness = None;
+            self.meeting_gtcrn = false;
 
             // The tail flush below is where real wall-clock time is spent
             // (transcribing the last partial chunk), yet the external state
@@ -3163,9 +3260,23 @@ impl Daemon {
                     MeetingEvent::SegmentUpdated { segment } => {
                         self.publish_segment_updated(&segment);
                     }
+                    MeetingEvent::SegmentDeleted { segment_id } => {
+                        self.publish_segment_deleted(segment_id);
+                    }
                     _ => {}
                 }
             }
+
+            // Read before "idle" resets the HUD snapshot they come from.
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            let elapsed = self
+                .meeting_hud
+                .started_at
+                .and_then(|t| (chrono::Utc::now() - t).to_std().ok())
+                .unwrap_or_default();
 
             let mut daemon = self.meeting_daemon.take().expect("checked above");
             match daemon.stop().await {
@@ -3173,33 +3284,45 @@ impl Daemon {
                     self.update_meeting_state("idle", None);
                     tracing::info!("Meeting stopped: {}", meeting_id);
 
-                    // Summarize in the background: the meeting is already
-                    // saved, and a slow or failing agent must not hold up
-                    // the daemon or the next meeting.
-                    if let Some(job) = daemon.auto_summary(meeting_id) {
-                        let hub = self.meeting_event_hub.clone();
-                        tokio::spawn(job.run(move |event| {
-                            if let Some(ref hub) = hub {
-                                hub.publish_summary_event(event);
-                            }
-                        }));
-                    }
+                    // Summarize, then rewrite meeting.json and run
+                    // post_meeting_command, in the background: the meeting
+                    // is already saved, and a slow or failing agent or
+                    // command must not hold up the daemon or the next
+                    // meeting. The command runs after the summary so it
+                    // sees summary.md, and the manifest lists it.
+                    let summary = daemon.auto_summary(meeting_id);
+                    let post = daemon.post_meeting(meeting_id);
+                    let hub = self.meeting_event_hub.clone();
+                    tokio::spawn(async move {
+                        if let Some(job) = summary {
+                            job.run(move |event| {
+                                if let Some(ref hub) = hub {
+                                    hub.publish_summary_event(event);
+                                }
+                            })
+                            .await;
+                        }
+                        post.run().await;
+                    });
 
                     self.play_feedback(SoundEvent::RecordingStop);
 
-                    if self.config.output.notification.on_recording_stop {
-                        send_notification(
-                            "Meeting Ended",
-                            &format!("ID: {}", meeting_id),
-                            false,
-                            self.config.engine,
-                            &self.config.output.notification.urgency,
-                        )
-                        .await;
-                    }
+                    self.meeting_status_notice(
+                        meeting::status_notice::MeetingNotice::Ended { title, elapsed },
+                        self.config.output.notification.on_recording_stop,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::error!("Error stopping meeting: {}", e);
+                    send_notification(
+                        "Meeting Error",
+                        &format!("Could not stop the meeting cleanly: {}", e),
+                        false,
+                        self.config.engine,
+                        "critical",
+                    )
+                    .await;
                 }
             }
 
@@ -3211,6 +3334,31 @@ impl Daemon {
         Ok(())
     }
 
+    /// Post a meeting status notification, unless `[meeting]
+    /// status_notifications` says not to or (in auto mode) a meeting view is
+    /// already showing the same thing. Errors never come through here.
+    async fn meeting_status_notice(
+        &self,
+        notice: meeting::status_notice::MeetingNotice,
+        enabled: bool,
+    ) {
+        use meeting::status_notice::{should_notify, StatusMode};
+        let mode = StatusMode::parse(&self.config.meeting.status_notifications);
+        if !should_notify(mode, enabled, meeting::view_presence::view_visible) {
+            tracing::debug!(?notice, "Meeting status notification skipped");
+            return;
+        }
+        let (summary, body) = notice.text();
+        send_notification(
+            summary,
+            &body,
+            false,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+        )
+        .await;
+    }
+
     /// Pause the current meeting
     async fn pause_meeting(&mut self) -> Result<()> {
         if let Some(ref mut daemon) = self.meeting_daemon {
@@ -3219,16 +3367,15 @@ impl Daemon {
             self.update_meeting_state("paused", meeting_id.as_deref());
             tracing::info!("Meeting paused");
 
-            if self.config.output.notification.on_recording_stop {
-                send_notification(
-                    "Meeting Paused",
-                    "Recording paused",
-                    false,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            self.meeting_status_notice(
+                meeting::status_notice::MeetingNotice::Paused { title },
+                self.config.output.notification.on_recording_stop,
+            )
+            .await;
         }
         Ok(())
     }
@@ -3241,16 +3388,15 @@ impl Daemon {
             self.update_meeting_state("recording", meeting_id.as_deref());
             tracing::info!("Meeting resumed");
 
-            if self.config.output.notification.on_recording_start {
-                send_notification(
-                    "Meeting Resumed",
-                    "Recording resumed",
-                    false,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            self.meeting_status_notice(
+                meeting::status_notice::MeetingNotice::Resumed { title },
+                self.config.output.notification.on_recording_start,
+            )
+            .await;
         }
         Ok(())
     }
@@ -3270,8 +3416,19 @@ impl Daemon {
                 tracing::warn!("Meeting already in progress; ignoring start request");
             } else {
                 tracing::debug!("Meeting start requested via file trigger");
-                if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
+                if let Err(e) = self
+                    .start_meeting(trigger.title, trigger.diarization, trigger.options)
+                    .await
+                {
                     tracing::error!("Failed to start meeting: {}", e);
+                    send_notification(
+                        "Meeting Error",
+                        &format!("The meeting could not start: {}", e),
+                        false,
+                        self.config.engine,
+                        "critical",
+                    )
+                    .await;
                 }
                 changed = true;
             }
@@ -3311,6 +3468,23 @@ impl Daemon {
             }
         }
 
+        // `meeting import` or `meeting retranscribe` got a chunk further.
+        if take_trigger(meeting::import::PROGRESS_TRIGGER) {
+            if let (Some(progress), Some(ref hub)) = (
+                meeting::import::read_progress(&Config::runtime_dir()),
+                &self.meeting_event_hub,
+            ) {
+                hub.publish_import_progress(&progress);
+            }
+        }
+
+        // `meeting play` started or stopped, or a playback ran to its end.
+        if take_trigger(meeting::playback::TRIGGER) {
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.publish_playback(&meeting::playback::status(&Config::runtime_dir()));
+            }
+        }
+
         if check_meeting_resume()
             && self
                 .meeting_daemon
@@ -3334,6 +3508,126 @@ impl Daemon {
             .is_some_and(|d| d.state().is_active())
     }
 
+    /// The meeting's loopback device, or `None` when it is off.
+    fn meeting_loopback_device(&self) -> Option<String> {
+        match self.config.meeting.audio.loopback_device.as_str() {
+            "disabled" | "" => None,
+            other => Some(other.to_string()),
+        }
+    }
+
+    /// Dictation's audio config with the meeting's mic, when it has its own.
+    fn meeting_mic_config(&self) -> crate::config::AudioConfig {
+        let mut config = self.config.audio.clone();
+        if !matches!(
+            self.config.meeting.audio.mic_device.as_str(),
+            "default" | ""
+        ) {
+            config.device = self.config.meeting.audio.mic_device.clone();
+        }
+        config
+    }
+
+    /// The echo handling a meeting gets for `path`, loading GTCRN when it
+    /// is the one: none if its model is missing or this build lacks it.
+    fn meeting_echo_path_in_use(
+        &mut self,
+        path: audio::echo_cancel::EchoPath,
+    ) -> audio::echo_cancel::EchoPath {
+        // Load GTCRN speech enhancer for echo cancellation
+        #[cfg(feature = "onnx-common")]
+        if self.speech_enhancer.is_none() && path == audio::echo_cancel::EchoPath::Gtcrn {
+            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
+            if model_path.exists() {
+                match audio::enhance::GtcrnEnhancer::load(&model_path) {
+                    Ok(enhancer) => {
+                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
+                        tracing::info!(
+                            "GTCRN speech enhancer loaded for meeting echo cancellation"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    "GTCRN model not found at {:?}, skipping speech enhancement",
+                    model_path
+                );
+            }
+        }
+
+        // What the meeting really uses: GTCRN only if its
+        // model loaded (and this build has it).
+        #[cfg(feature = "onnx-common")]
+        let gtcrn_loaded = self.speech_enhancer.is_some();
+        #[cfg(not(feature = "onnx-common"))]
+        let gtcrn_loaded = false;
+        match path {
+            audio::echo_cancel::EchoPath::Gtcrn if !gtcrn_loaded => {
+                audio::echo_cancel::EchoPath::None
+            }
+            path => path,
+        }
+    }
+
+    /// The echo canceller has delivered only digital silence since the
+    /// meeting started: it is not hearing the mic, and every line of yours
+    /// would be lost. Record the mic directly instead, with GTCRN, as a
+    /// meeting does when the canceller cannot start.
+    async fn leave_silent_echo_canceller(&mut self) {
+        let rms = self
+            .meeting_aec_liveness
+            .take()
+            .map(|check| check.rms())
+            .unwrap_or_default();
+        tracing::warn!(
+            "The echo canceller's mic has been silent for {}s ({:.1e} RMS): it is not hearing \
+             the mic. Recording the mic directly with GTCRN instead",
+            audio::echo_cancel::LIVENESS_SECS,
+            rms
+        );
+        let loopback_device = self.meeting_loopback_device();
+        let mut direct =
+            match audio::DualCapture::new(&self.meeting_mic_config(), loopback_device.as_deref()) {
+                Ok(capture) => capture,
+                Err(e) => {
+                    tracing::error!(
+                        "Cannot record the mic directly ({}); keeping the canceller",
+                        e
+                    );
+                    return;
+                }
+            };
+        if let Err(e) = direct.start().await {
+            tracing::error!(
+                "Cannot record the mic directly ({}); keeping the canceller",
+                e
+            );
+            return;
+        }
+        if let Some(mut capture) = self.meeting_audio_capture.replace(direct) {
+            if let Ok(rest) = capture.stop().await {
+                self.meeting_mic_buffer.extend(rest.mic);
+                self.meeting_loopback_buffer.extend(rest.loopback);
+            }
+        }
+        if let Some(mut canceller) = self.meeting_echo_canceller.take() {
+            canceller.stop();
+        }
+        let used = self.meeting_echo_path_in_use(audio::echo_cancel::EchoPath::Gtcrn);
+        self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
+        tracing::info!("Meeting echo handling: {}", used.as_str());
+        if let Some(ref daemon) = self.meeting_daemon {
+            daemon.record_echo_cancel(used.as_str());
+        }
+        self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
     /// Get the chunk duration for meeting mode
     fn meeting_chunk_samples(&self) -> usize {
         // 16kHz sample rate * chunk duration in seconds
@@ -3348,7 +3642,8 @@ impl Daemon {
         #[cfg(feature = "onnx-common")]
         {
             if !mic_chunk.is_empty() {
-                if let Some(ref enhancer) = self.speech_enhancer {
+                if let Some(enhancer) = self.speech_enhancer.as_ref().filter(|_| self.meeting_gtcrn)
+                {
                     match enhancer.enhance(&mic_chunk) {
                         Ok(enhanced) => {
                             tracing::debug!(
@@ -4397,7 +4692,8 @@ impl Daemon {
         // The single-instance lock is already held. Never register a duplicate tray.
         #[cfg(target_os = "linux")]
         if self.tray.is_none() {
-            self.tray = crate::tray::TrayRuntime::start_for_config(&self.config);
+            self.tray =
+                crate::tray::TrayRuntime::start_for_daemon(&self.config, self.config_path.clone());
         }
 
         // Start the meeting-event broadcaster for the meeting HUD. Bound
@@ -5584,8 +5880,21 @@ impl Daemon {
                     // Get samples from dual audio capture
                     if let Some(ref mut capture) = self.meeting_audio_capture {
                         let dual_samples = capture.get_samples().await;
+                        let liveness = self
+                            .meeting_aec_liveness
+                            .as_mut()
+                            .map(|check| check.feed(&dual_samples.mic));
                         self.meeting_mic_buffer.extend(dual_samples.mic);
                         self.meeting_loopback_buffer.extend(dual_samples.loopback);
+                        match liveness {
+                            Some(audio::echo_cancel::Liveness::Alive) => {
+                                self.meeting_aec_liveness = None;
+                            }
+                            Some(audio::echo_cancel::Liveness::Silent) => {
+                                self.leave_silent_echo_canceller().await;
+                            }
+                            _ => {}
+                        }
 
                         self.process_buffered_meeting_audio(false).await;
                     }
@@ -5634,6 +5943,9 @@ impl Daemon {
                         }
                         Some(MeetingEvent::SegmentUpdated { segment }) => {
                             self.publish_segment_updated(&segment);
+                        }
+                        Some(MeetingEvent::SegmentDeleted { segment_id }) => {
+                            self.publish_segment_deleted(segment_id);
                         }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via

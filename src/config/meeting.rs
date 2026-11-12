@@ -4,12 +4,40 @@ use serde::{Deserialize, Serialize};
 
 use super::default_true;
 
+/// Per-meeting choices given to `voxtype meeting start`. Unset fields keep
+/// the configuration's values. Travels from the CLI to the daemon as JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MeetingStartOptions {
+    /// Engine for this meeting's transcription (`whisper`, `parakeet`, ...)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Model for this meeting; its engine is implied when `engine` is unset
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Language hint for engines that take one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The call's link, stored with the meeting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// Meeting transcription configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingConfig {
     /// Enable meeting mode
     #[serde(default)]
     pub enabled: bool,
+
+    /// While meeting mode is off, offer to turn it on from the tray
+    #[serde(default = "default_true")]
+    pub offer_enable: bool,
+
+    /// Meeting started/paused/resumed/ended notifications: "auto" skips them
+    /// while a meeting view is on screen, "always", or "never". Errors always
+    /// notify.
+    #[serde(default = "default_status_notifications")]
+    pub status_notifications: String,
 
     /// Duration of each audio chunk in seconds
     #[serde(default = "default_chunk_duration")]
@@ -20,25 +48,41 @@ pub struct MeetingConfig {
     #[serde(default = "default_storage_path")]
     pub storage_path: String,
 
-    /// Retain raw audio files after transcription
+    /// Keep the meeting's audio in its folder: mic.opus, loopback.opus and
+    /// mixed.opus (WAV when ffmpeg is missing)
     #[serde(default)]
     pub retain_audio: bool,
+
+    /// Shell command run after a meeting stops and its folder is final
+    /// (after the auto-summary, when one runs). Gets VOXTYPE_MEETING_ID,
+    /// VOXTYPE_MEETING_DIR and VOXTYPE_MEETING_MANIFEST.
+    #[serde(default)]
+    pub post_meeting_command: Option<String>,
+
+    /// Seconds before post_meeting_command is killed
+    #[serde(default = "default_post_meeting_timeout")]
+    pub post_meeting_timeout_secs: u64,
 
     /// Maximum meeting duration in minutes (0 = unlimited)
     #[serde(default = "default_max_duration")]
     pub max_duration_mins: u32,
 
-    /// Open the live meeting view when a meeting starts. Read by the Omarchy
-    /// plugin, which is the only frontend with such a view; elsewhere it does
-    /// nothing.
+    /// Open the live meeting view when a meeting starts: the Quickshell
+    /// view reads it itself, and the daemon opens the GTK4 window when
+    /// `view` resolves to it.
     #[serde(default = "default_true")]
     pub show_view_on_start: bool,
 
-    /// Which meeting view `voxtype meeting view` opens: "auto", "quickshell",
-    /// "gtk4", "terminal" or "none". auto uses Quickshell when it can run,
-    /// then the GTK4 window. Also set with VOXTYPE_MEETING_VIEW.
+    /// Which meeting view opens: "auto", "quickshell", "gtk4", "terminal" or
+    /// "none". auto uses Quickshell when it can run, then the GTK4 window.
+    /// Also set with VOXTYPE_MEETING_VIEW.
     #[serde(default = "default_meeting_view")]
     pub view: String,
+
+    /// How opaque the meeting view's background is while the pointer is
+    /// elsewhere (0.3 to 1.0), so it reads as an overlay. Text stays opaque.
+    #[serde(default = "default_view_opacity")]
+    pub view_opacity: f32,
 
     /// Meeting audio configuration
     #[serde(default)]
@@ -72,11 +116,20 @@ pub struct MeetingAudioConfig {
     #[serde(default = "default_loopback")]
     pub loopback_device: String,
 
-    /// Echo cancellation mode for removing speaker bleed-through from mic
-    /// Options: "auto" (GTCRN neural enhancement + transcript dedup), "disabled"
-    /// The GTCRN model (~523KB) is auto-downloaded on first meeting start.
-    /// For system-level echo cancellation, configure PipeWire's echo-cancel module
-    /// and set this to "disabled".
+    /// Echo cancellation for the meeting mic:
+    /// - "auto" (default): PipeWire's WebRTC echo canceller unless the output
+    ///   is headphones, a headset or Bluetooth; GTCRN enhancement otherwise,
+    ///   or when the canceller cannot run
+    /// - "webrtc": the WebRTC canceller whatever the output, GTCRN if it
+    ///   cannot run
+    /// - "gtcrn": GTCRN enhancement only (the behaviour before 1.3.0)
+    /// - "disabled": neither
+    ///
+    /// "aec" and "off", the names in early 1.3.0 test builds, still work as
+    /// "webrtc" and "disabled".
+    ///
+    /// The canceller runs only during a meeting and never changes PipeWire's
+    /// configuration. Transcript dedup runs in every case.
     #[serde(default = "default_echo_cancel")]
     pub echo_cancel: String,
 
@@ -84,6 +137,32 @@ pub struct MeetingAudioConfig {
     /// Lower values are more permissive; 0.0 disables the pre-transcription gate.
     #[serde(default = "default_meeting_vad_threshold")]
     pub vad_threshold: f32,
+
+    /// The echo guard: keep the remote side, heard through your speakers,
+    /// out of your lines. Microphone lines whose sound is all explained by
+    /// the loopback go (or move to the remote speaker), and short lines that
+    /// are the remote misheard go, unless the microphone's level shows you
+    /// were the one speaking. `echo_fuzzy`, its name during development, is
+    /// read too.
+    #[serde(default = "default_true", alias = "echo_fuzzy")]
+    pub echo_guard: bool,
+
+    /// The longest microphone line, in words, the guard's misheard-words
+    /// check looks at.
+    #[serde(default = "default_echo_fuzzy_max_words")]
+    pub echo_fuzzy_max_words: u32,
+}
+
+fn default_echo_fuzzy_max_words() -> u32 {
+    4
+}
+
+fn default_meeting_view() -> String {
+    "auto".to_string()
+}
+
+fn default_view_opacity() -> f32 {
+    0.8
 }
 
 fn default_mic_device() -> String {
@@ -109,6 +188,8 @@ impl Default for MeetingAudioConfig {
             loopback_device: default_loopback(),
             echo_cancel: default_echo_cancel(),
             vad_threshold: default_meeting_vad_threshold(),
+            echo_guard: true,
+            echo_fuzzy_max_words: default_echo_fuzzy_max_words(),
         }
     }
 }
@@ -190,7 +271,7 @@ fn default_vad_rms_floor() -> f32 {
     0.005
 }
 
-fn default_meeting_view() -> String {
+fn default_status_notifications() -> String {
     "auto".to_string()
 }
 
@@ -204,6 +285,10 @@ fn default_storage_path() -> String {
 
 fn default_max_duration() -> u32 {
     180
+}
+
+fn default_post_meeting_timeout() -> u64 {
+    300
 }
 
 impl Default for MeetingDiarizationConfig {
@@ -260,7 +345,7 @@ pub struct MeetingSummaryConfig {
 /// and writes summaries, run headless with no tools.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingAssistantConfig {
-    /// Agent to use: "claude" or "codex". Unset uses `omarchy-default-agent`
+    /// Agent to use: "claude", "codex" or "pi". Unset uses `omarchy-default-agent`
     /// when that command exists, then a supported agent CLI found on PATH.
     #[serde(default)]
     pub agent: Option<String>,
@@ -342,12 +427,17 @@ impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            offer_enable: true,
+            status_notifications: default_status_notifications(),
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,
+            post_meeting_command: None,
+            post_meeting_timeout_secs: default_post_meeting_timeout(),
             max_duration_mins: default_max_duration(),
             show_view_on_start: true,
             view: default_meeting_view(),
+            view_opacity: default_view_opacity(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
@@ -370,7 +460,10 @@ mod tests {
         assert_eq!(config.storage_path, "auto");
         assert!(!config.retain_audio);
         assert_eq!(config.max_duration_mins, 180);
+        assert!(config.post_meeting_command.is_none());
+        assert_eq!(config.post_meeting_timeout_secs, 300);
         assert!(config.show_view_on_start);
+        assert!((config.view_opacity - 0.8).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -390,6 +483,25 @@ mod tests {
         assert_eq!(config.mic_device, "default");
         assert_eq!(config.loopback_device, "auto");
         assert_eq!(config.vad_threshold, 0.01);
+        assert!(config.echo_guard);
+        assert_eq!(config.echo_fuzzy_max_words, 4);
+    }
+
+    #[test]
+    fn test_echo_guard_defaults_on_for_old_configs_and_can_be_set() {
+        let config: Config = toml::from_str("[meeting.audio]\necho_cancel = \"auto\"\n").unwrap();
+        let rules = crate::meeting::echo::EchoRules::from(&config.meeting.audio);
+        assert_eq!(rules, crate::meeting::echo::EchoRules::default());
+
+        let config: Config =
+            toml::from_str("[meeting.audio]\necho_guard = false\necho_fuzzy_max_words = 40\n")
+                .unwrap();
+        let rules = crate::meeting::echo::EchoRules::from(&config.meeting.audio);
+        assert!(!rules.guard);
+        // The development name still reads.
+        let config: Config = toml::from_str("[meeting.audio]\necho_fuzzy = false\n").unwrap();
+        assert!(!config.meeting.audio.echo_guard);
+        assert_eq!(rules.fuzzy_max_words, 12, "clamped to the schema's range");
     }
 
     #[test]
@@ -443,6 +555,8 @@ mod tests {
             storage_path = "/tmp/meetings"
             retain_audio = true
             max_duration_mins = 60
+            post_meeting_command = "notify-send done"
+            post_meeting_timeout_secs = 30
         "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -451,6 +565,11 @@ mod tests {
         assert_eq!(config.meeting.storage_path, "/tmp/meetings");
         assert!(config.meeting.retain_audio);
         assert_eq!(config.meeting.max_duration_mins, 60);
+        assert_eq!(
+            config.meeting.post_meeting_command.as_deref(),
+            Some("notify-send done")
+        );
+        assert_eq!(config.meeting.post_meeting_timeout_secs, 30);
     }
 
     #[test]

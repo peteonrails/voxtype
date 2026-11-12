@@ -260,10 +260,12 @@ fn resolve_package_dir(
 /// Expand a leading `~` component to the user's home directory so config
 /// values like `plugin_path = "~/.config/voxtype/osd/my-style"` work.
 fn expand_tilde(path: &Path) -> PathBuf {
-    if let Ok(stripped) = path.strip_prefix("~") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
+    expand_tilde_in(path, dirs::home_dir().as_deref())
+}
+
+fn expand_tilde_in(path: &Path, home: Option<&Path>) -> PathBuf {
+    if let (Ok(stripped), Some(home)) = (path.strip_prefix("~"), home) {
+        return home.join(stripped);
     }
     path.to_path_buf()
 }
@@ -283,6 +285,24 @@ fn candidate_package_dirs_with_system(name: &str, system_dir: &Path) -> Vec<Path
         .collect()
 }
 
+/// Where the user's directories are. Read from the environment once, so the
+/// search order can be tested without depending on (or changing) `HOME`.
+struct UserDirs {
+    home: Option<PathBuf>,
+    xdg_config: Option<String>,
+    xdg_data: Option<String>,
+}
+
+impl UserDirs {
+    fn from_env() -> Self {
+        Self {
+            home: dirs::home_dir(),
+            xdg_config: std::env::var("XDG_CONFIG_HOME").ok(),
+            xdg_data: std::env::var("XDG_DATA_HOME").ok(),
+        }
+    }
+}
+
 /// Package search roots in priority order: user config, user data, then the
 /// system directory, so a user copy always shadows a shipped package. Shared
 /// by per-name resolution and [`list_installed_styles`] so the two can't
@@ -295,22 +315,22 @@ fn package_roots_with_system(system_dir: &Path) -> Vec<PathBuf> {
 /// Style packages (`osd`) and OSD recipes (`osd-recipes`) share this order so
 /// a user copy of either always shadows the shipped one.
 pub(crate) fn user_then_system_roots(subdir: &str, system_dir: &Path) -> Vec<PathBuf> {
+    user_then_system_roots_in(subdir, system_dir, &UserDirs::from_env())
+}
+
+fn user_then_system_roots_in(subdir: &str, system_dir: &Path, user: &UserDirs) -> Vec<PathBuf> {
     let rel = Path::new("voxtype").join(subdir);
     let mut roots = Vec::new();
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            roots.push(PathBuf::from(xdg).join(&rel));
-        }
+    if let Some(xdg) = user.xdg_config.as_deref().filter(|x| !x.is_empty()) {
+        roots.push(PathBuf::from(xdg).join(&rel));
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = &user.home {
         roots.push(home.join(".config").join(&rel));
     }
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            roots.push(PathBuf::from(xdg).join(&rel));
-        }
+    if let Some(xdg) = user.xdg_data.as_deref().filter(|x| !x.is_empty()) {
+        roots.push(PathBuf::from(xdg).join(&rel));
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = &user.home {
         roots.push(home.join(".local/share").join(&rel));
     }
     roots.push(system_dir.to_path_buf());
@@ -761,12 +781,28 @@ mod tests {
 
     #[test]
     fn system_package_dir_is_last_candidate_after_user_paths() {
+        // The user's directories are injected: other tests change HOME, and
+        // reading it twice here raced with them.
         let system = Path::new("/fake/system/osd");
-        let dirs = candidate_package_dirs_with_system("neon", system);
-        assert_eq!(dirs.last(), Some(&system.join("neon")));
-        let home_config = dirs::home_dir().unwrap().join(".config/voxtype/osd/neon");
-        let user_idx = dirs.iter().position(|p| *p == home_config).unwrap();
-        assert!(user_idx < dirs.len() - 1, "user path must precede system");
+        let user = UserDirs {
+            home: Some(PathBuf::from("/fake/home")),
+            xdg_config: Some("/fake/xdg-config".into()),
+            xdg_data: Some(String::new()),
+        };
+        let dirs: Vec<PathBuf> = user_then_system_roots_in("osd", system, &user)
+            .into_iter()
+            .map(|root| root.join("neon"))
+            .collect();
+        assert_eq!(
+            dirs,
+            [
+                "/fake/xdg-config/voxtype/osd/neon",
+                "/fake/home/.config/voxtype/osd/neon",
+                "/fake/home/.local/share/voxtype/osd/neon",
+                "/fake/system/osd/neon",
+            ]
+            .map(PathBuf::from)
+        );
 
         assert_eq!(
             candidate_package_dirs("neon").last(),
@@ -889,9 +925,19 @@ mod tests {
 
     #[test]
     fn expand_tilde_resolves_home() {
-        let home = dirs::home_dir().unwrap();
-        assert_eq!(expand_tilde(Path::new("~/x/y")), home.join("x/y"));
-        assert_eq!(expand_tilde(Path::new("/abs/x")), PathBuf::from("/abs/x"));
+        let home = Some(Path::new("/fake/home"));
+        assert_eq!(
+            expand_tilde_in(Path::new("~/x/y"), home),
+            PathBuf::from("/fake/home/x/y")
+        );
+        assert_eq!(
+            expand_tilde_in(Path::new("/abs/x"), home),
+            PathBuf::from("/abs/x")
+        );
+        assert_eq!(
+            expand_tilde_in(Path::new("~/x"), None),
+            PathBuf::from("~/x")
+        );
     }
 
     #[test]

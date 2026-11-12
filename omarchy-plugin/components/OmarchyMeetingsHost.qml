@@ -21,6 +21,12 @@ Item {
   readonly property alias cli: meetings.cli
   readonly property alias assistant: meetings.assistant
   readonly property alias window: meetings.window
+  readonly property alias placement: meetings.placement
+  // How often meeting-view.state is rewritten while the view is up; a test
+  // shortens it.
+  property alias stateHeartbeatMs: meetings.stateHeartbeatMs
+  // wl-copy, for Copy; a test points it elsewhere.
+  property alias copyCommand: meetings.copyCommand
 
   function select(payload) { meetings.select(payload) }
 
@@ -60,6 +66,7 @@ Item {
     shown: root.shown
     panelOpen: root.panelOpen
     canOpenSettings: true
+    host: "omarchy"
     onOpenRequested: root.openRequested()
     onCloseRequested: root.closeRequested()
     onSettingsRequested: root.settingsRequested()

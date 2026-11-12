@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import "plugin" as Plugin
 import "standalone" as Standalone
+import "standalone/voxtype-meetings" as VM
 
 // Driven by test-meeting-view.py. The meeting view runs under one of its two
 // hosts (__HOST__: "omarchy", the Settings plugin's Panel.qml, or
@@ -122,7 +123,29 @@ Item {
           else if (s === "past-reassign") tc.drivePastReassign()
           else if (s === "start-while-browsing") tc.driveStartWhileBrowsing()
           else if (s === "ask-error") tc.driveAskError()
+          else if (s === "cli-missing") tc.driveCliMissing()
+          else if (s === "daemon-old") tc.driveDaemonOld()
+          else if (s === "agent-missing") tc.driveAgentMissing()
+          else if (s === "old-voxtype") tc.driveOldVoxtype()
+          else if (s === "copy") tc.driveCopy()
+          else if (s === "minimize") tc.driveMinimize()
+          else if (s === "minimize-autoopen") tc.driveMinimizeAutoOpen()
+          else if (s === "resize") tc.driveResize()
+          else if (s === "move") tc.driveMove()
+          else if (s === "opacity") tc.driveOpacity()
+          else if (s === "view-state") tc.driveViewState()
+          else if (s === "play") tc.drivePlay()
+          else if (s === "play-no-audio") tc.drivePlayNoAudio()
+          else if (s === "play-errors") tc.drivePlayErrors()
+          else if (s === "line-edit") tc.driveLineEdit()
+          else if (s === "line-delete") tc.driveLineDelete(false)
+          else if (s === "line-delete-flag") tc.driveLineDelete(true)
+          else if (s === "export") tc.driveExport()
+          else if (s === "export-past") tc.driveExportPast()
           else if (s === "summary-error") tc.driveSummaryError()
+          else if (s === "summary-local-error") tc.driveSummaryLocalError()
+          else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
+          else if (s === "summary-stale") tc.driveSummaryStale()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -238,6 +261,8 @@ Item {
         lv.cacheBuffer = 100000
         wait(60)
       }
+      // Rows removed or inserted this turn are laid out before reading.
+      lv.forceLayout()
       var out = []
       for (var i = 0; i < lv.count; i++) {
         var item = lv.itemAtIndex(i)
@@ -270,11 +295,13 @@ Item {
       keyClick(Qt.Key_Return)
     }
 
-    function shot(name) {
+    function shot(name, wholeWindow) {
       if (__EVIDENCE__ === "") return
       var done = false
       wait(150)
-      view().grabToImage(function(result) {
+      // The window's content includes the busy backdrop behind the card.
+      var target = wholeWindow ? host.ctrl().window.shotItem : view()
+      target.grabToImage(function(result) {
         result.saveToFile(__EVIDENCE__ + "/" + (++tc.shotCount) + "-" + name + ".png")
         done = true
       })
@@ -1171,6 +1198,491 @@ Item {
       shot("list-after-meeting")
     }
 
+    // ------------------------------------------------------------ failure paths
+
+    function driveCliMissing() {
+      openView()
+      waitFor(function() { return feed().connected && shown(find(view(), "idleState")) }, "idle")
+      var missing = __FAKE_BIN__
+      waitFor(function() { return shown(find(view(), "meetingListError")) }, "the list says why it is empty")
+      check(txt("meetingListError") === "Could not run " + missing + ". Is voxtype installed and on PATH?", "list: " + txt("meetingListError"))
+      click(find(view(), "startButton"), "Start")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "Start says why")
+      check(view().actionError === "Could not run " + missing + ". Is voxtype installed and on PATH?", "start: " + view().actionError)
+      shot("cli-missing")
+    }
+
+    function driveDaemonOld() {
+      openView()
+      waitFor(function() { return txt("idleTitle") === "Voxtype is running without its meeting socket" }, "old daemon named: " + txt("idleTitle"), 8000)
+      check(txt("idleDetail").indexOf("systemctl --user restart voxtype") !== -1, "says what to do: " + txt("idleDetail"))
+      check(!find(view(), "startButton").enabled, "no Start without the socket")
+      shot("daemon-old")
+    }
+
+    function driveAgentMissing() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      var problem = find(find(view(), "askPane"), "assistantProblem")
+      waitFor(function() { return shown(problem) }, "the Ask tab says why it cannot answer")
+      check(String(problem.text).indexOf("No agent or local model was found.") === 0, "problem: " + problem.text)
+      check(chipLabel() === "No agent  ▾", "chip: " + chipLabel())
+      var menu = find(view(), "agentMenu")
+      click(find(find(view(), "askPane"), "agentChip"), "agent chip")
+      waitFor(function() { return menu.visible }, "menu")
+      check(!shown(find(menu, "agentOption_claude")), "an agent that was not found is not offered")
+      check(shown(find(menu, "agentOption_codex")) && !find(menu, "agentOption_codex").enabled, "an unsupported agent is shown, disabled")
+      check(String(find(menu, "agentNote_codex").text).indexOf("bwrap is not installed") === 0, "its note: " + find(menu, "agentNote_codex").text)
+      shot("agent-missing")
+      keyClick(Qt.Key_Escape)
+      // Asking anyway gets the CLI's own error, not a blank answer.
+      typeAsk("What did we decide?")
+      waitFor(function() { return answered(1) }, "the ask ended", 8000)
+      check(thread().get(1).error.indexOf("No agent or local model is available") === 0, "error: " + thread().get(1).error)
+    }
+
+    function driveOldVoxtype() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      var problem = find(find(view(), "askPane"), "assistantProblem")
+      waitFor(function() { return shown(problem) }, "the Ask tab says to update")
+      check(String(problem.text).indexOf("This voxtype is too old for the meeting assistant") === 0, "ask: " + problem.text)
+      tab("notes")
+      waitFor(function() { return shown(find(view(), "notesError")) }, "the Notes tab says to update")
+      check(txt("notesError").indexOf("This voxtype is too old for meeting notes") === 0, "notes: " + txt("notesError"))
+      tab("transcript")
+      openChooser(1)
+      pick("You")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "reassign says to update")
+      check(view().actionError.indexOf("This voxtype is too old for moving lines") === 0, "reassign: " + view().actionError)
+      check(lines()[1][1] === "Remote", "rolled back")
+      shot("old-voxtype")
+    }
+
+    function driveCopy() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      tab("ask")
+      typeAsk("What did we decide?")
+      waitFor(function() { return answered(1) }, "answered", 8000)
+      var row = find(view(), "askThread").itemAtIndex(1)
+      var copy = find(row, "answerCopy")
+      check(shown(copy) && String(copy.text) === "Copy", "Copy on the answer")
+      mouseClick(copy, copy.width / 2, copy.height / 2)
+      waitFor(function() { return String(copy.text) === "Copied" }, "Copied")
+      shot("copied")
+
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
+      tab("summary")
+      click(find(view(), "regenerateButton"), "Summarize")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary", 8000)
+      var scopy = find(view(), "summaryCopy")
+      click(scopy, "Copy summary")
+      waitFor(function() { return String(scopy.text) === "Copied" }, "summary Copied")
+
+      // Without wl-copy, say what is missing.
+      host.ctrl().copyCommand = "/nonexistent/wl-copy"
+      waitFor(function() { return String(scopy.text) === "Copy" }, "label back")
+      click(scopy, "Copy without wl-copy")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "the reason")
+      check(view().actionError === "Copying needs /nonexistent/wl-copy (the wl-clipboard package), which is not installed.", "message: " + view().actionError)
+    }
+
+    // ------------------------------------------------------------ after the call
+
+    function lineAction(i, name) {
+      var item = lineItem(i)
+      mouseMove(item, 30, 4)
+      var act = find(item, name)
+      waitFor(function() { return act && shown(act) }, name + " on hover of line " + i)
+      // A Row places a newly shown action on the next polish.
+      wait(100)
+      mouseClick(act, act.width / 2, act.height / 2)
+    }
+
+    function driveLineEdit() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "lineEditButton")
+      var field = find(lineItem(1), "lineEditField")
+      waitFor(function() { return field.visible && field.activeFocus }, "inline editor focused")
+      check(field.text === "Yes, loud and clear.", "editor holds the text: " + field.text)
+      check(!find(lineItem(1), "lineActions").visible, "no actions while editing")
+      shot("editing")
+      field.text = "Yes, very loud and clear."
+      keyClick(Qt.Key_Return)
+      check(!field.visible && lines()[1][2] === "Yes, very loud and clear.", "saved at once: " + JSON.stringify(lines()[1]))
+      waitFor(idleCli, "edit finished")
+      wait(300)
+      check(lines()[1][2] === "Yes, very loud and clear.", "kept after the daemon: " + lines()[1][2])
+      check(shown(find(lineItem(1), "lineEdited")), "marked edited (original_text)")
+      shot("edited")
+      // Restore original text: `edit --reset`.
+      lineAction(1, "lineRestoreTextButton")
+      check(lines()[1][2] === "Yes, loud and clear." && !shown(find(lineItem(1), "lineEdited")), "restored at once")
+      waitFor(idleCli, "reset finished")
+      wait(300)
+      check(lines()[1][2] === "Yes, loud and clear." && !shown(find(lineItem(1), "lineEdited")), "restored after the daemon")
+
+      // Escape leaves it as it was.
+      lineAction(2, "lineEditButton")
+      field = find(lineItem(2), "lineEditField")
+      waitFor(function() { return field.activeFocus }, "second editor focused")
+      field.text = "Something else"
+      keyClick(Qt.Key_Escape)
+      check(!field.visible && lines()[2][2] === "Great, let's start with the release.", "Escape cancels: " + lines()[2][2])
+      check(host.viewOpen(), "Escape in the editor does not close the view")
+
+      // A refused edit goes back.
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ fail: { edit: "Error: segment 4 is locked." } })])
+      lineAction(3, "lineEditButton")
+      field = find(lineItem(3), "lineEditField")
+      waitFor(function() { return field.activeFocus }, "third editor focused")
+      field.text = "It went red again."
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      check(view().actionError === "segment 4 is locked.", "message: " + view().actionError)
+      check(lines()[3][2] === "The build went green overnight.", "rolled back: " + lines()[3][2])
+    }
+
+    function driveLineDelete(flag) {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "lineDeleteButton")
+      check(lines().length === 3 && lines()[1][2] === "Great, let's start with the release.", "gone at once: " + JSON.stringify(lines()))
+      var bar = find(view(), "undoBar")
+      check(shown(bar), "Undo offered")
+      if (!flag) shot("undo")
+      click(find(bar, "undoButton"), "Undo")
+      check(lines().length === 4 && lines()[1][2] === "Yes, loud and clear.", "back in its place")
+      check(!shown(bar), "Undo bar gone")
+      wait(300)
+      check(idleCli(), "nothing ran for an undone delete")
+
+      lineAction(1, "lineDeleteButton")
+      check(lines().length === 3, "deleted again")
+      if (flag) {
+        // Closing the view accepts it at once.
+        var close = find(view(), "closeButton")
+        tc.parent = host
+        click(close, "Close")
+        waitFor(function() { return !host.viewOpen() }, "closed")
+        waitFor(function() { return idleCli() && host.ctrl().cli.busy === "" }, "delete ran on close")
+        wait(400)
+        openView()
+        waitFor(function() { return lines().length === 3 }, "still gone after reopening (hello without it)")
+      } else {
+        waitFor(function() { return !shown(bar) }, "the window closed", 8000)
+        waitFor(idleCli, "delete ran")
+        wait(400)
+        check(lines().length === 3, "stays gone when the daemon confirms")
+      }
+      // A line deleted elsewhere goes too, whichever shape the daemon uses.
+      ctl({ cmd: "delete", segment_id: 4, shape: flag ? "flag" : "event" })
+      waitFor(function() { return lines().length === 2 }, "deleted elsewhere")
+      check(lines()[1][2] === "Great, let's start with the release.", "the right line went: " + JSON.stringify(lines()))
+      // `delete-line --restore` elsewhere: the whole segment again, inserted
+      // by start time.
+      ctl({ cmd: "update", key: "event", segment: seg(2, 9, "Yes, loud and clear.", "loopback", "Remote", 0) })
+      waitFor(function() { return lines().length === 3 && lines()[1][2] === "Yes, loud and clear." }, "restored in its place: " + JSON.stringify(lines()))
+    }
+
+    function driveExport() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var menu = find(view(), "moreMenu")
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return menu.visible }, "More menu")
+      waitFor(function() { return find(menu, "openMeetingFolder").enabled }, "the meeting's folder is known")
+      shot("more-menu")
+      click(find(menu, "exportOption_markdown"), "Markdown")
+      waitFor(function() { return shown(find(view(), "exportNotice")) }, "export notice", 8000)
+      check(txt("exportNoticeText").indexOf("Exported to " + __DOCUMENTS__ + "/Voxtype/") === 0, "notice: " + txt("exportNoticeText"))
+      shot("exported")
+      click(find(view(), "exportOpenFolder"), "Open folder")
+      wait(500)
+      click(find(view(), "moreButton"), "More again")
+      waitFor(function() { return menu.visible }, "More menu again")
+      click(find(menu, "openMeetingFolder"), "Open meeting folder")
+      wait(500)
+    }
+
+    function driveExportPast() {
+      openList()
+      openPast(0, "Design review")
+      var menu = find(view(), "moreMenu")
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return menu.visible && find(menu, "openMeetingFolder").enabled }, "More menu with the folder")
+      check(!shown(find(menu, "exportOption_srt")) && !shown(find(menu, "exportOption_vtt")), "no SRT or VTT: the CLI refuses them")
+      click(find(menu, "exportOption_json"), "JSON")
+      waitFor(function() { return shown(find(view(), "exportNotice")) }, "export notice", 8000)
+      check(txt("exportNoticeText") === "Exported to " + __DOCUMENTS__ + "/Voxtype/2026-11-10 Design review.json", "notice: " + txt("exportNoticeText"))
+      click(find(view(), "moreButton"), "More again")
+      waitFor(function() { return menu.visible }, "menu")
+      click(find(menu, "openMeetingFolder"), "Open meeting folder")
+      wait(500)
+    }
+
+    // ------------------------------------------------------------ window
+
+    function placement() { return host.ctrl().placement }
+
+    // A known screen, so the math does not depend on the offscreen one.
+    function screen1600() {
+      placement().screenWidth = 1600
+      placement().screenHeight = 1000
+      placement().screenName = "DP-1"
+    }
+
+    function driveMinimize() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "minimizeButton"), "Minimize")
+      var pill = find(view(), "pill")
+      waitFor(function() { return pill.visible && placement().minimized }, "the pill")
+      var win = host.ctrl().window
+      check(win.implicitWidth === 300 && win.implicitHeight === 40, "pill-sized window: " + win.implicitWidth + "x" + win.implicitHeight)
+      check(host.viewOpen(), "the view is still open (the pill is the view)")
+      check(txt("pillState") === "Recording" && /^1:0\d$/.test(txt("pillElapsed")), "state and time: " + txt("pillState") + " " + txt("pillElapsed"))
+      check(txt("pillLine") === "Remote: The build went green overnight.", "last line: " + txt("pillLine"))
+      shot("pill", true)
+      click(find(view(), "pillDrag"), "the pill")
+      waitFor(function() { return !placement().minimized && shown(find(view(), "transcriptList")) }, "expanded by a click")
+
+      // `voxtype meeting view --minimize`, then `--expand`.
+      request({ window: "minimize" })
+      waitFor(function() { return placement().minimized }, "minimized by request")
+      request({ window: "expand" })
+      waitFor(function() { return !placement().minimized }, "expanded by request")
+      check(host.opens === 1, "one window throughout: " + host.opens)
+    }
+
+    function driveMinimizeAutoOpen() {
+      waitFor(function() { return feed().connected && feed().status === "idle" }, "feed connected")
+      openView()
+      click(find(view(), "minimizeButton"), "Minimize")
+      waitFor(function() { return placement().minimized }, "minimized")
+      ctl({ cmd: "start", title: "Design review" })
+      waitFor(function() { return !placement().minimized && feed().title === "Design review" }, "a meeting start expands the pill")
+      check(host.opens === 1, "no second window: " + host.opens)
+      waitFor(function() { return txt("meetingTitle") === "Design review" }, "the new meeting")
+    }
+
+    function driveResize() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      screen1600()
+      var p = placement()
+      check(p.cardWidth === 460 && p.left === 1600 - 460 - p.gap && p.handleOnLeft, "starts on the right edge: " + p.left)
+      var handle = find(view(), "resizeHandle")
+      // Drag the inner (left) edge 120 px out: wider, right side kept.
+      mousePress(handle, 4, 100)
+      mouseMove(handle, 4 - 120, 100)
+      mouseRelease(handle, 4 - 120, 100)
+      check(p.cardWidth === 580 && p.left + p.cardWidth === 1600 - p.gap, "wider to the left: " + p.cardWidth + " at " + p.left)
+      shot("wide", true)
+      // Clamped: never more than half the screen, never under 280 px.
+      p.resizeBy(-5000)
+      check(p.cardWidth === 800, "max is half the screen: " + p.cardWidth)
+      p.resizeBy(5000)
+      check(p.cardWidth === 280, "min 280: " + p.cardWidth)
+      p.endResize()
+      shot("narrow", true)
+      // Compact height: 40 % of the screen.
+      click(find(view(), "heightToggle"), "compact")
+      check(p.compact && !p.fullHeight && p.windowHeight === 400, "compact 400: " + p.windowHeight)
+      click(find(view(), "heightToggle"), "full")
+      check(!p.compact && p.fullHeight, "full height again")
+      // Reset position in the menu.
+      click(find(view(), "moreButton"), "More")
+      waitFor(function() { return find(view(), "moreMenu").visible }, "menu")
+      click(find(view(), "resetPosition"), "Reset position")
+      check(p.x === -1 && !p.compact && p.cardWidth === 460 && p.left === 1600 - 460 - p.gap, "back to the default: " + p.left)
+    }
+
+    function driveMove() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      screen1600()
+      var p = placement()
+      click(find(view(), "heightToggle"), "compact, so it can move vertically")
+      var drag = find(view(), "headerDrag")
+      var x0 = p.left
+      var y0 = p.top
+      mousePress(drag, 60, 10)
+      mouseMove(drag, 60 - 500, 10 + 200)
+      check(p.left === x0 - 500 && p.top === y0 + 200, "moved by the drag: " + p.left + "," + p.top)
+      mouseRelease(drag, 60 - 500, 10 + 200)
+      check(p.left === x0 - 500 && p.top === y0 + 200, "nowhere near an edge, so no snap: " + p.left + "," + p.top)
+      // Within 24 px of an edge snaps onto it (a gap in).
+      p.moveBy(-(p.left - 25), 0)
+      p.endMove()
+      check(p.left === p.gap, "snapped to the left edge: " + p.left)
+      p.moveBy(1600 - p.cardWidth - p.left - 30, 0)
+      p.endMove()
+      check(p.left === 1600 - p.cardWidth - p.gap, "snapped to the right edge: " + p.left)
+      p.moveBy(0, -(p.top - 20))
+      p.endMove()
+      check(p.top === p.gap, "snapped to the top: " + p.top)
+      // Clamped to the screen however far it is dragged.
+      p.moveBy(-9999, 9999)
+      check(p.left === 0 && p.top === 1000 - p.windowHeight, "clamped: " + p.left + "," + p.top)
+      p.moveBy(300, -300)
+      p.endMove()
+      var want = { x: p.left, y: p.top, width: p.cardWidth, compact: p.compact }
+      // The card still takes clicks after a drag.
+      click(find(view(), "moreButton"), "More after a drag")
+      waitFor(function() { return find(view(), "moreMenu").visible }, "menu after a drag")
+      keyClick(Qt.Key_Escape)
+      check(!find(view(), "moreMenu").visible && host.viewOpen(), "Escape closes the menu")
+      // The drag needs no keyboard: the window never asked for it.
+      check(host.ctrl().window.keyboardPolicy === "none", "no keyboard for a drag: " + host.ctrl().window.keyboardPolicy)
+
+      // Remembered: a new instance (a restarted shell) reads it back.
+      wait(800)
+      var fresh = Qt.createQmlObject('import "standalone/voxtype-meetings"; MeetingPlacement {}', host)
+      fresh.host = p.host
+      fresh.screenWidth = 1600
+      fresh.screenHeight = 1000
+      fresh.screenName = "DP-1"
+      waitFor(function() { return fresh.loaded }, "state file read")
+      check(fresh.left === want.x && fresh.top === want.y && fresh.cardWidth === want.width && fresh.compact === want.compact,
+            "round trip: " + JSON.stringify({ x: fresh.left, y: fresh.top, w: fresh.cardWidth, c: fresh.compact }) + " vs " + JSON.stringify(want))
+      // Per output: another output starts from the default.
+      fresh.screenName = "HDMI-A-1"
+      wait(100)
+      check(fresh.x === want.x || fresh.saved["standalone:HDMI-A-1"] === undefined, "")
+      check(fresh.saved[p.host + ":HDMI-A-1"] === undefined, "nothing saved for another output")
+
+    }
+
+    function driveOpacity() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      waitFor(function() { return view().restingOpacity === 0.5 }, "view_opacity from config: " + view().restingOpacity)
+      // The pointer away from the card: translucent.
+      mouseMove(view(), -40, -40)
+      waitFor(function() { return !view().engaged && view().cardAlpha === 0.5 }, "translucent at rest: " + view().cardAlpha, 4000)
+      wait(500)
+      shot("translucent", true)
+      // Over the card: opaque at once.
+      mouseMove(view(), 100, 300)
+      waitFor(function() { return view().engaged && view().cardAlpha === 1.0 }, "opaque on hover")
+      check(host.ctrl().window.keyboardPolicy === "none", "hovering the card asks for no keyboard")
+      // Away again: still opaque for a moment, then back.
+      mouseMove(view(), -40, -40)
+      wait(400)
+      check(view().cardAlpha === 1.0, "lingers opaque")
+      waitFor(function() { return view().cardAlpha === 0.5 }, "eases back after the linger", 4000)
+      // Typing: opaque, and now the window asks for the keyboard.
+      tab("ask")
+      var field = find(find(view(), "askPane"), "askField")
+      click(field, "Ask field")
+      mouseMove(view(), -40, -40)
+      wait(2000)
+      check(view().cardAlpha === 1.0 && host.ctrl().window.keyboardPolicy === "on-demand", "opaque while typing, keyboard on demand: "
+            + view().cardAlpha + " " + host.ctrl().window.keyboardPolicy)
+      // Typing ends (here: focus moves elsewhere in the card).
+      view().forceActiveFocus()
+      waitFor(function() { return host.ctrl().window.keyboardPolicy === "none" }, "keyboard given back when typing ends")
+    }
+
+    FileView { id: stateFileView; path: __RUNTIME__ + "/meeting-view.state"; blockLoading: true; printErrors: false }
+    function viewState() {
+      stateFileView.reload()
+      try { return JSON.parse(stateFileView.text()) } catch (e) { return null }
+    }
+
+    function driveViewState() {
+      host.ctrl().stateHeartbeatMs = 300
+      waitFor(function() { var s = viewState(); return s && s.visible === false }, "written as not visible at start")
+      openView()
+      waitFor(function() { var s = viewState(); return s && s.visible === true && s.minimized === false }, "visible on show")
+      var s = viewState()
+      check(s.host === __HOST__ && s.pid > 1, "host and pid: " + JSON.stringify(s))
+      var first = s.updated_at
+      waitFor(function() { var t = viewState(); return t && t.updated_at > first }, "heartbeat while visible", 4000)
+      click(find(view(), "minimizeButton"), "Minimize")
+      waitFor(function() { var t = viewState(); return t && t.visible === true && t.minimized === true }, "minimized counts as visible")
+      click(find(view(), "pillDrag"), "expand")
+      waitFor(function() { var t = viewState(); return t && t.minimized === false }, "expanded")
+      var close = find(view(), "closeButton")
+      tc.parent = host
+      click(close, "Close")
+      waitFor(function() { var t = viewState(); return t && t.visible === false }, "not visible after close")
+      var closed = viewState().updated_at
+      wait(1500)
+      check(viewState().updated_at === closed, "no heartbeat while closed")
+    }
+
+    // ------------------------------------------------------------ playback
+
+    function playing(i) { var m = find(lineItem(i), "linePlaying"); return m && m.visible }
+
+    function drivePlay() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return shown(find(view(), "transportStop")) }, "the transport")
+      check(txt("transportTrack") === "▶ Playing both sides", "track: " + txt("transportTrack"))
+      waitFor(function() { return playing(1) }, "the played line is lit")
+      shot("playing")
+      // At ten times speed the position reaches 0:21 within about 1.2 s.
+      waitFor(function() { return playing(2) && !playing(1) }, "the light follows position_ms", 5000)
+      click(find(view(), "transportStop"), "Stop")
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "transport gone")
+      check(!playing(1) && !playing(2) && !playing(3), "nothing lit")
+
+      // Stopped elsewhere: the playback event says so.
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return shown(find(view(), "transportStop")) }, "playing again")
+      sh(["sh", "-c", '"$1" meeting play --stop --json >/dev/null', "_", __FAKE_BIN__])
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "stopped from elsewhere")
+    }
+
+    function drivePlayNoAudio() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      waitFor(function() { return host.ctrl().assistant.audioRetained === false }, "audio_retained read")
+      var hint = find(view(), "audioHint")
+      check(shown(hint), "the hint, once")
+      check(txt("audioHint") !== "", "")
+      var item = lineItem(1)
+      mouseMove(item, 30, 4)
+      waitFor(function() { return shown(find(item, "lineEditButton")) }, "hover actions")
+      check(!shown(find(item, "linePlayButton")), "no ▶ without audio")
+      check(shown(find(view(), "audioHintSettings")) === host.omarchy, "Settings link where the host has Settings")
+      shot("audio-not-kept")
+      click(find(view(), "audioHintDismiss"), "dismiss")
+      check(!shown(find(view(), "audioHint")), "dismissed")
+    }
+
+    function drivePlayErrors() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "the refusal")
+      check(view().actionError === "This meeting was recorded without keeping audio. Turn on meeting.retain_audio for future meetings.",
+            "verbatim: " + view().actionError)
+      waitFor(function() { return shown(find(view(), "audioHint")) }, "now known: the hint")
+      var item = lineItem(1)
+      mouseMove(item, 30, 4)
+      waitFor(function() { return shown(find(item, "lineEditButton")) }, "hover actions")
+      check(!shown(find(item, "linePlayButton")), "and no more ▶")
+      // Missing tools: said as the CLI says it, and ▶ stays.
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ play_error: "Error: Playing meeting audio needs ffmpeg, which is not installed." })])
+      // (Back to not knowing, as for a meeting whose manifest says it kept audio.)
+      host.ctrl().assistant.audioRetained = null
+      // The hint going away moves the lines up; let it settle before hovering.
+      wait(300)
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return view().actionError === "Playing meeting audio needs ffmpeg, which is not installed." }, "tools: " + view().actionError)
+      check(host.ctrl().assistant.audioRetained === null, "a tools problem does not mean no audio")
+    }
+
     function driveAskError() {
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
@@ -1183,16 +1695,112 @@ Item {
       shot("ask-error")
     }
 
+    // The error card, alone at the top of the Summary pane: above any
+    // summary text, Summarizing gone, the actions as wanted.
+    function checkErrorCard(message, useAgent) {
+      // Let the layout place the card it has just shown.
+      wait(150)
+      var card = find(view(), "summaryErrorCard")
+      check(shown(card), "error card shown")
+      check(!shown(find(view(), "summarizingRow")), "Summarizing cleared")
+      check(txt("summaryErrorTitle") === "Couldn't write the summary", "title: " + txt("summaryErrorTitle"))
+      check(txt("summaryError") === message, "message: " + txt("summaryError"))
+      var pane = find(view(), "summaryPane")
+      var flick = find(pane, "summaryFlick")
+      var head = find(pane, "regenerateButton").mapToItem(pane, 0, 0).y + find(pane, "regenerateButton").height
+      var cardY = card.mapToItem(pane, 0, 0).y
+      check(cardY >= head && cardY < head + 40, "card right under the header: " + cardY + " (header ends " + head + ")")
+      if (shown(flick)) check(cardY < flick.mapToItem(pane, 0, 0).y, "card above the summary text")
+      check(shown(find(view(), "summaryRetry")), "Retry offered")
+      check(shown(find(view(), "summaryUseAgent")) === (useAgent !== ""), "Use agent offered: " + shown(find(view(), "summaryUseAgent")))
+      if (useAgent !== "") check(txt("summaryUseAgent") === "Use " + useAgent + " instead", "use: " + txt("summaryUseAgent"))
+      check(shown(find(view(), "summarySettings")) === view().canOpenSettings, "Settings offered where the host has it")
+      check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+    }
+
     function driveSummaryError() {
       ctl({ cmd: "autosummary", error: { code: "agent_failed", message: "Summary failed: Claude exited with status 1." } })
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
       click(find(view(), "stopButton"), "Stop")
       waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing", 6000)
-      waitFor(function() { return shown(find(view(), "summaryError")) }, "the failure", 6000)
-      check(txt("summaryError") === "Summary failed: Claude exited with status 1.", "message: " + txt("summaryError"))
-      check(txt("meetingState") === "Ended", "Ended: " + txt("meetingState"))
+      check(txt("summarizing") === "Summarizing with Claude…", "summarizing: " + txt("summarizing"))
+      wait(100)
+      var spane = find(view(), "summaryPane")
+      var shead = find(spane, "regenerateButton").mapToItem(spane, 0, 0).y + find(spane, "regenerateButton").height
+      var rowY = find(view(), "summarizingRow").mapToItem(spane, 0, 0).y
+      check(rowY >= shead && rowY < shead + 40, "summarizing right under the header: " + rowY + " (header ends " + shead + ")")
+      shot("summarizing-with")
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the failure", 6000)
+      // An agent failed: nothing to offer instead of it.
+      checkErrorCard("Summary failed: Claude exited with status 1.", "")
       shot("summary-error")
+      click(find(view(), "summaryRetry"), "Retry")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "retried summary", 8000)
+      check(!shown(find(view(), "summaryErrorCard")) && !shown(find(view(), "summarizingRow")), "card and spinner gone")
+    }
+
+    function driveSummaryLocalError() {
+      ctl({ cmd: "autosummary", error: { code: "local_failed",
+        message: "Local model (llama3.2 at http://localhost:11434) failed: LLM request failed: http://localhost:11434/api/generate: status code 500" } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      waitFor(function() { return assistant().status !== null }, "status read")
+      tab("ask")
+      check(chipLabel() === "Claude  ▾", "Ask chip names what answers: " + chipLabel())
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return view().currentTab === "summary" && shown(find(view(), "summarizing")) }, "summarizing", 6000)
+      check(chipLabel() === "Local (llama3.2)  ▾", "Summary chip names what summarizes: " + chipLabel())
+      check(txt("summarizing") === "Summarizing with Local (llama3.2)…", "summarizing: " + txt("summarizing"))
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the failure", 6000)
+      checkErrorCard("Local model (llama3.2 at http://localhost:11434) failed: LLM request failed: http://localhost:11434/api/generate: status code 500", "Claude")
+      shot("summary-local-error")
+      click(find(view(), "summaryUseAgent"), "Use Claude instead")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing again")
+      check(txt("summarizing") === "Summarizing with Claude…", "summarizing with: " + txt("summarizing"))
+      check(!shown(find(view(), "summaryErrorCard")), "card gone while it runs")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary by Claude", 8000)
+      check(!shown(find(view(), "summaryErrorCard")) && !shown(find(view(), "summarizingRow")), "card and spinner gone")
+      tab("ask")
+      check(chipLabel() === "Claude  ▾", "Ask chip unchanged: " + chipLabel())
+    }
+
+    function driveSummaryErrorCli() {
+      var message = "Local model (llama3.2 at http://localhost:11434) failed: LLM request failed: http://localhost:11434/api/generate: status code 500"
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      tab("summary")
+      waitFor(function() { return assistant().status !== null }, "status read")
+      check(chipLabel() === "Local (llama3.2)  ▾", "local_only chip: " + chipLabel())
+      click(find(view(), "regenerateButton"), "Summarize")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing")
+      check(txt("summarizing") === "Summarizing with Local (llama3.2)…", "summarizing: " + txt("summarizing"))
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the CLI failure", 6000)
+      // local_only: the user said nothing goes to an agent.
+      checkErrorCard(message, "")
+      shot("summary-error-cli")
+      click(find(view(), "summaryRetry"), "Retry")
+      waitFor(function() { return shown(find(view(), "summarizingRow")) }, "retrying")
+      check(!shown(find(view(), "summaryErrorCard")), "card gone while retrying")
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "failed again", 6000)
+      checkErrorCard(message, "")
+    }
+
+    function driveSummaryStale() {
+      ctl({ cmd: "autosummary", anonymous: true, error: { code: "summary_failed", message: "Summary failed: no backend answered." } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return shown(find(view(), "summarizing")) }, "summarizing", 6000)
+      // No summary_backend in this status: the chip falls back to backend_name.
+      check(chipLabel() === "Claude  ▾", "fallback chip: " + chipLabel())
+      check(txt("summarizing") === "Summarizing with Claude…", "summarizing: " + txt("summarizing"))
+      waitFor(function() { return shown(find(view(), "summaryErrorCard")) }, "the unnamed error ends it", 6000)
+      checkErrorCard("Summary failed: no backend answered.", "")
+      check(feed().lastError === "", "not repeated in the banner: " + feed().lastError)
+      shot("summary-stale")
     }
 
     function driveScroll() {

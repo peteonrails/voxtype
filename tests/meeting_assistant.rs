@@ -58,14 +58,12 @@ impl World {
             std::fs::create_dir_all(w.p(d)).unwrap();
         }
         // Only these tools are on PATH, so no real agent or
-        // omarchy-default-agent on this machine can be found.
+        // omarchy-default-agent on this machine can be found. Resolved on
+        // the caller's PATH rather than /usr/bin and /bin: the Nix build
+        // sandbox has neither, only /bin/sh and store paths on PATH.
         for tool in ["sh", "cat", "cp", "ls", "grep", "env", "sleep", "sort"] {
-            for base in ["/usr/bin", "/bin"] {
-                let src = Path::new(base).join(tool);
-                if src.exists() {
-                    let _ = std::os::unix::fs::symlink(&src, w.p("bin").join(tool));
-                    break;
-                }
+            if let Ok(src) = which::which(tool) {
+                let _ = std::os::unix::fs::symlink(&src, w.p("bin").join(tool));
             }
         }
         let out = w.p("out");

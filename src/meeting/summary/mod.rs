@@ -34,6 +34,10 @@ pub enum SummaryError {
 
     #[error("Ollama not available at {0}")]
     OllamaUnavailable(String),
+
+    /// A backend's own explanation, already naming the backend.
+    #[error("{0}")]
+    Backend(String),
 }
 
 /// Format a MeetingSummary as markdown

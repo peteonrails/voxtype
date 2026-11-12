@@ -691,6 +691,16 @@ install -Dm755 packaging/scripts/voxtype-configure-launcher \
 install -Dm644 packaging/voxtype-configure.desktop \
     "$STAGING/usr/share/applications/voxtype-configure.desktop"
 
+# Voxtype Meetings launcher entry (`voxtype meeting view`), and voxtype's own
+# icon: named by both desktop entries' Icon=voxtype and passed to notify-send
+# as --icon=voxtype, so neither depends on an icon theme.
+install -Dm644 packaging/voxtype-meetings.desktop \
+    "$STAGING/usr/share/applications/voxtype-meetings.desktop"
+install -Dm644 assets/icon.svg \
+    "$STAGING/usr/share/icons/hicolor/scalable/apps/voxtype.svg"
+install -Dm644 assets/icon.png \
+    "$STAGING/usr/share/icons/hicolor/128x128/apps/voxtype.png"
+
 # Man pages. Rendered from src/cli by `cargo xtask man`, which compiles
 # only clap and clap_mangen, not voxtype. This used to copy them out of
 # target/release/build/*/out/man, which only exists after a local release

@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell.Io
+import "MeetingText.js" as MT
 
 
 // The meeting view's subprocesses: `voxtype meeting …` and the one config read
@@ -89,6 +90,23 @@ Item {
 
   signal annotateFinished(var extra, bool ok, string message, var segment)
 
+  // A line's text, after the call.
+  function editText(meeting, segId, text, extra) {
+    root.enqueue("edit", ["meeting", "edit", meeting || "latest", String(segId), String(text), "--json"], extra)
+  }
+
+  // Back to the transcribed text.
+  function resetText(meeting, segId, extra) {
+    root.enqueue("edit", ["meeting", "edit", meeting || "latest", String(segId), "--reset", "--json"], extra)
+  }
+
+  // A line removed for good (after the view's undo window).
+  function deleteLine(meeting, segId, extra) {
+    root.enqueue("delete-line", ["meeting", "delete-line", meeting || "latest", String(segId), "--json"], extra)
+  }
+
+  signal segmentActionFinished(string action, var extra, bool ok, string message, var segment)
+
   // `[meeting] show_view_on_start`. A CLI that predates the key exits non-zero
   // on it; that reads as the default, which is on.
   function readShowOnStart() {
@@ -118,10 +136,12 @@ Item {
       var action = actionProc.action
       var extra = actionProc.extra
       var ok = exitCode === 0
-      var message = ok ? "" : (actionProc.err || ("voxtype meeting " + action + " exited " + exitCode))
+      var what = action === "annotate" ? "notes on lines" : action === "reassign" ? "moving lines"
+        : action === "edit" ? "editing lines" : action === "delete-line" ? "deleting lines" : "voxtype meeting " + action
+      var message = ok ? "" : (MT.cliProblem(actionProc.err, what) || ("voxtype meeting " + action + " exited " + exitCode))
       actionProc.action = ""
       if (ok && action === "label" && extra) root.labelApplied(extra.key, extra.name)
-      if (action === "reassign" || action === "annotate") {
+      if (action === "reassign" || action === "annotate" || action === "edit" || action === "delete-line") {
         var segment = null
         if (ok) {
           try { segment = JSON.parse(actionProc.out) } catch (e) { segment = null }
@@ -129,7 +149,8 @@ Item {
           if (!segment || typeof segment !== "object" || segment.id === undefined) segment = null
         }
         if (action === "reassign") root.reassignFinished(extra, ok, message, segment)
-        else root.annotateFinished(extra, ok, message, segment)
+        else if (action === "annotate") root.annotateFinished(extra, ok, message, segment)
+        else root.segmentActionFinished(action, extra, ok, message, segment)
       }
       root.actionFinished(action, ok, message)
       Qt.callLater(root.pump)
@@ -137,10 +158,11 @@ Item {
     onFailedToStart: {
       var action = actionProc.action
       var extra = actionProc.extra
-      var message = "Could not run " + root.bin + ". Is voxtype installed?"
+      var message = MT.missingCli(root.bin)
       actionProc.action = ""
       if (action === "reassign") root.reassignFinished(extra, false, message, null)
       if (action === "annotate") root.annotateFinished(extra, false, message, null)
+      if (action === "edit" || action === "delete-line") root.segmentActionFinished(action, extra, false, message, null)
       root.actionFinished(action, false, message)
       Qt.callLater(root.pump)
     }

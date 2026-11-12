@@ -1,10 +1,12 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls.Basic as C
 
 // The Transcript tab: speaker chips (click to rename), then one row per
 // utterance with its time, speaker and text. A line's speaker opens the
-// reassign chooser; hovering a line offers "Add note"; a note or highlight
-// shows as a marker in the margin and the note under the text.
+// reassign chooser; hovering a line offers Edit (its text, inline: Enter
+// saves, Escape cancels), Add note and Delete; a note or highlight shows as a
+// marker in the margin and the note under the text.
 Item {
   id: root
 
@@ -15,6 +17,38 @@ Item {
   signal renameRequested(var keys, string name)
   signal speakerClicked(var line, var anchor)
   signal noteClicked(var line, var anchor)
+  signal editRequested(int segId, string text)
+  signal resetTextRequested(int segId)
+  signal playRequested(int segId)
+  signal settingsRequested()
+  // ▶ on lines unless the meeting is known to have kept no audio.
+  property bool canPlay: true
+  property bool audioKnownMissing: false
+  property bool canOpenSettings: false
+  // The line being heard while the meeting's audio plays.
+  property int playingSegId: -1
+  property bool audioHintDismissed: false
+  onAudioKnownMissingChanged: if (!root.audioKnownMissing) root.audioHintDismissed = false
+  signal deleteRequested(int segId)
+
+  // A small text action that shows on a line's hover.
+  component LineAction: Text {
+    id: act
+    signal activated()
+    readonly property bool hovered: actMouse.containsMouse
+    color: act.hovered ? root.theme.fg : root.theme.dim
+    font.family: root.theme.fontFamily
+    font.pixelSize: root.theme.caption
+    font.underline: act.hovered
+    MouseArea {
+      id: actMouse
+      anchors.fill: parent
+      anchors.margins: -root.theme.sm
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: act.activated()
+    }
+  }
 
   readonly property alias list: transcript
 
@@ -117,6 +151,7 @@ Item {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: chip.beginEdit()
+              InputDemand { theme: root.theme; active: chipMouse.containsMouse }
             }
           }
 
@@ -138,6 +173,36 @@ Item {
             onActiveFocusChanged: if (!activeFocus && chip.editing) chip.editing = false
           }
         }
+      }
+    }
+
+    // Once, not per line: why there is no ▶, and where it is turned on.
+    RowLayout {
+      objectName: "audioHint"
+      Layout.fillWidth: true
+      visible: root.audioKnownMissing && !root.audioHintDismissed
+      spacing: root.theme.md
+      Text {
+        Layout.fillWidth: true
+        text: "Audio not kept for this meeting, so lines cannot be played. "
+          + (root.canOpenSettings ? "Keep audio is in Settings, under Meeting." : "Set [meeting] retain_audio = true to keep it next time.")
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+        wrapMode: Text.WordWrap
+      }
+      MeetingButton {
+        objectName: "audioHintSettings"
+        theme: root.theme
+        visible: root.canOpenSettings
+        text: "Settings"
+        onClicked: root.settingsRequested()
+      }
+      MeetingButton {
+        objectName: "audioHintDismiss"
+        theme: root.theme
+        text: "✕"
+        onClicked: root.audioHintDismissed = true
       }
     }
 
@@ -197,6 +262,7 @@ Item {
           required property real startMs
           required property int segId
           required property string originalSpeaker
+          required property string originalText
           required property string annotation
           required property bool highlight
           objectName: "transcriptLine"
@@ -205,6 +271,26 @@ Item {
           readonly property string speakerName: root.feed.displayName(line.speaker)
           readonly property int chipIndex: root.feed.chipIndexFor(line.speaker)
           readonly property bool marked: line.annotation !== "" || line.highlight
+          property bool editing: false
+
+          function beginEdit() {
+            line.editing = true
+            editField.text = line.text
+            editField.forceActiveFocus()
+            editField.cursorPosition = editField.length
+          }
+
+          function cancelEdit() {
+            line.editing = false
+            root.forceActiveFocus()
+          }
+
+          function commitEdit() {
+            var next = editField.text.trim()
+            line.editing = false
+            root.forceActiveFocus()
+            if (next !== "" && next !== line.text) root.editRequested(line.segId, next)
+          }
 
           Rectangle {
             anchors.fill: parent
@@ -212,6 +298,18 @@ Item {
             radius: 4
             color: root.theme.alpha(root.theme.accent, 0.18)
             visible: root.flashSegId === line.segId
+          }
+
+          // The line being heard.
+          Rectangle {
+            objectName: "linePlaying"
+            anchors.fill: parent
+            anchors.margins: -root.theme.xs
+            radius: 4
+            color: root.theme.alpha(root.theme.accent, 0.12)
+            border.width: 1
+            border.color: root.theme.alpha(root.theme.accent, 0.5)
+            visible: root.playingSegId === line.segId
           }
 
           // Hover shows "Add note" without taking clicks from anything.
@@ -277,6 +375,8 @@ Item {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.speakerClicked(line, speakerLabel)
+                    // The chooser has a "New speaker…" field.
+                    InputDemand { theme: root.theme; active: speakerMouse.containsMouse }
                   }
                 }
 
@@ -292,37 +392,116 @@ Item {
                 }
               }
 
-              Text {
-                id: noteAction
-                objectName: "lineNoteButton"
+              Row {
+                objectName: "lineActions"
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                visible: lineHover.containsMouse || noteMouse.containsMouse
-                text: line.marked ? "Edit note" : "Add note"
-                color: noteMouse.containsMouse ? root.theme.fg : root.theme.dim
-                font.family: root.theme.fontFamily
-                font.pixelSize: root.theme.caption
-                font.underline: noteMouse.containsMouse
+                spacing: root.theme.lg
+                visible: !line.editing
+                  && (lineHover.containsMouse || playAction.hovered || editAction.hovered
+                    || noteAction.hovered || deleteAction.hovered)
 
-                MouseArea {
-                  id: noteMouse
-                  anchors.fill: parent
-                  anchors.margins: -root.theme.sm
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.noteClicked(line, noteAction)
+                LineAction {
+                  id: playAction
+                  objectName: "linePlayButton"
+                  visible: root.canPlay
+                  text: "▶"
+                  onActivated: root.playRequested(line.segId)
+                }
+
+                // These open a text field, so they ask for the keyboard on
+                // hover: the click that opens the field then focuses it.
+                LineAction {
+                  id: editAction
+                  objectName: "lineEditButton"
+                  text: "Edit"
+                  onActivated: line.beginEdit()
+                  InputDemand { theme: root.theme; active: editAction.hovered }
+                }
+                LineAction {
+                  id: noteAction
+                  objectName: "lineNoteButton"
+                  text: line.marked ? "Edit note" : "Add note"
+                  onActivated: root.noteClicked(line, noteAction)
+                  InputDemand { theme: root.theme; active: noteAction.hovered }
+                }
+                LineAction {
+                  id: deleteAction
+                  objectName: "lineDeleteButton"
+                  text: "Delete"
+                  onActivated: root.deleteRequested(line.segId)
                 }
               }
+            }
+
+            C.TextArea {
+              id: editField
+              objectName: "lineEditField"
+              width: parent.width
+              visible: line.editing
+              wrapMode: TextEdit.Wrap
+              color: root.theme.fg
+              selectionColor: root.theme.accent
+              selectedTextColor: root.theme.bg
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.body
+              padding: root.theme.sm
+              background: Rectangle {
+                radius: Math.min(root.theme.radius, 4)
+                color: root.theme.alpha(root.theme.fg, 0.05)
+                border.width: 1
+                border.color: root.theme.accent
+              }
+              // Enter saves; Shift+Enter is a new line; Escape cancels.
+              Keys.onReturnPressed: function(event) {
+                if (event.modifiers & Qt.ShiftModifier) event.accepted = false
+                else line.commitEdit()
+              }
+              Keys.onEnterPressed: function(event) { line.commitEdit() }
+              Keys.onEscapePressed: line.cancelEdit()
+              onActiveFocusChanged: if (!activeFocus && line.editing) line.cancelEdit()
+              InputDemand { theme: root.theme; active: editField.visible && (editField.hovered || editField.activeFocus) }
+            }
+
+            Text {
+              objectName: "lineEditHint"
+              visible: line.editing
+              text: "Enter saves · Escape cancels"
+              color: root.theme.dim
+              font.family: root.theme.fontFamily
+              font.pixelSize: root.theme.caption
             }
 
             Text {
               objectName: "lineText"
               width: parent.width
+              visible: !line.editing
               text: line.text
               color: root.theme.fg
               font.family: root.theme.fontFamily
               font.pixelSize: root.theme.body
               wrapMode: Text.WordWrap
+            }
+
+            // An edited line says so under its text, with the way back. Its
+            // own row: the speaker's row has the hover actions on the right.
+            Row {
+              visible: line.originalText !== ""
+              spacing: root.theme.md
+              Text {
+                objectName: "lineEdited"
+                text: "edited ·"
+                color: root.theme.dim
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.caption
+                font.italic: true
+              }
+              LineAction {
+                id: restoreAction
+                objectName: "lineRestoreTextButton"
+                text: "Restore original text"
+                onActivated: root.resetTextRequested(line.segId)
+              }
             }
 
             Text {

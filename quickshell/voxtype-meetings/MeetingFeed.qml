@@ -76,6 +76,8 @@ Item {
   // "meeting_id"}`. Not a change of the daemon's state, which is already
   // idle by then (and may be a new meeting's): it names the meeting.
   signal summarizing(string meetingId)
+  // `{"event":"playback", meeting_id, track, state, from_ms}`.
+  signal playbackEvent(var ev)
   // An `error` event naming a meeting, such as a failed summary.
   signal meetingError(string meetingId, string code, string message)
   // A meeting began while this feed was watching: an idle (or ended) meeting
@@ -149,6 +151,8 @@ Item {
   }
 
   function insertSegment(segment) {
+    // A deleted line (a backlog may still carry one, flagged) is not shown.
+    if (segment.deleted === true) return
     var key = root.speakerKey(segment)
     var row = {
       segId: Number(segment.id),
@@ -159,6 +163,8 @@ Item {
       source: String(segment.source || ""),
       chunkId: Number(segment.chunk_id) || 0,
       originalSpeaker: root.originalOf(segment),
+      // The text before a correction (`original_text`, only on an edited line).
+      originalText: segment.original_text ? String(segment.original_text) : "",
       annotation: root.annotationOf(segment).text,
       highlight: root.annotationOf(segment).highlight
     }
@@ -309,6 +315,10 @@ Item {
   // It is the daemon's word on the line, override and all.
   function updateSegment(segment) {
     if (!segment || segment.id === undefined) return
+    if (segment.deleted === true) {
+      root.removeRow(Number(segment.id))
+      return
+    }
     var i = root.rowIndex(Number(segment.id))
     if (i === -1) {
       root.insertSegment(segment)
@@ -320,12 +330,55 @@ Item {
     model.setProperty(i, "speaker", key)
     if (segment.text !== undefined && String(segment.text).trim() !== "") model.setProperty(i, "text", String(segment.text).trim())
     model.setProperty(i, "originalSpeaker", original)
+    model.setProperty(i, "originalText", segment.original_text ? String(segment.original_text) : "")
     var note = root.annotationOf(segment)
     model.setProperty(i, "annotation", note.text)
     model.setProperty(i, "highlight", note.highlight)
     root.noteSpeaker(key)
     root.noteLabel(key, segment)
     root.pruneSpeakers()
+  }
+
+  // Take a line out, returning everything needed to put it back (an undone
+  // or refused delete). null if the line is not here.
+  function removeRow(segId) {
+    var i = root.rowIndex(segId)
+    if (i === -1) return null
+    var r = model.get(i)
+    var copy = ({})
+    for (var k in r) copy[k] = r[k]
+    model.remove(i)
+    root.pruneSpeakers()
+    return copy
+  }
+
+  // A removed line back in its place by start time.
+  function restoreRow(row) {
+    if (!row || root.rowIndex(row.segId) !== -1) return
+    var at = model.count
+    while (at > 0 && model.get(at - 1).startMs > row.startMs) at--
+    model.insert(at, row)
+    root.noteSpeaker(row.speaker)
+  }
+
+  function setText(segId, text) {
+    var i = root.rowIndex(segId)
+    if (i !== -1) model.setProperty(i, "text", String(text))
+  }
+
+  function setOriginalText(segId, text) {
+    var i = root.rowIndex(segId)
+    if (i !== -1) model.setProperty(i, "originalText", String(text || ""))
+  }
+
+  function originalTextOf(segId) {
+    var i = root.rowIndex(segId)
+    return i === -1 ? null : model.get(i).originalText
+  }
+
+  function textOf(segId) {
+    var i = root.rowIndex(segId)
+    return i === -1 ? null : model.get(i).text
   }
 
   // Chips are the speakers the transcript has lines for; one emptied by a
@@ -422,6 +475,12 @@ Item {
                         ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
+    } else if (kind === "playback") {
+      root.playbackEvent(ev)
+    } else if (kind === "segment_deleted") {
+      // A deleted line: drop it. (A restored one comes back as a
+      // segment_updated for a line not in the list, which inserts it.)
+      if (!ev.meeting_id || String(ev.meeting_id) === root.meetingId) root.removeRow(Number(ev.segment_id))
     } else if (kind === "speaker_renamed") {
       root.renameSpeaker(String(ev.from || ""), String(ev.to || ""))
     } else if (kind === "status") {
@@ -450,7 +509,9 @@ Item {
         root.meetingError(String(ev.meeting_id), String(ev.code || ""), String(ev.message || ""))
         return
       }
+      // No meeting named: the banner, unless a summary in progress claims it.
       root.lastError = String(ev.message || "")
+      root.meetingError("", String(ev.code || ""), String(ev.message || ""))
     }
   }
 

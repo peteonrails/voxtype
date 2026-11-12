@@ -39,7 +39,7 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
                                     error (consent_required while blocked,
                                     agent_failed with state["fail"]["ask"]);
                                     each answer is saved for `show --json`
-  meeting summarize M [--regenerate] --format json
+  meeting summarize M [--regenerate] [--agent ID] --format json
                                     the saved MeetingSummary, or a new one
                                     (state["summary_json"] or a default); refused
                                     on stderr while consent is missing
@@ -57,12 +57,40 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
                                     `annotation` {text, highlight} on the segment;
                                     --json prints the segment
 
+  meeting edit M SEG TEXT|--reset [--json]
+                                    a line's new text, keeping what was
+                                    transcribed in `original_text`; --reset puts
+                                    it back; empty TEXT is refused; prints the
+                                    segment
+  meeting delete-line M SEG [--json]
+                                    removes the line; the socket announces it as
+                                    {"event":"segment_deleted"} (the daemon's
+                                    shape) or, with state["delete_shape"] ==
+                                    "flag", as segment_updated with "deleted":
+                                    true, which the view also tolerates
+  meeting export M --format F --output PATH [--timestamps --speakers --metadata]
+                                    writes a small stand-in file at PATH
+
+  meeting play M --segment S [--track T] --json | --status --json | --stop --json
+                                    playback without a player: a state file in
+                                    FAKE_MEETING_DATA, `position_ms` advancing at
+                                    state["play_speed"] (default 1) times real
+                                    time, and a `playback` event on the socket.
+                                    state["play_error"] is the stderr of a
+                                    refused play (exit 1)
+
+`show --json` reports metadata.audio_retained from state["audio_retained"]
+(default true). `export` accepts text, markdown and json, as the real one.
+
 A meeting ID may be a unique prefix, as with the real CLI. Edits to a past
 meeting rewrite its transcript.json; edits to the socket's meetings go through
 the socket, which announces live ones as segment_updated.
 
 state["fail"] maps an action ("pause", "label", …) to the stderr it should
-fail with (exit 1), changing nothing.
+fail with (exit 1), changing nothing. state["old"] makes the commands newer
+than 1.3.0 (assistant, ask, summarize, notes, annotate, reassign) fail the way
+an older voxtype does: "unrecognized subcommand", exit 2. `status --format
+json` exits 0 only with state["daemon_running"].
 """
 import json
 import os
@@ -259,8 +287,8 @@ def status(state):
                 "supported": c.get("supported", True), "tool_less": c["id"] == "claude",
                 "sandbox": "bwrap" if c["id"] == "codex" else None, "consent": c.get("consent", False),
                 "sources": ["path"]}
-        if c["id"] == "codex":
-            cand["note"] = CODEX_NOTE
+        if c.get("note") or c["id"] == "codex":
+            cand["note"] = c.get("note", CODEX_NOTE)
         cands.append(cand)
     usable = [c for c in cands if c["found"] and c["supported"]]
     agent = next((c for c in cands if c["id"] == a.get("agent")), None) if a.get("agent") else None
@@ -278,12 +306,19 @@ def status(state):
         backend, name, blocked = "none", None, "consent_required"
     else:
         backend, name, blocked = "none", None, "no_backend"
-    return {"agent": agent["id"] if agent else None, "agent_name": agent["name"] if agent else None,
+    out = {"agent": agent["id"] if agent else None, "agent_name": agent["name"] if agent else None,
             "agent_path": agent["path"] if agent else None, "source": "config" if a.get("agent") else "path",
             "consent": bool(agent and agent["consent"]), "choice_required": choice, "problem": None,
             "omarchy_default": None, "local_only": bool(a.get("local_only")), "local": local,
             "backend": backend, "backend_name": name, "blocked": blocked, "auto_summary": False,
             "auto_summary_configured": None, "consent_file": "/tmp/assistant-consent.json", "candidates": cands}
+    # Where summaries go: a legacy [meeting.summary] backend can differ from
+    # where questions go. `legacy_status` is a voxtype from before the field.
+    if a.get("summary_backend"):
+        out["summary_backend"], out["summary_backend_name"] = a["summary_backend"], a["summary_backend_name"]
+    elif not a.get("legacy_status"):
+        out["summary_backend"], out["summary_backend_name"] = backend, name
+    return out
 
 
 def assistant(state, args):
@@ -350,8 +385,11 @@ def ask(state, args):
     meeting = resolve(state, rest[0])
     st = status(state)
     if st["backend"] == "none":
-        emit({"event": "error", "code": st["blocked"],
-              "message": "Meeting transcripts can't go to %s until you allow it." % (st["agent_name"] or "an agent")})
+        if st["blocked"] == "consent_required":
+            message = "Meeting transcripts can't go to %s until you allow it." % (st["agent_name"] or "an agent")
+        else:
+            message = "No agent or local model is available (%s)." % st["blocked"]
+        emit({"event": "error", "code": st["blocked"], "message": message})
         return 1
     if state.get("fail", {}).get("ask"):
         emit({"event": "error", "code": "agent_failed", "message": state["fail"]["ask"]})
@@ -393,9 +431,17 @@ def summarize(state, args):
     elif os.path.exists(os.path.join(folder, "metadata.json")):
         with open(os.path.join(folder, "metadata.json")) as f:
             saved = json.load(f).get("summary")
-    if saved is None or "--regenerate" in args:
+    agent = args[args.index("--agent") + 1] if "--agent" in args else None
+    if saved is None or "--regenerate" in args or agent:
         st = status(state)
-        if st["backend"] == "none":
+        # `summary_fail`: the configured summary backend fails (a local model
+        # answering 500); `--agent` goes around it.
+        if state.get("summary_fail") and not agent:
+            print("Summarizing...", file=sys.stderr)
+            time.sleep(0.4)
+            print("Error: " + state["summary_fail"], file=sys.stderr)
+            return 1
+        if st["backend"] == "none" and not agent:
             print("Error: Meeting transcripts can't go to %s until you allow it (consent_required)"
                   % (st["agent_name"] or "an agent"), file=sys.stderr)
             return 1
@@ -455,6 +501,133 @@ def annotate(state, args):
     return 0
 
 
+def edit_text(state, args):
+    want_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 3:
+        return 2
+    meeting, _, seg = find_segment(state, rest[0], rest[1])
+    if seg is None:
+        return 1
+    if rest[2] == "--reset":
+        if "original_text" in seg:
+            seg["text"] = seg.pop("original_text")
+    elif rest[2].strip() == "":
+        print("error: the new text is empty; use `voxtype meeting delete-line` to remove a line", file=sys.stderr)
+        return 1
+    else:
+        seg.setdefault("original_text", seg["text"])
+        seg["text"] = rest[2]
+        if seg["text"] == seg["original_text"]:
+            seg.pop("original_text")
+    if not put_segment(state, meeting, seg):
+        print("error: the fake socket did not apply the change", file=sys.stderr)
+        return 1
+    print(json.dumps(seg, indent=2) if want_json else "Edited segment %s" % rest[1])
+    return 0
+
+
+def delete_line(state, args):
+    want_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 2:
+        return 2
+    meeting, _, seg = find_segment(state, rest[0], rest[1])
+    if seg is None:
+        return 1
+    path = os.path.join(past_dir(meeting), "transcript.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            t = json.load(f)
+        t["segments"] = [s for s in t["segments"] if s["id"] != seg["id"]]
+        with open(path, "w") as f:
+            json.dump(t, f)
+    else:
+        nonce = "delete-%f" % time.time()
+        control({"cmd": "delete", "meeting_id": meeting, "segment_id": seg["id"],
+                 "shape": state.get("delete_shape", "event"), "nonce": nonce})
+        if not wait_applied(nonce):
+            print("error: the fake socket did not apply the change", file=sys.stderr)
+            return 1
+    print(json.dumps(dict(seg, deleted=True), indent=2) if want_json else "Deleted segment %s" % rest[1])
+    return 0
+
+
+def export(state, args):
+    meeting = resolve(state, args[0])
+    if meeting is None:
+        print("error: Meeting not found: " + args[0], file=sys.stderr)
+        return 1
+    fmt = args[args.index("--format") + 1]
+    if fmt not in ("text", "txt", "markdown", "md", "json"):
+        print("Error: Unknown export format '%s'. Valid formats: text, markdown, json" % fmt, file=sys.stderr)
+        return 1
+    out = args[args.index("--output") + 1]
+    flags = [a for a in args if a in ("--timestamps", "--speakers", "--metadata")]
+    with open(out, "w") as f:
+        f.write("FAKE EXPORT %s %s %s\n" % (meeting, fmt, " ".join(flags)))
+        for s in segments_of(state, meeting) or []:
+            f.write(s["text"] + "\n")
+    print("Exported to %s" % out, file=sys.stderr)
+    return 0
+
+
+def play_path():
+    return os.path.join(os.environ["FAKE_MEETING_DATA"], "play.json")
+
+
+def play_state(state):
+    try:
+        with open(play_path()) as f:
+            p = json.load(f)
+    except FileNotFoundError:
+        return {"state": "stopped", "meeting_id": None, "track": None, "from_ms": None, "pid": None,
+                "started_at": None, "position_ms": None}
+    if p["state"] == "playing":
+        speed = state.get("play_speed", 1)
+        p["position_ms"] = int(p["from_ms"] + (time.time() - p["_t0"]) * 1000 * speed)
+    else:
+        p["position_ms"] = None
+    return p
+
+
+def play(state, args):
+    if "--status" in args:
+        p = play_state(state)
+        p.pop("_t0", None)
+        print(json.dumps(p))
+        return 0
+    if "--stop" in args:
+        p = play_state(state)
+        if p.get("meeting_id"):
+            p["state"] = "stopped"
+            p["position_ms"] = None
+            with open(play_path(), "w") as f:
+                json.dump(p, f)
+            control({"cmd": "playback", "meeting_id": p["meeting_id"], "track": p["track"], "state": "stopped",
+                      "from_ms": p["from_ms"]})
+        p.pop("_t0", None)
+        print(json.dumps(p))
+        return 0
+    if state.get("play_error"):
+        print(state["play_error"], file=sys.stderr)
+        return 1
+    meeting = resolve(state, args[0])
+    seg_id = args[args.index("--segment") + 1]
+    track = args[args.index("--track") + 1] if "--track" in args else "mixed"
+    seg = next((s for s in segments_of(state, meeting) or [] if str(s["id"]) == seg_id), None)
+    if seg is None:
+        print("Error: no segment %s in meeting %s" % (seg_id, meeting), file=sys.stderr)
+        return 1
+    p = {"state": "playing", "meeting_id": meeting, "track": track, "from_ms": seg["start_ms"], "pid": 4242,
+         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "_t0": time.time()}
+    with open(play_path(), "w") as f:
+        json.dump(p, f)
+    control({"cmd": "playback", "meeting_id": meeting, "track": track, "state": "playing", "from_ms": seg["start_ms"]})
+    print(json.dumps({"meeting_id": meeting, "track": track, "from_ms": seg["start_ms"], "pid": 4242}))
+    return 0
+
+
 def list_meetings(state, args):
     """meeting list --json [--limit N]: the socket's last meeting, then the past ones."""
     limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 10
@@ -490,7 +663,8 @@ def show(state, args_meeting):
     snap = snapshot()
     target = next(m for m in (snap.get("live"), snap.get("stored")) if m and m.get("meeting_id") == meeting)
     meta = {"id": meeting, "title": target.get("title"), "started_at": target.get("started_at"),
-            "status": "completed", "chunk_count": 3, "audio_retained": False}
+            "status": "completed", "chunk_count": 3, "audio_retained": state.get("audio_retained", True),
+            "storage_path": os.path.join(os.environ["FAKE_MEETING_DATA"], "live-" + meeting)}
     if snap.get("summary"):
         meta["summary"] = snap["summary"]
     saved = os.path.join(os.environ["FAKE_MEETING_DATA"], "summary-%s.json" % meeting)
@@ -516,6 +690,22 @@ def main():
             return 2
         print("true" if state.get("show_view_on_start", True) else "false")
         return 0
+
+    if args == ["config", "get", "meeting.view_opacity"]:
+        print(state.get("view_opacity", 0.8))
+        return 0
+
+    if args[:3] == ["status", "--format", "json"]:
+        if state.get("daemon_running"):
+            print(json.dumps({"text": "", "alt": "idle", "class": "idle"}))
+            return 0
+        print("voxtype daemon is not running", file=sys.stderr)
+        return 1
+
+    if state.get("old") and args[:1] == ["meeting"] and len(args) > 1 and args[1] in (
+            "assistant", "ask", "summarize", "notes", "annotate", "reassign", "edit", "delete-line"):
+        print("error: unrecognized subcommand '%s'" % args[1], file=sys.stderr)
+        return 2
 
     if args[:2] == ["config", "set"] and len(args) == 4:
         return config_set(state, args[2], args[3])
@@ -553,6 +743,14 @@ def main():
         return notes(state, args[2:])
     elif action == "annotate":
         return annotate(state, args[2:])
+    elif action == "edit":
+        return edit_text(state, args[2:])
+    elif action == "delete-line":
+        return delete_line(state, args[2:])
+    elif action == "export":
+        return export(state, args[2:])
+    elif action == "play":
+        return play(state, args[2:])
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))

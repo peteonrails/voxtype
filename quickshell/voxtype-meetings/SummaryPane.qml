@@ -15,6 +15,10 @@ Item {
 
   signal agentMenuRequested(var anchor)
   signal citationActivated(real ms)
+  signal copyRequested(string text, string key)
+  signal settingsRequested()
+  property bool canOpenSettings: false
+  property string copiedKey: ""
 
   readonly property string summaryState: root.assistant ? root.assistant.summaryState : ""
   readonly property alias flick: flick
@@ -37,7 +41,16 @@ Item {
       AgentChip {
         theme: root.theme
         assistant: root.assistant
+        label: root.assistant ? root.assistant.summaryLabel : ""
         onMenuRequested: function(anchor) { root.agentMenuRequested(anchor) }
+      }
+      MeetingButton {
+        objectName: "summaryCopy"
+        theme: root.theme
+        visible: root.assistant && root.assistant.summaryMarkdown !== ""
+        text: root.copiedKey === "summary" ? "Copied" : "Copy"
+        bordered: true
+        onClicked: root.copyRequested(root.assistant.summaryMarkdown, "summary")
       }
       MeetingButton {
         objectName: "regenerateButton"
@@ -50,25 +63,120 @@ Item {
     }
 
     Text {
-      objectName: "summarizing"
+      objectName: "assistantProblem"
       Layout.fillWidth: true
-      visible: root.summaryState === "summarizing"
-      text: "Summarizing… this takes a minute for a long meeting."
-      color: root.theme.dim
+      visible: text !== "" && root.summaryState !== "ready"
+      text: root.assistant ? root.assistant.problem : ""
+      color: root.theme.urgent
       font.family: root.theme.fontFamily
       font.pixelSize: root.theme.bodySmall
       wrapMode: Text.WordWrap
     }
 
-    Text {
-      objectName: "summaryError"
+    // Writing it: at the top, naming who is writing it.
+    RowLayout {
+      objectName: "summarizingRow"
+      Layout.fillWidth: true
+      visible: root.summaryState === "summarizing"
+      spacing: root.theme.md
+      Row {
+        spacing: root.theme.xs
+        Repeater {
+          model: 3
+          Rectangle {
+            required property int index
+            width: 5
+            height: 5
+            radius: 2.5
+            color: root.theme.accent
+            opacity: 0.3
+            SequentialAnimation on opacity {
+              running: root.summaryState === "summarizing" && root.visible
+              loops: Animation.Infinite
+              PauseAnimation { duration: index * 200 }
+              NumberAnimation { to: 1.0; duration: 350 }
+              NumberAnimation { to: 0.3; duration: 350 }
+              PauseAnimation { duration: (2 - index) * 200 }
+            }
+          }
+        }
+      }
+      Text {
+        objectName: "summarizing"
+        Layout.fillWidth: true
+        text: "Summarizing with " + (root.assistant && root.assistant.summaryWith !== "" ? root.assistant.summaryWith : "the assistant") + "…"
+        color: root.theme.fg
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+        wrapMode: Text.WordWrap
+      }
+    }
+
+    // A failed summary: what happened and the ways on, at the top.
+    Rectangle {
+      objectName: "summaryErrorCard"
       Layout.fillWidth: true
       visible: root.summaryState === "error"
-      text: root.assistant ? root.assistant.summaryError : ""
-      color: root.theme.urgent
-      font.family: root.theme.fontFamily
-      font.pixelSize: root.theme.bodySmall
-      wrapMode: Text.WordWrap
+      implicitHeight: errorColumn.implicitHeight + root.theme.padX * 2
+      radius: Math.min(root.theme.radius, 6)
+      color: root.theme.alpha(root.theme.urgent, 0.12)
+      border.width: 1
+      border.color: root.theme.alpha(root.theme.urgent, 0.5)
+
+      Column {
+        id: errorColumn
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: root.theme.padX
+        spacing: root.theme.md
+
+        Text {
+          objectName: "summaryErrorTitle"
+          width: parent.width
+          text: "Couldn't write the summary"
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.body
+          font.bold: true
+        }
+        Text {
+          objectName: "summaryError"
+          width: parent.width
+          text: root.assistant ? root.assistant.summaryError : ""
+          color: root.theme.fg
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          wrapMode: Text.WordWrap
+        }
+        Flow {
+          width: parent.width
+          spacing: root.theme.gap
+          MeetingButton {
+            objectName: "summaryRetry"
+            theme: root.theme
+            text: "Retry"
+            bordered: true
+            onClicked: root.assistant.regenerate()
+          }
+          MeetingButton {
+            objectName: "summaryUseAgent"
+            theme: root.theme
+            visible: root.assistant !== null && root.assistant.summaryFailedLocal && root.assistant.allowedAgent !== null
+            text: root.assistant && root.assistant.allowedAgent ? "Use " + root.assistant.allowedAgent.name + " instead" : ""
+            bordered: true
+            onClicked: root.assistant.useAgentInstead()
+          }
+          MeetingButton {
+            objectName: "summarySettings"
+            theme: root.theme
+            visible: root.canOpenSettings
+            text: "Settings"
+            bordered: true
+            onClicked: root.settingsRequested()
+          }
+        }
+      }
     }
 
     Text {
@@ -115,6 +223,13 @@ Item {
           cursorShape: parent.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
         }
       }
+    }
+
+    // With no summary text the layout would spread the rows above down the
+    // pane, leaving a state or an error stranded at the bottom: keep them up.
+    Item {
+      Layout.fillHeight: true
+      visible: !flick.visible
     }
   }
 }
