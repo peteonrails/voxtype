@@ -281,15 +281,26 @@ fn with_nothing_to_recover_the_daemon_says_nothing() {
     let s = Scratch::new();
     let mut daemon = s.daemon();
     assert_eq!(daemon.next("hello")["status"], "idle");
-    // The next line, if any, is not a recovery card.
-    daemon
-        .lines
-        .get_ref()
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    let mut line = String::new();
-    let _ = daemon.lines.read_line(&mut line);
-    assert!(!line.contains("recoverable"), "{line}");
+    // Asking the daemon to announce again is a known later event: every
+    // `recoverable` up to and including it, the startup one included if it
+    // arrived, must be empty, so no card ever shows.
+    let trigger = s.path("runtime/voxtype/meeting_recoverable");
+    std::fs::write(&trigger, "").unwrap();
+    assert_eq!(
+        daemon.next("recoverable")["meetings"],
+        serde_json::json!([])
+    );
+    while trigger.exists() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // A connection made now gets hello and nothing for the card: the next
+    // line is the announcement asked for after it.
+    let mut late = s.daemon_socket();
+    assert_eq!(read_event(&mut late)["event"], "hello");
+    std::fs::write(&trigger, "").unwrap();
+    let next = read_event(&mut late);
+    assert_eq!(next["event"], "recoverable", "{next}");
+    assert_eq!(next["meetings"], serde_json::json!([]));
     let out = s.voxtype(&["meeting", "recover"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("No meetings to recover."));
 }
