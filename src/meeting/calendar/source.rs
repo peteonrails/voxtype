@@ -22,6 +22,28 @@ pub const EVENTS_FILE: &str = "calendar-events.json";
 
 pub use crate::cli::CALENDAR_LINK_HELP as LINK_HELP;
 
+/// The Settings entry for the link, in `voxtype config schema --json`'s
+/// `secrets` list: a value that is set through a command rather than
+/// written to config.toml, and is never read back. A UI pipes the value to
+/// `set_command`'s stdin.
+pub fn schema_entry(store: &Store) -> serde_json::Value {
+    let settings = store.settings();
+    serde_json::json!({
+        "key": "meeting.calendar.ics_link",
+        "type": "secret",
+        "section": "Meeting",
+        "label": "Calendar (iCal link)",
+        "description": "Your calendar's private iCal link. Meetings that start without a title you chose are named after the calendar event happening then.",
+        "help": LINK_HELP,
+        "set": settings.is_some(),
+        "host": settings.as_ref().map(|s| host(&s.url)),
+        "last_error": settings.as_ref().and_then(|s| s.last_error.clone()),
+        "set_command": ["meeting", "calendar", "set-ics", "-", "--json"],
+        "clear_command": ["meeting", "calendar", "clear", "--json"],
+        "status_command": ["meeting", "calendar", "status", "--json"],
+    })
+}
+
 /// How often the daemon fetches the feed.
 pub const REFRESH_EVERY: Duration = Duration::minutes(15);
 /// How far ahead events are cached.
@@ -328,6 +350,28 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const SECRET: &str = "/calendar/ical/pete%40example.com/private-0a1b2c3d4e5f/basic.ics";
+
+    #[test]
+    fn the_settings_entry_never_holds_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let entry = schema_entry(&store);
+        assert_eq!(entry["label"], "Calendar (iCal link)");
+        assert_eq!(entry["type"], "secret");
+        assert_eq!(entry["set"], false);
+        assert!(entry["help"].as_str().unwrap().contains("Fastmail"));
+        assert_eq!(
+            entry["set_command"],
+            serde_json::json!(["meeting", "calendar", "set-ics", "-", "--json"])
+        );
+        store
+            .set_link(&format!("https://calendar.google.com{SECRET}"))
+            .unwrap();
+        let entry = schema_entry(&store);
+        assert_eq!(entry["set"], true);
+        assert_eq!(entry["host"], "calendar.google.com");
+        assert!(!entry.to_string().contains("private-0a1b2c3d4e5f"));
+    }
 
     #[test]
     fn links_are_checked_and_only_their_host_is_shown() {
