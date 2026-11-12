@@ -522,7 +522,7 @@ voxtype meeting summarize latest --regenerate
 
 The summary is saved with the meeting: `summary.md` in the meeting folder, `metadata.json`, and the meeting index, so it survives a restart. Running `summarize` again prints the saved summary; `--regenerate` writes a new one. Your notes go in as guidance, so the summary expands on what you wrote.
 
-The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent) unless `[meeting.summary] backend` is `"local"` or `"remote"`, which keep the older Ollama and API summarizers.
+The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent): the allowed agent, or the local model. The older Ollama and API summarizers (`[meeting.summary] backend = "local"` or `"remote"`) are used only while no agent is allowed; see [Which backend answers](#which-backend-answers).
 
 **Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md#status)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
 
@@ -551,7 +551,25 @@ voxtype meeting assistant revoke claude   # stop
 voxtype meeting assistant status --json   # for the meeting view and Settings panel
 ```
 
-With no agent found, or with `local_only = true` or `--local`, answers and summaries come from the local Ollama model in `[meeting.summary]`.
+#### Which backend answers
+
+Questions and summaries follow the same order, top row first. "The agent" is the one picked above, and "the local model" is Ollama at `[meeting.summary] ollama_url` with `ollama_model`.
+
+| Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
+|-----------|-------------------------------|--------------------------------------------|
+| `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
+| `--agent <id>` | That agent, once allowed | That agent, once allowed |
+| The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
+| Not allowed, and `[meeting.summary] backend = "local"` | The local model | The older Ollama summarizer |
+| Not allowed, and `[meeting.summary] backend = "remote"` | As in the rows below | The remote summarizer |
+| Not allowed, and an agent was found | Asks to allow it | Asks to allow it |
+| No agent found | The local model | The local model |
+
+Allowing an agent is the newer and more explicit choice, so it wins over a `[meeting.summary] backend` written before the assistant existed. Someone who never allowed an agent keeps the summarizer they set up.
+
+`voxtype meeting assistant status` shows both choices, and `--json` has them as `backend_name` (questions) and `summary_backend_name` (summaries), with a note when they differ.
+
+When the backend fails, the error names it and gives its reason, for example `Ollama (llama3:latest at localhost:11434) returned an error: mkdir /opt/models/manifests-v2: permission denied`. A failure never sends the transcript somewhere else you did not choose: a failing local model is never replaced by an agent. The one fallback goes the other way. If the agent fails while writing a summary and `[meeting.summary] backend = "local"` is set, the local model writes it instead, provided it answers, and `meeting summarize` says so.
 
 ### Privacy: Where Transcripts Go
 
