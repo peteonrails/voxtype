@@ -3455,6 +3455,68 @@ impl Daemon {
         }
     }
 
+    /// At startup, a desktop notification for each meeting that never
+    /// finished and was not announced before, under the same
+    /// `status_notifications` rule as the other meeting notices. Its Finish
+    /// or Open button runs `voxtype meeting recover --finish` or
+    /// `voxtype meeting view`.
+    fn notify_interrupted_meetings(&self) {
+        use meeting::recover::notify;
+        use meeting::status_notice::{should_notify, StatusMode};
+        let current = match meeting::MeetingStorage::open(meeting_storage_config(&self.config))
+            .and_then(|storage| {
+                meeting::recover::recoverable(
+                    &storage,
+                    None,
+                    self.config.meeting.chunk_duration_secs,
+                )
+            }) {
+            Ok(current) => current,
+            Err(e) => {
+                tracing::warn!("Could not list meetings to recover: {}", e);
+                return;
+            }
+        };
+        // Recorded as announced whether or not it shows, so a later
+        // restart never brings the same meeting up again.
+        let new = notify::unannounced(&notify::state_path(), &current);
+        if new.is_empty() {
+            return;
+        }
+        let mode = StatusMode::parse(&self.config.meeting.status_notifications);
+        if !should_notify(mode, true, meeting::view_presence::view_visible) {
+            tracing::debug!("Interrupted meeting notification skipped");
+            return;
+        }
+        tokio::spawn(async move {
+            let choice = match zbus::Connection::session().await {
+                Ok(conn) => notify::announce(&conn, &new).await,
+                Err(e) => Err(e.into()),
+            };
+            let choice = match choice {
+                Ok(Some(choice)) => choice,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!("Interrupted meeting notification unavailable: {}", e);
+                    return;
+                }
+            };
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("voxtype"));
+            match std::process::Command::new(exe)
+                .args(choice.args())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+                }
+                Err(e) => tracing::warn!("Could not run {:?}: {}", choice.args(), e),
+            }
+        });
+    }
+
     async fn handle_meeting_triggers(&mut self) -> bool {
         let mut changed = false;
 
@@ -4762,6 +4824,7 @@ impl Daemon {
                 tracing::info!("Meeting event socket: {:?}", hub.socket_path());
                 self.meeting_event_hub = Some(hub);
                 self.announce_recoverable_meetings();
+                self.notify_interrupted_meetings();
             }
             Err(e) => {
                 tracing::warn!(

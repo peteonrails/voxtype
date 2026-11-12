@@ -8,6 +8,8 @@
 //! and announces them on meeting.sock; `voxtype meeting recover` lists them
 //! and finishes ([`finish`]) or discards ([`discard`]) each one.
 
+pub mod notify;
+
 use std::path::Path;
 
 use chrono::{DateTime, Utc};

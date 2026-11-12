@@ -3740,7 +3740,7 @@ While meeting mode is off, the tray shows **Turn on meetings...**, and a notific
 **Default:** `"auto"`
 **Required:** No
 
-The Meeting Started, Paused, Resumed and Ended notifications. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
+The Meeting Started, Paused, Resumed and Ended notifications, and "A meeting didn't finish" when the daemon starts after it stopped mid-meeting. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
 
 - `"auto"` - Skip them while a meeting view is on screen, minimized or not, since it already shows the same thing.
 - `"always"` - Always show them.
