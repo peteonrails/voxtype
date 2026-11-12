@@ -3077,8 +3077,9 @@ impl Daemon {
         // so it starts first; anything that goes wrong falls back to GTCRN.
         let echo_mode = audio::echo_cancel::Mode::parse(&self.config.meeting.audio.echo_cancel);
         let mic_device = self.config.meeting.audio.mic_device.clone();
+        let loopback = self.config.meeting.audio.loopback_device.clone();
         let (mut echo_path, mut echo_canceller) = tokio::task::spawn_blocking(move || {
-            audio::echo_cancel::begin(echo_mode, &mic_device, &Config::runtime_dir())
+            audio::echo_cancel::begin(echo_mode, &mic_device, &loopback, &Config::runtime_dir())
         })
         .await
         .unwrap_or((audio::echo_cancel::EchoPath::Gtcrn, None));

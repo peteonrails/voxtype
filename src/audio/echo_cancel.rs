@@ -192,6 +192,12 @@ pub struct Environment {
     pub wraps: Option<String>,
     /// pipewire, pactl and parec are installed
     pub available: bool,
+    /// The sink whose sound the canceller removes, when it is not the
+    /// default sink: the one `loopback_device` records the call from
+    pub reference: Option<String>,
+    /// The mic is that sink's own monitor (directly or through filters), so
+    /// it hears nothing but what the canceller would remove
+    pub mic_hears_output: bool,
 }
 
 /// Classify one sink from `pactl -f json list sinks`.
@@ -248,6 +254,11 @@ pub fn plan(mode: Mode, env: &Environment) -> (EchoPath, &'static str) {
         _ if matches!(env.mic, Mic::Unmapped(_)) => (
             EchoPath::Gtcrn,
             "meeting.audio.mic_device is not a PipeWire source the canceller can record",
+        ),
+        _ if env.mic_hears_output => (
+            EchoPath::Gtcrn,
+            "the mic is a monitor of the output the canceller would cancel, so it would remove \
+             everything the mic hears",
         ),
         _ if env.system_canceller && env.mic == Mic::Default => (
             EchoPath::Gtcrn,
@@ -310,7 +321,10 @@ pub fn filter_upstream(
 
 /// Read the environment from `pactl` output: the default sink and source,
 /// and the sink, source and source-output lists as JSON. `mic_device` is
-/// `[meeting.audio] mic_device`.
+/// `[meeting.audio] mic_device`, `loopback_device` its `loopback_device`.
+// Five pactl outputs and two settings, kept flat so tests read as the
+// pactl session they model.
+#[allow(clippy::too_many_arguments)]
 pub fn environment_from(
     default_sink: &str,
     default_source: &str,
@@ -318,6 +332,7 @@ pub fn environment_from(
     sources_json: &str,
     source_outputs_json: &str,
     mic_device: &str,
+    loopback_device: &str,
     available: bool,
 ) -> Environment {
     let sources: Vec<serde_json::Value> = serde_json::from_str(sources_json).unwrap_or_default();
@@ -351,13 +366,62 @@ pub fn environment_from(
     } else {
         Mic::Unmapped(mic_device.to_string())
     };
+    let reference = reference_sink(loopback_device, sinks_json);
+    let cancelled = reference.as_deref().unwrap_or(default_sink.trim());
+    let mic_name = match mic_device {
+        "default" | "" | "pipewire" | "pulse" => default_source,
+        named => named,
+    };
+    let mic_hears_output = !cancelled.is_empty()
+        && monitor_beneath(mic_name, &sources, &outputs).as_deref() == Some(cancelled);
     Environment {
-        output: classify_default(sinks_json, default_sink),
+        output: classify_default(sinks_json, cancelled),
         mic,
         system_canceller,
         wraps,
         available,
+        reference,
+        mic_hears_output,
     }
+}
+
+/// The sink a `loopback_device` records, when it names a sink's monitor
+/// outright (`auto` follows the default sink, like the canceller).
+pub fn reference_sink(loopback_device: &str, sinks_json: &str) -> Option<String> {
+    let sink = loopback_device.trim().strip_suffix(".monitor")?;
+    let sinks: Vec<serde_json::Value> = serde_json::from_str(sinks_json).unwrap_or_default();
+    sinks
+        .iter()
+        .any(|s| s["name"].as_str() == Some(sink))
+        .then(|| sink.to_string())
+}
+
+/// The sink whose monitor `name` is, or sits on through filters: a virtual
+/// mic fed from an output rather than a microphone.
+pub fn monitor_beneath(
+    name: &str,
+    sources: &[serde_json::Value],
+    outputs: &[serde_json::Value],
+) -> Option<String> {
+    let mut current = sources.iter().find(|s| s["name"].as_str() == Some(name))?;
+    for _ in 0..5 {
+        let monitored = current["monitor_source"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| current["name"].as_str()?.strip_suffix(".monitor"));
+        if let Some(sink) = monitored {
+            return Some(sink.to_string());
+        }
+        let group = current["properties"]["node.link-group"].as_str()?;
+        let upstream = outputs
+            .iter()
+            .find(|o| o["properties"]["node.link-group"].as_str() == Some(group))?["source"]
+            .as_u64()?;
+        current = sources
+            .iter()
+            .find(|s| s["index"].as_u64() == Some(upstream))?;
+    }
+    None
 }
 
 /// Decide a meeting's echo handling and, for the canceller, start it. Never
@@ -366,6 +430,7 @@ pub fn environment_from(
 pub fn begin(
     mode: Mode,
     mic_device: &str,
+    loopback_device: &str,
     runtime_dir: &Path,
 ) -> (EchoPath, Option<EchoCanceller>) {
     let tools = Tools::detect();
@@ -387,6 +452,8 @@ pub fn begin(
             system_canceller: false,
             wraps: None,
             available: tools.is_some(),
+            reference: None,
+            mic_hears_output: false,
         }
     } else {
         environment_from(
@@ -396,6 +463,7 @@ pub fn begin(
             &pactl(&["-f", "json", "list", "sources"]),
             &pactl(&["-f", "json", "list", "source-outputs"]),
             mic_device,
+            loopback_device,
             tools.is_some(),
         )
     };
@@ -415,12 +483,14 @@ pub fn begin(
                 Mic::Node(ref node) => Some(node.as_str()),
                 _ => None,
             };
-            match EchoCanceller::start(&tools, runtime_dir, target) {
+            let reference = env.reference.as_deref();
+            match EchoCanceller::start(&tools, runtime_dir, target, reference) {
                 Ok(canceller) => {
                     tracing::info!(
-                        "Meeting echo handling: webrtc (PipeWire's echo canceller; output {:?}, mic {})",
+                        "Meeting echo handling: webrtc (PipeWire's echo canceller; output {:?}, mic {}, cancelling {})",
                         env.output,
-                        target.unwrap_or("the default source")
+                        target.unwrap_or("the default source"),
+                        reference.unwrap_or("the default sink")
                     );
                     (EchoPath::Webrtc, Some(canceller))
                 }
@@ -471,11 +541,14 @@ impl Tools {
 
 /// The canceller's PipeWire config: a client-only context that loads the
 /// echo-cancel module in monitor mode, capturing from `target` (or the
-/// default source) and offering the cancelled audio as [`SOURCE_NODE`].
-pub fn config(target: Option<&str>) -> String {
-    let target = target
-        .map(|t| format!(" target.object = \"{}\"", t.replace('"', "")))
-        .unwrap_or_default();
+/// default source), removing what `reference` plays (or the default sink),
+/// and offering the cancelled audio as [`SOURCE_NODE`].
+pub fn config(target: Option<&str>, reference: Option<&str>) -> String {
+    let object = |node: Option<&str>| {
+        node.map(|t| format!(" target.object = \"{}\"", t.replace('"', "")))
+            .unwrap_or_default()
+    };
+    let (target, reference) = (object(target), object(reference));
     format!(
         r#"# Written by voxtype for one meeting; removed when the meeting stops.
 context.properties = {{ log.level = 2 }}
@@ -500,7 +573,7 @@ context.modules = [
                 node.description = "Voxtype meeting echo canceller"
                 priority.session = 1
             }}
-            sink.props = {{ node.name = {SINK_NODE} }}
+            sink.props = {{ node.name = {SINK_NODE}{reference} }}
         }}
     }}
 ]
@@ -517,8 +590,14 @@ pub struct EchoCanceller {
 
 impl EchoCanceller {
     /// Start the canceller and wait until its source is up. `target` is the
-    /// mic to capture (`None` follows the default source).
-    pub fn start(tools: &Tools, runtime_dir: &Path, target: Option<&str>) -> Result<Self, String> {
+    /// mic to capture (`None` follows the default source), `reference` the
+    /// sink whose sound it removes (`None` follows the default sink).
+    pub fn start(
+        tools: &Tools,
+        runtime_dir: &Path,
+        target: Option<&str>,
+        reference: Option<&str>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(runtime_dir).map_err(|e| e.to_string())?;
         let conf = runtime_dir.join(CONF_FILE);
         let stale = stop_stale(&conf);
@@ -528,7 +607,7 @@ impl EchoCanceller {
                 stale
             );
         }
-        std::fs::write(&conf, config(target)).map_err(|e| e.to_string())?;
+        std::fs::write(&conf, config(target, reference)).map_err(|e| e.to_string())?;
         let log = std::fs::File::create(runtime_dir.join("meeting-aec.log"))
             .map_err(|e| e.to_string())?;
 
@@ -799,6 +878,8 @@ mod tests {
             system_canceller: false,
             wraps: None,
             available: true,
+            reference: None,
+            mic_hears_output: false,
         }
     }
 
@@ -871,6 +952,7 @@ mod tests {
             &sources,
             "[]",
             "default",
+            "auto",
             true,
         );
         assert_eq!(
@@ -884,11 +966,12 @@ mod tests {
             &sources,
             "[]",
             "pipewire",
+            "auto",
             true,
         );
         assert!(e.system_canceller);
         // Our own canceller left as the default is not the user's.
-        let e = environment_from("spk", SOURCE_NODE, &sinks, &sources, "[]", "", true);
+        let e = environment_from("spk", SOURCE_NODE, &sinks, &sources, "[]", "", "auto", true);
         assert!(!e.system_canceller);
         let e = environment_from(
             "spk",
@@ -897,6 +980,7 @@ mod tests {
             &sources,
             "[]",
             "alsa_input.usb-mic",
+            "auto",
             true,
         );
         assert_eq!(e.mic, Mic::Node("alsa_input.usb-mic".into()));
@@ -907,15 +991,88 @@ mod tests {
             &sources,
             "[]",
             "hw:CARD=Mic,DEV=0",
+            "auto",
             true,
         );
         assert_eq!(e.mic, Mic::Unmapped("hw:CARD=Mic,DEV=0".into()));
         // No pactl output at all: unknown output, default mic.
-        let e = environment_from("", "", "", "", "", "default", true);
+        let e = environment_from("", "", "", "", "", "default", "auto", true);
         assert_eq!(
             (e.output, e.mic, e.system_canceller),
             (Output::Unknown, Mic::Default, false)
         );
+    }
+
+    /// The call can play on a sink other than the default, with
+    /// `loopback_device` naming its monitor; and a virtual mic can be fed
+    /// from the very output the canceller removes.
+    #[test]
+    fn the_reference_follows_the_loopback_and_a_monitor_mic_is_left_alone() {
+        let sinks = json!([
+            sink("spk", "[Out] Speaker", "Speaker", json!({})),
+            sink("call", "[Out] Speaker", "Speaker", json!({})),
+            sink("hp", "[Out] Headphones", "Headphones", json!({})),
+        ])
+        .to_string();
+        // pactl names a monitor "<sink>.monitor" and gives its sink as
+        // monitor_source; a filter over one shares a link group with the
+        // capture stream that reads it.
+        let sources = json!([
+            {"index": 1, "name": "mic", "monitor_source": "", "properties": {}},
+            {"index": 2, "name": "spk.monitor", "monitor_source": "spk", "properties": {}},
+            {"index": 3, "name": "call.monitor", "monitor_source": "call", "properties": {}},
+            {"index": 4, "name": "monmic", "monitor_source": "",
+             "properties": {"node.link-group": "remap-4"}},
+            {"index": 5, "name": "odd_name", "monitor_source": "spk", "properties": {}},
+        ])
+        .to_string();
+        let outputs = json!([
+            {"source": 2, "properties": {"node.link-group": "remap-4"}},
+        ])
+        .to_string();
+        let env = |sink: &str, source: &str, mic: &str, loopback: &str| {
+            environment_from(
+                sink, source, &sinks, &sources, &outputs, mic, loopback, true,
+            )
+        };
+
+        assert_eq!(
+            reference_sink("call.monitor", &sinks).as_deref(),
+            Some("call")
+        );
+        for loopback in ["auto", "disabled", "", "gone.monitor", "mic"] {
+            assert_eq!(reference_sink(loopback, &sinks), None, "{loopback}");
+        }
+
+        // The call's sink, not the default, decides speakers or headphones.
+        let e = env("hp", "mic", "default", "call.monitor");
+        assert_eq!(
+            (e.reference.as_deref(), e.output),
+            (Some("call"), Output::Speakers)
+        );
+        assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Webrtc);
+        let e = env("hp", "mic", "default", "auto");
+        assert_eq!((e.reference, e.output), (None, Output::Headphones));
+        assert!(!e.mic_hears_output);
+
+        // A mic that is the cancelled output's monitor, outright, through a
+        // filter, or named in mic_device: nothing would be left of it.
+        for (source, mic, loopback) in [
+            ("spk.monitor", "default", "auto"),
+            ("monmic", "default", "auto"),
+            ("odd_name", "default", "auto"),
+            ("mic", "call.monitor", "call.monitor"),
+        ] {
+            let e = env("spk\n", source, mic, loopback);
+            assert!(e.mic_hears_output, "{source} {mic} {loopback}");
+            let (path, why) = plan(Mode::Webrtc, &e);
+            assert_eq!(path, EchoPath::Gtcrn);
+            assert!(why.contains("monitor of the output"), "{why}");
+        }
+        // A monitor of some other output is a mic like any other.
+        let e = env("spk", "spk.monitor", "default", "call.monitor");
+        assert!(!e.mic_hears_output);
+        assert_eq!(plan(Mode::Auto, &e).0, EchoPath::Webrtc);
     }
 
     /// Pete's machine on 2026-11-11, from `pactl -f json list sources` and
@@ -950,7 +1107,9 @@ mod tests {
         let sinks = json!([sink("spk", "[Out] Speaker", "Speaker", json!({}))]).to_string();
         let webcam = "alsa_input.usb-046d_HD_Pro_Webcam_C920_C1FB42FF-02.analog-stereo";
         let env = |default: &str, mic: &str| {
-            environment_from("spk", default, &sinks, &sources, &outputs, mic, true)
+            environment_from(
+                "spk", default, &sinks, &sources, &outputs, mic, "auto", true,
+            )
         };
         let e = env("camera-effects-mic\n", "default");
         assert_eq!(e.mic, Mic::Node(webcam.to_string()));
@@ -977,6 +1136,7 @@ mod tests {
             &hidden,
             &outputs,
             "default",
+            "auto",
             true,
         );
         assert_eq!((e.mic.clone(), e.wraps.clone()), (Mic::Default, None));
@@ -1040,6 +1200,7 @@ mod tests {
             &sources,
             &outputs,
             "",
+            "auto",
             true,
         );
         assert!(e.system_canceller);
@@ -1049,16 +1210,23 @@ mod tests {
 
     #[test]
     fn the_config_runs_the_webrtc_canceller_in_monitor_mode() {
-        let c = config(None);
+        let c = config(None, None);
         assert!(c.contains("libpipewire-module-echo-cancel"));
         assert!(c.contains("library.name = aec/libspa-aec-webrtc"));
         assert!(c.contains("monitor.mode = true"));
         assert!(c.contains(&format!("node.name = {SOURCE_NODE}")));
         assert!(c.contains("node.description = \"Voxtype meeting echo canceller\""));
-        assert!(!c.contains("target.object"), "follows the default source");
         assert!(
-            config(Some("alsa_input.usb-mic")).contains("target.object = \"alsa_input.usb-mic\"")
+            !c.contains("target.object"),
+            "follows the default source and sink"
         );
+        let c = config(Some("alsa_input.usb-mic"), Some("call_sink"));
+        assert!(c.contains(&format!(
+            "node.name = {CAPTURE_NODE} node.passive = true target.object = \"alsa_input.usb-mic\""
+        )));
+        assert!(c.contains(&format!(
+            "sink.props = {{ node.name = {SINK_NODE} target.object = \"call_sink\" }}"
+        )));
     }
 
     /// Fake `pipewire` and `pactl`: the fake canceller records its PID and
@@ -1143,7 +1311,7 @@ mod tests {
     fn a_canceller_starts_and_stops_with_its_config() {
         let fakes = Fakes::new("sources", SOURCE_NODE);
         let runtime = tempfile::TempDir::new().unwrap();
-        let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None).unwrap();
+        let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None, None).unwrap();
         assert_eq!(aec.source(), SOURCE_NODE);
         let pid = fakes.canceller_pid();
         assert!(runtime.path().join(CONF_FILE).is_file());
@@ -1158,7 +1326,7 @@ mod tests {
     fn a_vanished_daemon_takes_the_canceller_with_it() {
         let fakes = Fakes::new("sources", SOURCE_NODE);
         let runtime = tempfile::TempDir::new().unwrap();
-        let aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None).unwrap();
+        let aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None, None).unwrap();
         let pid = fakes.canceller_pid();
         let shell = aec.abandon();
         wait_gone(pid);
@@ -1186,7 +1354,7 @@ mod tests {
         assert_eq!(fakes.canceller_pid(), orphan.id() as i32);
         std::fs::remove_file(fakes.dir.path().join("canceller.pid")).unwrap();
 
-        let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None).unwrap();
+        let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None, None).unwrap();
         // Reaped rather than read from /proc, and with room for a machine
         // under full test load to schedule the orphan's exit.
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -1244,7 +1412,7 @@ mod tests {
         // monitor.mode ignored: the module made a sink instead.
         let fakes = Fakes::new("sinks", SINK_NODE);
         let runtime = tempfile::TempDir::new().unwrap();
-        let err = EchoCanceller::start(&fakes.tools(), runtime.path(), None)
+        let err = EchoCanceller::start(&fakes.tools(), runtime.path(), None, None)
             .err()
             .unwrap();
         assert!(err.contains("monitor mode"), "{err}");
@@ -1257,7 +1425,7 @@ mod tests {
             ..fakes.tools()
         };
         let started = Instant::now();
-        let err = EchoCanceller::start(&tools, runtime.path(), None)
+        let err = EchoCanceller::start(&tools, runtime.path(), None, None)
             .err()
             .unwrap();
         assert!(err.contains("did not appear"), "{err}");
