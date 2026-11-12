@@ -69,7 +69,8 @@ Scenarios:
               closing the view commits a pending delete
   export      More > Export (markdown) into Documents/Voxtype, then Open folder;
               Open meeting folder
-  export-past an SRT export of a past meeting, and its folder
+  export-past a JSON export of a past meeting, and its folder; SRT and VTT
+              are not offered (the CLI does not accept them)
   minimize    the pill (state, elapsed, last line), click to expand, the
               --minimize/--expand requests
   minimize-autoopen  a meeting start while minimized expands the one window
@@ -81,6 +82,12 @@ Scenarios:
               after the linger; the keyboard is asked for only while typing
   view-state  meeting-view.state: visible, minimized, heartbeat, and the
               close write
+  play        ▶ on a line plays from it (`meeting play --segment`); the header
+              transport and Stop; the line being heard follows position_ms;
+              a stop from elsewhere arrives as a playback event
+  play-no-audio  a meeting without kept audio: no ▶, one "Audio not kept" hint
+  play-errors the CLI's refusals shown as they are: no kept audio (then no ▶
+              and the hint), missing tools
   ask-error   an ask that fails shows the error event's message
   summary-error  a summary that fails after the meeting shows its error
   autoopen    a meeting started elsewhere opens the closed view
@@ -115,7 +122,8 @@ SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-se
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
              "ask-error", "summary-error", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
-             "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state")
+             "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
+             "play-errors")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -242,6 +250,9 @@ INITIAL = {
     "move": lambda: [running_meeting()],
     "opacity": lambda: [running_meeting()],
     "view-state": lambda: [running_meeting()],
+    "play": lambda: [running_meeting()],
+    "play-no-audio": lambda: [running_meeting()],
+    "play-errors": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
 }
 
@@ -269,6 +280,10 @@ STATE = {
     "old-voxtype": {"old": True},
     "line-delete-flag": {"delete_shape": "flag"},
     "opacity": {"view_opacity": 0.5},
+    "play": {"play_speed": 10},
+    "play-no-audio": {"audio_retained": False},
+    "play-errors": {"play_error": "This meeting was recorded without keeping audio. "
+                                  "Turn on meeting.retain_audio for future meetings."},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
 }
 
@@ -447,8 +462,8 @@ def run(scenario, host, shell, evidence):
         if opened_paths != [str(documents / "Voxtype"), str(data / ("live-" + MEETING_ID))]:
             problems.append("opened: %s" % opened_paths)
     if scenario == "export-past":
-        name = "Voxtype/2026-11-10 Design review.srt"
-        if exports != [name] or export_head != ["FAKE EXPORT %s srt " % PAST["design"]]:
+        name = "Voxtype/2026-11-10 Design review.json"
+        if exports != [name] or export_head != ["FAKE EXPORT %s json " % PAST["design"]]:
             problems.append("exports: %s %s" % (exports, export_head))
         if opened_paths != [str(data / "meetings" / PAST["design"])]:
             problems.append("opened: %s" % opened_paths)
@@ -463,6 +478,8 @@ def run(scenario, host, shell, evidence):
 def read_only(argv):
     """Reads the view makes on its own (notes, assistant status, show)."""
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
+        return True
+    if argv == ["meeting", "play", "--status", "--json"]:
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -567,8 +584,17 @@ def check_calls(scenario, calls, runtime_notes=""):
                           str(documents_dir(runtime_notes)) + "/Voxtype/" + time.strftime("%Y-%m-%d") + " Standup.md",
                           "--timestamps", "--speakers", "--metadata"]], "meeting commands")
     elif scenario == "export-past":
-        expect(meeting, [["meeting", "export", PAST["design"], "--format", "srt", "--output",
-                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.srt"]], "meeting commands")
+        expect(meeting, [["meeting", "export", PAST["design"], "--format", "json", "--output",
+                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.json"]], "meeting commands")
+    elif scenario == "play":
+        start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
+        expect(meeting, [start, ["meeting", "play", "--stop", "--json"], start, ["meeting", "play", "--stop", "--json"]],
+               "meeting commands")
+    elif scenario == "play-no-audio":
+        expect(meeting, [], "meeting commands")
+    elif scenario == "play-errors":
+        start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
+        expect(meeting, [start, start], "meeting commands")
     elif scenario == "agent-missing":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario == "copy":

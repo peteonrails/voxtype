@@ -134,6 +134,9 @@ Item {
           else if (s === "move") tc.driveMove()
           else if (s === "opacity") tc.driveOpacity()
           else if (s === "view-state") tc.driveViewState()
+          else if (s === "play") tc.drivePlay()
+          else if (s === "play-no-audio") tc.drivePlayNoAudio()
+          else if (s === "play-errors") tc.drivePlayErrors()
           else if (s === "line-edit") tc.driveLineEdit()
           else if (s === "line-delete") tc.driveLineDelete(false)
           else if (s === "line-delete-flag") tc.driveLineDelete(true)
@@ -1292,6 +1295,8 @@ Item {
       mouseMove(item, 30, 4)
       var act = find(item, name)
       waitFor(function() { return act && shown(act) }, name + " on hover of line " + i)
+      // A Row places a newly shown action on the next polish.
+      wait(100)
       mouseClick(act, act.width / 2, act.height / 2)
     }
 
@@ -1408,9 +1413,10 @@ Item {
       var menu = find(view(), "moreMenu")
       click(find(view(), "moreButton"), "More")
       waitFor(function() { return menu.visible && find(menu, "openMeetingFolder").enabled }, "More menu with the folder")
-      click(find(menu, "exportOption_srt"), "SRT")
+      check(!shown(find(menu, "exportOption_srt")) && !shown(find(menu, "exportOption_vtt")), "no SRT or VTT: the CLI refuses them")
+      click(find(menu, "exportOption_json"), "JSON")
       waitFor(function() { return shown(find(view(), "exportNotice")) }, "export notice", 8000)
-      check(txt("exportNoticeText") === "Exported to " + __DOCUMENTS__ + "/Voxtype/2026-11-10 Design review.srt", "notice: " + txt("exportNoticeText"))
+      check(txt("exportNoticeText") === "Exported to " + __DOCUMENTS__ + "/Voxtype/2026-11-10 Design review.json", "notice: " + txt("exportNoticeText"))
       click(find(view(), "moreButton"), "More again")
       waitFor(function() { return menu.visible }, "menu")
       click(find(menu, "openMeetingFolder"), "Open meeting folder")
@@ -1607,6 +1613,71 @@ Item {
       var closed = viewState().updated_at
       wait(1500)
       check(viewState().updated_at === closed, "no heartbeat while closed")
+    }
+
+    // ------------------------------------------------------------ playback
+
+    function playing(i) { var m = find(lineItem(i), "linePlaying"); return m && m.visible }
+
+    function drivePlay() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return shown(find(view(), "transportStop")) }, "the transport")
+      check(txt("transportTrack") === "▶ Playing both sides", "track: " + txt("transportTrack"))
+      waitFor(function() { return playing(1) }, "the played line is lit")
+      shot("playing")
+      // At ten times speed the position reaches 0:21 within about 1.2 s.
+      waitFor(function() { return playing(2) && !playing(1) }, "the light follows position_ms", 5000)
+      click(find(view(), "transportStop"), "Stop")
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "transport gone")
+      check(!playing(1) && !playing(2) && !playing(3), "nothing lit")
+
+      // Stopped elsewhere: the playback event says so.
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return shown(find(view(), "transportStop")) }, "playing again")
+      sh(["sh", "-c", '"$1" meeting play --stop --json >/dev/null', "_", __FAKE_BIN__])
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "stopped from elsewhere")
+    }
+
+    function drivePlayNoAudio() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      waitFor(function() { return host.ctrl().assistant.audioRetained === false }, "audio_retained read")
+      var hint = find(view(), "audioHint")
+      check(shown(hint), "the hint, once")
+      check(txt("audioHint") !== "", "")
+      var item = lineItem(1)
+      mouseMove(item, 30, 4)
+      waitFor(function() { return shown(find(item, "lineEditButton")) }, "hover actions")
+      check(!shown(find(item, "linePlayButton")), "no ▶ without audio")
+      check(shown(find(view(), "audioHintSettings")) === host.omarchy, "Settings link where the host has Settings")
+      shot("audio-not-kept")
+      click(find(view(), "audioHintDismiss"), "dismiss")
+      check(!shown(find(view(), "audioHint")), "dismissed")
+    }
+
+    function drivePlayErrors() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return shown(find(view(), "actionError")) }, "the refusal")
+      check(view().actionError === "This meeting was recorded without keeping audio. Turn on meeting.retain_audio for future meetings.",
+            "verbatim: " + view().actionError)
+      waitFor(function() { return shown(find(view(), "audioHint")) }, "now known: the hint")
+      var item = lineItem(1)
+      mouseMove(item, 30, 4)
+      waitFor(function() { return shown(find(item, "lineEditButton")) }, "hover actions")
+      check(!shown(find(item, "linePlayButton")), "and no more ▶")
+      // Missing tools: said as the CLI says it, and ▶ stays.
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ play_error: "Error: Playing meeting audio needs ffmpeg, which is not installed." })])
+      // (Back to not knowing, as for a meeting whose manifest says it kept audio.)
+      host.ctrl().assistant.audioRetained = null
+      // The hint going away moves the lines up; let it settle before hovering.
+      wait(300)
+      lineAction(1, "linePlayButton")
+      waitFor(function() { return view().actionError === "Playing meeting audio needs ffmpeg, which is not installed." }, "tools: " + view().actionError)
+      check(host.ctrl().assistant.audioRetained === null, "a tools problem does not mean no audio")
     }
 
     function driveAskError() {

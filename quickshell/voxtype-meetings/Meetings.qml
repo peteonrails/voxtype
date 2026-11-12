@@ -370,6 +370,37 @@ Item {
     function onMeetingIdChanged() { if (root.pendingDelete && root.pendingDelete.meeting !== feed.meetingId) root.commitDelete() }
   }
 
+  // ------------------------------------------------------------ playback
+
+  readonly property alias playback: playback
+  MeetingPlayback {
+    id: playback
+    bin: root.bin
+    onFailed: function(message, noAudio) {
+      root.actionError = message
+      if (noAudio) assistant.audioRetained = false
+    }
+  }
+
+  Connections {
+    target: feed
+    function onPlaybackEvent(ev) { playback.noteEvent(ev) }
+  }
+
+  // The line being heard: the one whose time contains the playback position,
+  // when it is this meeting playing.
+  readonly property int playingSegId: {
+    if (!playback.playing || playback.meetingId !== feed.meetingId || playback.positionMs < 0) return -1
+    var count = feed.segments.count
+    var row = count > 0 ? feed.rowAt(playback.positionMs) : -1
+    return row < 0 ? -1 : feed.segments.get(row).segId
+  }
+
+  function play(segId) {
+    root.actionError = ""
+    playback.play(feed.meetingId, segId, "mixed")
+  }
+
   // ------------------------------------------------------------ export, folders
 
   // Exports go to the user's documents, where they will look for them, not
@@ -479,6 +510,7 @@ Item {
     root.writeViewState()
     // A finished meeting stays on screen until the view is closed.
     if (!root.shown) {
+      if (playback.playing) playback.stop()
       root.commitDelete()
       feed.clearEnded()
       placement.minimized = false
@@ -657,6 +689,9 @@ Item {
       view.daemonRunning = Qt.binding(function() { return root.daemonRunning })
       view.pendingDelete = Qt.binding(function() { return root.pendingDelete !== null })
       view.lastExport = Qt.binding(function() { return root.lastExport })
+      view.playingHere = Qt.binding(function() { return playback.playing && playback.meetingId === feed.meetingId })
+      view.playTrack = Qt.binding(function() { return playback.track })
+      view.playingSegId = Qt.binding(function() { return root.playingSegId })
       if (root.pendingTab !== "") view.selectTab(root.pendingTab)
       root.pendingTab = ""
       w.visible = true
@@ -687,6 +722,8 @@ Item {
     function onCopyRequested(text, key) { root.copyText(text, key) }
     function onEditTextRequested(segId, text) { root.editText(segId, text) }
     function onResetTextRequested(segId) { root.resetText(segId) }
+    function onPlayRequested(segId) { root.play(segId) }
+    function onStopPlaybackRequested() { playback.stop() }
     function onDeleteLineRequested(segId) { root.deleteLine(segId) }
     function onUndoDeleteRequested() { root.undoDelete() }
     function onExportRequested(format) { root.exportMeeting(format) }

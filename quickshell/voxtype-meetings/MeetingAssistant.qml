@@ -332,6 +332,9 @@ Item {
   // The meeting's folder (metadata.storage_path from `show --json`), for
   // Open folder; "" until read.
   property string meetingFolder: ""
+  // Whether the meeting kept its audio (metadata.audio_retained): null until
+  // known, which leaves ▶ offered.
+  property var audioRetained: null
 
   property string notes: ""
   property string notesMeeting: ""
@@ -435,6 +438,7 @@ Item {
     if (root.notesDirty) root.saveNotes()
     root.notesMeeting = id
     root.meetingFolder = ""
+    root.audioRetained = null
     root.notes = ""
     root.notesDirty = false
     root.notesError = ""
@@ -626,8 +630,10 @@ Item {
       var data = null
       try { data = JSON.parse(asksProc.out) } catch (e) {}
       if (!data) return
-      if (asksProc.meeting === root.feed.meetingId && data.metadata && data.metadata.storage_path)
-        root.meetingFolder = String(data.metadata.storage_path)
+      if (asksProc.meeting === root.feed.meetingId && data.metadata) {
+        if (data.metadata.storage_path) root.meetingFolder = String(data.metadata.storage_path)
+        if (data.metadata.audio_retained !== undefined) root.audioRetained = data.metadata.audio_retained === true
+      }
       root.applyAsks(asksProc.meeting, data.asks)
     }
   }
