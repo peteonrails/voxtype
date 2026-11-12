@@ -1081,11 +1081,13 @@ Item {
       }
 
       Repeater {
-        // What `meeting export --format` accepts (srt and vtt are not yet).
+        // What `meeting export --format` accepts.
         model: [
           { format: "markdown", label: "Markdown (.md)" },
           { format: "text", label: "Plain text (.txt)" },
-          { format: "json", label: "JSON (.json)" }
+          { format: "json", label: "JSON (.json)" },
+          { format: "srt", label: "Subtitles (.srt)" },
+          { format: "vtt", label: "WebVTT (.vtt)" }
         ]
         MeetingButton {
           required property var modelData

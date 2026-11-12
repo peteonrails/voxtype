@@ -559,8 +559,8 @@ def export(state, args):
         print("error: Meeting not found: " + args[0], file=sys.stderr)
         return 1
     fmt = args[args.index("--format") + 1]
-    if fmt not in ("text", "txt", "markdown", "md", "json"):
-        print("Error: Unknown export format '%s'. Valid formats: text, markdown, json" % fmt, file=sys.stderr)
+    if fmt not in ("text", "txt", "markdown", "md", "json", "srt", "vtt"):
+        print("Error: Unknown export format '%s'. Valid formats: text, markdown, json, srt, vtt" % fmt, file=sys.stderr)
         return 1
     out = args[args.index("--output") + 1]
     flags = [a for a in args if a in ("--timestamps", "--speakers", "--metadata")]
