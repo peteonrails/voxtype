@@ -3927,7 +3927,7 @@ For quiet USB/XLR mics, try `0.001`.
 ```toml
 [meeting.audio]
 loopback_device = "auto"
-echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+echo_cancel = "auto"  # WebRTC echo cancellation on speakers, else GTCRN; transcript dedup always runs
 echo_guard = true  # Keep the call heard through speakers out of your lines
 echo_fuzzy_max_words = 4
 vad_threshold = 0.001  # Optional: quiet mic tuning
