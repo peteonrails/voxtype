@@ -282,7 +282,7 @@ Item {
       check(panel.pluginLink.copy_dismissed === undefined, "older CLI: no copy_dismissed key")
       waitFor(function() { return shown(copyBanner()) }, "copy banner shown")
       var text = find(copyBanner(), "pluginCopyText").text
-      check(text === "This is an older copy of Voxtype Settings. Switch to the one that updates with voxtype?",
+      check(text === "This is an older copy of the Voxtype panel. Switch to the one that updates with voxtype?",
             "copy banner text: " + text)
       check(shown(panel.formTest.cardTest), "settings still usable beside the banner")
       click(find(copyBanner(), "pluginCopySwitch"), "Switch")
