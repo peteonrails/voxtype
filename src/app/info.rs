@@ -73,7 +73,7 @@ fn run_accel(json: bool) -> anyhow::Result<()> {
 }
 
 fn run_devices(json: bool) -> anyhow::Result<()> {
-    let found = devices::input_devices();
+    let found = devices::input_devices().map_err(|e| anyhow::anyhow!("{e}"))?;
     if json {
         println!("{}", serde_json::to_string_pretty(&found)?);
         return Ok(());
