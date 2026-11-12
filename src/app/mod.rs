@@ -26,6 +26,7 @@ mod info;
 mod macos;
 mod meeting;
 mod meeting_assistant;
+mod meeting_recover;
 mod migrate;
 mod overrides;
 mod record;

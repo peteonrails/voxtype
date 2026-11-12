@@ -192,7 +192,9 @@ fast:
 ]
 ```
 
-- `status` is `active`, `paused`, `completed` or `cancelled`.
+- `status` is `active`, `paused`, `completed`, `cancelled` or `interrupted`
+  (the daemon stopped while it recorded; see
+  [Meetings that never finished](#meetings-that-never-finished-meeting-recover)).
 - `url` is the call's link from `meeting start --url`, absent otherwise.
 - `has_summary`: a summary is saved (`meeting summarize`, or the summary at
   stop).
@@ -291,6 +293,7 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
 | `import_progress` | `meeting import` or `meeting retranscribe` finished a chunk |
+| `recoverable` | Meetings the daemon never finished: after `hello` while there are any, and when one is finished or discarded |
 | `error` | Something failed |
 
 #### `hello`
@@ -415,6 +418,32 @@ outside the daemon and hand it their progress: see
 [Importing and transcribing again](#importing-and-transcribing-again-meeting-import-and-meeting-retranscribe)
 below. It is not sent while the daemon is down.
 
+#### `recoverable`
+
+```json
+{"event": "recoverable", "meetings": [{"id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Release sync", "started_at": "2026-11-11T15:00:04Z", "last_chunk_ms": 1260000, "has_audio": true, "untranscribed_chunks": 1, "lines": 84, "stopped_at": "2026-11-11T15:21:40Z", "duration_secs": 1296}]}
+{"event": "recoverable", "meetings": []}
+```
+
+Meetings the daemon never finished because it crashed or was killed while
+they recorded, newest first, for a card that offers to finish or discard
+them. A connection gets it right after `hello` while the list is not empty,
+and every connection gets it again, possibly empty, after
+`meeting recover --finish` or `--discard`. `title` is absent for an untitled
+meeting.
+
+- `last_chunk_ms`: where the transcript ends on the meeting's timeline (the
+  end of the last chunk transcribed).
+- `has_audio`: whether retained audio is in the folder.
+- `untranscribed_chunks`: chunks of that audio past `last_chunk_ms`, which
+  the daemon kept but never transcribed; `--finish` transcribes them.
+  Always 0 without retained audio.
+- `lines`: transcript lines on disk.
+- `stopped_at`: when the meeting last wrote to its folder, about when the
+  daemon stopped; `duration_secs` runs from `started_at` to it.
+
+Act on an entry with `voxtype meeting recover` (below).
+
 #### `error`
 
 ```json
@@ -426,6 +455,51 @@ below. It is not sent while the daemon is down.
 An error about the summary at stop also has `meeting_id`, a `code` from the
 [assistant error codes](#assistant-error-codes), and `backend`, the name of
 the backend that failed, as `summary_backend_name` gives it.
+
+### Meetings that never finished: `meeting recover`
+
+```sh
+voxtype meeting recover [--json]
+voxtype meeting recover --finish <id> [--json]
+voxtype meeting recover --discard <id> [--json]
+```
+
+Without options it lists the meetings the daemon never finished; with
+`--json`, as `{"meetings": [...]}` with the entries of the
+[`recoverable`](#recoverable) event. It works with the daemon down too, and
+then also lists meetings still marked `active`, which the next daemon start
+would mark `interrupted`.
+
+`--finish` completes one from its folder. First it transcribes the
+`untranscribed_chunks`, with the engine and model the meeting recorded with
+(the configured ones if this build cannot run those), and adds their lines
+after the transcript's; then `ended_at` becomes `stopped_at`,
+`transcript.md` is rewritten and the status becomes `completed`; then the
+summary runs under the usual `[meeting.summary]` rules and
+`post_meeting_command` runs, as after `meeting stop`. It waits for all of
+it, so it can take as long as the transcription and the summary do. If the
+leftover audio cannot be transcribed (no ffmpeg, no model), it says why and
+finishes with the transcript as it is.
+
+With `--json` it prints the meeting's metadata, as `meeting show --json`
+has it under `metadata` (with `summary` once written), plus `recovered`:
+
+```json
+{"id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Release sync", "started_at": "2026-11-11T15:00:04Z", "ended_at": "2026-11-11T15:21:40Z", "duration_secs": 1296, "status": "completed", "chunk_count": 86, "storage_path": "/home/me/.local/share/voxtype/meetings/2026-11-11-release-sync", "audio_retained": true, "recovered": {"transcribed_chunks": 1, "summary": {"state": "written", "agent": "claude", "path": "/home/me/.local/share/voxtype/meetings/2026-11-11-release-sync/summary.md"}, "post_meeting_command": "succeeded"}}
+```
+
+`recovered.transcribed_chunks` counts the chunks transcribed from the
+leftover audio (a trailing fraction of a second counts as one).
+`recovered.summary.state` is `written`, `skipped` (auto-summary off, no
+consent, or no transcript) or `failed`, with `message` and `backend`.
+`recovered.post_meeting_command` is `null` when none is configured,
+otherwise `succeeded`, `failed (exit N)`, `timed out` or
+`could not start: ...`.
+
+`--discard` deletes the meeting and its folder and prints
+`{"discarded": "<id>"}`. Both take a full ID or a unique prefix, exit 1 for
+a meeting that is not interrupted (finished, or recording now), and have the
+daemon send `recoverable` again.
 
 ### Changing a transcript
 
@@ -798,8 +872,9 @@ This is a stable contract:
 
 The fields:
 
-- `status`: `active`, `paused`, `completed` or `cancelled`. A meeting left
-  `active` by a crash becomes `completed` the next time the daemon starts.
+- `status`: `active`, `paused`, `completed`, `cancelled` or `interrupted`. A
+  meeting left `active` by a crash becomes `interrupted` the next time the
+  daemon starts, and `completed` once `meeting recover --finish` finishes it.
 - `started_at`, `ended_at`: RFC 3339, UTC. `duration_secs` is wall-clock
   time from start to stop.
 - `engine`, `model`: the transcription engine and model the meeting used,

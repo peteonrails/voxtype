@@ -787,25 +787,31 @@ fn cleanup_meeting_files() {
     }
 }
 
-/// Mark any active/paused meetings as completed on daemon startup.
-/// This handles meetings orphaned by a crash or daemon restart.
-fn cleanup_stale_meetings(config: &Config) {
+/// Where meetings are stored, per `[meeting] storage_path`.
+fn meeting_storage_config(config: &Config) -> StorageConfig {
     let storage_path = if config.meeting.storage_path == "auto" {
         Config::data_dir().join("meetings")
     } else {
         std::path::PathBuf::from(&config.meeting.storage_path)
     };
-
-    let storage_config = StorageConfig {
+    StorageConfig {
         storage_path,
         retain_audio: config.meeting.retain_audio,
         max_meetings: 0,
-    };
+    }
+}
 
-    match meeting::MeetingStorage::open(storage_config) {
-        Ok(storage) => match storage.complete_stale_meetings() {
+/// Mark meetings still active or paused as interrupted on daemon startup:
+/// the daemon that recorded them crashed or was killed, so none of them
+/// finished. `voxtype meeting recover` finishes or discards them.
+fn cleanup_stale_meetings(config: &Config) {
+    match meeting::MeetingStorage::open(meeting_storage_config(config)) {
+        Ok(storage) => match storage.interrupt_stale_meetings() {
             Ok(count) if count > 0 => {
-                tracing::info!("Marked {} orphaned meeting(s) as completed", count);
+                tracing::warn!(
+                    "{} meeting(s) never finished (the daemon stopped while recording); see voxtype meeting recover",
+                    count
+                );
                 // Reset meeting state file to idle
                 let state_file = Config::runtime_dir().join("meeting_state");
                 let _ = std::fs::write(&state_file, "idle");
@@ -3406,8 +3412,44 @@ impl Daemon {
     ///
     /// Every trigger is consumed whether or not it applies, so a request the
     /// daemon refused cannot fire later against a different meeting.
+    /// Tell meeting.sock which meetings never finished, for the recovery
+    /// card: at startup, and again when `meeting recover` finished or
+    /// discarded one.
+    fn announce_recoverable_meetings(&self) {
+        let Some(ref hub) = self.meeting_event_hub else {
+            return;
+        };
+        let running = self
+            .meeting_daemon
+            .as_ref()
+            .and_then(|d| d.current_meeting_id());
+        match meeting::MeetingStorage::open(meeting_storage_config(&self.config)).and_then(
+            |storage| {
+                meeting::recover::recoverable(
+                    &storage,
+                    running.as_ref(),
+                    self.config.meeting.chunk_duration_secs,
+                )
+            },
+        ) {
+            Ok(meetings) => {
+                if !meetings.is_empty() {
+                    tracing::info!("{} meeting(s) can be recovered", meetings.len());
+                }
+                hub.publish_recoverable(&meetings);
+            }
+            Err(e) => tracing::warn!("Could not list meetings to recover: {}", e),
+        }
+    }
+
     async fn handle_meeting_triggers(&mut self) -> bool {
         let mut changed = false;
+
+        let recover_trigger = Config::runtime_dir().join(meeting::recover::TRIGGER);
+        if recover_trigger.exists() {
+            let _ = std::fs::remove_file(&recover_trigger);
+            self.announce_recoverable_meetings();
+        }
 
         if let Some(trigger) = check_meeting_start() {
             if !self.config.meeting.enabled {
@@ -4706,6 +4748,7 @@ impl Daemon {
             Ok(hub) => {
                 tracing::info!("Meeting event socket: {:?}", hub.socket_path());
                 self.meeting_event_hub = Some(hub);
+                self.announce_recoverable_meetings();
             }
             Err(e) => {
                 tracing::warn!(

@@ -261,6 +261,9 @@ pub struct Source {
     pub inputs: Vec<PathBuf>,
     pub channels: Channels,
     pub duration_ms: u64,
+    /// Where in the inputs to start decoding (`meeting recover` picks up
+    /// after the last chunk the daemon transcribed).
+    pub start_ms: u64,
 }
 
 impl Source {
@@ -268,6 +271,10 @@ impl Source {
         let mut cmd = Command::new(&ff.ffmpeg);
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         for input in &self.inputs {
+            if self.start_ms > 0 {
+                cmd.arg("-ss")
+                    .arg(format!("{:.3}", self.start_ms as f64 / 1000.0));
+            }
             cmd.arg("-i").arg(input);
         }
         if self.inputs.len() > 1 {
@@ -665,6 +672,7 @@ pub async fn import(
         inputs: vec![request.file.clone()],
         channels: channels.clone(),
         duration_ms: probed.duration_ms,
+        start_ms: 0,
     };
     // The audio first: if transcription fails, the meeting can still be
     // transcribed again from it.

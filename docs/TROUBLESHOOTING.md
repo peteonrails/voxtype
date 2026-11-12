@@ -1770,6 +1770,26 @@ The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
 `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
 terminal: anything that prompts for input fails.
 
+### A meeting shows as interrupted, with no summary
+
+The daemon stopped while the meeting recorded: it crashed, was killed, or the
+computer lost power. Everything saved until then is in the meeting's folder,
+but nothing finished the meeting, so it has no end time or summary and
+`post_meeting_command` did not run. Finish it from what is on disk, or
+delete it:
+
+```bash
+voxtype meeting recover                  # list them
+voxtype meeting recover --finish <id>    # end it, summarize, run the command
+voxtype meeting recover --discard <id>   # delete it and its folder
+```
+
+With `retain_audio` on, finishing transcribes the audio kept after the last
+transcribed chunk too (that needs ffmpeg and the meeting's model). Without
+it, what was said after the last chunk (up to `chunk_duration_secs`, 30
+seconds by default) is lost. If the daemon is crashing, its log has the
+reason: `journalctl --user -u voxtype -b`.
+
 ## Meetings: The Remote Side Shows Up Under "You"
 
 With speakers instead of headphones, your microphone hears the call. Voxtype removes that echo from your lines, but what is left can still show up:

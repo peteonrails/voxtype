@@ -182,6 +182,17 @@ pub struct Transcript {
     pub segments: Vec<TranscriptSegment>,
     /// Total number of chunks processed
     pub total_chunks: u32,
+    /// How far into the meeting's audio the transcript reaches: the end of
+    /// the last chunk transcribed, on the transcript's timeline. What lies
+    /// beyond it in the retained audio was never transcribed (the daemon
+    /// stopped first); `meeting recover --finish` transcribes it. 0 in
+    /// transcripts written before 1.3.1.
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub audio_ms: u64,
+}
+
+fn is_zero_ms(ms: &u64) -> bool {
+    *ms == 0
 }
 
 /// What [`Transcript::resolve_echo_lines`] did, by segment ID.
@@ -719,6 +730,10 @@ pub enum MeetingStatus {
     Completed,
     /// Meeting was cancelled/abandoned
     Cancelled,
+    /// The daemon stopped while the meeting was recording (a crash or a
+    /// kill), so it was never finished: `voxtype meeting recover` finishes
+    /// or discards it.
+    Interrupted,
 }
 
 /// Metadata for a meeting

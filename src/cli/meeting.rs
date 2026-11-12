@@ -133,6 +133,35 @@ pub enum MeetingAction {
         #[arg(long, short)]
         force: bool,
     },
+    /// Finish or discard meetings the daemon never finished
+    ///
+    /// A meeting is saved as it records, so when the daemon crashes or is
+    /// killed mid-meeting its transcript and audio are on disk, but the
+    /// meeting never ends: no end time, no summary, no post-meeting
+    /// command. The daemon marks such meetings interrupted when it next
+    /// starts. Without options this lists them; --finish transcribes any
+    /// audio the daemon kept but never transcribed, ends the meeting when it
+    /// last wrote, then summarizes it and runs post_meeting_command as a
+    /// normal stop would; --discard deletes it and its folder. A meeting
+    /// still recording is never touched.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting recover\n  \
+        voxtype meeting recover --json\n  \
+        voxtype meeting recover --finish 3f2a\n  \
+        voxtype meeting recover --discard 3f2a")]
+    Recover {
+        /// Finish this meeting (ID or unique prefix)
+        #[arg(long, value_name = "ID", conflicts_with = "discard")]
+        finish: Option<String>,
+
+        /// Delete this meeting and its folder (ID or unique prefix)
+        #[arg(long, value_name = "ID")]
+        discard: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Label a speaker in a meeting transcript
     ///
     /// Assigns a human-readable name to a speaker the transcript contains:

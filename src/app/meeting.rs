@@ -456,6 +456,21 @@ pub(crate) async fn run_meeting_command(
             println!("Meeting {} deleted.", meeting_id);
         }
 
+        MeetingAction::Recover {
+            finish,
+            discard,
+            json,
+        } => {
+            super::meeting_recover::run_recover(
+                config,
+                &meeting_config,
+                finish.as_deref(),
+                discard.as_deref(),
+                json,
+            )
+            .await?;
+        }
+
         MeetingAction::Label {
             meeting_id,
             speaker_id,

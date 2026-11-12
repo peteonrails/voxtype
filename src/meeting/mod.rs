@@ -36,6 +36,7 @@ pub mod manifest;
 pub mod meeting_recorder;
 pub mod notes;
 pub mod playback;
+pub mod recover;
 pub mod retained_audio;
 pub mod retranscribe;
 pub mod start;
@@ -784,8 +785,10 @@ impl MeetingDaemon {
     /// would otherwise lose the whole transcript, and `meeting show --json`
     /// would report nothing while a meeting is in progress. One small JSON
     /// write per chunk is negligible next to the transcription.
-    fn persist_transcript(&self) {
-        if let Some(ref meeting) = self.current_meeting {
+    fn persist_transcript(&mut self) {
+        let reached = self.source_offsets.values().copied().max().unwrap_or(0);
+        if let Some(ref mut meeting) = self.current_meeting {
+            meeting.transcript.audio_ms = meeting.transcript.audio_ms.max(reached);
             if let Err(e) = self
                 .storage
                 .save_transcript(&meeting.metadata.id, &meeting.transcript)
@@ -1287,11 +1290,20 @@ mod tests {
         assert!(file_names(&h.manifest()).contains(&"summary.md"));
     }
 
+    /// The daemon dies mid-meeting with audio being kept. The next start
+    /// marks the meeting interrupted, `meeting recover` lists it with its
+    /// lines and audio, and finishing it completes it from the folder and
+    /// summarizes it with the usual rules (here a fake Claude).
     #[tokio::test]
-    async fn a_crashed_meeting_is_completed_in_its_manifest_on_restart() {
+    async fn a_crashed_meeting_is_interrupted_on_restart_and_recovered() {
+        let sb = assistant::testing::Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], SUMMARY_REPLY);
         let mut h = harness_with(|c| c.retain_audio = true).await;
         h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
         let folder = h.folder();
+        let id = h.daemon.current_meeting_id().unwrap();
         // The daemon goes away without stopping the meeting.
         drop(h.daemon);
         assert_eq!(manifest::Manifest::read(&folder).unwrap().status, "active");
@@ -1308,11 +1320,108 @@ mod tests {
 
         // The next daemon start.
         let storage = MeetingStorage::open(h.config.storage.clone()).unwrap();
-        assert_eq!(storage.complete_stale_meetings().unwrap(), 1);
+        assert_eq!(storage.interrupt_stale_meetings().unwrap(), 1);
+        assert_eq!(
+            manifest::Manifest::read(&folder).unwrap().status,
+            "interrupted"
+        );
+        let listed = recover::recoverable(&storage, None, 30).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id.to_string());
+        assert_eq!(listed[0].lines, 2);
+        assert!(listed[0].has_audio);
+        assert_eq!(listed[0].last_chunk_ms, 30_000);
+        assert_eq!(listed[0].untranscribed_chunks, 0);
+
+        let done = recover::finish(&storage, &id, None).unwrap();
+        assert_eq!(done.status, MeetingStatus::Completed);
+        assert!(done.audio_retained);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let ran = assistant::summarize::AutoSummary {
+            settings: sb.settings(),
+            storage: h.config.storage.clone(),
+            meeting_id: id,
+        }
+        .run(move |e| seen.lock().unwrap().push(e))
+        .await;
+        assert!(ran);
+        assert!(matches!(
+            events.lock().unwrap().last(),
+            Some(assistant::summarize::SummaryEvent::Ready(_))
+        ));
+
         let m = manifest::Manifest::read(&folder).unwrap();
         assert_eq!(m.status, "completed");
         assert!(m.audio_retained);
         assert!(m.files.iter().any(|f| f.kind == "audio_mic"));
+        assert!(folder.join("summary.md").is_file());
+        assert!(recover::recoverable(&storage, None, 30).unwrap().is_empty());
+    }
+
+    /// The daemon dies while transcribing its second chunk: the audio of
+    /// that chunk is on disk, but the transcript saved before it is all
+    /// there is. Recovery counts the chunk as untranscribed and finishing
+    /// transcribes it, putting its lines after the first chunk's.
+    #[tokio::test]
+    async fn the_chunk_a_crash_left_untranscribed_is_transcribed_on_finish() {
+        if !import::tests::ffmpeg_present() {
+            return;
+        }
+        let mut h = harness_with(|c| c.retain_audio = true).await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let folder = h.folder();
+        let id = h.daemon.current_meeting_id().unwrap();
+        let first_chunk = std::fs::read(folder.join("transcript.json")).unwrap();
+        h.pair(&[(2.0, 4.0)], &[(10.0, 12.0)]).await;
+        drop(h.daemon);
+        // As if it died before the second chunk's transcript was saved.
+        std::fs::write(folder.join("transcript.json"), &first_chunk).unwrap();
+        let ext = retained_audio::Encoder::detect().format().extension();
+        let mic = folder.join(format!("mic.{ext}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while try_audio_secs(&mic).unwrap_or(0.0) < 55.0 {
+            assert!(std::time::Instant::now() < deadline, "audio never landed");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let storage = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        storage.interrupt_stale_meetings().unwrap();
+        let first_chunks = storage.load_transcript(&id).unwrap().total_chunks;
+        let listed = recover::recoverable(&storage, None, 30).unwrap();
+        assert_eq!(listed[0].last_chunk_ms, 30_000);
+        assert_eq!(listed[0].untranscribed_chunks, 1);
+        assert_eq!(listed[0].lines, 2);
+
+        let config = import::tests::config_in(&h.config.storage.storage_path);
+        let done =
+            recover::transcribe_tail(&config, &storage, &id, None, import::tests::counting())
+                .await
+                .unwrap();
+        assert!(done >= 1, "{done} chunks");
+        let t = storage.load_transcript(&id).unwrap();
+        let lines: Vec<(u64, &str)> = t
+            .segments
+            .iter()
+            .map(|s| (s.start_ms / 1000, s.text.as_str()))
+            .collect();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(lines[2].0 >= 30 && lines[3].0 >= 30, "{lines:?}");
+        assert!(t.total_chunks > first_chunks, "{} chunks", t.total_chunks);
+        assert!(t.audio_ms >= 55_000);
+        let ids: std::collections::HashSet<u32> = t.segments.iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(
+            recover::recoverable(&storage, None, 30).unwrap()[0].untranscribed_chunks,
+            0
+        );
+        // Nothing left: a second pass adds nothing.
+        assert_eq!(
+            recover::transcribe_tail(&config, &storage, &id, None, import::tests::counting())
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     fn with_command(h: &mut Harness, command: &str, timeout: std::time::Duration) {
