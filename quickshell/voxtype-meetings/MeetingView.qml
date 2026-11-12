@@ -137,6 +137,20 @@ Item {
     noteEditor.visible = false
     agentMenu.visible = false
     moreMenu.visible = false
+    shareSheet.visible = false
+  }
+
+  // MeetingShare, from the controller.
+  property var share: null
+  function openShare() {
+    if (!root.share || !root.feed || root.feed.meetingId === "") return
+    root.share.open(root.feed.meetingId)
+    shareSheet.visible = true
+    shareSheet.forceActiveFocus()
+  }
+  function closeShare() {
+    shareSheet.visible = false
+    root.forceActiveFocus()
   }
   signal minimizeRequested()
   signal expandRequested()
@@ -1256,6 +1270,7 @@ Item {
     objectName: "overlayScrim"
     anchors.fill: parent
     visible: reassignPopup.visible || noteEditor.visible || agentMenu.visible || moreMenu.visible || consent.visible
+      || shareSheet.visible
     z: 9
     onClicked: {
       if (consent.visible) return
@@ -1263,7 +1278,23 @@ Item {
       noteEditor.close()
       agentMenu.close()
       moreMenu.close()
+      if (shareSheet.visible) root.closeShare()
     }
+  }
+
+  // Share ▾ from the More menu: the preview and where to send it.
+  ShareSheet {
+    id: shareSheet
+    objectName: "shareSheet"
+    visible: false
+    z: 10
+    anchors.fill: parent
+    anchors.margins: root.theme.lg
+    anchors.topMargin: Math.min(80, root.height * 0.1)
+    theme: root.theme
+    share: root.share
+    onCloseRequested: root.closeShare()
+    onOpenFolderRequested: function(path) { root.openFolderRequested(path) }
   }
 
   // A deleted line can be had back for a few seconds; then it is gone.
@@ -1391,6 +1422,19 @@ Item {
         height: 1
         visible: root.hasMeeting
         color: root.theme.alpha(root.theme.fg, 0.12)
+      }
+
+      MeetingButton {
+        objectName: "shareOption"
+        visible: root.hasMeeting && root.share !== null
+        theme: root.theme
+        width: moreColumn.width
+        text: "Share…"
+        enabled: root.feed !== null && root.feed.meetingId !== ""
+        onClicked: {
+          moreMenu.close()
+          root.openShare()
+        }
       }
 
       MeetingButton {

@@ -146,6 +146,14 @@ Scenarios:
               name on lines that arrive later, and after the view reconnects
               (a fresh hello) both a talking and a silent renamed speaker
               keep theirs
+  share       More > Share...: the preview of exactly what would leave and
+              what it includes, the transcript toggle re-previewing, Copy,
+              Save... (with Open folder) and Email... each sending only on a
+              click, the sheet closing with Escape
+  share-unavailable  greyed destinations say why (the CLI's reason, or what
+              they need), the configured command offered and run, a refused
+              send shown as the CLI words it
+  share-old   a voxtype without `meeting share` is called too old
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -183,7 +191,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
-             "recovery-real",
+             "recovery-real", "share", "share-unavailable", "share-old",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -349,6 +357,9 @@ INITIAL = {
     "play-errors": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
     "levels": lambda: [running_meeting()],
+    "share": lambda: [running_meeting()],
+    "share-unavailable": lambda: [running_meeting()],
+    "share-old": lambda: [running_meeting()],
     "undo-edit": lambda: [running_meeting()],
     "undo-reassign": lambda: [running_meeting()],
     "seek": lambda: [running_meeting()],
@@ -393,6 +404,11 @@ STATE = {
     "soundcheck-no-loopback": {"sc_no_loopback": True, "sc_echo": "none", "sc_time_scale": 0.02},
     "search": {"search_delay": 0.6},
     "recovery-old": {"recover_missing": True},
+    "share-unavailable": {"share_available": {"clipboard": False, "email": False},
+                          "share_why": {"clipboard": "wl-copy is not installed. Install wl-clipboard."},
+                          "share_command": "post-standup --channel team",
+                          "share_fail": {"file": "Documents/Voxtype is not writable. Check its permissions."}},
+    "share-old": {"old": True},
     "recovery-socket": {"recover_array": True},
     "recovery": {"recover_summary": {"state": "failed", "message": "the local model answered 500"},
                  "recoverable": [
@@ -600,6 +616,8 @@ def run(scenario, host, shell, evidence):
     problems += check_calls(scenario, calls, runtime_notes=str(runtime / "voxtype"))
     if scenario == "notes" and saved_notes != "Mine":
         problems.append("notes on disk: %r, expected 'Mine'" % saved_notes)
+    if scenario == "share" and opened_paths != ["/home/u/Documents/Voxtype"]:
+        problems.append("opened: %s" % opened_paths)
     if scenario == "export":
         name = "Voxtype/" + time.strftime("%Y-%m-%d", time.localtime()) + " Standup.md"
         if exports != [name] or export_head != ["FAKE EXPORT %s markdown --timestamps --speakers --metadata" % MEETING_ID]:
@@ -790,6 +808,17 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "recovery":
         expect(meeting, [["meeting", "recover", "--finish", STALE[0], "--json"],
                          ["meeting", "recover", "--discard", STALE[1], "--json"]], "meeting commands")
+    elif scenario == "share":
+        sh = ["meeting", "share", MEETING_ID]
+        expect(meeting, [sh + ["--preview", "--json"], sh + ["--preview", "--json", "--transcript"],
+                         sh + ["--to", "clipboard", "--transcript", "--json"], sh + ["--to", "file", "--transcript", "--json"],
+                         sh + ["--to", "email", "--transcript", "--json"]], "meeting commands")
+    elif scenario == "share-unavailable":
+        sh = ["meeting", "share", MEETING_ID]
+        expect(meeting, [sh + ["--preview", "--json"], sh + ["--to", "command", "--json"], sh + ["--to", "file", "--json"]],
+               "meeting commands")
+    elif scenario == "share-old":
+        expect(meeting, [["meeting", "share", MEETING_ID, "--preview", "--json"]], "meeting commands")
     elif scenario == "recovery-real":
         expect(meeting, [["meeting", "recover", "--finish", STALE[0], "--json"],
                          ["meeting", "recover", "--discard", STALE[1], "--json"]], "meeting commands")

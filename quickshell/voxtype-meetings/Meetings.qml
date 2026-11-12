@@ -589,6 +589,12 @@ Item {
   readonly property alias playback: playback
   // ------------------------------------------------------------ sound check
 
+  readonly property alias share: share
+  MeetingShare {
+    id: share
+    bin: root.bin
+  }
+
   readonly property alias search: search
   MeetingSearch {
     id: search
@@ -958,6 +964,7 @@ Item {
         return playback.playing && playback.meetingId === feed.meetingId ? playback.positionMs : -1
       })
       view.search = search
+      view.share = share
       view.canOpenSettings = Qt.binding(function() { return root.canOpenSettings })
       view.busy = Qt.binding(function() { return meetingCli.busy })
       view.actionError = Qt.binding(function() { return root.actionError })
