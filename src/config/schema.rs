@@ -1492,7 +1492,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Status",
         "Link Omarchy Settings panel",
-        "On Omarchy, let the daemon link the packaged Voxtype Settings panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
+        "On Omarchy, let the daemon link the packaged Voxtype panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
     ),
     // -- OSD ----------------------------------------------------------------
     spec(

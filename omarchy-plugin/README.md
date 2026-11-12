@@ -6,6 +6,23 @@ panel plugin inside `omarchy-shell`. It renders whatever `voxtype config schema
 panel, the CLI, and `voxtype configure` all agree about defaults and validation
 without keeping a second copy of the schema.
 
+Omarchy lists it as **Voxtype**: the same panel holds the settings and the
+live meeting view (`omarchy-shell io.voxtype.settings open` or `meetings`).
+
+### Why the ID is still `io.voxtype.settings`
+
+The plugin's ID predates the meeting view, so it says "settings" while the
+panel does more. It stays `io.voxtype.settings` on purpose: the ID is the
+directory name the packages install to
+(`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings`), the link
+`voxtype setup omarchy` and the daemon create in `~/.config/omarchy/plugins`,
+the IPC target the tray and scripts call, and what omarchy-pkgs packages.
+Renaming it would leave every installed link pointing at a directory that no
+longer exists, and break keybindings and scripts that summon it. Only the
+display name changed. A rename, if it happens, belongs in 2.0 with a migration:
+`voxtype setup omarchy` would link the new ID, remove the old link, and keep an
+IPC alias for the old target for a release.
+
 ## Requirements
 
 - Omarchy 4 with the Quickshell shell (`omarchy-shell`)
@@ -388,7 +405,7 @@ Inside the panel:
   minimum; the row's help states what the default is. Nothing is written until
   you enter a number, and **Reset to default** returns it to that state.
 - If a voxtype command cannot be started at all (voxtype is not installed, or a
-  `dev.json` names a binary that is gone), the panel says so: "Voxtype Settings
+  `dev.json` names a binary that is gone), the panel says so: "The Voxtype panel
   could not run `<binary>`", plus the `dev.json` path when that is where the
   binary came from. It also drops everything it was showing from earlier
   answers (version, configured model, model list, daemon state, upgrade offers)

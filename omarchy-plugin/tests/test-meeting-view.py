@@ -69,8 +69,8 @@ Scenarios:
               closing the view commits a pending delete
   export      More > Export (markdown) into Documents/Voxtype, then Open folder;
               Open meeting folder
-  export-past a JSON export of a past meeting, and its folder; SRT and VTT
-              are not offered (the CLI does not accept them)
+  export-past an SRT export of a past meeting (all five formats offered),
+              and its folder
   minimize    the pill (state, elapsed, last line), click to expand, the
               --minimize/--expand requests
   minimize-autoopen  a meeting start while minimized expands the one window
@@ -482,8 +482,8 @@ def run(scenario, host, shell, evidence):
         if opened_paths != [str(documents / "Voxtype"), str(data / ("live-" + MEETING_ID))]:
             problems.append("opened: %s" % opened_paths)
     if scenario == "export-past":
-        name = "Voxtype/2026-11-10 Design review.json"
-        if exports != [name] or export_head != ["FAKE EXPORT %s json " % PAST["design"]]:
+        name = "Voxtype/2026-11-10 Design review.srt"
+        if exports != [name] or export_head != ["FAKE EXPORT %s srt " % PAST["design"]]:
             problems.append("exports: %s %s" % (exports, export_head))
         if opened_paths != [str(data / "meetings" / PAST["design"])]:
             problems.append("opened: %s" % opened_paths)
@@ -609,8 +609,8 @@ def check_calls(scenario, calls, runtime_notes=""):
                           str(documents_dir(runtime_notes)) + "/Voxtype/" + time.strftime("%Y-%m-%d") + " Standup.md",
                           "--timestamps", "--speakers", "--metadata"]], "meeting commands")
     elif scenario == "export-past":
-        expect(meeting, [["meeting", "export", PAST["design"], "--format", "json", "--output",
-                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.json"]], "meeting commands")
+        expect(meeting, [["meeting", "export", PAST["design"], "--format", "srt", "--output",
+                          str(documents_dir(runtime_notes)) + "/Voxtype/2026-11-10 Design review.srt"]], "meeting commands")
     elif scenario == "play":
         start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
         expect(meeting, [start, ["meeting", "play", "--stop", "--json"], start, ["meeting", "play", "--stop", "--json"]],
