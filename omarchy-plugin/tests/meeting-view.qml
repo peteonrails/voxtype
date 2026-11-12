@@ -163,6 +163,7 @@ Item {
           else if (s === "actions") tc.driveActions()
           else if (s === "actions-connect") tc.driveActionsConnect()
           else if (s === "actions-old") tc.driveActionsOld()
+          else if (s === "actions-real") tc.driveActionsReal()
           else if (s === "share-real") tc.driveShareReal()
           else if (s === "share-real-unavailable") tc.driveShareRealUnavailable()
           else if (s === "search") tc.driveSearch()
@@ -2218,7 +2219,8 @@ Item {
       var first = actionRow(0)
       check(String(find(first, "actionText").text) === "Cut the tag", "text")
       check(shown(find(first, "actionOwner")), "the owner chip")
-      check(String(find(first, "actionDue").text) === "due Fri Nov 13" && !shown(find(actionRow(1), "actionDue")), "due only when said")
+      check(String(find(first, "actionDue").text) === "due 2026-11-13", "the resolved date: " + find(first, "actionDue").text)
+      check(String(find(actionRow(1), "actionDue").text) === "due next week", "as said when it has no date: " + find(actionRow(1), "actionDue").text)
       check(String(find(first, "actionTime").text) === "0:35", "time: " + find(first, "actionTime").text)
       check(txt("summaryText").indexOf("Action items") === -1, "the summary's own list gives way to the rows")
       check(shown(find(view(), "actionsTodoist")) && !shown(find(view(), "actionsConnect")) && shown(find(view(), "actionsRemind")), "the buttons")
@@ -2229,6 +2231,8 @@ Item {
       click(find(view(), "actionsTodoist"), "Send to Todoist")
       waitFor(function() { return txt("actionsNotice") === "1 item sent to Todoist." }, "sent: " + txt("actionsNotice"), 6000)
       waitFor(function() { return String(find(actionRow(0), "actionSent").text) === "✓ Todoist" && !shown(find(actionRow(1), "actionSent")) }, "✓ on the sent row")
+      waitFor(function() { return !view().actions.loading }, "re-read")
+      wait(150)
       // A resend of everything adds only what is new.
       click(find(actionRow(1), "actionTick"), "tick it again")
       click(find(view(), "actionsTodoist"), "Send to Todoist again")
@@ -2251,14 +2255,41 @@ Item {
       check(!shown(find(view(), "actionsTodoist")) && shown(find(view(), "actionsConnect")), "Connect first")
       check(!shown(find(view(), "actionsRemind")), "no reminder app, no Remind me")
       click(find(view(), "actionsConnect"), "Connect Todoist…")
-      waitFor(function() { return txt("actionsConnect") === "Waiting for the browser…" && txt("actionsNotice").indexOf("browser") !== -1 }, "waits on the browser")
+      waitFor(function() { return txt("actionsConnect") === "Waiting for the browser…" && txt("actionsNotice").indexOf("Allow voxtype") === 0
+                           && shown(find(view(), "actionsConnectUrl")) && shown(find(view(), "actionsCancelConnect")) }, "waits on the browser, link offered: " + txt("actionsNotice"))
       shot("actions-connecting")
       waitFor(function() { return shown(find(view(), "actionsTodoist")) && txt("actionsNotice") === "Todoist connected." }, "connected", 6000)
-      sh(["sh", "-c", 'python3 - "$1" <<\'PY\'\nimport json,sys\np=sys.argv[1]\ns=json.load(open(p))\ns["actions_send_fail"]="Todoist refused the task (401): the access was revoked. Connect Todoist again."\njson.dump(s,open(p,"w"))\nPY', "_", __STATE__])
+      sh(["sh", "-c", 'python3 - "$1" <<\'PY\'\nimport json,sys\np=sys.argv[1]\ns=json.load(open(p))\ns["actions_item_fail"]={"2":"Todoist refused the task (401): the access was revoked. Connect Todoist again."}\njson.dump(s,open(p,"w"))\nPY', "_", __STATE__])
       click(find(view(), "actionsTodoist"), "Send to Todoist")
-      waitFor(function() { return txt("actionsError").indexOf("Todoist refused the task (401)") === 0 }, "refusal: " + txt("actionsError"), 6000)
+      waitFor(function() { return txt("actionsError").indexOf("Update the release notes: Todoist refused the task (401)") === 0 }, "the failed item: " + txt("actionsError"), 6000)
+      check(txt("actionsNotice") === "1 item sent to Todoist.", "the other one went: " + txt("actionsNotice"))
+      waitFor(function() { return String(find(actionRow(0), "actionSent").text) === "✓ Todoist" && !shown(find(actionRow(1), "actionSent")) }, "✓ only where it went")
       check(find(view(), "actionsError").color === view().theme.urgent, "in the urgent colour")
       shot("actions-refused")
+    }
+
+    // A real voxtype, a fake Todoist, a stand-in browser.
+    function driveActionsReal() {
+      summaryReady()
+      waitFor(function() { return shown(actionRow(1)) }, "the real items", 10000)
+      check(String(find(actionRow(0), "actionText").text) === "Cut the tag", "first: " + find(actionRow(0), "actionText").text)
+      check(shown(find(view(), "actionsConnect")) && shown(find(view(), "actionsRemind")), "Connect first; omarchy-reminder found")
+      click(find(view(), "actionsConnect"), "Connect Todoist…")
+      waitFor(function() { return txt("actionsNotice") === "Todoist connected." && shown(find(view(), "actionsTodoist")) }, "connected for real: " + txt("actionsNotice") + " / " + txt("actionsError"), 20000)
+      click(find(actionRow(1), "actionTick"), "untick the second")
+      click(find(view(), "actionsTodoist"), "Send to Todoist")
+      waitFor(function() { return txt("actionsNotice") === "1 item sent to Todoist." }, "sent: " + txt("actionsNotice") + " / " + txt("actionsError"), 10000)
+      waitFor(function() { return String(find(actionRow(0), "actionSent").text) === "✓ Todoist" }, "✓ from the real list", 8000)
+      click(find(view(), "actionsRemind"), "Remind me…")
+      click(find(view(), "remind_15m"), "In 15 min")
+      waitFor(function() { return txt("actionsNotice") === "1 reminder set." }, "reminder: " + txt("actionsNotice") + " / " + txt("actionsError"), 10000)
+      // The list re-reads after a send; let it settle before the next click.
+      waitFor(function() { return !view().actions.loading }, "re-read")
+      wait(150)
+      click(find(actionRow(1), "actionTick"), "tick it again")
+      click(find(view(), "actionsTodoist"), "Send to Todoist again")
+      waitFor(function() { return txt("actionsNotice") === "1 item sent to Todoist, 1 already in Todoist." }, "no duplicate: " + txt("actionsNotice"), 10000)
+      shot("actions-real")
     }
 
     function driveActionsOld() {

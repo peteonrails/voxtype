@@ -87,8 +87,8 @@ ColumnLayout {
           }
           Text {
             objectName: "actionDue"
-            visible: !!item.modelData.due
-            text: "due " + String(item.modelData.due || "")
+            visible: text !== ""
+            text: root.actions.dueText(item.modelData) !== "" ? "due " + root.actions.dueText(item.modelData) : ""
             color: root.theme.dim
             font.family: root.theme.fontFamily
             font.pixelSize: root.theme.caption
@@ -168,7 +168,7 @@ ColumnLayout {
     visible: false
     spacing: root.theme.gap
     Repeater {
-      model: [{ key: "15m", label: "In 15 min" }, { key: "1h", label: "In 1 hour" }, { key: "eod", label: "End of day" }]
+      model: [{ key: "15m", label: "In 15 min" }, { key: "1h", label: "In 1 hour" }, { key: "eod", label: "End of day (5 pm)" }]
       MeetingButton {
         required property var modelData
         objectName: "remind_" + modelData.key
@@ -180,6 +180,26 @@ ColumnLayout {
         }
       }
     }
+  }
+
+  // The consent page, should the browser not have opened it.
+  Text {
+    objectName: "actionsConnectUrl"
+    Layout.fillWidth: true
+    visible: root.actions !== null && root.actions.connectUrl !== ""
+    text: root.actions ? '<a href="' + root.actions.connectUrl + '" style="color:' + root.theme.accent + '">Open the Todoist page</a> if it did not open.' : ""
+    textFormat: Text.StyledText
+    color: root.theme.dim
+    font.family: root.theme.fontFamily
+    font.pixelSize: root.theme.caption
+    onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+  }
+  MeetingButton {
+    objectName: "actionsCancelConnect"
+    theme: root.theme
+    visible: root.actions !== null && root.actions.busy === "connect"
+    text: "Cancel"
+    onClicked: root.actions.cancelConnect()
   }
 
   Text {
