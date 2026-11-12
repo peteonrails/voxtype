@@ -184,7 +184,10 @@ pub(crate) async fn run_meeting_command(
             );
             // stderr only: scripts parse stdout. Never a prompt.
             if meeting::notice::pending() {
-                eprintln!("Note: {}", meeting::notice::NOTICE);
+                eprintln!(
+                    "Note: {}",
+                    meeting::notice::text(options.announce == Some(true))
+                );
                 eprintln!("{}", meeting::notice::ACK_HINT);
             }
         }
@@ -206,10 +209,16 @@ pub(crate) async fn run_meeting_command(
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&meeting::notice::to_json(&state))?
+                    serde_json::to_string_pretty(&meeting::notice::to_json(
+                        &state,
+                        config.meeting.announce_recording
+                    ))?
                 );
             } else {
-                println!("{}", meeting::notice::NOTICE);
+                println!(
+                    "{}",
+                    meeting::notice::text(config.meeting.announce_recording)
+                );
                 println!();
                 match state.acknowledged_at {
                     Some(at) if ack => println!(

@@ -100,6 +100,9 @@ pub struct MeetingHudState {
     pub recording_notice: bool,
     /// The recording announcement's outcome, when this meeting announces
     pub announcement: Option<crate::meeting::announce::Status>,
+    /// This meeting announces the recording, so views word the consent
+    /// notice accordingly from the start, before the announcement plays
+    pub announces: bool,
 }
 
 impl MeetingHudState {
@@ -169,6 +172,8 @@ enum WireEvent {
         echo_cancel: Option<String>,
         segments: Vec<TranscriptSegment>,
         recording_notice: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        announces: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         announcement: Option<serde_json::Value>,
     },
@@ -252,6 +257,7 @@ impl WireEvent {
             echo_cancel: state.echo_cancel.clone(),
             segments: state.segments.clone(),
             recording_notice: state.recording_notice,
+            announces: state.announces,
             announcement: state
                 .announcement
                 .as_ref()

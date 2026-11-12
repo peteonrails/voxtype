@@ -138,6 +138,8 @@ Scenarios:
               with the view open; "Got it" hides it and runs
               `meeting notice --ack`
   notice-acked  acknowledged already: never shown, at open or at a start
+  notice-announce  a meeting that announces the recording: the notice says
+              voxtype will announce it, never that it tells nobody
   announcement  the recording announcement's line: waiting, then played into
               the call (quiet), or only on the speakers (a warning); from
               hello on reconnect, and gone once the meeting ends
@@ -166,7 +168,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
-             "play-errors", "notice", "notice-acked", "announcement", "title", "title-external", "title-past", "title-fail",
+             "play-errors", "notice", "notice-acked", "notice-announce", "announcement", "title", "title-external", "title-past", "title-fail",
              "title-labelled", "title-real")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -320,6 +322,7 @@ INITIAL = {
     "summary-stale": lambda: [running_meeting()],
     "notice": lambda: [running_meeting(), {"cmd": "notice", "pending": True}],
     "notice-acked": lambda: [running_meeting()],
+    "notice-announce": lambda: [dict(running_meeting(), announces=True), {"cmd": "notice", "pending": True}],
     "announcement": lambda: [running_meeting()],
 }
 
@@ -713,6 +716,8 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [["meeting", "stop"], ["meeting", "start", "--title", "Second"]], "meeting commands")
     elif scenario == "announcement":
         expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "notice-announce":
+        expect(meeting, [["meeting", "notice", "--ack"]], "meeting commands")
     elif scenario in ("cli-missing", "daemon-old", "old-voxtype", "minimize", "minimize-autoopen", "resize", "move",
                       "opacity", "view-state"):
         pass

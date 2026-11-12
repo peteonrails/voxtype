@@ -13,7 +13,8 @@ It is driven by JSON lines appended to CONTROL, by the QML driver and by
 fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
 
   {"cmd": "state", ...}            set hello fields (status, meeting_id, title,
-                                   started_at, chunk_count, segments); no event
+                                   started_at, chunk_count, segments,
+                                   announces); no event
   {"cmd": "segments", "chunk_id": N, "segments": [...]}
   {"cmd": "rename", "from": A, "to": B}         a speaker_renamed event
   {"cmd": "status", "status": S}   as update_meeting_state: idle resets
@@ -144,6 +145,8 @@ class Server:
         for key in ("meeting_id", "title", "started_at"):
             if self.state.get(key):
                 ev[key] = self.state[key]
+        if self.state.get("announces"):
+            ev["announces"] = True
         if self.announcement:
             ev["announcement"] = self.announcement
         return ev

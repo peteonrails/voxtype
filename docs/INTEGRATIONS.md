@@ -318,9 +318,11 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 is `idle`, `meeting_id`, `title` and `started_at` are absent, and
 `segments` is empty.
 
-A meeting with the recording announcement on also carries `announcement`, as
-in `meeting status --json`, once the announcement has started; it is absent
-otherwise.
+A meeting with the recording announcement on carries `announces: true` from
+the start (absent otherwise); show the notice with the announced wording
+above while it is set, never one saying voxtype tells nobody. It also carries
+`announcement`, as in `meeting status --json`, once the announcement has
+started; it is absent otherwise.
 
 `recording_notice` is `true` while the user has not acknowledged the
 recording-consent notice ([Meeting Mode](MEETING_MODE.md#recording-consent)).
@@ -491,10 +493,13 @@ voxtype meeting notice --ack [--json]
 ```
 
 ```json
-{"notice": "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.", "acknowledged": false, "acknowledged_at": null}
+{"notice": "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.", "announce_recording": false, "acknowledged": false, "acknowledged_at": null}
 ```
 
-`notice` is the text to show, word for word. `--ack` records the
+`notice` is the text to show, word for word. With `[meeting]
+announce_recording` on (`announce_recording: true`) it is "Voxtype will
+announce the recording to the call. You're still responsible for getting
+consent where the law requires it." instead. `--ack` records the
 acknowledgement (the first time is kept in `acknowledged_at`, RFC 3339 UTC)
 in `$XDG_STATE_HOME/voxtype/recording-notice.json` and tells a running
 daemon, which repeats its current `status` with `recording_notice: false`.

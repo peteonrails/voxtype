@@ -3135,6 +3135,7 @@ impl Daemon {
                 crate::error::VoxtypeError::Config(e)
             })?;
         let announce_clip = meeting::announce::Clip::for_meeting(&self.config.meeting, &options);
+        let announces = announce_clip.is_some();
 
         // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
         let backend = diarization_override
@@ -3299,6 +3300,7 @@ impl Daemon {
                             // Set from the notice's state in update_meeting_state.
                             recording_notice: false,
                             announcement: None,
+                            announces,
                         };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);

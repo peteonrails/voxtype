@@ -158,6 +158,7 @@ Item {
           else if (s === "notice") tc.driveNotice(true)
           else if (s === "notice-acked") tc.driveNotice(false)
           else if (s === "announcement") tc.driveAnnouncement()
+          else if (s === "notice-announce") tc.driveNoticeAnnounced()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -371,6 +372,30 @@ Item {
       wait(300)
       check(!shown(card), "stays hidden")
       shot("notice-acked")
+    }
+
+    // A meeting that announces the recording: the notice must not say
+    // voxtype tells nobody.
+    function driveNoticeAnnounced() {
+      var wording = "Voxtype will announce the recording to the call. You're still responsible for "
+          + "getting consent where the law requires it."
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var card = find(view(), "recordingNotice")
+      waitFor(function() { return shown(card) }, "notice shown on a running meeting")
+      waitFor(function() { return txt("recordingNoticeText") === wording }, "announced wording: " + txt("recordingNoticeText"))
+      check(txt("recordingNoticeText").indexOf("doesn't tell") < 0, "never says voxtype tells nobody")
+      shot("notice-announce")
+
+      // The announcement playing only locally keeps this wording; the
+      // warning line says the call did not hear it.
+      ctl({ cmd: "announcement", state: "local", detail: "no call app opened the microphone within 120 s",
+            text: "played on your speakers only; the call did not hear it (no call app opened the microphone within 120 s)" })
+      waitFor(function() { return view().announcementMissedCall }, "local-only warning")
+      check(txt("recordingNoticeText") === wording, "wording kept: " + txt("recordingNoticeText"))
+
+      click(find(view(), "recordingNoticeAck"), "Got it")
+      waitFor(function() { return feed().recordingNotice === false }, "daemon confirmed the acknowledgement")
     }
 
     // The recording announcement's line under the header. It never says the

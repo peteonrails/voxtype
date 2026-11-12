@@ -7,6 +7,9 @@ const NOTICE: &str = "Laws on recording and transcribing conversations differ by
 require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them \
 know you're using a meeting assistant.";
 
+const NOTICE_ANNOUNCED: &str = "Voxtype will announce the recording to the call. You're still \
+responsible for getting consent where the law requires it.";
+
 struct Scratch {
     dir: tempfile::TempDir,
 }
@@ -25,11 +28,18 @@ impl Scratch {
     }
 
     fn voxtype(&self, args: &[&str]) -> Output {
+        self.voxtype_env(args, &[])
+    }
+
+    fn voxtype_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_voxtype"))
+            .env_remove("VOXTYPE_MEETING_ANNOUNCE_RECORDING")
+            .env_remove("VOXTYPE_MEETING_ANNOUNCEMENT_FILE")
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_DATA_HOME", self.path("data"))
             .env("XDG_STATE_HOME", self.path("state"))
             .env("XDG_RUNTIME_DIR", self.path("runtime"))
+            .envs(env.iter().copied())
             .args(args)
             .output()
             .unwrap()
@@ -140,4 +150,41 @@ fn start_prints_the_notice_on_stderr_until_acknowledged() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains("Laws on recording"));
+}
+
+/// With the recording announcement on, the notice must not claim voxtype
+/// tells nobody.
+#[test]
+fn announcing_changes_the_wording_everywhere_the_notice_shows() {
+    let s = Scratch::new();
+    startable(&s);
+    let on = [("VOXTYPE_MEETING_ANNOUNCE_RECORDING", "true")];
+
+    let out = s.voxtype_env(&["meeting", "notice", "--json"], &on);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["notice"], NOTICE_ANNOUNCED);
+    assert_eq!(v["announce_recording"], true);
+    let text =
+        String::from_utf8_lossy(&s.voxtype_env(&["meeting", "notice"], &on).stdout).to_string();
+    assert!(text.starts_with(NOTICE_ANNOUNCED), "{text}");
+    assert!(!text.contains("doesn't tell"), "{text}");
+
+    let out = s.voxtype_env(&["meeting", "start", "--title", "Standup"], &on);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Note: {NOTICE_ANNOUNCED}")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("doesn't tell"), "{stderr}");
+
+    // --no-announce for this meeting: the usual wording again.
+    std::fs::remove_file(s.path("runtime/voxtype/meeting_start")).unwrap();
+    let out = s.voxtype_env(
+        &["meeting", "start", "--title", "Standup", "--no-announce"],
+        &on,
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains(&format!("Note: {NOTICE}")), "{stderr}");
 }

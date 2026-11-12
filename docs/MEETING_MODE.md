@@ -73,6 +73,8 @@ For short dictation (a sentence or two at a time), stick with the normal push-to
 
 Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.
 
+With the [recording announcement](#announcing-the-recording) on, the notice reads instead: "Voxtype will announce the recording to the call. You're still responsible for getting consent where the law requires it." If the announcement then plays only on your speakers, the meeting view and `meeting status` say the call did not hear it.
+
 You are responsible for following the rules that apply to you.
 
 Until you acknowledge this, voxtype reminds you:
@@ -84,7 +86,7 @@ Until you acknowledge this, voxtype reminds you:
 ```bash
 voxtype meeting notice          # show it, and whether you acknowledged it
 voxtype meeting notice --ack    # acknowledge it; the reminders stop
-voxtype meeting notice --json   # {"notice", "acknowledged", "acknowledged_at"}
+voxtype meeting notice --json   # {"notice", "announce_recording", "acknowledged", "acknowledged_at"}
 ```
 
 **Got it** in the view does the same as `--ack`. The acknowledgement is kept in `~/.local/state/voxtype/recording-notice.json`.

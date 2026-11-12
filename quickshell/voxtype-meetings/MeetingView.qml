@@ -183,7 +183,11 @@ Item {
   property bool speakerHintDismissed: false
   signal speakerHintDismissRequested()
   // The recording-consent notice: shown on a live meeting until acknowledged.
-  readonly property string recordingNoticeText: "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant."
+  // Worded as src/meeting/notice.rs words it: with the recording
+  // announcement on, saying voxtype tells nobody would be untrue.
+  readonly property string recordingNoticeQuiet: "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant."
+  readonly property string recordingNoticeAnnounced: "Voxtype will announce the recording to the call. You're still responsible for getting consent where the law requires it."
+  readonly property string recordingNoticeText: root.feed !== null && root.feed.announces ? root.recordingNoticeAnnounced : root.recordingNoticeQuiet
   property bool noticeDismissed: false
   readonly property bool showRecordingNotice: root.live && !root.noticeDismissed && root.feed !== null && root.feed.recordingNotice
   signal noticeAcknowledged()
