@@ -305,6 +305,7 @@ impl MeetingDaemon {
             model: self.model_name.clone(),
             diarization: diarization_backend.clone().filter(|_| diarization_enabled),
             voxtype_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            echo_cancel: None,
         };
         if let Err(e) = self.storage.set_context(&meeting_id, &context) {
             tracing::warn!("Failed to record the meeting's engine and model: {}", e);
@@ -451,6 +452,26 @@ impl MeetingDaemon {
             storage: self.config.storage.clone(),
             meeting_id,
         })
+    }
+
+    /// Record the echo handling the running meeting uses (`aec`, `gtcrn`
+    /// or `off`), for meeting.json and `meeting status --json`.
+    pub fn record_echo_cancel(&self, path: &str) {
+        let Some(id) = self.current_meeting_id() else {
+            return;
+        };
+        let result = self.storage.get_context(&id).and_then(|context| {
+            self.storage.set_context(
+                &id,
+                &manifest::MeetingContext {
+                    echo_cancel: Some(path.to_string()),
+                    ..context
+                },
+            )
+        });
+        if let Err(e) = result {
+            tracing::warn!("Failed to record the meeting's echo handling: {}", e);
+        }
     }
 
     /// Get current meeting state

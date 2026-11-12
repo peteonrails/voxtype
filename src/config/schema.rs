@@ -251,7 +251,7 @@ const FEEDBACK_THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const OUTPUT_MODE_CHOICES: &[&str] = &["type", "clipboard", "paste", "file"];
 const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
-const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
+const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "aec", "gtcrn", "off", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
@@ -1392,7 +1392,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(ECHO_CANCEL_CHOICES),
         "Meeting",
         "Echo cancellation",
-        "auto runs GTCRN enhancement plus transcript dedup on the mic track. Set disabled if PipeWire already cancels echo.",
+        "auto cancels speaker echo with PipeWire's WebRTC canceller on speakers, GTCRN otherwise. aec forces it, gtcrn is the old behaviour, off is neither.",
     ),
     spec(
         "meeting.diarization.enabled",

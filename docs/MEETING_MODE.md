@@ -40,6 +40,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
+  - [Echo Cancellation](#echo-cancellation)
+  - [Echo Guard](#echo-guard)
   - [Diarization Settings](#diarization-settings)
   - [Summarization Settings](#summarization-settings)
   - [Assistant Settings](#assistant-settings)
@@ -442,7 +444,7 @@ Permanently deletes the meeting: its record, its folder and everything in it, au
 
 With `retain_audio = true` the meeting folder also keeps the meeting's audio, as three Ogg Opus files at 16 kHz mono and 24 kbps:
 
-- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (`echo_cancel = "auto"` with the GTCRN model present), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
+- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (the WebRTC canceller on speakers, or GTCRN; see [Echo Cancellation](#echo-cancellation)), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
 - `loopback.opus`: the other side, from the loopback device. A meeting recorded without loopback has no loopback file.
 - `mixed.opus`: the two summed, for listening back.
 
@@ -678,6 +680,9 @@ loopback_device = "auto"
 # Lower to 0.001 for quiet mics; set 0.0 to disable this pre-transcription gate
 vad_threshold = 0.01
 
+# Echo cancellation for the mic (default: "auto"). See "Echo Cancellation".
+echo_cancel = "auto"
+
 # Keep the call heard through your speakers out of your lines (default: true);
 # the misheard-words check looks at lines up to this many words (default: 4)
 echo_guard = true
@@ -688,7 +693,33 @@ Setting `loopback_device = "auto"` lets voxtype capture system audio (the other 
 
 Set `loopback_device = "disabled"` if you only want to capture your own microphone, or if loopback detection is causing problems.
 
-On speakers rather than headphones, your microphone also hears the call, or a video playing on your desktop. Echo cancellation (`echo_cancel`) removes most of it from the audio. What gets through, the echo guard (`echo_guard`, on by default) keeps out of your lines:
+### Echo Cancellation
+
+On speakers, your microphone hears everything the speakers play: the other side of the call, and anything else, such as a video playing during the meeting. Without echo cancellation that audio is transcribed as You.
+
+With `echo_cancel = "auto"` (the default), a meeting whose output is speakers runs PipeWire's echo canceller (the WebRTC engine) for as long as the meeting runs. The canceller listens to what your default output plays and removes it from the microphone before voxtype transcribes it, whatever is playing, not only the call. Your own voice comes through. With headphones or a headset there is no echo to remove, so voxtype skips the canceller and uses GTCRN, its speech enhancer, as before.
+
+- **What counts as headphones:** the default output's active port is Headphones, Headset or Handset, or the device says it is headphones or a headset, or it is Bluetooth (unless it is a Bluetooth speaker). Everything else, including HDMI, line out and anything voxtype cannot identify, counts as speakers.
+- **Nothing in your PipeWire configuration changes.** The canceller is a small `pipewire` process voxtype starts when the meeting starts and stops when it stops. If voxtype crashes, the canceller stops with it. While it runs, a source called "Voxtype meeting mic (echo cancelled)" shows in your mixer; it never becomes your default.
+- **If the canceller cannot start** (PipeWire is missing its echo-cancel module or the WebRTC plugin, or it is too old), the meeting logs one warning and uses GTCRN. The meeting never fails because of it.
+- **It works on the meeting mic only.** Dictation is not affected.
+
+`voxtype meeting status --json` and the meeting's `meeting.json` say which one a meeting used: `aec`, `gtcrn` or `off`.
+
+| `echo_cancel` | What it does |
+|---------------|--------------|
+| `auto` (default) | The canceller on speakers, GTCRN with headphones |
+| `aec` | The canceller whatever the output; GTCRN if it cannot start |
+| `gtcrn` | GTCRN only, as before 1.3.0 |
+| `off` (or `disabled`) | Neither |
+
+With `auto`, setting `mic_device` to a specific device also means GTCRN, because that is an ALSA device name the canceller cannot record from. Use `echo_cancel = "aec"` with a PipeWire source name (`pactl list short sources`) as `mic_device` to have both.
+
+The transcript dedup, which removes mic lines that also appear on the loopback track, and the echo guard below run whichever echo handling a meeting uses.
+
+### Echo Guard
+
+Echo cancellation removes most of what your speakers play from the microphone. What gets through, the echo guard (`echo_guard`, on by default) keeps out of your lines in the transcript:
 
 - A microphone line whose sound is all explained by the loopback, whatever its length, is echo. When the loopback has the same speech at the time, the line is dropped, because the loopback already has those words. When it does not, the line moves to the remote speaker instead, so nothing the loopback missed is lost; `voxtype meeting reassign` moves it back if that was wrong.
 - A short line that is a misheard version of the remote's words, such as "after the daemon restarts." while the remote said "after the demon restarts", is dropped.

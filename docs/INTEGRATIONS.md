@@ -133,10 +133,15 @@ voxtype meeting status --json
 ```json
 {
   "active": true,
+  "echo_cancel": "aec",
   "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed",
   "status": "recording"
 }
 ```
+
+`echo_cancel` is the echo handling the running meeting uses: `aec` (PipeWire's
+WebRTC echo canceller), `gtcrn` or `off`. It is `null` when no meeting is
+running.
 
 `status` is one of `idle`, `starting`, `recording`, `pausing`, `paused`,
 `resuming`, `stopping` or `finalizing`. `starting`, `pausing`, `resuming` and
@@ -706,6 +711,7 @@ beside it. Read the manifest rather than guessing file names, and rather than
   "engine": "parakeet",
   "model": "parakeet-tdt-0.6b-v3",
   "diarization": "hybrid",
+  "echo_cancel": "aec",
   "speakers": [
     { "id": "Remote 1", "name": "Dana" },
     { "id": "Remote 2", "name": "Remote 2" },
@@ -759,6 +765,9 @@ The fields:
   `audio_mixed`. Names are relative to the folder. Audio is `.opus` (Ogg
   Opus, 16 kHz mono), or `.wav` (16-bit PCM, 16 kHz mono) when ffmpeg was
   missing; match on `kind`, not on the name.
+- `echo_cancel`: the echo handling the meeting used: `aec` (PipeWire's
+  WebRTC echo canceller, on speakers), `gtcrn` (the speech enhancer) or
+  `off`. `null` for meetings recorded before 1.3.0.
 - `audio_retained`: whether the meeting kept its audio (`retain_audio`).
 
 The folder can hold files the manifest does not list: `asks.jsonl` (one
