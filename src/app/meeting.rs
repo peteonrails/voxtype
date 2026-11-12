@@ -30,6 +30,7 @@ pub(crate) async fn run_meeting_command(
         max_duration_mins: config.meeting.max_duration_mins,
         vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
+        echo_rules: (&config.meeting.audio).into(),
     };
 
     match action {
@@ -251,11 +252,19 @@ pub(crate) async fn run_meeting_command(
             let (phase, meeting_id) = meeting_phase(&config::Config::runtime_dir());
             let active = phase != MeetingPhase::Idle;
 
+            // The echo handling the running meeting uses, as the daemon
+            // recorded it at start.
+            let echo_cancel = meeting_id.as_deref().and_then(|id| {
+                let storage = meeting::MeetingStorage::open(meeting_config.storage.clone()).ok()?;
+                let id = meeting::MeetingId::parse(id).ok()?;
+                storage.get_context(&id).ok()?.echo_cancel
+            });
             if json {
                 let payload = serde_json::json!({
                     "active": active,
                     "status": phase.as_str(),
                     "meeting_id": meeting_id,
+                    "echo_cancel": echo_cancel,
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if !active {
@@ -266,6 +275,9 @@ pub(crate) async fn run_meeting_command(
                 println!("Meeting Status: {}", phase.as_str());
                 if let Some(id) = meeting_id {
                     println!("Meeting ID: {}", id);
+                }
+                if let Some(path) = echo_cancel {
+                    println!("Echo handling: {}", path);
                 }
             }
         }
@@ -778,6 +790,127 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Import {
+            file,
+            title,
+            engine,
+            model,
+            language,
+            date,
+            channels,
+            diarization,
+            json,
+        } => {
+            use meeting::import;
+            let date = date
+                .map(|d| {
+                    chrono::DateTime::parse_from_rfc3339(&d)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "Invalid --date '{d}': use RFC 3339, e.g. 2026-11-02T15:00:00Z"
+                            )
+                        })
+                })
+                .transpose()?;
+            let request = import::ImportRequest {
+                file: file.clone(),
+                title,
+                options: config::MeetingStartOptions {
+                    engine,
+                    model,
+                    language,
+                    url: None,
+                },
+                diarization,
+                date,
+                channels,
+            };
+            let name = file.display().to_string();
+            let mut report = progress_reporter(json, format!("Importing {name}"));
+            let outcome = import::import(config, &request, None, &mut report).await?;
+            if json {
+                let mut line = serde_json::to_value(&outcome)?;
+                line["event"] = "imported".into();
+                println!("{line}");
+            } else {
+                println!(
+                    "Imported {} as meeting {} ({} lines, {}, {} {}).",
+                    name,
+                    outcome.meeting_id,
+                    outcome.segments,
+                    format_ms(outcome.duration_ms),
+                    outcome.engine,
+                    outcome.model
+                );
+                println!("Folder: {}", outcome.folder.display());
+            }
+        }
+
+        MeetingAction::Retranscribe {
+            meeting_id,
+            engine,
+            model,
+            language,
+            diarization,
+            keep_edits: _,
+            discard_edits,
+            json,
+        } => {
+            use meeting::retranscribe;
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            if live_meeting_id(&config::Config::runtime_dir()).as_deref() == Some(&id.to_string()) {
+                anyhow::bail!(
+                    "Meeting {id} is still recording. Stop it first: voxtype meeting stop"
+                );
+            }
+            let request = retranscribe::RetranscribeRequest {
+                meeting: id.to_string(),
+                options: config::MeetingStartOptions {
+                    engine,
+                    model,
+                    language,
+                    url: None,
+                },
+                diarization,
+                keep_edits: !discard_edits,
+            };
+            let mut report = progress_reporter(json, format!("Transcribing {id} again"));
+            let outcome = retranscribe::retranscribe(config, &request, None, &mut report).await?;
+            if json {
+                let mut line = serde_json::to_value(&outcome)?;
+                line["event"] = "retranscribed".into();
+                println!("{line}");
+            } else {
+                let e = &outcome.edits;
+                println!(
+                    "Transcribed meeting {} again with {} {}: {} lines.",
+                    outcome.meeting_id, outcome.engine, outcome.model, outcome.segments
+                );
+                if let Some(ref previous) = outcome.previous_transcript {
+                    println!("The previous transcript is kept as {previous}.");
+                }
+                if discard_edits {
+                    println!(
+                        "Edits: {} dropped as asked; annotations: {} carried over, {} had no matching line.",
+                        e.edits_discarded, e.annotations_carried, e.annotations_dropped
+                    );
+                } else {
+                    println!(
+                        "Edits: {} carried over, {} had no matching line; annotations: {} carried over, {} had no matching line.",
+                        e.edits_carried,
+                        e.edits_dropped,
+                        e.annotations_carried,
+                        e.annotations_dropped
+                    );
+                }
+            }
+        }
+
         MeetingAction::Play {
             meeting_id,
             segment,
@@ -1180,6 +1313,30 @@ fn refuse_start() -> ! {
     eprintln!("Error: A meeting is already in progress.");
     eprintln!("Use 'voxtype meeting stop' to end it first.");
     std::process::exit(1);
+}
+
+/// Report import or retranscribe progress: to the daemon, so meeting.sock
+/// carries it, and to the user, as JSON lines on stdout with `--json` or
+/// one line per chunk on stderr without.
+fn progress_reporter(json: bool, what: String) -> impl FnMut(&voxtype::meeting::import::Progress) {
+    let runtime_dir = config::Config::runtime_dir();
+    move |p| {
+        voxtype::meeting::import::announce(&runtime_dir, p);
+        if json {
+            if let Ok(mut line) = serde_json::to_value(p) {
+                line["event"] = "progress".into();
+                println!("{line}");
+            }
+        } else if p.state == "transcribing" && p.chunks_done > 0 {
+            eprintln!(
+                "{what}: chunk {} of about {} ({} of {})",
+                p.chunks_done,
+                p.chunks_total,
+                format_ms(p.position_ms),
+                format_ms(p.duration_ms)
+            );
+        }
+    }
 }
 
 /// `m:ss`, or `h:mm:ss` past an hour, as transcript timestamps read.

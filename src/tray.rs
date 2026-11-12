@@ -2080,16 +2080,13 @@ mod tests {
 
     #[tokio::test]
     async fn meeting_actions_reach_the_cli() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("calls");
         let bin = dir.path().join("voxtype");
-        std::fs::write(
+        crate::test_support::write_script(
             &bin,
-            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", out.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", out.display()),
+        );
         for action in [TrayAction::StartMeeting, TrayAction::StopMeeting] {
             assert!(cli_command(&bin, action).status().await.unwrap().success());
         }

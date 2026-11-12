@@ -267,10 +267,42 @@ When the configured Parakeet model is a `.gguf` file, the panel and
 `voxtype configure` hide **Decoder type**, which only applies to ONNX models.
 
 The engine list at the top of the Engine section only browses another engine's
-models. **Use** on an installed model of the generic GGUF engine, Parakeet or
-Cohere switches the engine and the model together, so you can move between
-them from the panel, for example back to Parakeet Ultra after trying a GGUF
-model. To switch to any other engine, run `voxtype config set engine <name>`.
+models. **Use** on an installed model of any engine switches the engine and the
+model together, so you can move between engines from the panel, for example
+from Parakeet to an Omnilingual model, or back to Parakeet Ultra after trying a
+GGUF model. From a terminal, the same switch is
+`voxtype config select-model <engine> <model>`. An engine your build of
+voxtype was compiled without lists no models to use, and `select-model`
+refuses it with the command that gets you a build that includes it.
+
+## Coding agent setup skill
+
+If you use a coding agent such as Claude Code, Codex, Gemini CLI, OpenCode,
+Cursor, GitHub Copilot or Goose, Voxtype can install a skill that teaches it to
+configure Voxtype for your machine:
+
+```bash
+voxtype setup skill
+```
+
+Then ask your agent to "set up voxtype for this machine". It inspects your
+hardware, asks which languages you dictate and whether battery life matters,
+and suggests an engine, model, GPU acceleration, thread count, memory settings
+and output mode. On an older install it also points out settings your config
+is missing that new installs get. It shows you the plan and asks before
+changing your config or running anything with `sudo`.
+
+The command installs the skill for every agent it finds: Claude Code in
+`~/.claude/skills`, and the others in `~/.agents/skills`. Use `--target claude`,
+`--target agents` or `--target all` to choose. The skill is built into the
+voxtype binary, so run `voxtype setup skill` again after upgrading.
+`voxtype setup skill --status` and `voxtype setup check` tell you when the
+installed copy is out of date, and `voxtype setup skill --remove` uninstalls it.
+
+If you edit the installed `SKILL.md`, voxtype notices. It asks before replacing
+or removing your copy, and when it can't ask (no terminal) it leaves the file
+alone. `--force` replaces it without asking. The same applies if a different
+skill already sits at that path.
 
 ## Table of Contents
 
@@ -2807,6 +2839,8 @@ show_view_on_start = true        # Omarchy: open the live meeting view when a me
 mic_device = "default"           # Microphone (uses audio.device if not set)
 loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
 echo_cancel = "auto"             # GTCRN neural enhancement + transcript dedup
+echo_guard = true                # Keep the call heard through speakers out of your lines
+echo_fuzzy_max_words = 4         # Longest line the misheard-words check looks at
 vad_threshold = 0.01             # Lower to 0.001 for quiet mics; 0.0 disables meeting VAD
 
 [meeting.diarization]
@@ -2849,6 +2883,8 @@ Once an agent is allowed, each meeting is also summarized when it stops (`summar
 When `loopback_device` is enabled, meeting mode captures both your microphone and system audio (remote participants) on separate channels. Without echo cancellation, the remote participants' audio bleeds into your microphone recording and gets transcribed as your speech.
 
 Voxtype uses GTCRN, a lightweight neural speech enhancement model, to clean the mic signal before transcription. The model removes background noise and speaker bleed-through while preserving your voice. A second pass at the transcript level strips any residual echoed phrases.
+
+The echo guard (`echo_guard`, on by default) catches what gets through. A microphone line whose sound is all explained by the loopback is echo at any length: it is dropped when the loopback has the same words, or moved to the remote speaker when it does not. A short line that is a misheard copy of the remote, such as "Omarky problem." while the loopback said "the Omarchy package ... without any problems", is dropped too. It compares the audio levels of both tracks first, so your own lines, even a short reply ("yes", "only one?") said over the other side, are kept. See [CONFIGURATION.md](CONFIGURATION.md#echo_guard).
 
 The GTCRN model (~523 KB) is downloaded automatically the first time you run `voxtype meeting start`. To disable echo cancellation (e.g., if you have PipeWire's `echo-cancel` module configured):
 

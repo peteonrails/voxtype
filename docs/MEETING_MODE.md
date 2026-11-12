@@ -31,6 +31,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [Meeting Audio](#meeting-audio)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
+  - [Importing a Recording](#importing-a-recording)
+  - [Transcribing a Meeting Again](#transcribing-a-meeting-again)
 - [The Meeting Assistant](#the-meeting-assistant)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
@@ -42,6 +44,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [Configuration](#configuration)
   - [Basic Settings](#basic-settings)
   - [Audio Settings](#audio-settings)
+  - [Echo Cancellation](#echo-cancellation)
+  - [Echo Guard](#echo-guard)
   - [Diarization Settings](#diarization-settings)
   - [Summarization Settings](#summarization-settings)
   - [Assistant Settings](#assistant-settings)
@@ -185,10 +189,10 @@ The header shows the meeting title, how long it has been running, and whether it
   - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
   - Click the speaker name on a line to move just that line: pick one of the meeting's speakers, type a new name, or, for a line already moved, **Restore original**. This runs `voxtype meeting reassign`; if it is refused, the line goes back and the error is shown.
   - Hover a line for **▶**, **Edit**, **Add note** and **Delete**. ▶ plays the meeting's audio from that line (`voxtype meeting play --segment`); while it plays, the header shows **■ Stop** and the line being heard is lit. A meeting recorded without `[meeting] retain_audio = true` has no audio to play: the view says so once and offers no ▶.
-  - Hover a line for **Edit**, **Add note** and **Delete**. Edit changes the line's text in place (Enter saves, Escape cancels; `voxtype meeting edit`); an edited line is marked "edited" and offers **Restore original text** (`voxtype meeting edit --reset`). A note can be text, a **Highlight**, or both (`voxtype meeting annotate`); lines with either get a marker in the margin. Delete removes the line at once and offers **Undo** for a few seconds before it runs `voxtype meeting delete-line`.
+  - **Edit** changes the line's text in place (Enter saves, Escape cancels; `voxtype meeting edit`); an edited line is marked "edited" and offers **Restore original text** (`voxtype meeting edit --reset`). A note can be text, a **Highlight**, or both (`voxtype meeting annotate`); lines with either get a marker in the margin. Delete removes the line at once and offers **Undo** for a few seconds before it runs `voxtype meeting delete-line`.
 - **Notes**: your notes for the meeting. They save as you type and go into the summary as guidance.
 - **Ask**: ask about what has been said, or use a quick question: "Last 5 minutes", "What did *the last remote speaker* just say?", "Action items so far". Answers stream in, say which agent gave them, and cite times like [1:58] that jump to that line.
-- **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing…" while it is written, and **Regenerate** after you fix speakers or lines.
+- **Summary**, once the meeting stops: overview, decisions, action items and chapters, "Summarizing with Claude…" (or whichever backend writes it) while it is written, and **Regenerate** after you fix speakers or lines. The agent chip in this tab's header names the backend summaries go to, which can differ from the one that answers questions when an older `[meeting.summary]` backend such as Ollama is configured. If the summary fails, a card at the top of the tab says why, with **Retry**, **Settings**, and, when a local model failed and you have allowed an agent, **Use Claude instead** (it runs `voxtype meeting summarize <id> --agent claude`).
 
 **⋯** in the header exports the meeting as Markdown, plain text, JSON, SRT or WebVTT (`voxtype meeting export`) into `~/Documents/Voxtype/` (or `$XDG_DOCUMENTS_DIR/Voxtype/`), named by date and title, with **Open folder** once it is written. **Open meeting folder** shows the meeting's own files. All of this works during a meeting, after it, and on past meetings.
 
@@ -472,7 +476,7 @@ Permanently deletes the meeting: its record, its folder and everything in it, au
 
 With `retain_audio = true` the meeting folder also keeps the meeting's audio, as three Ogg Opus files at 16 kHz mono and 24 kbps:
 
-- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (`echo_cancel = "auto"` with the GTCRN model present), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
+- `mic.opus`: your microphone, as the transcript heard it. When echo cancellation runs (the WebRTC canceller on speakers, or GTCRN; see [Echo Cancellation](#echo-cancellation)), this is the cleaned-up mic, not the raw one: the raw mic carries the other side again through your speakers, and a mix of it with the loopback plays every remote voice twice. With echo cancellation off it is the raw mic.
 - `loopback.opus`: the other side, from the loopback device. A meeting recorded without loopback has no loopback file.
 - `mixed.opus`: the two summed, for listening back.
 
@@ -500,6 +504,50 @@ voxtype meeting play --stop
 Only one playback runs at a time; starting another stops the one before. It plays `mixed.opus` by default.
 
 Playback needs `ffmpeg` and one of `pw-play` (PipeWire), `paplay` (PulseAudio) or `aplay` (ALSA), and goes to your default output. A meeting recorded without `retain_audio` has nothing to play, and says so.
+
+### Importing a Recording
+
+`voxtype meeting import` turns a recording made elsewhere (a phone memo, a call recorded by another app, a video) into a meeting like any other: transcript, speakers, exports, the kept audio, the summary at the end when auto-summary is on, and `post_meeting_command`. Anything ffmpeg reads works.
+
+```bash
+voxtype meeting import call.mp3 --title "Client call"
+voxtype meeting import memo.m4a --model large-v3-turbo --language de
+voxtype meeting import recording.wav --channels mic,loopback
+voxtype meeting import memo.m4a --date 2026-11-02T15:00:00Z
+```
+
+It runs in your terminal, not in the daemon, so it never interrupts a meeting being recorded, and prints its progress chunk by chunk. `--engine`, `--model` and `--language` work as they do for `meeting start`, and `--diarization` picks the backend for this import.
+
+**Channels.** By default every channel is mixed into one track. Lines then have no side (they show as `Unknown` until you label them), and with `ml` diarization each voice gets its own speaker. A call recorded with you on one channel and the others on another can say so: `--channels mic,loopback` (or `loopback,mic`) names each channel in order, so lines are attributed to You and Remote, and `hybrid` diarization splits the remote side into Remote 1, Remote 2. `ignore` (or `-`) skips a channel.
+
+**Date.** The meeting is dated by `--date` (RFC 3339), else by the file's `creation_time` tag, else by its modification time. Its length is the recording's.
+
+**Audio.** The recording is kept in the meeting folder as `mixed.opus`, plus `mic.opus` and `loopback.opus` when channels are mapped, whatever `retain_audio` says, so the meeting can be played back and transcribed again. The original file is left where it is.
+
+**From Omarchy Meeting Recorder.** Give `meeting import` a Meeting Recorder meeting folder (the one with the `.meeting-recorder` file) and the meeting comes over as it is: its transcript, speaker names, chapters (as the summary's chapters), notes, and audio (from `.tracks/`, the separate files, or `audio.ogg`). Nothing is transcribed; run `meeting retranscribe` afterwards to redo it with a voxtype engine. This importer was written from Meeting Recorder's source, not tested against folders it wrote.
+
+```bash
+voxtype meeting import ~/Documents/Meetings/'202511021500 Launch sync'
+```
+
+### Transcribing a Meeting Again
+
+`voxtype meeting retranscribe` runs a meeting's kept audio through the transcriber again, for a better model, another engine or another language:
+
+```bash
+voxtype meeting retranscribe latest --model large-v3-turbo
+voxtype meeting retranscribe b6b2 --engine parakeet --discard-edits
+```
+
+It needs the meeting's audio: a meeting recorded with `retain_audio = true`, or an imported one. The meeting keeps its ID, folder, notes, speaker names and summary, and its previous transcript is kept as `transcript.v1.json` (then `v2`, and so on).
+
+Edits you made line by line are tied to the old lines, and the new transcript has new lines, so each old line is matched to the new line it overlaps most in time, on the same side:
+
+- annotations always move to their matching line;
+- speaker moves, text corrections and deleted lines move too with `--keep-edits` (the default), or are dropped with `--discard-edits`;
+- an edit whose line has no match (the new transcript has nothing there, or splits it differently) is dropped.
+
+The command says how many carried over. Speaker names carry over by speaker: with `simple` and `hybrid` diarization You and Remote stay put, but with `ml` the speaker numbers come from a fresh clustering, so check the names. A meeting that is still recording cannot be transcribed again until it stops.
 
 ---
 
@@ -707,11 +755,59 @@ loopback_device = "auto"
 # RMS threshold for meeting voice activity detection (default: 0.01)
 # Lower to 0.001 for quiet mics; set 0.0 to disable this pre-transcription gate
 vad_threshold = 0.01
+
+# Echo cancellation for the mic (default: "auto"). See "Echo Cancellation".
+echo_cancel = "auto"
+
+# Keep the call heard through your speakers out of your lines (default: true);
+# the misheard-words check looks at lines up to this many words (default: 4)
+echo_guard = true
+echo_fuzzy_max_words = 4
 ```
 
 Setting `loopback_device = "auto"` lets voxtype capture system audio (the other side of a call). When loopback is active, speaker attribution can distinguish between "You" (from the mic) and "Remote" (from system audio).
 
 Set `loopback_device = "disabled"` if you only want to capture your own microphone, or if loopback detection is causing problems.
+
+### Echo Cancellation
+
+On speakers, your microphone hears everything the speakers play: the other side of the call, and anything else, such as a video playing during the meeting. Without echo cancellation that audio is transcribed as You.
+
+With `echo_cancel = "auto"` (the default), a meeting runs PipeWire's echo canceller (the WebRTC engine) for as long as the meeting runs, unless the output is headphones. The canceller listens to what your default output plays and removes it from the microphone before voxtype transcribes it, whatever is playing, not only the call. Your own voice comes through. With headphones or a headset there is no echo to remove, so voxtype skips the canceller and uses GTCRN, its speech enhancer, as before.
+
+- **What counts as headphones:** the default output's active port is Headphones, Headset or Handset, or the device says it is headphones or a headset, or it is Bluetooth (unless it is a Bluetooth speaker). Everything else, including HDMI, line out, S/PDIF and anything voxtype cannot identify, gets the canceller.
+- **Nothing in your PipeWire configuration changes.** The canceller is a small `pipewire` process voxtype starts when the meeting starts and stops when it stops. If voxtype crashes, the canceller stops with it. While it runs, a source called "Voxtype meeting echo canceller" shows in your mixer; it never becomes your default.
+- **If your default microphone is a filter** over a real one (Camera Effects' "Microphone Effects", a noise-suppression filter chain), the canceller records the real microphone underneath. A filter's noise gate, auto level or voice effect, placed before the canceller, would bend the echo it removes. Voxtype finds the real microphone from the filter's own capture stream and says so in the log. If the filter hides the real microphones from other apps (Camera Effects can), voxtype cannot see them and records the filter, as before. Name a microphone in `mic_device` to choose it yourself.
+- **A call on another output.** The canceller removes what your default output plays. If the call plays somewhere else and `loopback_device` names that output's monitor (`"<sink>.monitor"`), the canceller removes that output's sound instead, and decides speakers or headphones by it.
+- **If your microphone is a monitor of that output** (a virtual mic fed from the speakers, not a microphone), everything it hears is what the canceller removes, so it would deliver silence. Voxtype skips the canceller, uses GTCRN, and says so in the log.
+- **If you already run an echo canceller** as your default microphone (PipeWire's `echo-cancel` module, set up yourself), voxtype records from it and does not add a second one.
+- **If the canceller cannot start** (PipeWire is missing its echo-cancel module or the WebRTC plugin, or it is too old), the meeting logs one warning and uses GTCRN. The meeting never fails because of it.
+- **If the canceller hears nothing.** For its first 3 seconds voxtype checks that the canceller's mic carries any sound at all. A real microphone always picks up some room noise; a canceller that delivers digital silence is not getting the microphone, or is removing your voice along with the echo (when your microphone is a monitor of the very output it cancels, for one). The meeting then records the microphone directly with GTCRN, logs a warning, and reports `gtcrn` from then on. The first 3 seconds of your microphone are lost in that case; everything after is kept.
+- **The two tracks stay in step.** The canceller hands the mic over about 37 ms late; voxtype drops that much from the start of the mic so the mic and the other side line up in the transcript and the kept audio.
+- **It works on the meeting mic only.** Dictation is not affected.
+
+`voxtype meeting status --json`, the meeting's `meeting.json` and the meeting socket's `hello` say which one a meeting used: `webrtc`, `gtcrn` or `none`.
+
+| `echo_cancel` | What it does |
+|---------------|--------------|
+| `auto` (default) | The canceller unless the output is headphones, then GTCRN |
+| `webrtc` | The canceller whatever the output; GTCRN if it cannot start |
+| `gtcrn` | GTCRN only, as before 1.3.0 |
+| `disabled` | Neither |
+
+**A specific microphone.** With `mic_device` set to something other than `default`, the canceller records that microphone if the name is a PipeWire source (as `pactl list short sources` lists it). An ALSA device name is not one, so the meeting uses GTCRN instead and says so in the log.
+
+The transcript dedup, which removes mic lines that also appear on the loopback track, and the echo guard below run whichever echo handling a meeting uses.
+
+### Echo Guard
+
+Echo cancellation removes most of what your speakers play from the microphone. What gets through, the echo guard (`echo_guard`, on by default) keeps out of your lines in the transcript:
+
+- A microphone line whose sound is all explained by the loopback, whatever its length, is echo. When the loopback has the same speech at the time, the line is dropped, because the loopback already has those words. When it does not, the line moves to the remote speaker instead, so nothing the loopback missed is lost; `voxtype meeting reassign` moves it back if that was wrong.
+- A short line that is a misheard version of the remote's words, such as "after the daemon restarts." while the remote said "after the demon restarts", is dropped.
+- Your own lines stay. Before touching a line the guard compares both tracks' audio levels: your voice is louder on the microphone than the echo can explain, so a line with any of your own speech in it stays yours, and "yes" said over the other side's "yes" stays too.
+
+Short lines with exactly the remote's words, and runs of four or more of them, are removed whether the guard is on or off. See [`echo_guard`](CONFIGURATION.md#echo_guard) for the details.
 
 ### Diarization Settings
 

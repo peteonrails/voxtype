@@ -5,7 +5,10 @@
 //!
 //! Mic capture uses cpal (ALSA). Loopback capture uses `parec` (PulseAudio
 //! recording client) which works with PipeWire's PulseAudio compatibility
-//! layer and can access monitor sources that aren't visible to ALSA.
+//! layer and can access monitor sources that aren't visible to ALSA. While
+//! the meeting echo canceller runs (`audio::echo_cancel`), the mic is
+//! recorded with `parec` too, from the canceller's source, which ALSA
+//! cannot name either.
 
 use super::cpal_capture::CpalCapture;
 use super::AudioCapture;
@@ -34,10 +37,12 @@ pub struct SourcedSample {
     pub timestamp: u64,
 }
 
-/// Loopback capture via parec subprocess
-struct ParecLoopback {
+/// Capture from a PulseAudio/PipeWire source via a parec subprocess
+struct ParecCapture {
     /// Source name (PulseAudio/PipeWire source)
     source: String,
+    /// Samples to drop from the start, to line this track up with another
+    skip: usize,
     /// Child process
     child: Option<std::process::Child>,
     /// Shared buffer for received samples
@@ -46,10 +51,16 @@ struct ParecLoopback {
     reader_thread: Option<std::thread::JoinHandle<()>>,
 }
 
-impl ParecLoopback {
+impl ParecCapture {
     fn new(source: String) -> Self {
+        Self::skipping(source, 0)
+    }
+
+    /// Capture `source`, dropping its first `skip` samples.
+    fn skipping(source: String, skip: usize) -> Self {
         Self {
             source,
+            skip,
             child: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             reader_thread: None,
@@ -78,10 +89,11 @@ impl ParecLoopback {
             .ok_or_else(|| AudioError::Connection("Failed to capture parec stdout".to_string()))?;
 
         self.child = Some(child);
-        tracing::info!("Loopback capture started via parec: {}", self.source);
+        tracing::info!("Capture started via parec: {}", self.source);
 
         // Spawn reader thread
         let buffer = Arc::clone(&self.buffer);
+        let mut skip = self.skip;
         self.reader_thread = Some(std::thread::spawn(move || {
             use std::io::Read;
             let mut raw_buf = [0u8; 4096]; // 1024 f32 samples
@@ -104,8 +116,10 @@ impl ParecLoopback {
                                 samples.push(sample);
                             }
                         }
+                        let dropped = skip.min(samples.len());
+                        skip -= dropped;
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend(samples);
+                            buf.extend(&samples[dropped..]);
                         }
                     }
                     Err(_) => break,
@@ -138,18 +152,26 @@ impl ParecLoopback {
     }
 }
 
-impl Drop for ParecLoopback {
+impl Drop for ParecCapture {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
+/// Where the microphone is recorded from.
+enum MicCapture {
+    /// The configured device, via cpal/ALSA
+    Cpal(CpalCapture),
+    /// A PipeWire/PulseAudio source, via parec (the echo canceller's)
+    Parec(ParecCapture),
+}
+
 /// Dual audio capture for mic + loopback
 pub struct DualCapture {
-    /// Microphone capture (via cpal/ALSA)
-    mic_capture: CpalCapture,
+    /// Microphone capture
+    mic_capture: MicCapture,
     /// Loopback capture (via parec subprocess)
-    loopback: Option<ParecLoopback>,
+    loopback: Option<ParecCapture>,
     /// Sample counter for timestamps
     sample_counter: u64,
 }
@@ -160,14 +182,41 @@ impl DualCapture {
         mic_config: &AudioConfig,
         loopback_device: Option<&str>,
     ) -> Result<Self, AudioError> {
-        let mic_capture = CpalCapture::new(mic_config)?;
+        Self::with_mic(
+            MicCapture::Cpal(CpalCapture::new(mic_config)?),
+            loopback_device,
+        )
+    }
 
+    /// Like [`DualCapture::new`], recording the mic from the PipeWire or
+    /// PulseAudio source `mic_source` (the echo canceller's) with parec.
+    /// The first `delay_ms` of it are dropped: the canceller delivers the
+    /// mic that much later than the loopback, which comes straight from the
+    /// sink's monitor, and dropping it puts both tracks on one timeline.
+    pub fn with_mic_source(
+        mic_source: &str,
+        loopback_device: Option<&str>,
+        delay_ms: u32,
+    ) -> Result<Self, AudioError> {
+        Self::with_mic(
+            MicCapture::Parec(ParecCapture::skipping(
+                mic_source.to_string(),
+                16 * delay_ms as usize,
+            )),
+            loopback_device,
+        )
+    }
+
+    fn with_mic(
+        mic_capture: MicCapture,
+        loopback_device: Option<&str>,
+    ) -> Result<Self, AudioError> {
         let loopback = match loopback_device {
             Some("disabled") | Some("") | None => None,
             Some("auto") => match Self::find_monitor_source() {
                 Some(source) => {
                     tracing::info!("Auto-detected loopback source: {}", source);
-                    Some(ParecLoopback::new(source))
+                    Some(ParecCapture::new(source))
                 }
                 None => {
                     tracing::warn!("No monitor source found, using mic only");
@@ -176,7 +225,7 @@ impl DualCapture {
             },
             Some(device) => {
                 tracing::info!("Using configured loopback source: {}", device);
-                Some(ParecLoopback::new(device.to_string()))
+                Some(ParecCapture::new(device.to_string()))
             }
         };
 
@@ -213,7 +262,12 @@ impl DualCapture {
 
     /// Start both captures
     pub async fn start(&mut self) -> Result<(), AudioError> {
-        let _mic_rx = self.mic_capture.start().await?;
+        match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => {
+                let _mic_rx = mic.start().await?;
+            }
+            MicCapture::Parec(ref mut mic) => mic.start()?,
+        }
 
         if let Some(ref mut loopback) = self.loopback {
             if let Err(e) = loopback.start() {
@@ -227,7 +281,14 @@ impl DualCapture {
 
     /// Stop both captures and return all samples
     pub async fn stop(&mut self) -> Result<DualSamples, AudioError> {
-        let mic_samples = self.mic_capture.stop().await?;
+        let mic_samples = match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => mic.stop().await?,
+            MicCapture::Parec(ref mut mic) => {
+                let samples = mic.get_samples();
+                mic.stop();
+                samples
+            }
+        };
 
         let loopback_samples = if let Some(ref mut loopback) = self.loopback {
             let samples = loopback.get_samples();
@@ -245,7 +306,10 @@ impl DualCapture {
 
     /// Get current samples without stopping (for continuous recording)
     pub async fn get_samples(&mut self) -> DualSamples {
-        let mic = self.mic_capture.get_samples().await;
+        let mic = match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => mic.get_samples().await,
+            MicCapture::Parec(ref mic) => mic.get_samples(),
+        };
 
         let loopback = if let Some(ref loopback) = self.loopback {
             loopback.get_samples()

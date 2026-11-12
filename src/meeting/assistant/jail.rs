@@ -7,9 +7,11 @@
 //! `~/.ssh` or `~/.config` into the model's context. So codex only ever runs
 //! under bubblewrap, where it sees:
 //!
-//! - read-only: `/usr` and the host's `/bin`, `/lib*` layout; the few `/etc`
-//!   entries name resolution and TLS need; the directory holding the codex
-//!   binary; and `auth.json` from its CODEX_HOME;
+//! - read-only: `/usr` and the host's `/bin`, `/lib*` layout; on NixOS,
+//!   `/nix/store` and `/run/current-system/sw`, where every program, its
+//!   loader and its libraries live; the few `/etc` entries name resolution
+//!   and TLS need; the directory holding the codex binary; and `auth.json`
+//!   from its CODEX_HOME;
 //! - an empty HOME (a fresh CODEX_HOME inside it for codex's own logs and
 //!   state) and a tmpfs `/tmp` with an empty working directory, all of it
 //!   discarded when codex exits;
@@ -63,6 +65,17 @@ const ETC: &[&str] = &[
     "/etc/pki",
 ];
 
+/// NixOS keeps every program, its dynamic loader and its libraries in the
+/// store, and the system profile's tools under `/run/current-system/sw`.
+/// Bound when present, so a Nix-installed codex and the commands it runs
+/// resolve inside the jail. Neither holds user data.
+const NIX_STORE: &str = "/nix/store";
+const NIX_SYSTEM_SW: &str = "/run/current-system/sw";
+
+/// The jail's PATH. On NixOS the system profile's bin is appended, since
+/// /usr/bin and /bin hold only `env` and `sh` there.
+const JAIL_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
 /// Everything needed to run codex jailed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexJail {
@@ -110,12 +123,17 @@ pub fn real_codex(found: &Path, run: &dyn Fn(&Path, &[&str]) -> Option<String>) 
             }
         }
     }
-    // A script with a system interpreter runs as-is.
+    // A script with a system interpreter runs as-is. On NixOS that
+    // interpreter lives in the store or the system profile (a makeWrapper
+    // launcher, for one), both of which the jail binds.
     let head = std::fs::read(&canonical).ok()?;
     let first = head.split(|b| *b == b'\n').next().unwrap_or_default();
     let first = String::from_utf8_lossy(first);
     let interp = first.strip_prefix("#!")?.split_whitespace().next()?;
-    (interp.starts_with("/usr/") || interp.starts_with("/bin/")).then_some(canonical)
+    ["/usr/", "/bin/", "/nix/store/", "/run/current-system/sw/"]
+        .iter()
+        .any(|prefix| interp.starts_with(prefix))
+        .then_some(canonical)
 }
 
 /// Set up the jail for the codex found at `found`, or say why it can't be.
@@ -151,6 +169,19 @@ impl CodexJail {
     /// bwrap's arguments: the jail, then `codex_args` for the program.
     /// `out_dir` is bound writable at [`JAIL_OUT`].
     pub fn args(&self, codex_args: &[String], out_dir: &Path) -> Vec<String> {
+        self.args_with(codex_args, out_dir, &|p| p.exists())
+    }
+
+    /// [`Self::args`], with `exists` deciding whether the NixOS paths are
+    /// present, so tests need not depend on the host's layout.
+    fn args_with(
+        &self,
+        codex_args: &[String],
+        out_dir: &Path,
+        exists: &dyn Fn(&Path) -> bool,
+    ) -> Vec<String> {
+        let nix_store = exists(Path::new(NIX_STORE));
+        let nix_system_sw = exists(Path::new(NIX_SYSTEM_SW));
         let mut a: Vec<String> = Vec::new();
         let mut push = |items: &[&str]| a.extend(items.iter().map(|s| s.to_string()));
         push(&[
@@ -180,6 +211,12 @@ impl CodexJail {
                 Err(_) => {}
             }
         }
+        if nix_store {
+            push(&["--ro-bind", NIX_STORE, NIX_STORE]);
+        }
+        if nix_system_sw {
+            push(&["--ro-bind", NIX_SYSTEM_SW, NIX_SYSTEM_SW]);
+        }
         for etc in ETC {
             if Path::new(etc).exists() {
                 push(&["--ro-bind", etc, etc]);
@@ -203,6 +240,11 @@ impl CodexJail {
         }
         let out = out_dir.display().to_string();
         push(&["--bind", &out, JAIL_OUT]);
+        let path = if nix_system_sw {
+            format!("{JAIL_PATH}:{NIX_SYSTEM_SW}/bin")
+        } else {
+            JAIL_PATH.to_string()
+        };
         push(&[
             "--setenv",
             "HOME",
@@ -212,7 +254,7 @@ impl CodexJail {
             JAIL_CODEX_HOME,
             "--setenv",
             "PATH",
-            "/usr/local/bin:/usr/bin:/bin",
+            &path,
             "--setenv",
             "NO_COLOR",
             "1",
@@ -284,5 +326,83 @@ mod tests {
         let home_binds: Vec<&String> = a.iter().filter(|s| s.starts_with("/home/u/")).collect();
         assert_eq!(home_binds, vec!["/home/u/.codex/auth.json"]);
         assert!(!a.iter().any(|s| s == "/"));
+    }
+
+    fn sample_jail() -> CodexJail {
+        CodexJail {
+            bwrap: "/usr/bin/bwrap".into(),
+            program: "/nix/store/abc-codex/bin/codex".into(),
+            install_dir: "/nix/store/abc-codex/bin".into(),
+            auth: Some("/home/u/.codex/auth.json".into()),
+        }
+    }
+
+    fn binds(a: &[String], path: &str) -> bool {
+        a.windows(3)
+            .any(|w| w[0] == "--ro-bind" && w[1] == path && w[2] == path)
+    }
+
+    fn jail_path(a: &[String]) -> String {
+        a.windows(3)
+            .find(|w| w[0] == "--setenv" && w[1] == "PATH")
+            .map(|w| w[2].clone())
+            .expect("PATH is set")
+    }
+
+    #[test]
+    fn nix_paths_are_bound_only_when_they_exist() {
+        let jail = sample_jail();
+        let out = Path::new("/tmp/x/out");
+        let args = |present: &'static [&'static str]| {
+            jail.args_with(&["exec".into()], out, &move |p: &Path| {
+                present.iter().any(|q| p == Path::new(q))
+            })
+        };
+
+        let nixos = args(&[NIX_STORE, NIX_SYSTEM_SW]);
+        assert!(binds(&nixos, NIX_STORE));
+        assert!(binds(&nixos, NIX_SYSTEM_SW));
+        assert_eq!(
+            jail_path(&nixos),
+            "/usr/local/bin:/usr/bin:/bin:/run/current-system/sw/bin"
+        );
+
+        let store_only = args(&[NIX_STORE]);
+        assert!(binds(&store_only, NIX_STORE));
+        assert!(!store_only.iter().any(|s| s.starts_with(NIX_SYSTEM_SW)));
+        assert_eq!(jail_path(&store_only), JAIL_PATH);
+
+        let fhs = args(&[]);
+        assert!(!fhs.iter().any(|s| s == NIX_STORE));
+        assert!(!fhs.iter().any(|s| s.starts_with(NIX_SYSTEM_SW)));
+        assert_eq!(jail_path(&fhs), JAIL_PATH);
+
+        // The existing binds stay, and HOME is never bound, on either layout.
+        for a in [&nixos, &fhs] {
+            assert!(binds(a, "/usr"));
+            assert!(binds(a, "/nix/store/abc-codex/bin"));
+            assert!(a
+                .windows(3)
+                .any(|w| w[0] == "--bind" && w[1] == "/tmp/x/out" && w[2] == JAIL_OUT));
+            let home: Vec<&String> = a.iter().filter(|s| s.starts_with("/home/u")).collect();
+            assert_eq!(home, vec!["/home/u/.codex/auth.json"]);
+        }
+    }
+
+    #[test]
+    fn a_nix_store_interpreter_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("codex");
+        std::fs::write(
+            &wrapper,
+            "#! /nix/store/abc-bash-5.3/bin/bash -e\nexec /nix/store/abc-codex/bin/.codex-wrapped \"$@\"\n",
+        )
+        .unwrap();
+        let canonical = std::fs::canonicalize(&wrapper).unwrap();
+        assert_eq!(real_codex(&wrapper, &no_run), Some(canonical));
+
+        let other = dir.path().join("other");
+        std::fs::write(&other, "#!/opt/weird/sh\n").unwrap();
+        assert_eq!(real_codex(&other, &no_run), None);
     }
 }

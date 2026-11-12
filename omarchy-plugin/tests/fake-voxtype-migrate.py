@@ -22,6 +22,12 @@ state["gguf_model"] adds the generic GGUF engine with that model installed, and
 state["engine"] names the configured engine ("parakeet" when absent).
 state["installed"] lists the Parakeet models on disk (default: the configured
 one). `config select-model` and `config set parakeet.model` update the state.
+state["extra_engines"] maps further engines ("omnilingual", "dolphin", ...) to
+their installed models: each gets an engine choice, a compiled `info engines`
+row, a `<engine>.model` schema key and an `info models` catalog, and
+`config select-model` records its choice in state["extra_models"]. Like the
+real CLI, select-model accepts every engine `config set engine` offers and
+refuses `--language` for anything but gguf.
 
 state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
 the stderr it should fail with (exit 1).
@@ -91,6 +97,9 @@ def status(state):
 
 
 FRONTENDS = ["auto", "gtk4", "native", "quickshell"]
+# config_set::ENGINE_NAMES: what the real select-model accepts.
+SELECTABLE = ("whisper", "parakeet", "moonshine", "sensevoice", "paraformer", "dolphin", "omnilingual",
+              "cohere", "gguf", "openvino")
 SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads"}
 
 
@@ -123,8 +132,9 @@ def schema(state):
     if not state.get("legacy_schema"):
         model_type["onnx_model_only"] = True
     engine = state.get("engine", "parakeet")
+    extra = state.get("extra_engines", {})
     choices = ["whisper", "parakeet"] + (["gguf"] if "gguf_model" in state else []) \
-        + (["cohere"] if "cohere_models" in state else [])
+        + (["cohere"] if "cohere_models" in state else []) + list(extra)
     keys = [
         {"key": "engine", "type": "enum", "choices": choices, "section": "Engine",
          "label": "Transcription engine", "description": "", "value": engine,
@@ -139,6 +149,11 @@ def schema(state):
         keys.append({"key": "cohere.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
                      "label": "Model", "description": "", "value": cohere, "file_value": cohere,
                      "engine": "cohere", "compiled": True, "restart_required": True})
+    for name, installed in extra.items():
+        chosen = state.get("extra_models", {}).get(name, installed[0])
+        keys.append({"key": name + ".model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+                     "label": "Model", "description": "", "value": chosen, "file_value": chosen,
+                     "engine": name, "compiled": True, "restart_required": True})
     if "gguf_model" in state:
         keys.append({"key": "gguf.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
                      "label": "Model", "description": "", "value": state["gguf_model"],
@@ -189,6 +204,8 @@ def models(state):
     if "cohere_models" in state:
         engines["cohere"] = {"models": [{"name": n, "installed": True, "languages": ["en"]}
                                         for n in state["cohere_models"]]}
+    for name, installed in state.get("extra_engines", {}).items():
+        engines[name] = {"models": [{"name": n, "installed": True, "languages": []} for n in installed]}
     return {"engines": engines}
 
 
@@ -265,6 +282,7 @@ def main():
             engines.append({"name": "gguf", "compiled": True})
         if "cohere_models" in state:
             engines.append({"name": "cohere", "compiled": True})
+        engines += [{"name": name, "compiled": True} for name in state.get("extra_engines", {})]
         print(json.dumps(engines))
     elif args[:3] == ["info", "devices", "--json"]:
         print(json.dumps([{"name": "Built-in Microphone", "default": True}]))
@@ -315,11 +333,14 @@ def main():
         print(json.dumps({"class": "idle"}))
     elif args[:2] == ["config", "select-model"] and len(args) >= 4:
         engine, model = args[2], args[3]
-        if engine not in ("gguf", "parakeet", "cohere") or ("--language" in args and engine != "gguf"):
+        if engine not in SELECTABLE or ("--language" in args and engine != "gguf"):
             print("error: select-model rejected " + " ".join(args[2:]), file=sys.stderr)
             return 2
         state["engine"] = engine
-        state[{"gguf": "gguf_model", "cohere": "cohere_model"}.get(engine, "model")] = model
+        if engine in state.get("extra_engines", {}):
+            state.setdefault("extra_models", {})[engine] = model
+        else:
+            state[{"gguf": "gguf_model", "cohere": "cohere_model"}.get(engine, "model")] = model
         save(state)
     elif args[:3] == ["config", "set", "parakeet.model"] and len(args) == 4:
         state["model"] = args[3]
