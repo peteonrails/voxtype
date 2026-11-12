@@ -904,6 +904,13 @@ def actions(state, args):
         print(json.dumps({"connected": True, "service": "todoist"}))
         return 0
     meeting = resolve(state, args[0])
+    # A past meeting's items come from its saved summary.
+    meta = os.path.join(past_dir(meeting), "metadata.json")
+    if os.path.exists(meta) and "actions" not in state:
+        with open(meta) as f:
+            saved = (json.load(f).get("summary") or {}).get("action_items", [])
+        state["actions"] = [{"id": "p%d" % i, "text": a["description"], "owner": a.get("assignee"), "due": None,
+                             "source_ms": None, "sent": {}} for i, a in enumerate(saved)]
     items = state.setdefault("actions", json.loads(json.dumps(DEFAULT_ACTIONS)))
     if "--send" in args:
         dest = args[args.index("--send") + 1]
