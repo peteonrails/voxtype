@@ -87,6 +87,7 @@ impl Scratch {
                         assignee: Some("Dana".into()),
                         due_date: None,
                         completed: false,
+                        ..Default::default()
                     }],
                     decisions: vec!["Ship Friday".into()],
                     chapters: vec![],

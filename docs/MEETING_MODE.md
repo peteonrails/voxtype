@@ -12,6 +12,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Pausing and Resuming](#pausing-and-resuming)
   - [Checking Status](#checking-status)
 - [Live Meeting View](#live-meeting-view)
+  - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
 - [Meeting Detection](#meeting-detection)
   - [How calls are recognized](#how-calls-are-recognized)
   - [When it prompts](#when-it-prompts)
@@ -32,6 +33,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Deleting Meetings](#deleting-meetings)
   - [Recovering an Interrupted Meeting](#recovering-an-interrupted-meeting)
 - [Meeting Audio](#meeting-audio)
+  - [Checking the Audio](#checking-the-audio)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
   - [Importing a Recording](#importing-a-recording)
@@ -39,6 +41,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [The Meeting Assistant](#the-meeting-assistant)
   - [Asking About a Meeting](#asking-about-a-meeting)
   - [AI Summarization](#ai-summarization)
+  - [Action Items](#action-items)
   - [The Meeting Assistant and Consent](#the-meeting-assistant-and-consent)
   - [Privacy: Where Transcripts Go](#privacy-where-transcripts-go)
 - [Automation](#automation)
@@ -279,6 +282,34 @@ VOXTYPE_MEETING_VIEW=terminal voxtype meeting view
 The deb and rpm packages install the window as `/usr/lib/voxtype/voxtype-meetings-gtk4`; it needs GTK 4 (`libgtk-4-1` on Debian and Ubuntu, `gtk4` on Fedora and Arch) but not gtk4-layer-shell.
 
 The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#the-live-feed-meetingsock). It does not open over an open Voxtype Settings panel.
+
+### Watching a Meeting in the Terminal
+
+`voxtype meeting watch` shows the running meeting in the terminal, on any desktop and over SSH:
+
+```bash
+voxtype meeting watch
+```
+
+- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time.
+- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
+- The side panel lists the speakers, merged by the names you gave them, and the summary once it is written.
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause or resume |
+| `s` | Stop (asks first) |
+| `r` | Move the selected line to another speaker: pick one, or "New speaker…" and type a name (`meeting reassign`) |
+| `n` | Add a note to the selected line (`meeting annotate`) |
+| `a` | Ask the assistant about the meeting; the answer streams into a pane at the bottom (`meeting ask`) |
+| `Esc` | Close the answer, or go to the list of meetings |
+| `q` | Quit |
+
+Each key runs the matching `voxtype meeting` command, so it behaves exactly as typing it would, including the assistant's consent: if transcripts have not been allowed to go to an agent yet, the answer pane says how to allow it.
+
+With no meeting running, `watch` lists recent meetings with their length, speaker count and whether they have a summary. Enter opens one (ended meetings still take `r`, `n` and `a`), Esc goes back, and a meeting that starts meanwhile appears at the top of the list. If the daemon restarts, the view says it is reconnecting and catches up when it is back.
+
+For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md#the-live-feed-meetingsock)), reconnecting on its own; every connection starts with a `hello` snapshot. `voxtype meeting watch --levels` prints the microphone and loopback levels instead, about ten times a second while a meeting records, for a level meter; add both flags for everything.
 
 ---
 
@@ -595,7 +626,7 @@ Permanently deletes the meeting: its record, its folder and everything in it, au
 
 ### Recovering an Interrupted Meeting
 
-A meeting is saved while it records: the transcript after every chunk, and the audio as it arrives when `retain_audio` is on. If the daemon crashes, is killed, or the computer loses power mid-meeting, all of that is still in the meeting's folder, but the meeting never ends: it has no end time, no summary, and `post_meeting_command` never ran. The next time the daemon starts it marks such meetings `interrupted`, and the meeting view offers to finish them.
+A meeting is saved while it records: the transcript after every chunk, and the audio as it arrives when `retain_audio` is on. If the daemon crashes, is killed, or the computer loses power mid-meeting, all of that is still in the meeting's folder, but the meeting never ends: it has no end time, no summary, and `post_meeting_command` never ran. The next time the daemon starts it marks such meetings `interrupted`, the meeting view offers to finish them, and a notification says "A meeting didn't finish". For one meeting it has a **Finish** button, which finishes it as below, and an **Open** button for the meeting view; for several, **Open**. It comes once per meeting, not on every restart, and follows [`status_notifications`](CONFIGURATION.md#status_notifications): by default it is skipped while the meeting view is on screen, since the view shows the same.
 
 From the command line:
 
@@ -615,6 +646,21 @@ Finishing first transcribes any audio the daemon kept but had not transcribed ye
 ---
 
 ## Meeting Audio
+
+### Checking the Audio
+
+Before a call, check that voxtype hears both sides:
+
+```bash
+voxtype meeting soundcheck                # 30 seconds of meters; Ctrl+C stops
+voxtype meeting soundcheck --seconds 60
+```
+
+It opens the meeting's microphone and loopback the way a meeting would (the same devices, and on speakers the same echo canceller), records and transcribes nothing, and shows a meter for each. Speak: the mic meter should move. Play something on the computer: the loopback meter should move, and with speakers the mic meter should stay low, because the echo canceller takes the speakers out of the mic. The first line says which echo handling the next meeting will use.
+
+While the daemon runs the check, the meeting views show its meters too: `voxtype meeting watch` beside **Meetings** ("Sound check  mic ▮▮▮▯▯ call ▮▮▮▮▯") and the GTK4 window in its title bar, under **Sound check**, while no meeting records.
+
+During a meeting the levels are already live in `voxtype meeting watch --levels` and the meeting view, so the sound check refuses to run then. Starting a meeting ends a sound check.
 
 ### Keeping the Audio
 
@@ -747,6 +793,34 @@ The summary is saved with the meeting: `summary.md` in the meeting folder, `meta
 The summary comes from the [meeting assistant](#the-meeting-assistant-and-consent): the allowed agent, or the local model. The older Ollama and API summarizers (`[meeting.summary] backend = "local"` or `"remote"`) are used only while no agent is allowed; see [Which backend answers](#which-backend-answers).
 
 **Summary at stop.** Once you have allowed an agent, each meeting is summarized when it stops. This happens in the background after the transcript is saved: the meeting socket reports `summarizing` and then `summary_ready` (see [INTEGRATIONS.md](INTEGRATIONS.md#status)). If the summary fails, the meeting and its transcript are unaffected; the failure is logged and reported on the socket, and `voxtype meeting summarize <id> --regenerate` retries it. Set `[meeting.summary] auto = false` to summarize only by hand, or `auto = true` to summarize at stop with the local model or older summarizers too.
+
+### Action Items
+
+A summary lists the meeting's action items: what to do, who took it on (a speaker name), the deadline if someone said one, and where in the meeting it came up. `voxtype meeting actions` lists them and sends them on:
+
+```bash
+voxtype meeting actions latest                           # List them
+voxtype meeting actions latest --mine                    # Only yours
+voxtype meeting actions latest --send todoist            # Add every item to Todoist
+voxtype meeting actions latest --send todoist --pick 1,3 # Only items 1 and 3
+voxtype meeting actions latest --send reminder --in 30   # Omarchy reminders in 30 minutes
+voxtype meeting actions latest --json                    # For scripts and the meeting view
+```
+
+```
+Action items from "Release sync":
+   1. Tag the release (Dana, due Fri Nov 13, at 01:05)
+   2. Write the notes (Pete (you), due Thu Nov 12 15:00)
+   3. Book the room (due "next week")  [sent: Todoist]
+```
+
+A deadline is only kept when someone said it, and voxtype turns what was said into a day counted from the meeting's date: "Friday" in a Thursday meeting is the next day, "by end of day" is the meeting's day, "November 20" and "next Friday" are what you would expect. Something that names no day ("next week", "soon") stays as it was said. An item is yours when its owner is `You` or your [name](#your-name) (`[meeting] my_name`).
+
+Every item is sent unless you narrow it with `--pick` (item numbers from the list, such as `1,3` or `2-4`) or `--mine`. Each send is remembered per item, so sending again skips what already went and never makes a second task; `--resend` sends it again anyway. An item that fails is reported and can simply be sent again. Items come from the summary, so a meeting without one has none: summarize it first with `voxtype meeting summarize`.
+
+**Todoist.** Each item becomes a task in your Inbox, or in `[meeting.actions] todoist_project_id` (or `--project`). The task is the item's text, with the owner added when it is someone else's, due on the resolved day (and time, when one was said). Its description names the meeting, the date and the moment the item came up, and the command that opens the meeting. Connect your Todoist account once with `voxtype meeting todoist connect`; voxtype keeps the access token in `~/.local/state/voxtype/todoist.json`, readable only by you, and never in `config.toml`.
+
+**Omarchy reminders.** On Omarchy, `--send reminder` sets an `omarchy-reminder` notification for each item. It goes off after `[meeting.actions] remind_in_mins` (60 by default, or `--in`), or at the time said when that is later today ("by 3pm"). Omarchy's reminders are timed notifications, not a task list, so they suit "remind me about this later today"; Todoist is the place to keep tasks. Without `omarchy-reminder` installed, this option is not offered.
 
 ### The Meeting Assistant and Consent
 

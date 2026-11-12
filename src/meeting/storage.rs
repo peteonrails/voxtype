@@ -108,6 +108,16 @@ fn speaker_list(speakers: &[String]) -> String {
     }
 }
 
+/// An action item sent somewhere, from [`MeetingStorage::action_sends`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActionSend {
+    pub item_key: String,
+    pub target: String,
+    pub remote_id: Option<String>,
+    /// Unix seconds
+    pub sent_at: i64,
+}
+
 /// How a meeting's per-line edits fared when its transcript was replaced.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SegmentEditCarry {
@@ -291,6 +301,18 @@ impl MeetingStorage {
                 summary_json TEXT NOT NULL,
                 generated_by TEXT,
                 generated_at INTEGER NOT NULL
+            );
+
+            -- Action items sent to Todoist or a reminder, so sending again
+            -- does not make a second task. Keyed by the item's text, which
+            -- survives a regenerated summary that keeps the item.
+            CREATE TABLE IF NOT EXISTS action_item_sends (
+                meeting_id TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                target TEXT NOT NULL,
+                remote_id TEXT,
+                sent_at INTEGER NOT NULL,
+                PRIMARY KEY (meeting_id, item_key, target)
             );
             "#,
         )?;
@@ -500,6 +522,49 @@ impl MeetingStorage {
         super::search::index_summary(&self.conn, &meeting_id.to_string(), Some(summary))?;
         metadata.summary = Some(summary.clone());
         self.update_meeting(&metadata)
+    }
+
+    /// Record that the action item `item_key` was sent to `target`
+    /// ("todoist", "reminder"), with the ID it got there.
+    pub fn record_action_sent(
+        &self,
+        meeting_id: &MeetingId,
+        item_key: &str,
+        target: &str,
+        remote_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO action_item_sends \
+             (meeting_id, item_key, target, remote_id, sent_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                meeting_id.to_string(),
+                item_key,
+                target,
+                remote_id,
+                chrono::Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Where each of a meeting's action items was sent: item key, target,
+    /// the ID it got there, and when.
+    pub fn action_sends(&self, meeting_id: &MeetingId) -> Result<Vec<ActionSend>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT item_key, target, remote_id, sent_at FROM action_item_sends \
+             WHERE meeting_id = ?1 ORDER BY sent_at",
+        )?;
+        let rows = stmt
+            .query_map(params![meeting_id.to_string()], |row| {
+                Ok(ActionSend {
+                    item_key: row.get(0)?,
+                    target: row.get(1)?,
+                    remote_id: row.get(2)?,
+                    sent_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// The meeting's stored summary, if it has one.
@@ -922,6 +987,10 @@ impl MeetingStorage {
         )?;
         self.conn.execute(
             "DELETE FROM meeting_summaries WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM action_item_sends WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
         self.conn.execute(

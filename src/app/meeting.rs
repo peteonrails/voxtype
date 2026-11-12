@@ -384,6 +384,33 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Actions {
+            meeting_id,
+            send,
+            all: _,
+            pick,
+            mine,
+            resend,
+            remind_in,
+            project,
+            json,
+        } => {
+            let request = ActionsRequest {
+                meeting_id,
+                send,
+                pick,
+                mine,
+                resend,
+                remind_in: remind_in.unwrap_or(config.meeting.actions.remind_in_mins),
+                project: project.or_else(|| config.meeting.actions.todoist_project_id.clone()),
+                json,
+            };
+            if let Err(e) = run_actions(config, &meeting_config.storage, request) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+
         MeetingAction::Share {
             meeting_id,
             transcript,
@@ -1174,8 +1201,16 @@ pub(crate) async fn run_meeting_command(
             run_ask(config, &meeting_config, args).await?;
         }
 
-        MeetingAction::Watch { json } => {
-            super::meeting_watch::run_watch(json, &meeting_config).await?;
+        MeetingAction::Watch { json, levels } => {
+            super::meeting_watch::run_watch(json, levels, &meeting_config).await?;
+        }
+
+        MeetingAction::Soundcheck {
+            seconds,
+            json,
+            stop,
+        } => {
+            super::meeting_soundcheck::run_soundcheck(config, seconds, json, stop).await?;
         }
 
         MeetingAction::Assistant { action } => {
@@ -1500,6 +1535,216 @@ fn format_ms(ms: u64) -> String {
     } else {
         format!("{m}:{s:02}")
     }
+}
+
+/// `voxtype meeting actions`, after config has filled in the defaults.
+struct ActionsRequest {
+    meeting_id: String,
+    send: Option<String>,
+    pick: Option<String>,
+    mine: bool,
+    resend: bool,
+    remind_in: u32,
+    project: Option<String>,
+    json: bool,
+}
+
+fn run_actions(
+    config: &config::Config,
+    storage_config: &meeting::StorageConfig,
+    req: ActionsRequest,
+) -> anyhow::Result<()> {
+    use meeting::actions::{self, reminder::Reminders, todoist, Selection, Target};
+    let storage = meeting::MeetingStorage::open(storage_config.clone())?;
+    let id = storage.resolve_meeting_id(&req.meeting_id)?;
+    let listing = actions::list(&storage, &id, config.meeting.my_name.as_deref())?;
+    let reminders = Reminders::default();
+    let store = todoist::TokenStore::new(todoist::TokenStore::default_path());
+    let connected = matches!(store.load(), Ok(Some(_)));
+    let short = &listing.meeting_id[..8];
+
+    let selection = Selection {
+        pick: match &req.pick {
+            Some(p) => actions::parse_pick(p, listing.items.len()).map_err(anyhow::Error::msg)?,
+            None => Vec::new(),
+        },
+        mine: req.mine,
+        resend: req.resend,
+    };
+
+    let Some(target) = req.send.as_deref() else {
+        if req.json {
+            let mut out = serde_json::to_value(&listing)?;
+            let items = out["items"].as_array_mut().expect("items");
+            for (item, listed) in items.iter_mut().zip(&listing.items) {
+                if !selection.pick.is_empty() && !selection.pick.contains(&listed.number)
+                    || selection.mine && !listed.mine
+                {
+                    *item = serde_json::Value::Null;
+                }
+            }
+            items.retain(|i| !i.is_null());
+            out["todoist_connected"] = connected.into();
+            out["reminder_available"] = reminders.available().into();
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            return Ok(());
+        }
+        if !listing.summarized {
+            println!(
+                "\"{}\" has no summary yet, so no action items. Summarize it with:\n  voxtype meeting summarize {short}",
+                listing.title
+            );
+            return Ok(());
+        }
+        let shown = listing.select(&selection);
+        if shown.is_empty() {
+            println!("No action items in \"{}\".", listing.title);
+            return Ok(());
+        }
+        println!("Action items from \"{}\":", listing.title);
+        for item in shown {
+            let mut details: Vec<String> = Vec::new();
+            if let Some(owner) = &item.owner {
+                details.push(if item.mine {
+                    format!("{owner} (you)")
+                } else {
+                    owner.clone()
+                });
+            }
+            match (item.due, &item.due_said) {
+                (Some(d), _) => details.push(format!(
+                    "due {}{}",
+                    d.format("%a %b %-d"),
+                    item.due_time
+                        .as_deref()
+                        .map(|t| format!(" {t}"))
+                        .unwrap_or_default()
+                )),
+                (None, Some(said)) => details.push(format!("due \"{said}\"")),
+                _ => {}
+            }
+            if let Some(ms) = item.source_ms {
+                details.push(format!("at {}", meeting::assistant::prompt::ts(ms)));
+            }
+            let sent: Vec<&str> = item
+                .sent
+                .keys()
+                .map(|t| {
+                    if t == "todoist" {
+                        "Todoist"
+                    } else {
+                        "reminder"
+                    }
+                })
+                .collect();
+            println!(
+                "  {:>2}. {}{}{}",
+                item.number,
+                item.text,
+                if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", details.join(", "))
+                },
+                if sent.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [sent: {}]", sent.join(", "))
+                }
+            );
+        }
+        let mut hints = Vec::new();
+        if connected {
+            hints.push(format!("voxtype meeting actions {short} --send todoist"));
+        }
+        if reminders.available() {
+            hints.push(format!("voxtype meeting actions {short} --send reminder"));
+        }
+        if !hints.is_empty() {
+            println!("\nSend them with:\n  {}", hints.join("\n  "));
+        }
+        return Ok(());
+    };
+
+    let target =
+        Target::parse(target).ok_or_else(|| anyhow::anyhow!("Unknown target '{target}'"))?;
+    if !listing.summarized {
+        anyhow::bail!(
+            "\"{}\" has no summary yet, so no action items. Summarize it with:\n  voxtype meeting summarize {short}",
+            listing.title
+        );
+    }
+    let client;
+    let mut senders = actions::Senders {
+        todoist: None,
+        reminders: None,
+        project_id: req.project.clone(),
+        remind_in_mins: req.remind_in,
+        now: chrono::Local::now().naive_local(),
+    };
+    match target {
+        Target::Todoist => {
+            if !connected {
+                anyhow::bail!("{}", todoist::TodoistError::NotConnected);
+            }
+            client = todoist::HttpTodoist::new(todoist::API_BASE, store);
+            senders.todoist = Some(&client);
+        }
+        Target::Reminder => {
+            if !reminders.available() {
+                anyhow::bail!(
+                    "omarchy-reminder is not installed, so reminders are not available here. Send to Todoist instead:\n  voxtype meeting actions {short} --send todoist"
+                );
+            }
+            senders.reminders = Some(&reminders);
+        }
+    }
+    let items = listing.select(&selection);
+    if items.is_empty() {
+        anyhow::bail!("No action items to send.");
+    }
+    let results = actions::send(&storage, &listing, &items, target, &senders, req.resend);
+    let failed = results.iter().filter(|r| r.status == "failed").count();
+    if req.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "meeting_id": listing.meeting_id,
+                "target": target.name(),
+                "results": results,
+            }))?
+        );
+    } else {
+        let place = if target == Target::Todoist {
+            "Todoist"
+        } else {
+            "reminders"
+        };
+        for r in &results {
+            match r.status {
+                "sent" => match r.minutes {
+                    Some(m) => println!("  {:>2}. {}: reminder in {m} min", r.number, r.text),
+                    None => println!("  {:>2}. {}: added", r.number, r.text),
+                },
+                "already_sent" => println!(
+                    "  {:>2}. {}: already sent (--resend sends it again)",
+                    r.number, r.text
+                ),
+                _ => eprintln!(
+                    "  {:>2}. {}: failed: {}",
+                    r.number,
+                    r.text,
+                    r.error.as_deref().unwrap_or("unknown error")
+                ),
+            }
+        }
+        let sent = results.iter().filter(|r| r.status == "sent").count();
+        println!("Sent {sent} of {} to {place}.", results.len());
+    }
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

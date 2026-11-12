@@ -22,6 +22,7 @@
 //! - **Phase 4 (v0.6.0):** Remote server sync for corporate deployments
 //! - **Phase 5 (v0.6.1):** AI summarization with action items
 
+pub mod actions;
 pub mod assistant;
 pub mod chunk;
 pub mod data;
@@ -32,6 +33,7 @@ pub mod events;
 pub mod export;
 pub mod hook;
 pub mod import;
+pub mod levels;
 pub mod manifest;
 pub mod meeting_recorder;
 pub mod my_name;
@@ -42,6 +44,7 @@ pub mod retained_audio;
 pub mod retranscribe;
 pub mod search;
 pub mod share;
+pub mod soundcheck;
 pub mod start;
 pub mod state;
 pub mod status_notice;

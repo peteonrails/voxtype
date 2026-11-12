@@ -693,6 +693,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("args");
         let exe = dir.path().join("fake-voxtype");
+        // write_script, not fs::write + chmod: exec'ing a file another
+        // test thread's fork still holds open for writing fails with
+        // ETXTBSY under parallel tests.
         crate::test_support::write_script(
             &exe,
             &format!("#!/bin/sh\nprintf '%s|' \"$@\" > '{}'\n", out.display()),

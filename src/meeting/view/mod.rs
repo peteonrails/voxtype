@@ -140,6 +140,13 @@ pub enum ViewEvent {
     },
     ImportProgress(ImportProgress),
     Levels(Levels),
+    Soundcheck {
+        state: String,
+        #[serde(default)]
+        echo_cancel: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -338,6 +345,9 @@ pub struct MeetingView {
     pub levels: Option<Levels>,
     /// When the latest levels arrived
     pub levels_at: Option<DateTime<Utc>>,
+    /// A sound check (`voxtype meeting soundcheck`) is running: its levels
+    /// feed the meters while no meeting records.
+    pub soundcheck: bool,
     /// Bumped on every change but levels, for viewers that cache rendering
     pub revision: u64,
 }
@@ -370,6 +380,7 @@ impl MeetingView {
             progress: None,
             levels: None,
             levels_at: None,
+            soundcheck: false,
             revision: 0,
         }
     }
@@ -400,6 +411,7 @@ impl MeetingView {
             progress: None,
             levels: None,
             levels_at: None,
+            soundcheck: false,
             revision: 0,
         };
         view.set_lines(meeting.transcript.segments.clone());
@@ -594,15 +606,45 @@ impl MeetingView {
                 }
             }
             ViewEvent::Levels(levels) => {
-                if levels.soundcheck || self.state != ViewState::Recording {
-                    return Change::Nothing;
-                }
-                if levels.meeting_id.is_some() && !self.is_ours(levels.meeting_id.as_deref()) {
+                // A sound check's levels while no meeting records; otherwise
+                // only the recording meeting's own.
+                let wanted = if levels.soundcheck {
+                    !self.state.is_live()
+                } else {
+                    self.state == ViewState::Recording
+                        && (levels.meeting_id.is_none()
+                            || self.is_ours(levels.meeting_id.as_deref()))
+                };
+                if !wanted {
                     return Change::Nothing;
                 }
                 self.levels = Some(levels);
                 self.levels_at = Some(Utc::now());
                 Change::Levels
+            }
+            ViewEvent::Soundcheck {
+                state,
+                echo_cancel,
+                message,
+            } => {
+                let running = state == "running";
+                if running && self.soundcheck {
+                    return Change::Nothing;
+                }
+                self.soundcheck = running;
+                if running {
+                    if !self.state.is_live() {
+                        self.echo_cancel = echo_cancel;
+                    }
+                } else {
+                    if self.levels.as_ref().is_some_and(|l| l.soundcheck) {
+                        self.levels = None;
+                    }
+                    if let Some(m) = message {
+                        self.last_error = Some(m);
+                    }
+                }
+                Change::State
             }
             ViewEvent::SpeakerRenamed { from, to } => {
                 // A name the new ID already has wins over the old ID's, as
@@ -1461,5 +1503,30 @@ mod tests {
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].name, "Ann");
         assert_eq!(chips[0].lines, 2);
+    }
+
+    #[test]
+    fn a_sound_check_feeds_the_meters_while_no_meeting_records() {
+        let mut v = MeetingView::live();
+        v.apply_line(r#"{"event":"hello","status":"idle","chunk_count":0,"segments":[]}"#);
+        assert_eq!(
+            v.apply_line(r#"{"event":"soundcheck","state":"running","seconds":30,"echo_cancel":"webrtc","mic":"voxtype_meeting_aec_source","loopback":true}"#),
+            Change::State
+        );
+        assert!(v.soundcheck);
+        assert_eq!(v.echo_cancel.as_deref(), Some("webrtc"));
+        let check = r#"{"event":"levels","meeting_id":null,"t_ms":100,"mic":-23.0,"mic_peak":-20.0,"loopback":-9.0,"loopback_peak":-6.0,"soundcheck":true}"#;
+        assert_eq!(v.apply_line(check), Change::Levels);
+        let l = v.current_levels(v.levels_at.unwrap()).unwrap();
+        assert_eq!((l.mic, l.loopback), (Some(-23.0), Some(-9.0)));
+        // Stopping drops the meter to silence and keeps an error.
+        v.apply_line(r#"{"event":"soundcheck","state":"stopped","reason":"error","message":"Audio connection failed"}"#);
+        assert!(!v.soundcheck && v.levels.is_none());
+        assert_eq!(v.last_error.as_deref(), Some("Audio connection failed"));
+
+        // While a meeting records, a sound check's levels are not its own.
+        let mut v = MeetingView::live();
+        v.apply_line(&hello("recording", "m1", vec![]));
+        assert_eq!(v.apply_line(check), Change::Nothing);
     }
 }

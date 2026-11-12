@@ -3740,7 +3740,7 @@ While meeting mode is off, the tray shows **Turn on meetings...**, and a notific
 **Default:** `"auto"`
 **Required:** No
 
-The Meeting Started, Paused, Resumed and Ended notifications. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
+The Meeting Started, Paused, Resumed and Ended notifications, and "A meeting didn't finish" when the daemon starts after it stopped mid-meeting. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
 
 - `"auto"` - Skip them while a meeting view is on screen, minimized or not, since it already shows the same thing.
 - `"always"` - Always show them.
@@ -4123,6 +4123,32 @@ Folder `voxtype meeting share --to file` saves into, and where an email share sa
 ```bash
 voxtype config set meeting.share.folder ~/Notes/Meetings
 ```
+
+---
+
+## [meeting.actions]
+
+Settings for `voxtype meeting actions --send`. See [Action Items](MEETING_MODE.md#action-items).
+
+### remind_in_mins
+
+**Type:** Integer (1 to 10080)
+**Default:** `60`
+**Required:** No
+
+Minutes until an Omarchy reminder for an action item goes off. An item due at a time later today ("by 3pm") goes off at that time instead. `--in` overrides it for one send.
+
+```bash
+voxtype config set meeting.actions.remind_in_mins 30
+```
+
+### todoist_project_id
+
+**Type:** String
+**Default:** none (the Inbox)
+**Required:** No
+
+The Todoist project action items are added to, by ID. The ID is the last part of the project's URL in Todoist's web app. `--project` overrides it for one send. The Todoist connection itself is not a setting: `voxtype meeting todoist connect` stores its token in `~/.local/state/voxtype/todoist.json`.
 
 ---
 

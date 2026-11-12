@@ -238,6 +238,8 @@ pub fn parse_summary_response(
         owner: Option<String>, // The assistant prompt asks for "owner"
         due_date: Option<String>,
         due: Option<String>, // Alternative name
+        /// The [mm:ss] where the item was given (the assistant prompt)
+        at: Option<serde_json::Value>,
     }
 
     #[derive(Deserialize)]
@@ -246,6 +248,15 @@ pub fn parse_summary_response(
         start_ms: Option<u64>,
         title: Option<String>,
     }
+
+    // "mm:ss", "[mm:ss]" or seconds.
+    let time = |v: serde_json::Value| match v {
+        serde_json::Value::String(s) => crate::meeting::assistant::prompt::parse_ts(
+            s.trim().trim_matches(|c| c == '[' || c == ']'),
+        ),
+        serde_json::Value::Number(n) => n.as_u64().map(|secs| secs * 1000),
+        _ => None,
+    };
 
     // "null" as a string is a model's way of saying no owner or no date.
     let present = |v: Option<String>| v.filter(|s| !s.trim().is_empty() && s.trim() != "null");
@@ -265,6 +276,8 @@ pub fn parse_summary_response(
                 assignee: present(item.owner.or(item.assignee)),
                 due_date: present(item.due_date.or(item.due)),
                 completed: false,
+                due_on: None,
+                source_ms: item.at.and_then(time),
             })
             .filter(|item| !item.description.trim().is_empty())
             .collect(),
@@ -274,13 +287,7 @@ pub fn parse_summary_response(
             .unwrap_or_default()
             .into_iter()
             .filter_map(|c| {
-                let start_ms = c.start_ms.or_else(|| match c.start? {
-                    serde_json::Value::String(s) => crate::meeting::assistant::prompt::parse_ts(
-                        s.trim_matches(|c| c == '[' || c == ']'),
-                    ),
-                    serde_json::Value::Number(n) => n.as_u64().map(|secs| secs * 1000),
-                    _ => None,
-                })?;
+                let start_ms = c.start_ms.or_else(|| time(c.start?))?;
                 Some(Chapter {
                     start_ms,
                     title: c.title.filter(|t| !t.trim().is_empty())?,
@@ -354,6 +361,7 @@ mod tests {
                 assignee: Some("Alice".to_string()),
                 due_date: None,
                 completed: false,
+                ..Default::default()
             }],
             decisions: vec!["Decision 1".to_string()],
             chapters: vec![Chapter {
@@ -406,5 +414,26 @@ mod tests {
         assert_eq!(config.backend, "disabled");
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.ollama_model, "llama3.2");
+    }
+
+    #[test]
+    fn action_items_carry_where_they_were_given() {
+        let response = r#"{"overview": "x", "action_items": [
+            {"description": "Tag", "owner": "Dana", "due": "Friday", "at": "01:05"},
+            {"description": "Notes", "at": "[1:02:03]"},
+            {"description": "Room", "at": 90},
+            {"description": "Lunch", "at": "soon"}]}"#;
+        let s = parse_summary_response(response, None).unwrap();
+        let at: Vec<Option<u64>> = s.action_items.iter().map(|a| a.source_ms).collect();
+        assert_eq!(at, [Some(65_000), Some(3_723_000), Some(90_000), None]);
+        assert_eq!(s.action_items[0].due_date.as_deref(), Some("Friday"));
+        assert_eq!(
+            s.action_items[0].due_on, None,
+            "resolved against the meeting later"
+        );
+        // Older summaries without the new fields still load.
+        let old: crate::meeting::data::ActionItem =
+            serde_json::from_str(r#"{"description": "Tag", "completed": false}"#).unwrap();
+        assert_eq!((old.due_on, old.source_ms), (None, None));
     }
 }

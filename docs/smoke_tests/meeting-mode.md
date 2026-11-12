@@ -434,6 +434,9 @@ Expected, with no meeting running:
   `summary.md` reads (headings, bullets). Ask still answers.
 - **Meetings** goes back to the list.
 
+In a terminal, `voxtype meeting soundcheck --seconds 20`: the title bar says
+**Sound check** and two meters move while you speak and while something plays.
+
 Type `GTK check` in the title field and press **Start meeting**. Talk for a
 minute.
 

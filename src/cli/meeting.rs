@@ -185,6 +185,67 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// List a meeting's action items, or send them to Todoist or as
+    /// Omarchy reminders
+    ///
+    /// The items come from the meeting's summary (`voxtype meeting
+    /// summarize`): what to do, who took it on, the deadline as said and
+    /// the day it resolves to, and where in the meeting it came up.
+    ///
+    /// --send todoist adds each item as a task (connect first with
+    /// `voxtype meeting todoist connect`). --send reminder sets an Omarchy
+    /// reminder for each, after [meeting.actions] remind_in_mins, or at the
+    /// time said when that is later today. Every item is sent unless you
+    /// narrow it with --pick or --mine, and an item already sent to that
+    /// place is skipped unless you add --resend.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting actions latest\n  \
+        voxtype meeting actions latest --send todoist\n  \
+        voxtype meeting actions latest --send todoist --pick 1,3\n  \
+        voxtype meeting actions latest --send reminder --mine --in 30\n  \
+        voxtype meeting actions latest --json")]
+    Actions {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Send the items: todoist or reminder
+        #[arg(
+            long,
+            value_name = "TARGET",
+            value_parser = clap::builder::PossibleValuesParser::new(["todoist", "reminder"])
+        )]
+        send: Option<String>,
+
+        /// Every item (the default)
+        #[arg(long, conflicts_with_all = ["pick", "mine"])]
+        all: bool,
+
+        /// Only these items, by number: 1,3 or 2-4
+        #[arg(long, value_name = "LIST")]
+        pick: Option<String>,
+
+        /// Only your own items: owned by You or [meeting] my_name
+        #[arg(long)]
+        mine: bool,
+
+        /// Send again items already sent there
+        #[arg(long)]
+        resend: bool,
+
+        /// For reminders: minutes until they go off, instead of
+        /// [meeting.actions] remind_in_mins
+        #[arg(long = "in", value_name = "MINUTES")]
+        remind_in: Option<u32>,
+
+        /// For Todoist: the project ID to add tasks to, instead of
+        /// [meeting.actions] todoist_project_id (default: Inbox)
+        #[arg(long, value_name = "ID")]
+        project: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show meeting details
     Show {
         /// Meeting ID (or "latest" for most recent)
@@ -791,14 +852,59 @@ pub enum MeetingAction {
     ///
     /// --json prints the daemon's meeting.sock events as NDJSON instead,
     /// for scripts: one JSON object per line, starting with a `hello`
-    /// snapshot, and a new `hello` after the daemon restarts.
+    /// snapshot, and a new `hello` after the daemon restarts. Level events
+    /// are left out unless --levels is given too.
+    ///
+    /// --levels prints the per-track level events (about ten a second while
+    /// a meeting records) as NDJSON, for a level meter.
     #[command(after_help = "Examples:\n  \
         voxtype meeting watch\n  \
-        voxtype meeting watch --json | jq -c 'select(.event == \"segments\")'")]
+        voxtype meeting watch --json | jq -c 'select(.event == \"segments\")'\n  \
+        voxtype meeting watch --levels\n  \
+        voxtype meeting watch --json --levels")]
     Watch {
         /// Print the live events as NDJSON instead of drawing the screen
         #[arg(long)]
         json: bool,
+
+        /// Print the microphone and loopback level events as NDJSON (with
+        /// --json, alongside every other event)
+        #[arg(long)]
+        levels: bool,
+    },
+    /// Check the meeting microphone and loopback levels without recording
+    ///
+    /// Opens the meeting's microphone and loopback exactly as a meeting
+    /// would (the same devices, and on speakers the same echo canceller),
+    /// records and transcribes nothing, and shows both tracks' levels about
+    /// ten times a second until the time is up or you press Ctrl+C. Speak,
+    /// then play something on the computer: your voice should move the mic
+    /// meter, the other side the loopback meter.
+    ///
+    /// While the daemon runs it does the check, since it owns the audio, and
+    /// the levels also go to meeting.sock for the meeting view. Without it,
+    /// this command opens the audio itself. A meeting that is recording
+    /// already has its levels: use `voxtype meeting watch --levels`.
+    ///
+    /// --json prints NDJSON: a `soundcheck` event when it starts (with the
+    /// echo path and devices), `levels` events, and a `soundcheck` event
+    /// when it stops.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting soundcheck\n  \
+        voxtype meeting soundcheck --seconds 60 --json\n  \
+        voxtype meeting soundcheck --stop")]
+    Soundcheck {
+        /// How long to run, in seconds (1 to 600)
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=600))]
+        seconds: u64,
+
+        /// Print NDJSON events instead of meters
+        #[arg(long)]
+        json: bool,
+
+        /// Stop a running sound check
+        #[arg(long, conflicts_with_all = ["seconds", "json"])]
+        stop: bool,
     },
     /// Choose and allow the agent that answers questions and writes summaries
     #[command(after_help = "Examples:\n  \
