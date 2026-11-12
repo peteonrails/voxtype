@@ -3842,6 +3842,40 @@ Name the speakers of a two-person meeting from its title. In a meeting titled "P
 voxtype config set meeting.auto_label_from_title false
 ```
 
+### announce_recording
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When a meeting starts, play "This meeting is being recorded and transcribed with Voxtype" once: into the call app's microphone stream, so the other people on the call hear it, and on your speakers. The call app is found as [meeting detection](MEETING_MODE.md#meeting-detection) finds it; a meeting started before the call waits up to two minutes for one. Without a call, or when the link into the call fails, it plays on your speakers only and `voxtype meeting status` says so. The announcement is kept out of the transcript. It needs PipeWire (`pw-play`, `pw-link`, `pw-dump`).
+
+This is a courtesy, not legal compliance: you remain responsible for the laws on recording calls. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
+
+`meeting start` reads it each time, so a change applies to the next meeting without a restart.
+
+**CLI:** `voxtype meeting start --announce` or `--no-announce`, for one meeting
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCE_RECORDING`
+
+```bash
+voxtype config set meeting.announce_recording true
+```
+
+### announcement_file
+
+**Type:** String (path)
+**Default:** unset (the built-in clip)
+**Required:** No
+
+An audio file (WAV, FLAC or Ogg) to announce with instead of the built-in clip, for your own wording or language. `~/` is expanded. With `announce_recording` on, a file that does not exist refuses `meeting start`. Voxtype does not know what a custom clip says, so it keeps out of the transcript the lines that fall mostly within the time the clip played.
+
+**CLI:** `voxtype meeting start --announcement-file <FILE>`
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCEMENT_FILE`
+
+```bash
+voxtype config set meeting.announcement_file ~/.config/voxtype/announcement-de.wav
+```
+
 ---
 
 ## [meeting.audio]
@@ -4536,6 +4570,8 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_EITYPE_XKB_VARIANT` | string | `output.eitype_xkb_variant` |
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
 | `VOXTYPE_LARD_DISFLUENCY` | bool | `text.lard_disfluency` |
+| `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | bool | `meeting.announce_recording` |
+| `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | path | `meeting.announcement_file` |
 | `VOXTYPE_LARD_MODEL_PATH` | path | `text.lard_model_path` |
 | `VOXTYPE_PUNCTUATION_CASING` | bool | `text.punctuation_casing` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |

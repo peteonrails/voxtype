@@ -144,6 +144,19 @@ voxtype meeting status --json
 It is `null` when no meeting is running. The meeting socket's `hello` carries
 the same `echo_cancel` once the meeting has started.
 
+`announcement` is the [recording announcement](MEETING_MODE.md#announcing-the-recording)'s
+outcome, `null` when the meeting does not announce (the default) or none is
+running:
+
+```json
+"announcement": {"state": "call", "app": "Zoom", "detail": "", "text": "played into Zoom's microphone and on your speakers"}
+```
+
+`state` is `waiting` (for a call app to open the mic), `call` (played into
+the call app's mic stream and on the speakers), `local` (on the speakers
+only: the call did not hear it, and `detail` says why) or `failed` (not
+played). `text` is the line `meeting status` prints.
+
 `status` is one of `idle`, `starting`, `recording`, `pausing`, `paused`,
 `resuming`, `stopping` or `finalizing`. `starting`, `pausing`, `resuming` and
 `stopping` mean the command was issued and the daemon has not acted on it
@@ -288,6 +301,7 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 | `segment_deleted` | One line was hidden |
 | `notes_updated` | The meeting's notes changed |
 | `title_changed` | The meeting was retitled, by hand or from the calendar |
+| `announcement` | The recording announcement is waiting for the call, or has played |
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
@@ -303,6 +317,10 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 `status` is `idle`, `recording`, `paused` or `finalizing`. With no meeting it
 is `idle`, `meeting_id`, `title` and `started_at` are absent, and
 `segments` is empty.
+
+A meeting with the recording announcement on also carries `announcement`, as
+in `meeting status --json`, once the announcement has started; it is absent
+otherwise.
 
 `recording_notice` is `true` while the user has not acknowledged the
 recording-consent notice ([Meeting Mode](MEETING_MODE.md#recording-consent)).
@@ -380,6 +398,16 @@ The notes changed. The event carries no text: read them with
 ```
 
 Show the new title. It follows `voxtype meeting title`, or a title taken from the calendar just after the meeting started. The `hello` snapshot carries the new title from then on. Lines whose speakers the new title names follow as `segment_updated`.
+
+#### `announcement`
+
+```json
+{"event": "announcement", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "state": "local", "detail": "no call app opened the microphone within 120 s", "text": "played on your speakers only; the call did not hear it (no call app opened the microphone within 120 s)"}
+```
+
+The recording announcement moved on: fields as `announcement` in
+`meeting status --json` above, plus the meeting. A view should never show
+`local` or `failed` as if the call heard it.
 
 #### `status`
 
