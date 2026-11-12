@@ -29,10 +29,18 @@ pub(crate) async fn run_meeting_command(
         max_duration_mins: config.meeting.max_duration_mins,
         vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
+        echo_rules: (&config.meeting.audio).into(),
     };
 
     match action {
-        MeetingAction::Start { title, diarization } => {
+        MeetingAction::Start {
+            title,
+            diarization,
+            engine,
+            model,
+            language,
+            url,
+        } => {
             // Check if meeting mode is enabled
             if !config.meeting.enabled {
                 eprintln!("Error: Meeting mode is disabled in config.");
@@ -40,6 +48,19 @@ pub(crate) async fn run_meeting_command(
                 eprintln!("Enable it by adding to config.toml:");
                 eprintln!("  [meeting]");
                 eprintln!("  enabled = true");
+                std::process::exit(1);
+            }
+
+            // Refuse a meeting that could not transcribe before it starts,
+            // with the fix, rather than leave the daemon to log it.
+            let options = config::MeetingStartOptions {
+                engine,
+                model,
+                language,
+                url: url.filter(|u| !u.trim().is_empty()),
+            };
+            if let Err(e) = meeting::start::meeting_transcription_config(config, &options) {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
 
@@ -102,6 +123,13 @@ pub(crate) async fn run_meeting_command(
             } else {
                 // Clear any stale override left from a prior run.
                 let _ = std::fs::remove_file(&diarization_file);
+            }
+
+            let options_file = runtime_dir.join("meeting_start_options");
+            if options == config::MeetingStartOptions::default() {
+                let _ = std::fs::remove_file(&options_file);
+            } else {
+                std::fs::write(&options_file, serde_json::to_string(&options)?)?;
             }
 
             // Write start trigger file (with optional title). The claim is
@@ -223,11 +251,19 @@ pub(crate) async fn run_meeting_command(
             let (phase, meeting_id) = meeting_phase(&config::Config::runtime_dir());
             let active = phase != MeetingPhase::Idle;
 
+            // The echo handling the running meeting uses, as the daemon
+            // recorded it at start.
+            let echo_cancel = meeting_id.as_deref().and_then(|id| {
+                let storage = meeting::MeetingStorage::open(meeting_config.storage.clone()).ok()?;
+                let id = meeting::MeetingId::parse(id).ok()?;
+                storage.get_context(&id).ok()?.echo_cancel
+            });
             if json {
                 let payload = serde_json::json!({
                     "active": active,
                     "status": phase.as_str(),
                     "meeting_id": meeting_id,
+                    "echo_cancel": echo_cancel,
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if !active {
@@ -238,6 +274,9 @@ pub(crate) async fn run_meeting_command(
                 println!("Meeting Status: {}", phase.as_str());
                 if let Some(id) = meeting_id {
                     println!("Meeting ID: {}", id);
+                }
+                if let Some(path) = echo_cancel {
+                    println!("Echo handling: {}", path);
                 }
             }
         }
@@ -294,8 +333,9 @@ pub(crate) async fn run_meeting_command(
         } => {
             let export_format = ExportFormat::parse(&format).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Unknown export format '{}'. Valid formats: text, markdown, json",
-                    format
+                    "Unknown export format '{}'. Valid formats: {}",
+                    format,
+                    ExportFormat::all_names().join(", ")
                 )
             })?;
 
@@ -373,6 +413,9 @@ pub(crate) async fn run_meeting_command(
                     }
                     println!("Status:   {:?}", meeting.metadata.status);
                     println!("Chunks:   {}", meeting.metadata.chunk_count);
+                    if let Some(ref url) = meeting.metadata.url {
+                        println!("Link:     {}", url);
+                    }
                     println!();
                     println!("Transcript:");
                     println!("-----------");
@@ -437,6 +480,45 @@ pub(crate) async fn run_meeting_command(
             );
         }
 
+        MeetingAction::View {
+            meeting_id,
+            ask_id,
+            tab,
+            ask,
+            no_open,
+            minimize,
+            expand,
+        } => {
+            let path = config::Config::runtime_dir().join("meeting-view.request");
+            let request = ViewRequest {
+                meeting_id: meeting_id.as_deref(),
+                ask_id: ask_id.as_deref(),
+                // An answer is shown on the Ask tab.
+                tab: tab.as_deref().or(ask_id.as_ref().map(|_| "ask")),
+                ask: ask.as_deref(),
+                open: !no_open,
+                window: if minimize {
+                    Some("minimize")
+                } else if expand {
+                    Some("expand")
+                } else {
+                    None
+                },
+            };
+            write_view_request(&path, &request)?;
+            if no_open && ask.is_none() {
+                println!("Nothing to do: --no-open without --ask.");
+            } else {
+                println!(
+                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin or voxtype's Quickshell shell, whichever is running.",
+                    if no_open { "ask" } else { "open" }
+                );
+            }
+        }
+
+        MeetingAction::Suggest { dry_run, watch } => {
+            run_meeting_suggest(config, None, dry_run, watch).await?;
+        }
         MeetingAction::Reassign {
             meeting_id,
             segment_id,
@@ -482,6 +564,82 @@ pub(crate) async fn run_meeting_command(
                     segment.id,
                     segment.speaker_display(),
                     meeting_id
+                );
+            }
+        }
+
+        MeetingAction::Edit {
+            meeting_id,
+            segment_id,
+            text,
+            reset,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let live = meeting_is_live(&id);
+
+            let segment = if reset {
+                storage.reset_segment_text(&id, segment_id, !live)
+            } else {
+                storage.edit_segment_text(
+                    &id,
+                    segment_id,
+                    text.as_deref().unwrap_or_default(),
+                    !live,
+                )
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to edit segment: {}", e))?;
+            if live {
+                poke_daemon("meeting_edit", &segment_id.to_string())?;
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&segment)?);
+            } else if reset {
+                println!(
+                    "Segment {} is back to its transcribed text in meeting {}",
+                    segment.id, meeting_id
+                );
+            } else {
+                println!("Edited segment {} in meeting {}", segment.id, meeting_id);
+            }
+        }
+
+        MeetingAction::DeleteLine {
+            meeting_id,
+            segment_id,
+            restore,
+            json,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let live = meeting_is_live(&id);
+
+            let segment = if restore {
+                storage.restore_segment(&id, segment_id, !live)
+            } else {
+                storage.delete_segment(&id, segment_id, !live)
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to change segment: {}", e))?;
+            if live {
+                poke_daemon("meeting_edit", &segment_id.to_string())?;
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&segment)?);
+            } else if restore {
+                println!("Restored segment {} in meeting {}", segment.id, meeting_id);
+            } else {
+                println!(
+                    "Deleted segment {} from meeting {} (restore with --restore)",
+                    segment.id, meeting_id
                 );
             }
         }
@@ -585,6 +743,200 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Import {
+            file,
+            title,
+            engine,
+            model,
+            language,
+            date,
+            channels,
+            diarization,
+            json,
+        } => {
+            use meeting::import;
+            let date = date
+                .map(|d| {
+                    chrono::DateTime::parse_from_rfc3339(&d)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "Invalid --date '{d}': use RFC 3339, e.g. 2026-11-02T15:00:00Z"
+                            )
+                        })
+                })
+                .transpose()?;
+            let request = import::ImportRequest {
+                file: file.clone(),
+                title,
+                options: config::MeetingStartOptions {
+                    engine,
+                    model,
+                    language,
+                    url: None,
+                },
+                diarization,
+                date,
+                channels,
+            };
+            let name = file.display().to_string();
+            let mut report = progress_reporter(json, format!("Importing {name}"));
+            let outcome = import::import(config, &request, None, &mut report).await?;
+            if json {
+                let mut line = serde_json::to_value(&outcome)?;
+                line["event"] = "imported".into();
+                println!("{line}");
+            } else {
+                println!(
+                    "Imported {} as meeting {} ({} lines, {}, {} {}).",
+                    name,
+                    outcome.meeting_id,
+                    outcome.segments,
+                    format_ms(outcome.duration_ms),
+                    outcome.engine,
+                    outcome.model
+                );
+                println!("Folder: {}", outcome.folder.display());
+            }
+        }
+
+        MeetingAction::Retranscribe {
+            meeting_id,
+            engine,
+            model,
+            language,
+            diarization,
+            keep_edits: _,
+            discard_edits,
+            json,
+        } => {
+            use meeting::retranscribe;
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            if live_meeting_id(&config::Config::runtime_dir()).as_deref() == Some(&id.to_string()) {
+                anyhow::bail!(
+                    "Meeting {id} is still recording. Stop it first: voxtype meeting stop"
+                );
+            }
+            let request = retranscribe::RetranscribeRequest {
+                meeting: id.to_string(),
+                options: config::MeetingStartOptions {
+                    engine,
+                    model,
+                    language,
+                    url: None,
+                },
+                diarization,
+                keep_edits: !discard_edits,
+            };
+            let mut report = progress_reporter(json, format!("Transcribing {id} again"));
+            let outcome = retranscribe::retranscribe(config, &request, None, &mut report).await?;
+            if json {
+                let mut line = serde_json::to_value(&outcome)?;
+                line["event"] = "retranscribed".into();
+                println!("{line}");
+            } else {
+                let e = &outcome.edits;
+                println!(
+                    "Transcribed meeting {} again with {} {}: {} lines.",
+                    outcome.meeting_id, outcome.engine, outcome.model, outcome.segments
+                );
+                if let Some(ref previous) = outcome.previous_transcript {
+                    println!("The previous transcript is kept as {previous}.");
+                }
+                if discard_edits {
+                    println!(
+                        "Edits: {} dropped as asked; annotations: {} carried over, {} had no matching line.",
+                        e.edits_discarded, e.annotations_carried, e.annotations_dropped
+                    );
+                } else {
+                    println!(
+                        "Edits: {} carried over, {} had no matching line; annotations: {} carried over, {} had no matching line.",
+                        e.edits_carried,
+                        e.edits_dropped,
+                        e.annotations_carried,
+                        e.annotations_dropped
+                    );
+                }
+            }
+        }
+
+        MeetingAction::Play {
+            meeting_id,
+            segment,
+            at,
+            track,
+            stop,
+            status,
+            json,
+        } => {
+            use meeting::playback;
+            let runtime_dir = config::Config::runtime_dir();
+
+            if stop || status {
+                let mut stop_message = "Nothing was playing";
+                let report = if stop {
+                    let before = playback::stop(&runtime_dir);
+                    if before.state == "playing" {
+                        stop_message = "Playback stopped";
+                    }
+                    playback::PlaybackStatus {
+                        state: "stopped".to_string(),
+                        position_ms: None,
+                        ..before
+                    }
+                } else {
+                    playback::status(&runtime_dir)
+                };
+                if json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else if stop {
+                    println!("{}", stop_message);
+                } else if report.state == "playing" {
+                    println!(
+                        "Playing the {} track of meeting {} from {}",
+                        report.track.map(|t| t.to_string()).unwrap_or_default(),
+                        report.meeting_id.as_deref().unwrap_or("?"),
+                        format_ms(report.position_ms.or(report.from_ms).unwrap_or(0)),
+                    );
+                } else {
+                    println!("Nothing is playing");
+                }
+                return Ok(());
+            }
+
+            let meeting_id = meeting_id.expect("clap requires a meeting without --stop/--status");
+            let track: playback::Track = track.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+            let start_at = match (segment, at) {
+                (Some(segment), _) => Some(playback::StartAt::Segment(segment)),
+                (None, Some(at)) => Some(playback::StartAt::Time(playback::parse_time(&at)?)),
+                (None, None) => None,
+            };
+            let from_ms = playback::resolve_start(&storage, &id, start_at)?;
+            let file = playback::track_file(&storage, &id, track)?;
+            let tools = playback::Tools::detect()?;
+            let started = playback::start(&runtime_dir, &tools, &id, track, &file, from_ms)?;
+
+            if json {
+                println!("{}", serde_json::to_string(&started)?);
+            } else {
+                println!(
+                    "Playing the {} track of meeting {} from {}. Stop it with: voxtype meeting play --stop",
+                    track,
+                    id,
+                    format_ms(from_ms)
+                );
+            }
+        }
+
         MeetingAction::Summarize {
             meeting_id,
             format,
@@ -637,6 +989,23 @@ pub(crate) async fn run_meeting_command(
     }
 
     Ok(())
+}
+
+/// `voxtype meeting suggest`; `config_path` is passed on to the
+/// `meeting start` a live prompt runs.
+pub(crate) async fn run_meeting_suggest(
+    config: &config::Config,
+    config_path: Option<PathBuf>,
+    dry_run: bool,
+    watch: bool,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return meeting::detect::runner::suggest(config, config_path, dry_run, watch).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, config_path, dry_run, watch);
+        anyhow::bail!("Meeting detection is only available on Linux.")
+    }
 }
 
 /// Where a meeting is, as the CLI sees it: the daemon's `meeting_state` file
@@ -732,6 +1101,43 @@ fn meeting_phase(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<String>
 ///
 /// The content is written to a private file and hard-linked into place, so
 /// the daemon can never read the trigger before its title is in it.
+/// What `voxtype meeting view` asks the running meeting view to do.
+struct ViewRequest<'a> {
+    meeting_id: Option<&'a str>,
+    ask_id: Option<&'a str>,
+    tab: Option<&'a str>,
+    ask: Option<&'a str>,
+    open: bool,
+    /// "minimize" or "expand".
+    window: Option<&'a str>,
+}
+
+/// Write the request every meeting view host watches (see
+/// quickshell/voxtype-meetings/Meetings.qml). Written whole and renamed into
+/// place, so a host never reads half of it. `requested_at` lets a host that
+/// starts later ignore a request that was not meant for it.
+fn write_view_request(path: &std::path::Path, req: &ViewRequest) -> std::io::Result<()> {
+    let requested_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let request = serde_json::json!({
+        "meeting_id": req.meeting_id,
+        "ask_id": req.ask_id,
+        "tab": req.tab,
+        "ask": req.ask,
+        "open": req.open,
+        "window": req.window,
+        "requested_at": requested_at,
+    });
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staged = path.with_extension(format!("request.{}.tmp", std::process::id()));
+    std::fs::write(&staged, request.to_string())?;
+    std::fs::rename(&staged, path)
+}
+
 fn claim_start_trigger(start_file: &std::path::Path, title: &str) -> std::io::Result<bool> {
     static STAGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let staged = start_file.with_extension(format!(
@@ -768,6 +1174,41 @@ fn refuse_start() -> ! {
     std::process::exit(1);
 }
 
+/// Report import or retranscribe progress: to the daemon, so meeting.sock
+/// carries it, and to the user, as JSON lines on stdout with `--json` or
+/// one line per chunk on stderr without.
+fn progress_reporter(json: bool, what: String) -> impl FnMut(&voxtype::meeting::import::Progress) {
+    let runtime_dir = config::Config::runtime_dir();
+    move |p| {
+        voxtype::meeting::import::announce(&runtime_dir, p);
+        if json {
+            if let Ok(mut line) = serde_json::to_value(p) {
+                line["event"] = "progress".into();
+                println!("{line}");
+            }
+        } else if p.state == "transcribing" && p.chunks_done > 0 {
+            eprintln!(
+                "{what}: chunk {} of about {} ({} of {})",
+                p.chunks_done,
+                p.chunks_total,
+                format_ms(p.position_ms),
+                format_ms(p.duration_ms)
+            );
+        }
+    }
+}
+
+/// `m:ss`, or `h:mm:ss` past an hour, as transcript timestamps read.
+fn format_ms(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,6 +1219,48 @@ mod tests {
 
     fn touch(dir: &std::path::Path, name: &str, content: &str) {
         std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn view_request_is_the_json_the_hosts_read() {
+        let dir = runtime();
+        let path = dir.path().join("voxtype").join("meeting-view.request");
+        let req = ViewRequest {
+            meeting_id: Some("abc"),
+            ask_id: Some("q1"),
+            tab: Some("ask"),
+            ask: Some("last-5m"),
+            open: false,
+            window: Some("minimize"),
+        };
+        write_view_request(&path, &req).unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(req["meeting_id"], "abc");
+        assert_eq!(req["tab"], "ask");
+        assert_eq!(req["ask"], "last-5m");
+        assert_eq!(req["ask_id"], "q1");
+        assert_eq!(req["window"], "minimize");
+        assert_eq!(req["open"], false);
+        assert!(req["requested_at"].as_u64().unwrap() > 0);
+
+        // Defaults: no meeting, no tab, open; and nothing left behind.
+        let req = ViewRequest {
+            meeting_id: None,
+            ask_id: None,
+            tab: None,
+            ask: None,
+            open: true,
+            window: None,
+        };
+        write_view_request(&path, &req).unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(req["meeting_id"].is_null() && req["tab"].is_null() && req["ask"].is_null());
+        assert!(req["ask_id"].is_null());
+        assert_eq!(req["open"], true);
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[test]

@@ -377,3 +377,221 @@ fn notes_and_annotations_during_a_meeting_poke_the_daemon() {
         "live annotation"
     );
 }
+
+impl Scratch {
+    fn enable_meetings(&self) {
+        std::fs::write(
+            self.path("config/voxtype/config.toml"),
+            "[meeting]\nenabled = true\n",
+        )
+        .unwrap();
+    }
+
+    fn start_error(&self, args: &[&str]) -> String {
+        let mut all = vec!["meeting", "start"];
+        all.extend_from_slice(args);
+        let output = self.voxtype(&all);
+        assert!(!output.status.success(), "start {args:?} should be refused");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+}
+
+/// A5: a meeting that could not transcribe is refused before it starts,
+/// with the fix, even before the daemon is consulted.
+#[test]
+fn meeting_start_refuses_engines_and_models_it_cannot_use() {
+    let s = Scratch::new();
+    s.enable_meetings();
+
+    let err = s.start_error(&["--engine", "nope"]);
+    assert!(
+        err.contains("Unknown engine 'nope'. Engines: whisper,"),
+        "{err}"
+    );
+
+    let err = s.start_error(&["--model", "no-such-model"]);
+    assert!(err.contains("Unknown model 'no-such-model'"), "{err}");
+
+    let err = s.start_error(&["--engine", "parakeet", "--model", "base.en"]);
+    assert!(
+        err.contains("Model 'base.en' is a whisper model, not a parakeet model"),
+        "{err}"
+    );
+
+    // Nothing is downloaded in the scratch data dir.
+    let err = s.start_error(&["--model", "large-v3-turbo"]);
+    assert!(
+        err.contains(
+            "not installed. Download it with: voxtype setup --download --model large-v3-turbo"
+        ),
+        "{err}"
+    );
+
+    // base.en is English-only.
+    let err = s.start_error(&["--language", "de"]);
+    assert!(err.contains("Language 'de' is not available"), "{err}");
+
+    // A default build has no Omnilingual engine; the hint says how to get it.
+    if !cfg!(feature = "omnilingual") {
+        let err = s.start_error(&["--engine", "omnilingual"]);
+        assert!(
+            err.contains(
+                "This voxtype binary was built without the omnilingual engine. To use it,"
+            ),
+            "{err}"
+        );
+    }
+
+    assert!(!s.path("runtime/voxtype/meeting_start").exists());
+    assert!(!s.path("runtime/voxtype/meeting_start_options").exists());
+}
+
+#[test]
+fn the_meeting_link_shows_in_show_and_the_export() {
+    let s = Scratch::new();
+    let storage = s.storage();
+    let mut metadata = MeetingMetadata::new(Some("Linked".to_string()));
+    metadata.url = Some("https://meet.example.com/abc-defg-hij".to_string());
+    storage.create_meeting(&metadata).unwrap();
+
+    let show: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "show", "latest", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        show["metadata"]["url"],
+        "https://meet.example.com/abc-defg-hij"
+    );
+    let text = stdout(&s.voxtype(&["meeting", "show", "latest"]));
+    assert!(
+        text.contains("Link:     https://meet.example.com/abc-defg-hij"),
+        "{text}"
+    );
+
+    let md = stdout(&s.voxtype(&["meeting", "export", "latest", "--metadata"]));
+    assert!(
+        md.contains("- **Link:** https://meet.example.com/abc-defg-hij"),
+        "{md}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "export", "latest", "--format", "json"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        json["metadata"]["url"],
+        "https://meet.example.com/abc-defg-hij"
+    );
+}
+
+#[test]
+fn edit_corrects_a_line_and_reset_restores_it() {
+    let s = Scratch::new();
+    s.meeting();
+
+    let out = stdout(&s.voxtype(&[
+        "meeting",
+        "edit",
+        "latest",
+        "2",
+        "I agree with that.",
+        "--json",
+    ]));
+    let segment: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(segment["id"], 2);
+    assert_eq!(segment["text"], "I agree with that.");
+    assert_eq!(segment["original_text"], "I disagree with that.");
+
+    let export = stdout(&s.voxtype(&["meeting", "export", "latest", "--format", "text"]));
+    assert!(export.contains("I agree with that."), "{export}");
+    assert!(!export.contains("I disagree"), "{export}");
+
+    let out = stdout(&s.voxtype(&["meeting", "edit", "latest", "2", "--reset", "--json"]));
+    let segment: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(segment["text"], "I disagree with that.");
+    assert!(segment.get("original_text").is_none());
+
+    assert!(!s
+        .voxtype(&["meeting", "edit", "latest", "2"])
+        .status
+        .success());
+    let output = s.voxtype(&["meeting", "edit", "latest", "2", "  "]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("use `meeting delete-line`"));
+}
+
+#[test]
+fn delete_line_hides_a_line_from_show_and_exports_until_restored() {
+    let s = Scratch::new();
+    let id = s.meeting();
+
+    let out = stdout(&s.voxtype(&["meeting", "delete-line", "latest", "2", "--json"]));
+    let segment: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(segment["id"], 2);
+    assert_eq!(segment["deleted"], true);
+
+    let show: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "show", "latest", "--json"]),
+    ))
+    .unwrap();
+    let ids: Vec<u64> = show["transcript"]["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![0, 1, 3]);
+    for format in ["markdown", "text", "json", "srt", "vtt"] {
+        let export = stdout(&s.voxtype(&["meeting", "export", "latest", "--format", format]));
+        assert!(!export.contains("I disagree"), "{format}: {export}");
+    }
+    let md =
+        std::fs::read_to_string(s.transcript_file(&id).with_file_name("transcript.md")).unwrap();
+    assert!(!md.contains("I disagree"), "{md}");
+    // Kept in the file for --restore.
+    assert!(std::fs::read_to_string(s.transcript_file(&id))
+        .unwrap()
+        .contains("I disagree"));
+
+    let out = stdout(&s.voxtype(&[
+        "meeting",
+        "delete-line",
+        "latest",
+        "2",
+        "--restore",
+        "--json",
+    ]));
+    let segment: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(segment.get("deleted").is_none());
+    let export = stdout(&s.voxtype(&["meeting", "export", "latest", "--format", "text"]));
+    assert!(export.contains("I disagree with that."), "{export}");
+}
+
+#[test]
+fn edit_and_delete_line_during_a_meeting_poke_the_daemon() {
+    let s = Scratch::new();
+    let id = s.meeting();
+    std::fs::write(
+        s.path("runtime/voxtype/meeting_state"),
+        format!("recording\n{id}\n"),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(s.transcript_file(&id)).unwrap();
+
+    stdout(&s.voxtype(&["meeting", "edit", "latest", "1", "Yes, let's begin."]));
+    assert_eq!(
+        std::fs::read_to_string(s.path("runtime/voxtype/meeting_edit")).unwrap(),
+        "1"
+    );
+    stdout(&s.voxtype(&["meeting", "delete-line", "latest", "3"]));
+    assert_eq!(
+        std::fs::read_to_string(s.transcript_file(&id)).unwrap(),
+        before
+    );
+
+    let show: serde_json::Value = serde_json::from_str(&stdout(
+        &s.voxtype(&["meeting", "show", "latest", "--json"]),
+    ))
+    .unwrap();
+    let segments = show["transcript"]["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 3);
+    assert_eq!(segments[1]["text"], "Yes, let's begin.");
+}

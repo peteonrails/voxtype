@@ -34,7 +34,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Agent ids the assistant can run headless.
-pub const SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
+pub const SUPPORTED_AGENTS: &[&str] = &["claude", "codex", "pi"];
 
 /// Running summary of a long meeting's earlier part, so repeated asks
 /// during a meeting only summarize what is new.
@@ -49,7 +49,7 @@ pub enum AssistantError {
     )]
     ConsentRequired { agent: String, name: String },
 
-    #[error("{0}\n  Supported agents: claude, codex. See: voxtype meeting assistant status")]
+    #[error("{0}\n  Supported agents: claude, codex, pi. See: voxtype meeting assistant status")]
     AgentUnavailable(String),
 
     #[error("Agent '{0}' cannot be run without tools, so voxtype does not use it")]
@@ -63,13 +63,15 @@ pub enum AssistantError {
     )]
     Timeout { name: String, secs: u64 },
 
-    #[error("Local model: {0}")]
+    /// The message names the backend: "Ollama (llama3:latest at
+    /// localhost:11434) returned an error: ...".
+    #[error("{0}")]
     Local(String),
 
     #[error(
         "Answers and summaries need an agent or a local model.\n  \
-         No supported agent CLI (claude, codex) was found, and the local model failed: {message}\n  \
-         Install Claude Code or Codex, or run Ollama with: ollama pull {model}"
+         No supported agent CLI (claude, codex, pi) was found, and the local model failed: {message}\n  \
+         Install Claude Code, Codex or Pi, or run Ollama with: ollama pull {model}"
     )]
     NoBackend { message: String, model: String },
 
@@ -306,8 +308,20 @@ pub struct Overrides {
     pub agent: Option<String>,
 }
 
-/// Pick the backend for one ask or summary. Never asks the user; a TTY
-/// prompt for consent is the caller's business.
+/// Pick the backend for one ask. Never asks the user; a TTY prompt for
+/// consent is the caller's business.
+///
+/// One order for asks and summaries (see [`choose_summary_backend`]):
+///
+/// 1. `local_only` or `--local`: the local model.
+/// 2. The agent (`--agent`, `[meeting.assistant] agent`, the Omarchy
+///    default, or one on PATH), when it has consent. Allowing an agent is
+///    the newest and most explicit choice, so it wins over an older
+///    `[meeting.summary] backend`.
+/// 3. `[meeting.summary] backend = "local"`, for someone who never allowed
+///    an agent: they chose Ollama before the assistant existed.
+/// 4. Otherwise: an agent without consent needs it, and with no agent at all
+///    the local model is the fallback.
 pub fn choose_backend(
     settings: &AssistantSettings,
     overrides: &Overrides,
@@ -325,15 +339,95 @@ pub fn choose_backend(
         if settings.consent().is_allowed(&agent.id) {
             return Ok(Backend::Agent(agent));
         }
+        if overrides.agent.is_none() && settings.summary_backend == "local" {
+            return Ok(local(false));
+        }
         return Err(AssistantError::ConsentRequired {
             agent: agent.id,
             name: agent.name,
         });
     }
+    if overrides.agent.is_none() && settings.summary_backend == "local" && res.problem.is_none() {
+        return Ok(local(false));
+    }
     if let Some(problem) = res.problem {
         return Err(AssistantError::AgentUnavailable(problem));
     }
     Ok(local(true))
+}
+
+/// What a summary runs on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SummaryBackend {
+    /// An agent or the local model, the same as `ask` would use.
+    Assistant(Backend),
+    /// `[meeting.summary] backend = "local"` or `"remote"`: the summarizers
+    /// from before the assistant, kept for people who never allowed an agent.
+    Legacy(String),
+}
+
+impl SummaryBackend {
+    /// `claude`, `local:<model>`, `ollama`, `remote`.
+    pub fn id(&self) -> String {
+        match self {
+            SummaryBackend::Assistant(b) => b.id(),
+            SummaryBackend::Legacy(kind) if kind == "local" => "ollama".to_string(),
+            SummaryBackend::Legacy(kind) => kind.clone(),
+        }
+    }
+
+    /// `agent`, `local` or `remote`, for `assistant status --json`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SummaryBackend::Assistant(Backend::Agent(_)) => "agent",
+            SummaryBackend::Assistant(Backend::Local { .. }) => "local",
+            SummaryBackend::Legacy(kind) if kind == "local" => "local",
+            SummaryBackend::Legacy(_) => "remote",
+        }
+    }
+
+    /// "Claude", "Local (llama3:latest)", "Remote (api.example.com)".
+    pub fn display_name(&self, settings: &AssistantSettings) -> String {
+        match self {
+            SummaryBackend::Assistant(b) => b.display_name(),
+            SummaryBackend::Legacy(kind) if kind == "local" => {
+                format!("Local ({})", settings.summary.ollama_model)
+            }
+            SummaryBackend::Legacy(_) => {
+                let endpoint = settings.summary.remote_endpoint.as_deref().unwrap_or("");
+                let host = endpoint
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("");
+                format!("Remote ({host})")
+            }
+        }
+    }
+}
+
+/// Pick the backend for one summary, automatic or asked for, in the order
+/// [`choose_backend`] describes. The difference is `[meeting.summary]
+/// backend = "remote"`, which only summaries can use, and that `"local"`
+/// keeps its own summarizer for summaries.
+pub fn choose_summary_backend(
+    settings: &AssistantSettings,
+    overrides: &Overrides,
+) -> Result<SummaryBackend, AssistantError> {
+    if settings.local_only || overrides.local || overrides.agent.is_some() {
+        return choose_backend(settings, overrides).map(SummaryBackend::Assistant);
+    }
+    let res = settings.resolve(None);
+    if let Some(agent) = res.agent {
+        if settings.consent().is_allowed(&agent.id) {
+            return Ok(SummaryBackend::Assistant(Backend::Agent(agent)));
+        }
+    }
+    if matches!(settings.summary_backend.as_str(), "local" | "remote") {
+        return Ok(SummaryBackend::Legacy(settings.summary_backend.clone()));
+    }
+    choose_backend(settings, overrides).map(SummaryBackend::Assistant)
 }
 
 /// The meeting's folder, when it has one.
@@ -577,6 +671,18 @@ pub fn status_json(settings: &AssistantSettings) -> serde_json::Value {
         Err(e) => ("none", Some(e.code())),
     };
     let agent = res.agent.as_ref();
+    let summary = choose_summary_backend(settings, &Overrides::default());
+    let summary_name = summary.as_ref().ok().map(|b| b.display_name(settings));
+    let ask_name = backend.as_ref().ok().map(Backend::display_name);
+    // Said out loud when questions and summaries go different ways, which
+    // only an older [meeting.summary] backend = "remote" does now.
+    let summary_note = match (&ask_name, &summary_name) {
+        (Some(a), Some(s)) if a != s => Some(format!(
+            "Summaries use {s} ([meeting.summary] backend = \"{}\"); questions use {a}.",
+            settings.summary_backend
+        )),
+        _ => None,
+    };
     serde_json::json!({
         "agent": agent.map(|a| a.id.clone()),
         "agent_name": agent.map(|a| a.name.clone()),
@@ -593,8 +699,12 @@ pub fn status_json(settings: &AssistantSettings) -> serde_json::Value {
             "name": format!("Local ({})", settings.summary.ollama_model),
         },
         "backend": backend_kind,
-        "backend_name": backend.as_ref().ok().map(Backend::display_name),
+        "backend_name": ask_name,
         "blocked": blocked,
+        "summary_backend": summary.as_ref().map(SummaryBackend::kind).unwrap_or("none"),
+        "summary_backend_name": summary_name,
+        "summary_blocked": summary.as_ref().err().map(AssistantError::code),
+        "summary_note": summary_note,
         "auto_summary": settings.auto_summary(),
         "auto_summary_configured": settings.summary_auto,
         "consent_file": consent.path(),
@@ -893,6 +1003,35 @@ mod tests {
             std::fs::read_to_string(sb.home().join(".codex/auth.json")).unwrap(),
             r#"{"fake":"auth"}"#
         );
+    }
+
+    #[test]
+    fn pi_answers_with_its_tools_off_from_an_attached_prompt() {
+        let sb = Sandbox::new();
+        sb.fake_pi();
+        sb.allow("pi");
+        std::fs::write(sb.out().join("pi.reply"), "Pi says Friday [00:41].\n").unwrap();
+        let m = steve_meeting(&sb);
+        let mut s = sb.settings();
+        s.agent = Some("pi".into());
+        let (record, streamed) = collect(&s, &m, "When do we ship?", None);
+        let record = record.unwrap();
+        assert_eq!(record.answer, "Pi says Friday [00:41].");
+        assert_eq!(record.agent, "pi");
+        assert_eq!(record.agent_name, "Pi");
+        assert_eq!(streamed, "Pi says Friday [00:41].\n");
+        let argv = std::fs::read_to_string(sb.out().join("pi.argv")).unwrap();
+        let argv: Vec<&str> = argv.lines().collect();
+        assert_eq!(argv[0], "--print");
+        assert!(argv.contains(&"--no-tools") && argv.contains(&"--no-mcp"));
+        assert!(argv.contains(&"--no-extensions") && argv.contains(&"--no-context-files"));
+        assert_eq!(*argv.last().unwrap(), runner::PI_INSTRUCTION);
+        let prompt = std::fs::read_to_string(sb.out().join("pi.prompt")).unwrap();
+        assert!(
+            prompt.contains("[00:41] Steve: We ship on Friday."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Question: When do we ship?"), "{prompt}");
     }
 
     #[test]

@@ -39,12 +39,28 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     let _ = writeln!(s, "  chunk_duration_secs = {}", meeting.chunk_duration_secs);
     let _ = writeln!(s, "  storage_path = {:?}", meeting.storage_path);
     let _ = writeln!(s, "  retain_audio = {}", meeting.retain_audio);
+    if let Some(ref cmd) = meeting.post_meeting_command {
+        let _ = writeln!(s, "  post_meeting_command = {:?}", cmd);
+    }
+    let _ = writeln!(
+        s,
+        "  post_meeting_timeout_secs = {}",
+        meeting.post_meeting_timeout_secs
+    );
     let _ = writeln!(s, "  max_duration_mins = {}", meeting.max_duration_mins);
+    let _ = writeln!(s, "  show_view_on_start = {}", meeting.show_view_on_start);
+    let _ = writeln!(s, "  view_opacity = {}", meeting.view_opacity);
 
     let _ = writeln!(s, "\n[meeting.audio]");
     let _ = writeln!(s, "  mic_device = {:?}", meeting.audio.mic_device);
     let _ = writeln!(s, "  loopback_device = {:?}", meeting.audio.loopback_device);
     let _ = writeln!(s, "  echo_cancel = {:?}", meeting.audio.echo_cancel);
+    let _ = writeln!(s, "  echo_guard = {}", meeting.audio.echo_guard);
+    let _ = writeln!(
+        s,
+        "  echo_fuzzy_max_words = {}",
+        meeting.audio.echo_fuzzy_max_words
+    );
 
     let _ = writeln!(s, "\n[meeting.diarization]");
     let _ = writeln!(s, "  enabled = {}", meeting.diarization.enabled);

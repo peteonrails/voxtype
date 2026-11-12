@@ -42,10 +42,12 @@ omarchy plugin add https://github.com/peteonrails/omarchy-voxtype-settings.git -
 ```
 
 Or by hand, from a checkout of this directory (the one holding
-`manifest.json`):
+`manifest.json`). `-L` matters: `components/meetings` is a link to the meeting
+view in `../quickshell/voxtype-meetings`, shared with the standalone
+Quickshell shell, and has to be copied as files:
 
 ```bash
-cp -r . ~/.config/omarchy/plugins/io.voxtype.settings
+cp -rL . ~/.config/omarchy/plugins/io.voxtype.settings
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.voxtype.settings
 ```
@@ -85,6 +87,7 @@ keybind or a script because it takes no JSON:
 | `omarchy-shell io.voxtype.settings close` | close it |
 | `omarchy-shell io.voxtype.settings toggle` | open or close |
 | `omarchy-shell io.voxtype.settings section Hotkey` | open on a section, or jump to it if already open (re-reading everything, as opening does) |
+| `omarchy-shell io.voxtype.settings meetings` | open the live meeting view (no-op if already open) |
 | `omarchy-shell io.voxtype.settings restart` | restart the voxtype daemon without opening anything |
 | `omarchy-shell io.voxtype.settings download <model>` | start the same download the model row's button starts |
 | `omarchy-shell io.voxtype.settings cancelDownload` | stop the download in progress |
@@ -101,6 +104,116 @@ Because a keybind can fire while the panel has never been opened, the manifest
 sets `keepLoaded: true` — the panel is instantiated with the shell so its IPC
 target exists from the start. Adding or removing that flag needs a full
 `omarchy-restart-shell`; `rescanPlugins` alone will not re-instantiate it.
+
+## Meetings
+
+The meeting view's QML lives in `quickshell/voxtype-meetings/`, shared with
+voxtype's standalone Quickshell shell; `components/meetings` here is a link to
+it, `scripts/stage-omarchy-plugin.sh` copies it into packages, and
+`components/OmarchyMeetingsHost.qml` adapts it to this plugin (the shell's
+theme, `shell.summon`, and "Change in Settings" opening the Meeting section).
+The view uses only QtQuick and Quickshell, never `qs.Commons` or `qs.Ui`, so it
+runs under both hosts.
+
+Tabs: **Transcript**, **Notes** (an autosaving pad over `voxtype meeting notes
+--set-file`, re-read with `notes --json` on `notes_updated`), **Ask** (the
+meeting's saved asks from `show --json`, then new questions streamed from
+`voxtype meeting ask --json`, with quick chips; the answer's `citations` become
+links that jump into the transcript) and, once the meeting stops, **Summary**
+(the MeetingSummary from `show --json`, `summary_ready` or `voxtype meeting
+summarize --format json [--regenerate]`, rendered with chapter links; a
+Summarizing state from the `summarizing` event that names the meeting). Each
+tab keeps its scroll position. Ask and Summary carry an agent chip
+(`backend_name` from `voxtype meeting assistant status --json`) with a menu of
+the agents found, their notes (codex's bwrap jail), Local model only, and
+Change in Settings. `blocked: "consent_required"` opens the consent dialog
+(one button per usable agent when `choice_required`). Transcript lines get
+"Add note" on hover (`voxtype meeting annotate`, note and/or `--highlight`),
+and annotated or highlighted lines a margin marker; Edit (inline, `voxtype
+meeting edit`) and Delete (with a five-second Undo before `voxtype meeting
+delete-line` runs; a deletion arrives as `segment_deleted` or as
+`segment_updated` with `"deleted": true`, and both are handled) sit beside it.
+The header's More menu exports through `voxtype meeting export` into
+`$XDG_DOCUMENTS_DIR/Voxtype` (default `~/Documents/Voxtype`) and opens folders
+with `xdg-open`. A question asked while the
+view is closed (`voxtype meeting view --ask last-5m --no-open`) runs with
+`--notify`; with `[meeting.assistant] open_command = "voxtype meeting view"`,
+the notification's Open writes `$XDG_RUNTIME_DIR/voxtype/meeting-view.request`
+(meeting and answer from `VOXTYPE_MEETING_ID`/`VOXTYPE_ASK_ID`), which every
+host reads, and the view opens on that answer.
+
+The view follows a meeting live: title, elapsed time, state
+(recording, paused, finalizing), Pause/Resume and Stop, a chip per speaker
+(click to rename, which runs `voxtype meeting label <meeting id> <key> <name>`;
+two chips renamed alike merge), and the transcript in start-time order with a
+timestamp per line. It scrolls with new lines unless you have scrolled up. With
+no meeting it offers Start meeting with an optional title.
+
+Clicking the speaker on a line opens a small chooser (a plain item, not a
+Popup) to move just that line: the meeting's speakers as chips, a "New
+speaker…" field, and Restore original for a line already moved. A pick runs
+`voxtype meeting reassign <meeting id> <segment id> <speaker> --json` (or
+`--reset`); the line moves at once, takes the segment the CLI prints, and goes
+back with the CLI's stderr in the error banner if it is refused.
+`segment_updated` events (tagged `event`, or `type` as its contract was first
+written) apply live, so a change made elsewhere shows up too. A line is marked
+"moved from …" when the segment carries `original_speaker_id` or
+`reassigned: true`, or it was moved from this view.
+
+A meeting that ends is kept on screen as **Ended** (title, length, end time)
+with renames and reassignment still working, until a new meeting starts, Back
+returns to the list, or the view is closed. A daemon that goes away
+mid-meeting leaves it Ended the same way.
+
+With no meeting on screen the view lists past meetings from `voxtype meeting
+list --json` (50, then more on request), newest first. That list carries
+metadata only, so each row reads its own folder (`storage_path`) for the
+speaker count (transcript.json) and the Summary badge (metadata.json's
+`summary`, or summary.md), and only for rows actually built. Opening one runs
+`voxtype meeting show <id> --json` and shows it as Ended; edits go to the
+stored meeting.
+
+```bash
+omarchy-shell io.voxtype.settings meetings
+omarchy-shell shell toggle io.voxtype.settings '{"view":"meetings"}'
+```
+
+It is not the modal Settings overlay: it is a card on the right edge, on the Top
+layer, without a scrim, reserving no space, and it takes the keyboard only when
+clicked, so the call keeps focus. Escape (once it has focus) or its close button
+dismisses it. Both views are one plugin, so the shell's open/close bookkeeping
+covers whichever is up, and a `shell toggle` of either closes the other.
+
+**Opening on meeting start.** The plugin is `keepLoaded`, so
+`components/meetings/MeetingFeed.qml` stays connected to
+`$XDG_RUNTIME_DIR/voxtype/meeting.sock` whether or not the view is open. The
+daemon announces every start there, whatever started it (`voxtype meeting
+start`, the detection prompt's Record button, the tray), so nothing has to be
+wired into those paths. On a start the plugin reads `voxtype config get
+meeting.show_view_on_start` (default `true`; a CLI without the key counts as
+`true`) and, if it is on and the plugin is not already open, summons itself with
+`{"view":"meetings"}`. A meeting already running when the shell starts is not a
+start and opens nothing. An open Settings panel is never replaced.
+
+While the daemon is away the feed retries with backoff (1, 2, 4, then every 8
+seconds; each failed attempt logs one socket warning in the shell's log), and
+opening the view retries at once. A drop or a daemon restart re-reads the
+`hello` snapshot, so the transcript is rebuilt rather than duplicated.
+
+Not there yet, because `meeting.sock` does not carry them: per-track level
+meters and a countdown to the next chunk. The view says "Listening…" and how
+long ago the last lines arrived instead. The title is not editable: no CLI
+renames a running meeting.
+
+**Seeing it after an install.** The shell does not reload a `keepLoaded`
+plugin's QML when its files change, and a plugin rescan keeps the old instance.
+After installing a build that adds or changes this view, restart the shell once
+(`omarchy-restart-shell`) in an unlocked session. A packaged upgrade whose
+manifest version changed loads the new versioned path on its own, but a test
+build that kept the old version, or a git copy, keeps serving the old QML until
+the shell restarts. The dictation daemon does not need a restart for a
+panel-only change, and a meeting in progress is not affected: the restarted
+plugin reconnects and reads the transcript so far from the `hello` snapshot.
 
 ## Text Cleanup
 
@@ -380,6 +493,28 @@ answers behind an open panel and checks that `section` re-reads all of them.
 for an ONNX one, and shown by a schema without the flag.
 Terminal launches are logged by a stand-in, never opened.
 
+### Meeting view tests
+
+```bash
+python3 omarchy-plugin/tests/test-meeting-view.py [--evidence DIR] [--scenario NAME]
+```
+
+Same harness and isolation rules as the tests above, plus a private
+`XDG_RUNTIME_DIR`. `tests/fake-meeting-sock.py` binds `meeting.sock` there and
+speaks the daemon's NDJSON contract (a `hello` per connection, `segments`,
+`speaker_renamed`, `status`, `error`), driven through a control file;
+`tests/fake-voxtype-meeting.py` stands in for `voxtype meeting …` and
+`voxtype config get meeting.show_view_on_start`, and tells the fake socket what
+the daemon would do. The plugin's `shell` is a stand-in that records summons.
+Scenarios cover the hello backlog, insertion by start time, speaker renames,
+chip rename and merge, moving one line (to a speaker, to a new one, a refusal
+rolled back, Restore original, `segment_updated` from elsewhere), editing after
+the meeting ends, pause/resume/stop through finalizing, opening on a start
+(on, off, an older CLI, an open Settings panel), reconnecting after a drop, a
+socket that goes away and a daemon restart, the idle state and a refused start,
+no daemon at all, and auto-scroll. `--evidence` also saves a screenshot of the
+view in each state.
+
 ### Schema boundary regression test
 
 Run `python3 omarchy-plugin/tests/test-schema-boundary.py` from the repository
@@ -411,8 +546,9 @@ it:
   outside its own bounds — a hover panel below a header, say — needs a `z` on the
   component itself where it is used, not just on the overflowing child.
 
-`components/VoxtypeCli.qml` owns every subprocess; the rest of the QML never
-spawns anything. Three rules there are load-bearing:
+`components/VoxtypeCli.qml` owns every subprocess of the Settings view, and
+`components/meetings/MeetingCli.qml` every one of the Meetings view; the rest
+of the QML never spawns anything. Three rules there are load-bearing:
 
 - Every subprocess is a `CliProcess`, started with `launch()`. Quickshell's
   `Process` emits neither `started` nor `exited` for a command that cannot
@@ -482,6 +618,11 @@ Layout of the QML:
 | `components/OsdOfferBanner.qml` | "switch to the Quickshell OSD" |
 | `components/VoxtypeCli.qml` | every subprocess |
 | `components/CliProcess.qml` | a `Process` that also reports a command that never started |
+| `components/meetings/Meetings.qml` | the Meetings view: feed, commands, window, opening on a start |
+| `components/meetings/MeetingFeed.qml` | the `meeting.sock` connection and the live meeting model |
+| `components/meetings/MeetingCli.qml` | `voxtype meeting …` and the `show_view_on_start` read |
+| `components/meetings/MeetingWindow.qml` | the non-modal layer-shell card the view lives in |
+| `components/meetings/MeetingView.qml` | header, speaker chips, transcript, idle state |
 
 ## Uninstall
 

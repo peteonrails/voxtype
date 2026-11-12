@@ -3719,10 +3719,32 @@ Meeting mode configuration. Meeting mode provides continuous transcription with 
 ### enabled
 
 **Type:** Boolean
-**Default:** `false`
+**Default:** `false` for a config without the key; `true` in the config `voxtype setup` writes for a new install
 **Required:** No
 
-Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available.
+Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available. Changing it needs a daemon restart.
+
+### offer_enable
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+While meeting mode is off, the tray shows **Turn on meetings...**, and a notification offers Turn on, Not now, and "No, don't ask again" at most once a day on daemon start. "No, don't ask again" is remembered in `~/.local/state/voxtype/meeting_offer.json`. Set `offer_enable = false` to turn the offer off entirely. Nothing is ever turned on without your click.
+
+### status_notifications
+
+**Type:** String (`"auto"`, `"always"`, `"never"`)
+**Default:** `"auto"`
+**Required:** No
+
+The Meeting Started, Paused, Resumed and Ended notifications. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
+
+- `"auto"` - Skip them while a meeting view is on screen, minimized or not, since it already shows the same thing.
+- `"always"` - Always show them.
+- `"never"` - Never show them.
+
+`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. Changing it needs a daemon restart.
 
 ### chunk_duration_secs
 
@@ -3746,7 +3768,35 @@ Directory for meeting transcript storage.
 **Default:** `false`
 **Required:** No
 
-Keep raw audio chunk files after transcription. Useful for debugging or re-transcribing with different settings.
+Keep the meeting's audio in its folder: `mic.opus` (your microphone, after echo cancellation when it runs), `loopback.opus` (the other side) and `mixed.opus` (both). The files are written chunk by chunk as the meeting records, so a crash loses at most the last chunk (`chunk_duration_secs`). Opus at 24 kbps takes about 10 MB per hour per file for speech.
+
+Needs `ffmpeg` with libopus. Without it the audio is kept as WAV (`mic.wav` and so on, about 115 MB per hour per file) and a warning is logged. See [Meeting Mode](MEETING_MODE.md#keeping-the-audio).
+
+```toml
+[meeting]
+retain_audio = true
+```
+
+### post_meeting_command
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Shell command run once a meeting has stopped and its folder is final (after the automatic summary, when one runs). It runs through `sh -c` in the meeting folder, in the background, with `VOXTYPE_MEETING_ID`, `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` (the path of `meeting.json`) set. Its output goes to the daemon log, and a failure never affects the daemon.
+
+```toml
+[meeting]
+post_meeting_command = 'cp -r "$VOXTYPE_MEETING_DIR" ~/Documents/meetings/'
+```
+
+### post_meeting_timeout_secs
+
+**Type:** Integer
+**Default:** `300`
+**Required:** No
+
+Seconds before `post_meeting_command` is killed, along with anything it started.
 
 ### max_duration_mins
 
@@ -3755,6 +3805,30 @@ Keep raw audio chunk files after transcription. Useful for debugging or re-trans
 **Required:** No
 
 Maximum meeting duration in minutes. Set to `0` for unlimited.
+
+### show_view_on_start
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view runs in the Voxtype plugin for the Omarchy shell and in voxtype's standalone Quickshell shell (`voxtype setup quickshell`); without either, this does nothing. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
+### view_opacity
+
+**Type:** Float (0.3 to 1.0)
+**Default:** `0.8`
+**Required:** No
+
+How opaque the meeting view's background is, so it reads as an overlay on the window behind it. The text stays fully opaque, and the card turns fully opaque while the pointer is on it or you are typing in it, easing back about 1.5 seconds later. `1.0` keeps it solid.
+
+```bash
+voxtype config set meeting.view_opacity 0.6
+```
 
 ---
 
@@ -3780,7 +3854,7 @@ System audio loopback capture for recording remote meeting participants. Uses `p
 
 - `"auto"` - Detect a monitor source automatically via `pactl`. Prefers a source that is currently RUNNING (active audio output).
 - `"disabled"` - Mic-only capture, no loopback.
-- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`).
+- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`). When it is a sink's monitor, the echo canceller (`echo_cancel`) removes that sink's sound rather than the default output's, so a call played on a non-default output is cancelled too.
 
 To list available monitor sources:
 
@@ -3790,14 +3864,54 @@ pactl list short sources | grep monitor
 
 ### echo_cancel
 
-**Type:** String (`"auto"`, `"disabled"`)
+**Type:** String (`"auto"`, `"webrtc"`, `"gtcrn"`, `"disabled"`)
 **Default:** `"auto"`
 **Required:** No
 
-Echo cancellation mode for removing speaker bleed-through from the microphone signal when loopback capture is active.
+How a meeting removes what the speakers play from the microphone, so it is not transcribed as You.
 
-- `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
-- `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
+- `"auto"` - Run PipeWire's WebRTC echo canceller for the length of the meeting and record the mic from it, unless the default output is headphones, a headset or Bluetooth audio. Then, or when the canceller cannot start, use GTCRN neural speech enhancement instead (its model, about 523 KB, is downloaded on the first `voxtype meeting start`).
+- `"webrtc"` - The WebRTC canceller whatever the output; GTCRN if it cannot start.
+- `"gtcrn"` - GTCRN only, the behaviour before 1.3.0.
+- `"disabled"` - Neither.
+
+The canceller needs PipeWire with its echo-cancel module and WebRTC plugin, plus `pactl` and `parec`, and changes nothing in PipeWire's configuration: it runs only while a meeting does. It is skipped when your default microphone is already an echo canceller, and when `mic_device` names a device that is not a PipeWire source. A phrase-level transcript dedup pass runs in every mode. See [Meeting Mode](MEETING_MODE.md#echo-cancellation).
+
+```toml
+[meeting.audio]
+echo_cancel = "auto"
+```
+
+### echo_guard
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Keep the call out of your lines when it reaches your microphone through speakers. With speakers instead of headphones, the microphone hears the other side (or a video playing on your desktop), and the speech engine transcribes it as You. Echo cancellation (`echo_cancel`, or PipeWire's) removes most of it from the audio; the guard is the safety net in the transcript.
+
+For every microphone line, voxtype compares the two tracks' audio levels over that line. Echo is the loopback's audio, delayed and quieter, so its level follows the loopback's; your voice is louder than the echo path explains, or comes while the other side is silent.
+
+- **A line that is only echo**, at least 300 ms of sound with nine-tenths of it explained by the loopback and no stretch of your own voice, whatever its length:
+  - is dropped when the loopback has the same speech at the same time, even partly (a few of the same words). The loopback's own line already holds those words, transcribed from the clean signal, so keeping the echo would show them twice.
+  - otherwise moves to the remote speaker it overlaps (or `Remote`), keeping its words: the loopback's transcript missed them, so dropping the line would lose the only copy. `voxtype meeting reassign <meeting> <line> You` moves it back.
+- **A short line that is the remote misheard** (up to `echo_fuzzy_max_words` words, most of them matching the remote line at the same time by spelling or sound, such as "Omarky problem." while the loopback said "the Amarky package ... without any problems") is dropped.
+- **Your own lines stay**, even over the other side and even in the same words ("yes" over their "yes"): a line with any stretch of your own voice, 150 ms louder than the echo explains, is never touched by the guard. Neither is a line whose audio could not be measured (no remote speech in that chunk).
+
+`false` turns the whole guard off and leaves only the older checks: short lines with exactly the remote's words, and runs of four or more of the remote's words. Applies only while loopback capture is active. The older name `echo_fuzzy` is read too.
+
+### echo_fuzzy_max_words
+
+**Type:** Integer (1-12)
+**Default:** `4`
+**Required:** No
+
+The longest microphone line, in words, that the guard's misheard-words check looks at. Lines the audio shows to be echo go at any length; this only limits the check that works from the words. Raising it catches longer misheard fragments but also lets that check judge more of your own lines; the audio-level guard still applies to each.
+
+```bash
+voxtype config set meeting.audio.echo_guard false
+voxtype config set meeting.audio.echo_fuzzy_max_words 3
+```
 
 ### vad_threshold
 
@@ -3813,7 +3927,9 @@ For quiet USB/XLR mics, try `0.001`.
 ```toml
 [meeting.audio]
 loopback_device = "auto"
-echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+echo_cancel = "auto"  # WebRTC canceller on speakers, GTCRN on headphones
+echo_guard = true  # Keep the call heard through speakers out of your lines
+echo_fuzzy_max_words = 4
 vad_threshold = 0.001  # Optional: quiet mic tuning
 ```
 
@@ -3877,24 +3993,42 @@ AI summarization settings for meeting transcripts.
 **Default:** `"disabled"`
 **Required:** No
 
-Which summarizer `voxtype meeting summarize` and the summary at stop use.
+The summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and this setting no longer applies.
 
 - `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
-- `"local"` - The older Ollama summarizer (no chapters).
-- `"remote"` - A remote API.
-- `"disabled"` - The default. Behaves like `"agent"` for `meeting summarize`; summaries at stop follow `auto`.
+- `"local"` - The older Ollama summarizer (no chapters). Questions (`meeting ask`) use the same Ollama model.
+- `"remote"` - A remote API, for summaries only.
+- `"disabled"` - The default. Behaves like `"agent"`; summaries at stop follow `auto`.
+
+The full order, for questions and summaries:
+
+| Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
+|-----------|-------------------------------|--------------------------------------------|
+| `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
+| `--agent <id>` | That agent, once allowed | That agent, once allowed |
+| The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
+| Not allowed, and `[meeting.summary] backend = "local"` | The local model | The older Ollama summarizer |
+| Not allowed, and `[meeting.summary] backend = "remote"` | As in the rows below | The remote summarizer |
+| Not allowed, and an agent was found | Asks to allow it | Asks to allow it |
+| No agent found | The local model | The local model |
+
+`voxtype meeting assistant status` shows which backend each one uses. A failing backend is named in the error with its reason; a failing local model is never replaced by an agent, and a failing agent hands a summary to the local model only when `backend = "local"` is set and it answers.
 
 ### ollama_url
 
 **Type:** String
 **Default:** `"http://localhost:11434"`
-**Required:** No (only used when `backend = "local"`)
+**Required:** No
+
+The Ollama server for the local model: the `"local"` summarizer and the meeting assistant's local model.
 
 ### ollama_model
 
 **Type:** String
 **Default:** `"llama3.2"`
-**Required:** No (only used when `backend = "local"`)
+**Required:** No
+
+The model the local model runs, for the `"local"` summarizer and the meeting assistant.
 
 ### timeout_secs
 
@@ -3925,11 +4059,11 @@ The meeting assistant answers `voxtype meeting ask` and writes summaries, throug
 
 ### agent
 
-**Type:** String (`"claude"`, `"codex"`)
+**Type:** String (`"claude"`, `"codex"`, `"pi"`)
 **Default:** unset
 **Required:** No
 
-The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` found on PATH. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
+The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` or `pi` found on PATH. OpenCode and Hermes are not supported: neither can be run with its tools off. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
 
 **CLI override:** `--agent` on `meeting ask` and `meeting summarize`
 **Environment variable:** `VOXTYPE_MEETING_AGENT`
@@ -3977,6 +4111,77 @@ local_only = false
 timeout_secs = 180
 max_transcript_chars = 100000
 ```
+
+---
+
+## [meeting.detect]
+
+Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browser) and offers to record it with a notification. Detection only suggests: nothing is recorded until you press Record, except for apps in `auto_record_apps`. It runs inside the daemon and only while `[meeting] enabled = true`. See [Meeting detection](MEETING_MODE.md#meeting-detection) for how calls are recognized.
+
+```toml
+[meeting.detect]
+enabled = true
+auto_record_apps = []
+debounce_secs = 5
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** unset (on for Omarchy, off elsewhere)
+**Required:** No
+
+Turn call detection on or off. When unset, detection is on when Omarchy is detected and off on every other desktop, so upgrading changes nothing outside Omarchy. Changing it needs a daemon restart.
+
+### auto_record_apps
+
+**Type:** Array of strings, or one comma-separated string
+**Default:** `[]`
+**Required:** No
+
+Call apps, by the `name` in `apps` (for example `"Zoom"` or `"Google Meet"`), whose calls are recorded without asking. Matching ignores case.
+
+```toml
+auto_record_apps = ["Zoom"]
+```
+
+### debounce_secs
+
+**Type:** Integer
+**Default:** `5`
+**Required:** No
+
+How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+
+### apps
+
+**Type:** Array of tables
+**Default:** Zoom, Microsoft Teams, Google Meet, Microsoft Teams (web), Zoom (web)
+**Required:** No
+
+The call apps to watch for. Setting `apps` replaces the built-in list, so copy the entries you want to keep. Each entry has:
+
+- `name` - shown in the prompt and used by `auto_record_apps`
+- `streams` - case-insensitive substrings of a PipeWire capture stream's `application.name`, `application.process.binary` or `node.name`
+- `titles` - case-insensitive substrings of a window title that confirm a call. Leave empty for a native client whose mic use always means a call. Browsers need titles, because they open the mic for many things.
+
+```toml
+[[meeting.detect.apps]]
+name = "Zoom"
+streams = ["zoom"]
+
+[[meeting.detect.apps]]
+name = "Google Meet"
+streams = ["chromium", "chrome", "firefox", "brave"]
+titles = ["Meet - ", "Google Meet"]
+
+[[meeting.detect.apps]]
+name = "Jitsi"
+streams = ["chromium", "firefox"]
+titles = ["Jitsi Meet"]
+```
+
+Window titles come from Hyprland. On other compositors only apps with empty `titles` are detected.
 
 ---
 
@@ -4837,13 +5042,21 @@ The following configuration options are deprecated but still supported for backw
 |-------------------|-------------|-------|
 | `wtype_delay_ms` | `pre_type_delay_ms` | Renamed for clarity (applies to all output drivers, not just wtype) |
 | `--wtype-delay` CLI flag | `--pre-type-delay` | CLI equivalent of the above |
-## Atomic generic GGUF selection
+## Atomic model selection
 
-`voxtype config select-model gguf MODEL [--language CODE]` selects an installed
-generic GGUF checkpoint without downloading or restarting. Catalog checkpoints
-set the canonical architecture; custom checkpoints require an existing explicit
+`voxtype config select-model ENGINE MODEL` sets `engine` and `ENGINE.model`
+together in one validated write, without downloading or restarting. It accepts
+every engine `config set engine` does (whisper, parakeet, moonshine,
+sensevoice, paraformer, dolphin, omnilingual, cohere, gguf and openvino). The
+model must already be installed, and the engine must be compiled into the
+running binary; otherwise the command exits 2 and the config file is left
+byte-identical. The Omarchy Settings panel's **Use** button runs it.
+
+For the generic `gguf` engine, `--language CODE` sets the language hint (it is
+refused for every other engine). Catalog checkpoints set the canonical
+architecture; custom checkpoints require an existing explicit
 `gguf.architecture`. Omitting `--language` preserves a compatible saved hint;
 incompatible hints fail without modifying the file. Model paths are preserved
 literally and resolved like the worker: an existing current-directory path wins,
-otherwise the models directory is searched. This additive command currently
-accepts only engine `gguf`; existing `config set` contracts are unchanged.
+otherwise the models directory is searched. Existing `config set` contracts are
+unchanged.

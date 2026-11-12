@@ -31,6 +31,8 @@ struct ExportedMetadata {
     status: String,
     #[serde(rename = "chunkCount")]
     chunk_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -103,6 +105,7 @@ impl Exporter for JsonExporter {
                 duration_secs: meeting.metadata.duration_secs,
                 status: format!("{:?}", meeting.metadata.status).to_lowercase(),
                 chunk_count: meeting.metadata.chunk_count,
+                url: meeting.metadata.url.clone(),
             },
             notes: meeting.notes.clone(),
             transcript: ExportedTranscript {

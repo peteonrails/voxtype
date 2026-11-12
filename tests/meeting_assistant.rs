@@ -9,6 +9,8 @@
 
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -27,9 +29,7 @@ struct World {
 }
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(path, &format!("#!/bin/sh\n{body}\n"));
 }
 
 fn claude_stream(deltas: &[&str], result: &str) -> String {
@@ -58,14 +58,12 @@ impl World {
             std::fs::create_dir_all(w.p(d)).unwrap();
         }
         // Only these tools are on PATH, so no real agent or
-        // omarchy-default-agent on this machine can be found.
+        // omarchy-default-agent on this machine can be found. Resolved on
+        // the caller's PATH rather than /usr/bin and /bin: the Nix build
+        // sandbox has neither, only /bin/sh and store paths on PATH.
         for tool in ["sh", "cat", "cp", "ls", "grep", "env", "sleep", "sort"] {
-            for base in ["/usr/bin", "/bin"] {
-                let src = Path::new(base).join(tool);
-                if src.exists() {
-                    let _ = std::os::unix::fs::symlink(&src, w.p("bin").join(tool));
-                    break;
-                }
+            if let Ok(src) = which::which(tool) {
+                let _ = std::os::unix::fs::symlink(&src, w.p("bin").join(tool));
             }
         }
         let out = w.p("out");

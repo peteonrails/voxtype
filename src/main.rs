@@ -30,19 +30,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Check if this is the worker command (needs stderr-only logging)
     let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
+    // Import and retranscribe print their own progress, and with --json
+    // their stdout is NDJSON, so logs go to stderr and only warnings show
+    // unless -v asks for more.
+    let is_import = matches!(
+        cli.command,
+        Some(Commands::Meeting {
+            action: voxtype::MeetingAction::Import { .. }
+                | voxtype::MeetingAction::Retranscribe { .. }
+        })
+    );
 
     // Initialize logging
     let log_level = if cli.quiet {
         "error"
     } else {
         match cli.verbose {
+            0 if is_import => "warn",
             0 => "info",
             1 => "debug",
             _ => "trace",
         }
     };
 
-    if is_worker {
+    if is_worker || is_import {
         // Worker uses stderr for logging (stdout is reserved for IPC protocol)
         tracing_subscriber::fmt()
             .with_env_filter(

@@ -218,12 +218,20 @@ A flake ships every variant:
 # Imperative install
 nix profile install github:peteonrails/voxtype/v1.0.1#vulkan
 
-# Available outputs: default, vulkan, cuda, rocm, osdGtk4, osdNative
-nix build github:peteonrails/voxtype/v1.0.1#osdGtk4
+# Available outputs: default, vulkan, rocm, onnx, onnx-cuda, onnx-migraphx,
+# osd-gtk4, osd-native
+nix build github:peteonrails/voxtype/v1.0.1#osd-gtk4
 
 # Or pin in your flake inputs
 inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";
 ```
+
+Each voxtype package includes the GGUF worker, the Quickshell QML tree (the OSD and the Voxtype Meetings view), the Voxtype Configuration and Voxtype Meetings desktop entries, and the `voxtype` icon. The wrapper puts the typing and clipboard tools on `PATH`, and appends ffmpeg, the PulseAudio client tools (`parec`, `pactl`, `paplay`), xdg-utils and bubblewrap for the meeting features, so the system's own copies take precedence when present.
+
+Two things the meeting features use are not included:
+
+- **PipeWire tools** (`pw-dump` for call detection, `pw-play` for playback). They only work against a running PipeWire, and `services.pipewire.enable = true` already installs them.
+- **Quickshell.** The meeting view and the Quickshell OSD need it, so add `pkgs.quickshell` to your packages to use them.
 
 ### Linux arm64 (aarch64) — manual install
 

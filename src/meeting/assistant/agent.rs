@@ -62,6 +62,20 @@ pub const AGENTS: &[AgentSpec] = &[
         support: Support::Jailed,
     },
     AgentSpec {
+        id: "pi",
+        name: "Pi",
+        binary: "pi",
+        support: Support::ToolLess,
+    },
+    AgentSpec {
+        id: "opencode",
+        name: "OpenCode",
+        binary: "opencode",
+        support: Support::Unsupported(
+            "`opencode run` has no flag that turns its tools off, and its agents allow shell and web fetch, so even a filesystem jail could not keep a transcript from leaving the machine",
+        ),
+    },
+    AgentSpec {
         id: "hermes",
         name: "Hermes",
         binary: "hermes",
@@ -360,10 +374,7 @@ mod tests {
     use std::ffi::OsString;
 
     fn script(dir: &Path, name: &str, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&dir.join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     struct Fixture {
@@ -544,8 +555,53 @@ mod tests {
     }
 
     #[test]
+    fn pi_alone_on_path_is_picked() {
+        let f = Fixture::new(&["pi"]);
+        let a = f.resolve(None).agent.unwrap();
+        assert_eq!((a.id.as_str(), a.source), ("pi", "path"));
+    }
+
+    #[test]
+    fn claude_and_pi_on_path_ask_which() {
+        let f = Fixture::new(&["claude", "pi"]);
+        let r = f.resolve(None);
+        assert!(r.choice_required);
+        assert_eq!(r.agent.unwrap().id, "claude");
+        // Once one is allowed, it is the one.
+        f.consent().allow("pi", None).unwrap();
+        let r = f.resolve(None);
+        assert!(!r.choice_required);
+        assert_eq!(r.agent.unwrap().id, "pi");
+    }
+
+    #[test]
+    fn opencode_is_listed_but_unsupported() {
+        let f = Fixture::new(&["opencode"]);
+        f.omarchy("opencode");
+        let r = f.resolve(None);
+        assert!(r.agent.is_none());
+        let c = &r.candidates[0];
+        assert_eq!(c.id, "opencode");
+        assert!(c.found && !c.supported);
+        assert!(
+            c.note.as_deref().unwrap().contains("not supported"),
+            "{c:?}"
+        );
+        let r = f.resolve(Some("opencode"));
+        assert!(r.problem.unwrap().contains("not supported"));
+    }
+
+    #[test]
+    fn the_omarchy_default_pi_is_used() {
+        let f = Fixture::new(&["claude", "pi"]);
+        f.omarchy("pi");
+        let a = f.resolve(None).agent.unwrap();
+        assert_eq!((a.id.as_str(), a.source), ("pi", "omarchy"));
+    }
+
+    #[test]
     fn aliases_resolve() {
         assert_eq!(spec("Claude-Code").unwrap().id, "claude");
-        assert!(spec("opencode").is_none());
+        assert!(spec("crush").is_none());
     }
 }

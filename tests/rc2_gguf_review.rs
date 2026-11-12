@@ -1,4 +1,6 @@
 //! Regression coverage for independent RC2 review findings.
+mod common;
+
 use voxtype::config::{Config, TranscriptionEngine};
 
 #[test]
@@ -50,9 +52,7 @@ fn cli_can_inspect_and_repair_invalid_saved_gguf_selection() {
     use std::io::Write;
     model.write_all(b"GGUF").unwrap();
     let worker = dir.path().join("worker-fixture");
-    std::fs::write(&worker, "#!/bin/sh\nexit 99\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    common::write_script(&worker, "#!/bin/sh\nexit 99\n");
     let valid = "engine='gguf'\n[gguf]\nmodel='Qwen3-ASR-0.6B-Q8_0.gguf'\narchitecture='qwen3_asr'\nlanguage='de'\nstreaming=false\n";
     for (key, wrong, right) in [
         ("streaming", "true", "false"),
