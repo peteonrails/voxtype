@@ -755,7 +755,7 @@ Item {
           root.osdOfferError = message
         }
       } else if (!ok) {
-        console.warn("Voxtype Settings: could not record Not now for the OSD offer (" + message
+        console.warn("Voxtype panel: could not record Not now for the OSD offer (" + message
                      + "); hiding it for this session")
         root.osdDismissedHere = true
       }
@@ -763,7 +763,7 @@ Item {
     }
     onCopyDismissFinished: function(ok, message) {
       if (!ok) {
-        console.warn("Voxtype Settings: could not record Not now (" + message + "); hiding the banner for this session")
+        console.warn("Voxtype panel: could not record Not now (" + message + "); hiding the banner for this session")
         root.copyDismissedHere = true
       }
       cli.fetchPluginLink()
@@ -1131,7 +1131,7 @@ Item {
                 objectName: "degradedTitle"
                 width: parent.width
                 text: root.cliMissing !== ""
-                  ? "Voxtype Settings could not run " + root.cliMissing + "."
+                  ? "The Voxtype panel could not run " + root.cliMissing + "."
                   : "This panel requires voxtype 0.8 or newer."
                 color: ShellTheme.Color.foreground
                 font.family: Style.font.family

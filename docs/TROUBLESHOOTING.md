@@ -179,7 +179,7 @@ graphical frontend is installed, install a supported terminal or run
   `voxtype setup omarchy --restart-shell`.
 - **Removed it and want it back.** Run `voxtype setup omarchy`. The daemon never
   re-adds it on its own.
-- **"Voxtype Settings could not run ..."** The panel could not start the voxtype
+- **"The Voxtype panel could not run ..."** The panel could not start the voxtype
   binary it names, so it shows nothing rather than stale values. If the message
   names a `dev.json` (next to the plugin's `manifest.json`), that file points at
   a build that no longer exists: fix the path, or delete the file to use
