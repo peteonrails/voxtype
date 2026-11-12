@@ -28,6 +28,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Notes](#notes)
   - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
   - [Exporting Transcripts](#exporting-transcripts)
+  - [Sharing a Meeting](#sharing-a-meeting)
   - [Deleting Meetings](#deleting-meetings)
   - [Recovering an Interrupted Meeting](#recovering-an-interrupted-meeting)
 - [Meeting Audio](#meeting-audio)
@@ -535,6 +536,53 @@ voxtype meeting export latest --format vtt --output meeting.vtt
 Markdown and JSON exports start with your notes and the summary when the meeting has them, and plain text with the notes. Annotations appear under their lines, and deleted lines are left out.
 
 Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did. Parakeet, ONNX or GGUF, also times every word, so an utterance holding several sentences gives a line per sentence, each at its own start, and a line ends with its last word rather than at the pause after it. Cohere has no word times (its GGUF model decodes without timestamps), so it keeps one line per utterance. Whisper, where a short clip costs as much as a whole chunk, transcribes the chunk in one call and uses the segments Whisper times itself, one per sentence or phrase. Each segment's start and end are then fitted to the speech inside it, since Whisper counts a pause before a sentence as part of it, and a segment over pure silence (a hallucinated "Thank you.") is dropped. This covers local Whisper with or without `gpu_isolation`, `whisper-cli` (`backend = "cli"`, which times every segment in its JSON output), and remote Whisper on a server that returns segments for `response_format=verbose_json` (OpenAI, whisper.cpp server and most compatible servers). The first meeting chunk asks the server for them; a server that refuses or ignores the format is remembered and gets one line per chunk, as before, for the rest of the daemon's run.
+
+### Sharing a Meeting
+
+`voxtype meeting share` sends a meeting's notes somewhere: the title, date, length and attendees, the summary's overview, key points, decisions, action items with their owners and chapters, your notes, and your highlighted or annotated lines. Add `--transcript` to include the transcript after them, as voxtype shows it: speaker names applied, deleted lines left out and edited lines as you corrected them.
+
+```bash
+voxtype meeting share latest                              # Copy the notes to the clipboard
+voxtype meeting share latest --transcript                 # ...with the transcript
+voxtype meeting share latest --to file                    # Save to Documents/Voxtype
+voxtype meeting share latest --to email                   # Open a mail draft
+voxtype meeting share latest --to command                 # Pipe to [meeting.share] command
+voxtype meeting share latest --format html                # Copy as HTML, for rich-text editors
+voxtype meeting share latest --transcript --preview       # Print what would be shared
+```
+
+| Destination | What happens |
+|-------------|--------------|
+| `clipboard` (default) | Copied with `wl-copy`: Markdown, plain text with `--format txt`, or `text/html` with `--format html` |
+| `file` | A new file named `<date> <title>.md` (or `.txt`, `.html`) in `[meeting.share] folder`, `~/Documents/Voxtype` by default. Existing files are never overwritten. `--output` names the file or folder instead |
+| `email` | Opens a draft in your mail app through a `mailto:` link, with the title and date as the subject and the notes as the body. A transcript is too long for a mail link, so with `--transcript` it is saved as a file next to your other shares and the draft tells you to attach it |
+| `command` | Runs `[meeting.share] command` (or `--command`) through `sh -c` with the share on stdin |
+
+Nothing is ever shared on its own: every share is a command you run or a menu item you click, and there is no hosted link or cloud copy. `--preview` prints exactly what would be sent without sending it, and `--preview --json` gives the same to the meeting view's share preview along with which destinations work on this machine.
+
+The share command is for anything voxtype does not do itself: posting to a chat webhook, converting with pandoc, or uploading somewhere. It gets these variables:
+
+| Variable | Value |
+|----------|-------|
+| `VOXTYPE_MEETING_ID` | The meeting's ID |
+| `VOXTYPE_MEETING_TITLE` | Its title |
+| `VOXTYPE_MEETING_DIR` | Its folder |
+| `VOXTYPE_SHARE_FORMAT` | `markdown`, `text` or `html` |
+| `VOXTYPE_SHARE_FILE` | A temporary file holding the share, removed when the command ends |
+| `VOXTYPE_SHARE_TRANSCRIPT` | `1` when the transcript is included, else `0` |
+
+```toml
+[meeting.share]
+# Post the notes to a Slack channel
+command = "jq -Rs '{text: .}' | curl -sf -X POST -H 'Content-Type: application/json' -d @- \"$SLACK_WEBHOOK_URL\""
+```
+
+```bash
+# A PDF through pandoc, for this share only
+voxtype meeting share latest --to command --command 'pandoc "$VOXTYPE_SHARE_FILE" -o ~/notes.pdf'
+```
+
+The command is stopped after `[meeting.share] timeout_secs` (60 by default). What it prints is shown after the share; a command that fails or times out makes the share fail with its error.
 
 ### Deleting Meetings
 

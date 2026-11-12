@@ -4088,6 +4088,44 @@ auto = false
 
 ---
 
+## [meeting.share]
+
+Settings for `voxtype meeting share`. See [Sharing a Meeting](MEETING_MODE.md#sharing-a-meeting).
+
+### command
+
+**Type:** String
+**Default:** none
+**Required:** No
+
+Shell command `voxtype meeting share --to command` runs through `sh -c`, with the share on stdin. It also gets `VOXTYPE_MEETING_ID`, `VOXTYPE_MEETING_TITLE`, `VOXTYPE_MEETING_DIR`, `VOXTYPE_SHARE_FORMAT` (`markdown`, `text` or `html`), `VOXTYPE_SHARE_FILE` (a temporary file with the same content) and `VOXTYPE_SHARE_TRANSCRIPT` (`1` or `0`). `--command` overrides it for one share. It only ever runs when you share.
+
+```bash
+voxtype config set meeting.share.command 'pandoc "$VOXTYPE_SHARE_FILE" -o ~/notes.pdf'
+```
+
+### timeout_secs
+
+**Type:** Integer (1 to 3600)
+**Default:** `60`
+**Required:** No
+
+Seconds before the share command, and anything it started, is stopped.
+
+### folder
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+Folder `voxtype meeting share --to file` saves into, and where an email share saves a transcript to attach. `"auto"` is the `Voxtype` folder in your documents folder (`~/Documents/Voxtype`, or `$XDG_DOCUMENTS_DIR/Voxtype`). A leading `~/` is expanded.
+
+```bash
+voxtype config set meeting.share.folder ~/Notes/Meetings
+```
+
+---
+
 ## [meeting.assistant]
 
 The meeting assistant answers `voxtype meeting ask` and writes summaries, through your own coding agent run headless with every tool off, or the local Ollama model from `[meeting.summary]`. Transcripts go to an agent only after you allow it once per agent. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) and its privacy section.
