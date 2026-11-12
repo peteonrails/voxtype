@@ -110,11 +110,15 @@ pub struct MeetingAudioConfig {
     #[serde(default = "default_loopback")]
     pub loopback_device: String,
 
-    /// Echo cancellation mode for removing speaker bleed-through from mic
-    /// Options: "auto" (GTCRN neural enhancement + transcript dedup), "disabled"
-    /// The GTCRN model (~523KB) is auto-downloaded on first meeting start.
-    /// For system-level echo cancellation, configure PipeWire's echo-cancel module
-    /// and set this to "disabled".
+    /// Echo cancellation for the meeting mic:
+    /// - "auto" (default): PipeWire's WebRTC echo canceller when the output is
+    ///   speakers and the module can run, GTCRN enhancement otherwise
+    /// - "aec": the WebRTC canceller whatever the output, GTCRN if it cannot run
+    /// - "gtcrn": GTCRN enhancement only (the behaviour before 1.3.0)
+    /// - "off" (or "disabled"): neither
+    ///
+    /// The canceller runs only during a meeting and never changes PipeWire's
+    /// configuration. Transcript dedup runs in every case.
     #[serde(default = "default_echo_cancel")]
     pub echo_cancel: String,
 

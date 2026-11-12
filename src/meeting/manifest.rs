@@ -35,6 +35,8 @@ pub struct MeetingContext {
     pub diarization: Option<String>,
     /// The voxtype version that recorded the meeting
     pub voxtype_version: Option<String>,
+    /// The echo handling the meeting used: `aec`, `gtcrn` or `off`
+    pub echo_cancel: Option<String>,
 }
 
 /// A speaker in the transcript and the name it is shown with.
@@ -72,6 +74,9 @@ pub struct Manifest {
     pub engine: Option<String>,
     pub model: Option<String>,
     pub diarization: Option<String>,
+    /// `aec`, `gtcrn` or `off`; null for meetings recorded before 1.3.0
+    #[serde(default)]
+    pub echo_cancel: Option<String>,
     pub speakers: Vec<ManifestSpeaker>,
     pub audio_retained: bool,
     pub files: Vec<ManifestFile>,
@@ -105,6 +110,7 @@ impl Manifest {
             engine: context.engine.clone().or_else(|| metadata.model.clone()),
             model: context.model.clone(),
             diarization: context.diarization.clone(),
+            echo_cancel: context.echo_cancel.clone(),
             speakers: speaker_keys
                 .iter()
                 .map(|id| ManifestSpeaker {

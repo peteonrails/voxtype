@@ -250,11 +250,19 @@ pub(crate) async fn run_meeting_command(
             let (phase, meeting_id) = meeting_phase(&config::Config::runtime_dir());
             let active = phase != MeetingPhase::Idle;
 
+            // The echo handling the running meeting uses, as the daemon
+            // recorded it at start.
+            let echo_cancel = meeting_id.as_deref().and_then(|id| {
+                let storage = meeting::MeetingStorage::open(meeting_config.storage.clone()).ok()?;
+                let id = meeting::MeetingId::parse(id).ok()?;
+                storage.get_context(&id).ok()?.echo_cancel
+            });
             if json {
                 let payload = serde_json::json!({
                     "active": active,
                     "status": phase.as_str(),
                     "meeting_id": meeting_id,
+                    "echo_cancel": echo_cancel,
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if !active {
@@ -265,6 +273,9 @@ pub(crate) async fn run_meeting_command(
                 println!("Meeting Status: {}", phase.as_str());
                 if let Some(id) = meeting_id {
                     println!("Meeting ID: {}", id);
+                }
+                if let Some(path) = echo_cancel {
+                    println!("Echo handling: {}", path);
                 }
             }
         }

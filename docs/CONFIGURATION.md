@@ -3864,14 +3864,23 @@ pactl list short sources | grep monitor
 
 ### echo_cancel
 
-**Type:** String (`"auto"`, `"disabled"`)
+**Type:** String (`"auto"`, `"aec"`, `"gtcrn"`, `"off"`)
 **Default:** `"auto"`
 **Required:** No
 
-Echo cancellation mode for removing speaker bleed-through from the microphone signal when loopback capture is active.
+How a meeting removes what the speakers play from the microphone, so it is not transcribed as You.
 
-- `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
-- `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
+- `"auto"` - When the default output is speakers, run PipeWire's WebRTC echo canceller for the length of the meeting and record the mic from it. With headphones, a headset or Bluetooth audio, or when the canceller cannot start, use GTCRN neural speech enhancement instead (its model, about 523 KB, is downloaded on the first `voxtype meeting start`).
+- `"aec"` - The WebRTC canceller whatever the output; GTCRN if it cannot start.
+- `"gtcrn"` - GTCRN only, the behaviour before 1.3.0.
+- `"off"` - Neither. `"disabled"` is the same, and stays accepted.
+
+The canceller needs PipeWire with its echo-cancel module and WebRTC plugin, plus `pactl` and `parec`, and changes nothing in PipeWire's configuration: it runs only while a meeting does. A phrase-level transcript dedup pass runs in every mode. See [Meeting Mode](MEETING_MODE.md#echo-cancellation).
+
+```toml
+[meeting.audio]
+echo_cancel = "auto"
+```
 
 ### vad_threshold
 
