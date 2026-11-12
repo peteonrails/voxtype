@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! Meeting: Weekly sync, 2026-11-11 14:00, 32m. Speakers: Pete (You), Steve (Remote 1).
+//! Pete (You) is the person reading this. Refer to them as Pete or "you", ...
 //! [00:41] Steve: ...
 //! [00:52] Pete: ...
 //! User notes: ...
@@ -144,11 +145,33 @@ pub fn speaker_list(segments: &[TranscriptSegment]) -> String {
         .join(", ")
 }
 
-/// The first line of the prompt.
+/// Who the reader is. The microphone's speaker, `You`, is the person
+/// reading the answer; without this an agent writes "You expected their
+/// lines" about them, as if You were a third person. With a name given to
+/// You it uses the name.
+pub fn reader_note(segments: &[TranscriptSegment]) -> Option<String> {
+    let you = segments.iter().find(|s| s.speaker_key() == "You")?;
+    let name = you.speaker_display();
+    Some(if name == "You" {
+        "You is the person reading this. Write about them in the second person \
+         (\"you said\", \"your action item\"), never as a third person named You."
+            .to_string()
+    } else {
+        format!(
+            "{name} (You) is the person reading this. Refer to them as {name} or \
+             \"you\", never as a third person named You."
+        )
+    })
+}
+
+/// The first lines of the prompt: the meeting, and who is reading.
 pub fn header(meeting: &MeetingData, now: DateTime<Utc>) -> String {
     let speakers = speaker_list(&meeting.transcript.segments);
+    let reader = reader_note(&meeting.transcript.segments)
+        .map(|note| format!("\n{note}"))
+        .unwrap_or_default();
     format!(
-        "Meeting: {}, {}, {}. Speakers: {}.",
+        "Meeting: {}, {}, {}. Speakers: {}.{reader}",
         meeting.metadata.display_title(),
         meeting
             .metadata
@@ -333,7 +356,7 @@ impl Context {
 }
 
 const SUMMARY_INSTRUCTIONS: &str = r#"Summarize this meeting. Where the user's notes say what mattered, expand on them from the transcript rather than ignoring them.
-Use speaker names exactly as written above. Reply with only a JSON object, no other text:
+Use speaker names exactly as written above, also for action item owners; in the prose, write about the reader as described above. Reply with only a JSON object, no other text:
 {
   "overview": "3-5 sentences on what the meeting covered and concluded",
   "key_points": ["..."],
@@ -399,6 +422,30 @@ mod tests {
         let ts: Vec<&str> = c.iter().map(|c| c.ts.as_str()).collect();
         assert_eq!(ts, vec!["00:41", "01:58", "02:10"]);
         assert_eq!(c[1].ms, 118_000);
+    }
+
+    #[test]
+    fn the_reader_is_you_in_the_second_person_or_by_name() {
+        let unnamed = [
+            seg(0, 1, "You", None, "hi"),
+            seg(1, 5, "Remote 1", None, "hello"),
+        ];
+        let note = reader_note(&unnamed).unwrap();
+        assert!(
+            note.starts_with("You is the person reading this."),
+            "{note}"
+        );
+        assert!(note.contains("second person"), "{note}");
+
+        let named = [seg(0, 1, "You", Some("Pete"), "hi")];
+        let note = reader_note(&named).unwrap();
+        assert!(
+            note.starts_with("Pete (You) is the person reading this."),
+            "{note}"
+        );
+        assert!(note.contains("Refer to them as Pete"), "{note}");
+
+        assert_eq!(reader_note(&[seg(0, 1, "Remote 1", None, "hello")]), None);
     }
 
     #[test]

@@ -24,6 +24,12 @@
 //!   (normalized edit distance) or by sound (a consonant skeleton). The demo
 //!   replay left "Omarky problem." while the loopback said "...the Amarchy
 //!   package... without any problems".
+//! - [`no_speech_phrase`]: a short line that is only what speech engines
+//!   write for sound they cannot make out ("Thank you.", "Thanks for
+//!   watching."), on a microphone holding no voice of yours while the
+//!   remote talks. Pete's 1.3.0 test with the WebRTC canceller had two
+//!   "Thank you." lines under You, made from the canceller's faint residual,
+//!   that no word of the loopback explained.
 
 use crate::meeting::data::{AudioSource, TranscriptSegment};
 
@@ -255,6 +261,88 @@ pub fn same_speech(mic_words: &[String], loopback_words: &[String]) -> bool {
     matched >= 2 && matched * 4 >= content.len()
 }
 
+/// What speech engines write for silence, noise or faint residual they
+/// cannot make out: the closing lines of the videos they learned from.
+/// Only whole lines made of these are taken for one, and only when the
+/// audio shows no voice of yours (see [`no_speech_phrase`]).
+const NO_SPEECH_PHRASES: &[&str] = &[
+    // English
+    "thank you",
+    "thank you very much",
+    "thank you so much",
+    "thanks",
+    "thanks for watching",
+    "thank you for watching",
+    "you",
+    "bye",
+    "bye bye",
+    "goodbye",
+    // German, French, Spanish, Portuguese, Italian, Dutch
+    "danke",
+    "vielen dank",
+    "danke schön",
+    "danke fürs zuschauen",
+    "merci",
+    "merci beaucoup",
+    "merci d'avoir regardé",
+    "gracias",
+    "muchas gracias",
+    "gracias por ver",
+    "obrigado",
+    "obrigada",
+    "obrigado por assistir",
+    "grazie",
+    "grazie mille",
+    "grazie per la visione",
+    "dank je wel",
+    "bedankt",
+    "bedankt voor het kijken",
+    // Russian, Japanese, Chinese, Korean
+    "спасибо",
+    "спасибо за просмотр",
+    "ありがとうございました",
+    "ご視聴ありがとうございました",
+    "谢谢",
+    "谢谢观看",
+    "감사합니다",
+    "시청해주셔서 감사합니다",
+];
+
+/// The longest line, in words, taken for a no-speech phrase: every phrase
+/// above fits, and longer lines are real speech often enough to leave.
+pub const NO_SPEECH_MAX_WORDS: usize = 4;
+
+/// Whether a line's words are nothing but no-speech phrases, one or more
+/// ("Thank you. Bye."), in at most [`NO_SPEECH_MAX_WORDS`] words.
+pub fn no_speech_phrase(words: &[String]) -> bool {
+    if words.is_empty() || words.len() > NO_SPEECH_MAX_WORDS {
+        return false;
+    }
+    let phrases: Vec<Vec<String>> = NO_SPEECH_PHRASES
+        .iter()
+        .map(|p| {
+            p.split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect()
+        })
+        .collect();
+    // ends[i]: the first i words split into whole phrases.
+    let mut ends = vec![false; words.len() + 1];
+    ends[0] = true;
+    for i in 0..words.len() {
+        if !ends[i] {
+            continue;
+        }
+        for phrase in &phrases {
+            if words[i..].starts_with(phrase) {
+                ends[i + phrase.len()] = true;
+            }
+        }
+    }
+    ends[words.len()]
+}
+
 /// Analysis frame for the energy guard.
 const FRAME_MS: u64 = 30;
 /// The longest echo path delay looked for.
@@ -464,6 +552,32 @@ mod tests {
             .map(normalize_word)
             .filter(|w| !w.is_empty())
             .collect()
+    }
+
+    #[test]
+    fn no_speech_phrases_are_whole_lines_of_them() {
+        for line in [
+            "Thank you.",
+            "Thank you. Thank you.",
+            "Thanks for watching!",
+            "you",
+            "Bye.",
+            "Merci d'avoir regardé.",
+            "Vielen Dank.",
+            "Спасибо за просмотр.",
+            "ご視聴ありがとうございました",
+        ] {
+            assert!(no_speech_phrase(&words(line)), "{line:?}");
+        }
+        for line in [
+            "Thank you, Dana.",
+            "Thanks for the update.",
+            "Sounds good.",
+            "Thank you. Thank you. Thank you.",
+            "",
+        ] {
+            assert!(!no_speech_phrase(&words(line)), "{line:?}");
+        }
     }
 
     #[test]

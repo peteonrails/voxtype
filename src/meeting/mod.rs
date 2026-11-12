@@ -599,6 +599,8 @@ impl MeetingDaemon {
         // it is at hand: your own voice, or nothing but the remote's echo.
         let rules = self.config.echo_rules;
         let mut echo_ids = std::collections::HashSet::new();
+        // Lines the audio measured and found no voice of yours in.
+        let mut quiet_ids = std::collections::HashSet::new();
         if let Some(probe) = &probe {
             for seg in done.iter().flat_map(|(_, segments)| segments) {
                 if seg.source != AudioSource::Microphone {
@@ -606,14 +608,34 @@ impl MeetingDaemon {
                 }
                 if probe.own_voice(seg.start_ms, seg.end_ms) {
                     self.own_voice_ids.insert(seg.id);
-                } else if rules.guard && probe.echo_only(seg.start_ms, seg.end_ms) {
+                    continue;
+                }
+                quiet_ids.insert(seg.id);
+                if rules.guard && probe.echo_only(seg.start_ms, seg.end_ms) {
                     echo_ids.insert(seg.id);
                 }
             }
         }
-        if had_loopback || !echo_ids.is_empty() {
+        if !rules.guard {
+            quiet_ids.clear();
+        }
+        if had_loopback || !echo_ids.is_empty() || !quiet_ids.is_empty() {
             let own = &self.own_voice_ids;
             if let Some(ref mut meeting) = self.current_meeting {
+                // A no-speech phrase is no one's line: dropped before an
+                // echo line could move it to the remote speaker.
+                if !quiet_ids.is_empty() {
+                    let dropped = meeting.transcript.drop_no_speech_lines(&quiet_ids);
+                    if !dropped.is_empty() {
+                        tracing::info!(
+                            "Echo guard: dropped {} no-speech phrase(s) said over the remote",
+                            dropped.len()
+                        );
+                        for id in dropped {
+                            echo_ids.remove(&id);
+                        }
+                    }
+                }
                 if !echo_ids.is_empty() {
                     let settled = meeting.transcript.resolve_echo_lines(&echo_ids);
                     if !settled.dropped.is_empty() || !settled.moved.is_empty() {
@@ -1986,6 +2008,67 @@ mod tests {
         ] {
             assert!(saved.contains(&echo.to_string()), "{echo:?} missing: {saved:#?}");
         }
+    }
+
+    /// The demo meeting through speakers with the WebRTC canceller on, as in
+    /// Pete's 1.3.0 hardware test: what is left of the remote on the
+    /// microphone is a faint residual (0.03 of the loopback, 60 ms late)
+    /// that the engine makes no words of.
+    fn cancelled_room() -> Room {
+        Room {
+            gain: Some(0.03),
+            delay_ms: Some(60),
+            reverb: true,
+            heard: Some(Box::new(|_, _| None)),
+        }
+    }
+
+    /// A "Thank you." on the microphone while the remote talks, at
+    /// `gain` times the demo's own "Good.".
+    fn thank_you(at: f32, gain: f32) -> Reply<'static> {
+        Reply {
+            at,
+            text: "Thank you.",
+            from_ms: 18150,
+            frames: 12,
+            gain,
+        }
+    }
+
+    /// Pete's test had two "Thank you." lines under You, 3 s apart, while
+    /// he was silent and the remote talked: the engine's no-speech phrase,
+    /// made from the canceller's faint residual. Here they come from sound
+    /// at a twentieth of the demo's voice, below the meeting's VAD level,
+    /// and the guard drops them.
+    #[tokio::test]
+    async fn a_no_speech_phrase_over_the_remote_is_dropped() {
+        let faint = [thank_you(25.0, 0.05), thank_you(28.0, 0.05)];
+        let mut h = harness().await;
+        let (saved, live) = ReleaseSync::load_in(&cancelled_room(), &faint)
+            .run(&mut h)
+            .await;
+        assert_eq!(saved, demo_lines(&[]), "{saved:#?}");
+        assert_eq!(live, saved);
+
+        let mut h = harness().await;
+        h.daemon.config.echo_rules.guard = false;
+        let (saved, _) = ReleaseSync::load_in(&cancelled_room(), &faint)
+            .run(&mut h)
+            .await;
+        let kept = saved.iter().filter(|l| *l == "You: Thank you.").count();
+        assert_eq!(kept, 2, "without the guard both stay: {saved:#?}");
+    }
+
+    /// A "Thank you." you really say over the remote is your voice by its
+    /// level, and stays, the same words as the dropped phrase above.
+    #[tokio::test]
+    async fn a_thank_you_you_say_over_the_remote_stays() {
+        let mut h = harness().await;
+        let (saved, live) = ReleaseSync::load_in(&cancelled_room(), &[thank_you(25.0, 1.0)])
+            .run(&mut h)
+            .await;
+        assert_eq!(saved, demo_lines(&[("You: Thank you.", 5)]), "{saved:#?}");
+        assert_eq!(live, saved);
     }
 
     /// Clusters each loopback chunk as the next new voice: Auto(0), then
