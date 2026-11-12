@@ -401,11 +401,13 @@ recording, and not at all while the daemon is down; ask
 
 ```json
 {"event": "error", "message": "Failed to start meeting: no microphone"}
-{"event": "error", "message": "Summary failed: meeting transcripts have not been allowed to go to Claude", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "code": "consent_required"}
+{"event": "error", "message": "Summary failed: Ollama (llama3:latest at localhost:11434) returned an error: mkdir /opt/models/manifests-v2: permission denied", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "code": "local_failed", "backend": "Local (llama3:latest)"}
 ```
 
-`message` is for people. An error about the summary at stop also has
-`meeting_id` and a `code` from the [assistant error codes](#assistant-error-codes).
+`message` is for people, and names the backend that failed and its reason.
+An error about the summary at stop also has `meeting_id`, a `code` from the
+[assistant error codes](#assistant-error-codes), and `backend`, the name of
+the backend that failed, as `summary_backend_name` gives it.
 
 ### Changing a transcript
 
@@ -548,10 +550,12 @@ One JSON object per line:
   to the meeting's `asks.jsonl` and listed under `asks` in `meeting show
   --json`.
 
-On failure the last line is an `error` and the exit status is 1:
+On failure the last line is an `error` and the exit status is 1. `backend`
+names the backend that failed, or is `null` when none was chosen:
 
 ```json
-{"event": "error", "code": "consent_required", "message": "Meeting transcripts have not been allowed to go to Claude.\n  Allow it once with: voxtype meeting assistant allow claude\n  Or answer with the local model: add --local, or set [meeting.assistant] local_only = true"}
+{"event": "error", "code": "consent_required", "message": "Meeting transcripts have not been allowed to go to Claude.\n  Allow it once with: voxtype meeting assistant allow claude\n  Or answer with the local model: add --local, or set [meeting.assistant] local_only = true", "backend": null}
+{"event": "error", "code": "agent_failed", "message": "Claude failed: Not logged in. Run claude /login", "backend": "Claude"}
 ```
 
 `--notify` also shows the answer as a notification. Its Open action runs
@@ -593,6 +597,10 @@ What a view needs for an agent chip and a consent dialog:
   "backend": "none",
   "backend_name": null,
   "blocked": "consent_required",
+  "summary_backend": "none",
+  "summary_backend_name": null,
+  "summary_blocked": "consent_required",
+  "summary_note": null,
   "candidates": [
     {"id": "claude", "name": "Claude", "path": "/usr/bin/claude", "found": true, "supported": true, "tool_less": true, "sandbox": null, "consent": false, "sources": ["omarchy", "path"]},
     {"id": "codex", "name": "Codex", "path": "/usr/bin/codex", "found": true, "supported": true, "tool_less": false, "sandbox": "bwrap", "consent": false, "note": "its command tool cannot be turned off, so it runs in a bwrap jail that sees no files from your home but its auth.json", "sources": ["config"]}
@@ -613,6 +621,13 @@ What a view needs for an agent chip and a consent dialog:
 - `backend` is what `ask` would use now: `agent`, `local`, or `none` with the
   reason in `blocked` (an [error code](#assistant-error-codes)).
   `backend_name` is the chip's label ("Claude", "Local (llama3.2)").
+- `summary_backend` is what a summary would use now (at stop, `summarize`,
+  Regenerate): `agent`, `local`, `remote`, or `none` with the reason in
+  `summary_blocked`. `summary_backend_name` names it ("Claude",
+  "Local (llama3:latest)", "Remote (host)"). The two follow one order
+  ([Meeting Mode](MEETING_MODE.md#which-backend-answers)) and differ only
+  for an older `[meeting.summary] backend = "remote"`; then `summary_note`
+  says so in words, otherwise it is `null`.
 - `consent` is whether `agent` is allowed. Each candidate has its own
   `consent`, and `consented_at` once allowed.
 - `choice_required` is true when several agents could answer and none is

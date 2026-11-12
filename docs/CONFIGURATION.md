@@ -3951,24 +3951,42 @@ AI summarization settings for meeting transcripts.
 **Default:** `"disabled"`
 **Required:** No
 
-Which summarizer `voxtype meeting summarize` and the summary at stop use.
+The summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and this setting no longer applies.
 
 - `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
-- `"local"` - The older Ollama summarizer (no chapters).
-- `"remote"` - A remote API.
-- `"disabled"` - The default. Behaves like `"agent"` for `meeting summarize`; summaries at stop follow `auto`.
+- `"local"` - The older Ollama summarizer (no chapters). Questions (`meeting ask`) use the same Ollama model.
+- `"remote"` - A remote API, for summaries only.
+- `"disabled"` - The default. Behaves like `"agent"`; summaries at stop follow `auto`.
+
+The full order, for questions and summaries:
+
+| Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
+|-----------|-------------------------------|--------------------------------------------|
+| `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
+| `--agent <id>` | That agent, once allowed | That agent, once allowed |
+| The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
+| Not allowed, and `[meeting.summary] backend = "local"` | The local model | The older Ollama summarizer |
+| Not allowed, and `[meeting.summary] backend = "remote"` | As in the rows below | The remote summarizer |
+| Not allowed, and an agent was found | Asks to allow it | Asks to allow it |
+| No agent found | The local model | The local model |
+
+`voxtype meeting assistant status` shows which backend each one uses. A failing backend is named in the error with its reason; a failing local model is never replaced by an agent, and a failing agent hands a summary to the local model only when `backend = "local"` is set and it answers.
 
 ### ollama_url
 
 **Type:** String
 **Default:** `"http://localhost:11434"`
-**Required:** No (only used when `backend = "local"`)
+**Required:** No
+
+The Ollama server for the local model: the `"local"` summarizer and the meeting assistant's local model.
 
 ### ollama_model
 
 **Type:** String
 **Default:** `"llama3.2"`
-**Required:** No (only used when `backend = "local"`)
+**Required:** No
+
+The model the local model runs, for the `"local"` summarizer and the meeting assistant.
 
 ### timeout_secs
 
