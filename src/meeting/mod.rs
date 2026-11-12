@@ -963,7 +963,20 @@ impl MeetingDaemon {
                     seg.confidence = Some(diar.confidence);
                 }
             }
-            for (from, to) in diarizer.take_speaker_renames() {
+            let renames = diarizer.take_speaker_renames();
+            let merges = diarizer.merge_similar_speakers();
+            for (from, to) in renames {
+                self.rename_speaker(&from, &to).await;
+            }
+            // Speakers found to be one voice become one, labels included.
+            for (from, to) in merges {
+                let (from, to) = (from.display_name(), to.display_name());
+                // This chunk's own segments are not in the transcript yet.
+                for seg in &mut result.segments {
+                    if seg.speaker_id.as_deref() == Some(from.as_str()) {
+                        seg.speaker_id = Some(to.clone());
+                    }
+                }
                 self.rename_speaker(&from, &to).await;
             }
         }
@@ -2315,6 +2328,100 @@ mod tests {
                 ("You", "You"),
                 ("Remote 2", "Sam"),
             ])
+        );
+    }
+
+    /// Voices 0, 1, 1 for three loopback chunks, then decides after the
+    /// third that voice 1 was voice 0 all along.
+    struct SplitThenMerge(AtomicU32);
+
+    impl diarization::Diarizer for SplitThenMerge {
+        fn diarize(
+            &self,
+            _samples: &[f32],
+            _source: AudioSource,
+            _chunk_start_ms: u64,
+            segments: &[TranscriptSegment],
+        ) -> Vec<diarization::DiarizedSegment> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            segments
+                .iter()
+                .map(|seg| diarization::DiarizedSegment {
+                    speaker: diarization::SpeakerId::Auto(call.min(1)),
+                    start_ms: seg.start_ms,
+                    end_ms: seg.end_ms,
+                    text: seg.text.clone(),
+                    confidence: 0.8,
+                })
+                .collect()
+        }
+
+        fn merge_similar_speakers(&self) -> Vec<(diarization::SpeakerId, diarization::SpeakerId)> {
+            if self.0.load(Ordering::SeqCst) == 3 {
+                vec![(
+                    diarization::SpeakerId::Auto(1),
+                    diarization::SpeakerId::Auto(0),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "split-then-merge"
+        }
+    }
+
+    /// One voice split in two (Pete's Chris meeting) is merged back: earlier
+    /// lines and the chunk that triggered it both end up on the survivor,
+    /// and the name Pete gave the survivor holds for all of them.
+    #[tokio::test]
+    async fn a_merged_speaker_takes_over_earlier_lines_and_keeps_the_survivors_name() {
+        let mut h = harness().await;
+        h.daemon.diarizer = Some(Box::new(diarization::hybrid::HybridDiarizer::new(
+            Box::new(SplitThenMerge(AtomicU32::new(0))),
+        )));
+        h.pair(&[], &[(5.0, 7.0)]).await;
+        h.pair(&[], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote 1", "Chris").unwrap();
+        cli.set_speaker_label(&id, "Remote 2", "Chris?").unwrap();
+        h.pair(&[], &[(5.0, 7.0)]).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = h.events.try_recv() {
+            match event {
+                MeetingEvent::SpeakerRenamed { from, to } => {
+                    events.push(format!("rename {from} -> {to}"))
+                }
+                MeetingEvent::ChunkProcessed { segments, .. } => {
+                    events.extend(segments.iter().map(|s| s.speaker_key()))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("Remote 1"),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&"rename Remote 2 -> Remote 1".to_string()),
+            "{events:?}"
+        );
+
+        h.daemon.stop().await.unwrap();
+        let speakers: Vec<(String, String)> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.speaker_display()))
+            .collect();
+        assert_eq!(
+            speakers,
+            vec![("Remote 1".to_string(), "Chris".to_string()); 3]
         );
     }
 

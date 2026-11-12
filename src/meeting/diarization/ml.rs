@@ -17,6 +17,15 @@ use ort::session::Session;
 #[cfg(feature = "ml-diarization")]
 use ort::value::Tensor;
 
+/// Shortest segment, in ms, that may start a new speaker or move a
+/// centroid. Shorter clips embed too noisily to be trusted with either.
+pub const MIN_MINT_MS: u64 = 1_500;
+
+/// Centroid similarity at or above which two speakers are merged. Matches of
+/// one voice against its own centroid run about 0.6-0.9 with ECAPA, two
+/// different people near 0.
+pub const MERGE_SIMILARITY: f32 = 0.5;
+
 /// Speaker embedding (voice fingerprint)
 #[derive(Debug, Clone)]
 pub struct SpeakerEmbedding {
@@ -30,6 +39,15 @@ pub struct SpeakerEmbedding {
 }
 
 impl SpeakerEmbedding {
+    /// The `n` of an `Auto(n)` speaker, for stable ordering.
+    #[cfg(feature = "ml-diarization")]
+    fn speaker_id_num(&self) -> u32 {
+        match self.speaker_id {
+            SpeakerId::Auto(n) => n,
+            _ => u32::MAX,
+        }
+    }
+
     /// Cosine similarity with another embedding
     pub fn cosine_similarity(&self, other: &SpeakerEmbedding) -> f32 {
         if self.vector.len() != other.vector.len() {
@@ -78,83 +96,174 @@ impl MlDiarizerState {
         }
     }
 
-    /// Find or create speaker ID for an embedding.
-    ///
-    /// On match, the existing centroid is updated with an online mean of the
-    /// new embedding (each centroid tracks `count` merged samples). This
-    /// improves robustness to within-speaker variation across long recordings
-    /// versus anchoring on a single first-utterance embedding.
+    /// The cluster an embedding is most similar to, with that similarity.
     #[cfg(feature = "ml-diarization")]
-    fn find_or_create_speaker(
+    fn nearest(&self, embedding: &[f32]) -> Option<(usize, f32)> {
+        let probe = SpeakerEmbedding {
+            vector: embedding.to_vec(),
+            speaker_id: SpeakerId::Unknown,
+            count: 1,
+        };
+        self.speaker_embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i, probe.cosine_similarity(e)))
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+    }
+
+    /// Fold an embedding into a centroid as an online mean. Cosine
+    /// similarity is scale-invariant, so the vector is not renormalized.
+    #[cfg(feature = "ml-diarization")]
+    fn absorb(&mut self, idx: usize, embedding: &[f32]) {
+        let existing = &mut self.speaker_embeddings[idx];
+        let n = existing.count as f32;
+        for (c, e) in existing.vector.iter_mut().zip(embedding.iter()) {
+            *c = (*c * n + *e) / (n + 1.0);
+        }
+        existing.count += 1;
+    }
+
+    /// The cluster that has absorbed the most speech.
+    #[cfg(feature = "ml-diarization")]
+    fn dominant(&self) -> Option<usize> {
+        self.speaker_embeddings
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.count.cmp(&b.1.count).then(b.0.cmp(&a.0)))
+            .map(|(i, _)| i)
+    }
+
+    /// Give one transcript segment a speaker from its sub-window embeddings.
+    ///
+    /// A segment is labelled as a whole, and only long, mostly unfamiliar
+    /// speech may start a new speaker. Minting per sub-window, as this used
+    /// to, split one voice on a call into several speakers: a sub-second
+    /// "Yeah." embeds noisily and fell under the threshold, and a single odd
+    /// 4 s window of a long turn created a cluster even when the rest of the
+    /// turn matched an existing one.
+    ///
+    /// - Matched sub-windows vote, and the winner absorbs them if the segment
+    ///   is at least [`MIN_MINT_MS`] long.
+    /// - A new speaker needs a segment of at least [`MIN_MINT_MS`] whose
+    ///   sub-windows are mostly unmatched; it starts from their mean.
+    /// - Anything else (a short clip, no majority, the speaker cap reached)
+    ///   joins the nearest speaker when it is at all similar, else the
+    ///   dominant one, and changes no centroid.
+    #[cfg(feature = "ml-diarization")]
+    fn assign_segment(
         &mut self,
-        embedding: &[f32],
+        embeddings: &[Vec<f32>],
+        duration_ms: u64,
         similarity_threshold: f32,
         max_speakers: u32,
     ) -> SpeakerId {
-        let new_embedding = SpeakerEmbedding {
-            vector: embedding.to_vec(),
-            speaker_id: SpeakerId::Auto(self.next_speaker_id),
-            count: 1,
-        };
+        if embeddings.is_empty() {
+            return SpeakerId::Unknown;
+        }
+        let long_enough = duration_ms >= MIN_MINT_MS;
 
-        // Find best matching existing speaker
-        let mut best_match: Option<(usize, f32)> = None;
-        for (i, existing) in self.speaker_embeddings.iter().enumerate() {
-            let similarity = new_embedding.cosine_similarity(existing);
-            if similarity > similarity_threshold {
-                match best_match {
-                    None => best_match = Some((i, similarity)),
-                    Some((_, best_sim)) if similarity > best_sim => {
-                        best_match = Some((i, similarity))
-                    }
-                    _ => {}
-                }
+        let mut votes: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut unmatched: Vec<usize> = Vec::new();
+        for (w, e) in embeddings.iter().enumerate() {
+            match self.nearest(e) {
+                Some((i, sim)) if sim > similarity_threshold => votes.entry(i).or_default().push(w),
+                _ => unmatched.push(w),
             }
         }
 
-        if let Some((idx, sim)) = best_match {
-            // Update the matched speaker's centroid with the online mean of the
-            // new embedding. Cosine similarity is scale-invariant so we don't
-            // need to renormalize the stored vector.
-            let existing = &mut self.speaker_embeddings[idx];
-            let n = existing.count as f32;
-            for (c, e) in existing.vector.iter_mut().zip(embedding.iter()) {
-                *c = (*c * n + *e) / (n + 1.0);
+        if long_enough
+            && unmatched.len() * 2 > embeddings.len()
+            && self.next_speaker_id < max_speakers
+        {
+            let dim = embeddings[unmatched[0]].len();
+            let mut mean = vec![0.0f32; dim];
+            for &w in &unmatched {
+                for (m, x) in mean.iter_mut().zip(&embeddings[w]) {
+                    *m += x / unmatched.len() as f32;
+                }
             }
-            existing.count += 1;
-            tracing::debug!(
-                "Speaker match: {} (similarity: {:.3}, n={})",
-                existing.speaker_id,
-                sim,
-                existing.count
-            );
-            existing.speaker_id.clone()
-        } else if self.next_speaker_id < max_speakers {
-            // Log best similarity for debugging
-            let best_sim = self
-                .speaker_embeddings
-                .iter()
-                .map(|e| new_embedding.cosine_similarity(e))
-                .fold(f32::NEG_INFINITY, f32::max);
-            if !self.speaker_embeddings.is_empty() {
-                tracing::debug!(
-                    "New speaker (best similarity: {:.3}, threshold: {:.3})",
-                    best_sim,
-                    similarity_threshold
-                );
-            }
-            // Create new speaker
             let speaker_id = SpeakerId::Auto(self.next_speaker_id);
+            tracing::debug!(
+                "New speaker {} from {} of {} sub-window(s), {} ms",
+                speaker_id,
+                unmatched.len(),
+                embeddings.len(),
+                duration_ms
+            );
             self.speaker_embeddings.push(SpeakerEmbedding {
-                vector: embedding.to_vec(),
+                vector: mean,
                 speaker_id: speaker_id.clone(),
-                count: 1,
+                count: unmatched.len() as u32,
             });
             self.next_speaker_id += 1;
-            speaker_id
-        } else {
-            // Too many speakers, return unknown
-            SpeakerId::Unknown
+            return speaker_id;
+        }
+
+        // Most votes; ties go to the earlier speaker so results repeat.
+        let winner = votes
+            .iter()
+            .max_by(|a, b| {
+                a.1.len().cmp(&b.1.len()).then(
+                    self.speaker_embeddings[*b.0]
+                        .speaker_id_num()
+                        .cmp(&self.speaker_embeddings[*a.0].speaker_id_num()),
+                )
+            })
+            .map(|(i, ws)| (*i, ws.clone()));
+        if let Some((idx, windows)) = winner {
+            if long_enough {
+                for w in windows {
+                    self.absorb(idx, &embeddings[w]);
+                }
+            }
+            return self.speaker_embeddings[idx].speaker_id.clone();
+        }
+
+        let mean_nearest = embeddings
+            .iter()
+            .filter_map(|e| self.nearest(e))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let idx = match mean_nearest {
+            Some((i, sim)) if sim > 0.0 => Some(i),
+            _ => self.dominant(),
+        };
+        idx.map(|i| self.speaker_embeddings[i].speaker_id.clone())
+            .unwrap_or(SpeakerId::Unknown)
+    }
+
+    /// Merge speakers whose centroids have come to sound alike, folding the
+    /// later one into the earlier. Returns `(merged, kept)` pairs in order.
+    #[cfg(feature = "ml-diarization")]
+    fn merge_similar(&mut self, merge_threshold: f32) -> Vec<(SpeakerId, SpeakerId)> {
+        let mut merged = Vec::new();
+        loop {
+            let mut best: Option<(usize, usize, f32)> = None;
+            for a in 0..self.speaker_embeddings.len() {
+                for b in (a + 1)..self.speaker_embeddings.len() {
+                    let sim =
+                        self.speaker_embeddings[a].cosine_similarity(&self.speaker_embeddings[b]);
+                    if sim >= merge_threshold && best.is_none_or(|(_, _, s)| sim > s) {
+                        best = Some((a, b, sim));
+                    }
+                }
+            }
+            let Some((keep, drop, sim)) = best else {
+                return merged;
+            };
+            let gone = self.speaker_embeddings.remove(drop);
+            let kept = &mut self.speaker_embeddings[keep];
+            let (n, m) = (kept.count as f32, gone.count as f32);
+            for (c, g) in kept.vector.iter_mut().zip(&gone.vector) {
+                *c = (*c * n + g * m) / (n + m);
+            }
+            kept.count += gone.count;
+            tracing::debug!(
+                "Merged speaker {} into {} (centroid similarity {:.3})",
+                gone.speaker_id,
+                kept.speaker_id,
+                sim
+            );
+            merged.push((gone.speaker_id, kept.speaker_id.clone()));
         }
     }
 }
@@ -425,41 +534,18 @@ impl Diarizer for MlDiarizer {
                     }
                 }
 
-                // Now take the lock once and process the cluster updates
-                // sequentially (order matters: online centroid updates feed
-                // back into subsequent matches within the same segment).
-                let mut counts: HashMap<SpeakerId, u32> = HashMap::new();
-                match self.state.lock() {
-                    Ok(mut state) => {
-                        for embedding in &embeddings {
-                            let label = state.find_or_create_speaker(
-                                embedding,
-                                self.similarity_threshold,
-                                self.max_speakers,
-                            );
-                            *counts.entry(label).or_insert(0) += 1;
-                        }
+                let speaker = match self.state.lock() {
+                    Ok(mut state) => state.assign_segment(
+                        &embeddings,
+                        seg.duration_ms(),
+                        self.similarity_threshold,
+                        self.max_speakers,
+                    ),
+                    Err(e) => {
+                        tracing::warn!("Speaker state lock poisoned: {}", e);
+                        SpeakerId::Unknown
                     }
-                    Err(e) => tracing::warn!("Speaker state lock poisoned: {}", e),
-                }
-
-                // Dominant speaker = mode of sub-window labels.
-                // Sort key: (named beats Unknown, higher count wins, then
-                // lowest Auto(n) wins on ties — first-seen speaker keeps the
-                // segment when two speakers vote-tie within a chunk).
-                // Without the third component, HashMap iteration order would
-                // make tied results nondeterministic across runs.
-                let speaker = counts
-                    .into_iter()
-                    .min_by_key(|(sp, c)| {
-                        let auto_id = match sp {
-                            SpeakerId::Auto(n) => *n as i64,
-                            _ => i64::MAX,
-                        };
-                        (matches!(sp, SpeakerId::Unknown), -(*c as i64), auto_id)
-                    })
-                    .map(|(sp, _)| sp)
-                    .unwrap_or(SpeakerId::Unknown);
+                };
 
                 let confidence = if matches!(speaker, SpeakerId::Unknown) {
                     0.0
@@ -477,6 +563,18 @@ impl Diarizer for MlDiarizer {
 
             results
         }
+    }
+
+    fn merge_similar_speakers(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        #[cfg(feature = "ml-diarization")]
+        {
+            self.state
+                .lock()
+                .map(|mut state| state.merge_similar(MERGE_SIMILARITY))
+                .unwrap_or_default()
+        }
+        #[cfg(not(feature = "ml-diarization"))]
+        Vec::new()
     }
 
     fn name(&self) -> &'static str {
@@ -556,120 +654,164 @@ mod tests {
         assert!(path.ends_with("ecapa_tdnn.onnx"));
     }
 
-    #[test]
+    /// Unit vectors standing in for ECAPA embeddings: `voice(a)` and
+    /// `voice(b)` are the same speaker when a == b, and orthogonal otherwise.
     #[cfg(feature = "ml-diarization")]
-    fn test_find_or_create_speaker_new() {
-        let mut state = MlDiarizerState::new();
-        let embedding = vec![1.0, 0.0, 0.0];
-        let speaker = state.find_or_create_speaker(&embedding, 0.75, 10);
-        assert_eq!(speaker, SpeakerId::Auto(0));
-        assert_eq!(state.next_speaker_id, 1);
-        assert_eq!(state.speaker_embeddings.len(), 1);
+    fn voice(n: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 8];
+        v[n] = 1.0;
+        v
+    }
+
+    /// Like `voice(n)` but noisier, as a sub-second clip embeds: it leans
+    /// toward the speaker without clearing the 0.25 threshold.
+    #[cfg(feature = "ml-diarization")]
+    fn mumble(n: usize, other: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 8];
+        v[n] = 0.2;
+        v[other] = 1.0;
+        v
     }
 
     #[test]
     #[cfg(feature = "ml-diarization")]
-    fn test_find_or_create_speaker_match() {
-        let mut state = MlDiarizerState::new();
-        // Create first speaker
-        let embedding1 = vec![1.0, 0.0, 0.0];
-        let speaker1 = state.find_or_create_speaker(&embedding1, 0.75, 10);
-        assert_eq!(speaker1, SpeakerId::Auto(0));
+    fn long_unfamiliar_speech_starts_a_speaker_and_matching_speech_joins_it() {
+        let mut s = MlDiarizerState::new();
+        assert_eq!(
+            s.assign_segment(&[voice(0), voice(0)], 6_000, 0.25, 10),
+            SpeakerId::Auto(0)
+        );
+        assert_eq!(
+            s.assign_segment(&[voice(0)], 3_000, 0.25, 10),
+            SpeakerId::Auto(0)
+        );
+        assert_eq!(
+            s.assign_segment(&[voice(1), voice(1)], 8_000, 0.25, 10),
+            SpeakerId::Auto(1)
+        );
+        assert_eq!(
+            s.speaker_embeddings[0].count, 3,
+            "matching long speech moves the centroid"
+        );
+    }
 
-        // Same embedding should match
-        let speaker2 = state.find_or_create_speaker(&embedding1, 0.75, 10);
-        assert_eq!(speaker2, SpeakerId::Auto(0));
-        assert_eq!(state.next_speaker_id, 1); // no new speaker created
+    /// The Chris meeting: one Zoom voice, whose "Yeah." and "Okay." embed
+    /// far from his long turns. Short clips must join him, never mint.
+    #[test]
+    #[cfg(feature = "ml-diarization")]
+    fn short_clips_never_start_a_speaker() {
+        let mut s = MlDiarizerState::new();
+        assert_eq!(
+            s.assign_segment(&[voice(0), voice(0)], 9_000, 0.25, 10),
+            SpeakerId::Auto(0)
+        );
+        for _ in 0..20 {
+            assert_eq!(
+                s.assign_segment(&[mumble(0, 5)], 900, 0.25, 10),
+                SpeakerId::Auto(0)
+            );
+        }
+        assert_eq!(s.speaker_embeddings.len(), 1);
+        assert_eq!(
+            s.speaker_embeddings[0].count, 2,
+            "short clips leave centroids alone"
+        );
     }
 
     #[test]
     #[cfg(feature = "ml-diarization")]
-    fn test_find_or_create_speaker_different() {
-        let mut state = MlDiarizerState::new();
-        // Create first speaker
-        let embedding1 = vec![1.0, 0.0, 0.0];
-        let speaker1 = state.find_or_create_speaker(&embedding1, 0.75, 10);
-        assert_eq!(speaker1, SpeakerId::Auto(0));
+    fn a_short_clip_joins_the_nearest_speaker_or_else_the_dominant_one() {
+        let mut s = MlDiarizerState::new();
+        s.assign_segment(&[voice(0), voice(0), voice(0)], 9_000, 0.25, 10);
+        s.assign_segment(&[voice(1), voice(1)], 6_000, 0.25, 10);
+        // Leans toward speaker 1 without matching it.
+        assert_eq!(
+            s.assign_segment(&[mumble(1, 6)], 800, 0.25, 10),
+            SpeakerId::Auto(1)
+        );
+        // Like neither: the speaker with the most speech.
+        assert_eq!(
+            s.assign_segment(&[voice(7)], 800, 0.25, 10),
+            SpeakerId::Auto(0)
+        );
+        // Nobody yet: unknown, never a new speaker.
+        let mut empty = MlDiarizerState::new();
+        assert_eq!(
+            empty.assign_segment(&[voice(3)], 800, 0.25, 10),
+            SpeakerId::Unknown
+        );
+        assert!(empty.speaker_embeddings.is_empty());
+    }
 
-        // Orthogonal embedding should create new speaker
-        let embedding2 = vec![0.0, 1.0, 0.0];
-        let speaker2 = state.find_or_create_speaker(&embedding2, 0.75, 10);
-        assert_eq!(speaker2, SpeakerId::Auto(1));
-        assert_eq!(state.next_speaker_id, 2);
+    /// One odd 4 s window in a long turn used to start a speaker that then
+    /// lay in wait (Remote 5 in the Chris meeting).
+    #[test]
+    #[cfg(feature = "ml-diarization")]
+    fn a_dissenting_sub_window_does_not_start_a_speaker() {
+        let mut s = MlDiarizerState::new();
+        s.assign_segment(&[voice(0), voice(0)], 8_000, 0.25, 10);
+        let turn = [voice(0), voice(4), voice(0), voice(0)];
+        assert_eq!(
+            s.assign_segment(&turn, 14_000, 0.25, 10),
+            SpeakerId::Auto(0)
+        );
+        assert_eq!(s.speaker_embeddings.len(), 1);
     }
 
     #[test]
     #[cfg(feature = "ml-diarization")]
-    fn test_find_or_create_speaker_online_mean_centroid() {
-        // PR #418 added an online-mean centroid update on match so the
-        // stored vector drifts toward the utterance average rather than
-        // anchoring on the first-seen embedding. Verify the math:
-        //   after match #n, centroid = (centroid_prev * n + new) / (n + 1)
-        let mut state = MlDiarizerState::new();
-
-        // First utterance: pure x-axis. State stores [1, 0, 0], count = 1.
-        let initial = vec![1.0_f32, 0.0, 0.0];
-        let speaker = state.find_or_create_speaker(&initial, 0.5, 10);
-        assert_eq!(speaker, SpeakerId::Auto(0));
-        assert_eq!(state.speaker_embeddings[0].count, 1);
-
-        // Second utterance is orthogonal (similarity = 0). Drop the
-        // threshold below 0 so the match path fires and we can observe the
-        // centroid update — otherwise the orthogonal embedding would spawn
-        // a new speaker and we'd never exercise the merge math.
-        let second = vec![0.0_f32, 1.0, 0.0];
-        let speaker = state.find_or_create_speaker(&second, -1.0, 10);
-        assert_eq!(speaker, SpeakerId::Auto(0), "forced match into speaker 0");
-
-        // Expected centroid: ([1,0,0] * 1 + [0,1,0]) / 2 = [0.5, 0.5, 0.0]
-        let centroid = &state.speaker_embeddings[0].vector;
-        assert!(
-            (centroid[0] - 0.5).abs() < 1e-5,
-            "x = 0.5, got {}",
-            centroid[0]
-        );
-        assert!(
-            (centroid[1] - 0.5).abs() < 1e-5,
-            "y = 0.5, got {}",
-            centroid[1]
-        );
-        assert!((centroid[2] - 0.0).abs() < 1e-5);
-        assert_eq!(state.speaker_embeddings[0].count, 2);
-
-        // Third utterance: aligns with original x-axis. Centroid should
-        // become (2 * [0.5, 0.5, 0] + [1, 0, 0]) / 3 = [2/3, 1/3, 0].
-        let third = vec![1.0_f32, 0.0, 0.0];
-        let speaker = state.find_or_create_speaker(&third, -1.0, 10);
-        assert_eq!(speaker, SpeakerId::Auto(0));
-
-        let centroid = &state.speaker_embeddings[0].vector;
-        assert!(
-            (centroid[0] - 2.0 / 3.0).abs() < 1e-5,
-            "x = 2/3, got {}",
-            centroid[0]
-        );
-        assert!(
-            (centroid[1] - 1.0 / 3.0).abs() < 1e-5,
-            "y = 1/3, got {}",
-            centroid[1]
-        );
-        assert_eq!(state.speaker_embeddings[0].count, 3);
+    fn the_speaker_cap_holds() {
+        let mut s = MlDiarizerState::new();
+        s.assign_segment(&[voice(0)], 5_000, 0.75, 2);
+        s.assign_segment(&[voice(1)], 5_000, 0.75, 2);
+        let third = s.assign_segment(&[voice(2)], 5_000, 0.75, 2);
+        assert_ne!(third, SpeakerId::Auto(2));
+        assert_eq!(s.speaker_embeddings.len(), 2);
     }
 
     #[test]
     #[cfg(feature = "ml-diarization")]
-    fn test_find_or_create_speaker_max_speakers() {
-        let mut state = MlDiarizerState::new();
-        // Fill up to max
-        let e1 = vec![1.0, 0.0, 0.0];
-        let e2 = vec![0.0, 1.0, 0.0];
-        state.find_or_create_speaker(&e1, 0.75, 2);
-        state.find_or_create_speaker(&e2, 0.75, 2);
+    fn centroids_are_online_means() {
+        let mut s = MlDiarizerState::new();
+        s.assign_segment(&[vec![1.0, 0.0, 0.0]], 5_000, 0.5, 10);
+        s.assign_segment(&[vec![1.0, 1.0, 0.0]], 5_000, 0.5, 10);
+        let c = &s.speaker_embeddings[0].vector;
+        assert!(
+            (c[0] - 1.0).abs() < 1e-5 && (c[1] - 0.5).abs() < 1e-5,
+            "{c:?}"
+        );
+        assert_eq!(s.speaker_embeddings[0].count, 2);
+    }
 
-        // Third distinct speaker should return Unknown
-        let e3 = vec![0.0, 0.0, 1.0];
-        let speaker = state.find_or_create_speaker(&e3, 0.75, 2);
-        assert_eq!(speaker, SpeakerId::Unknown);
+    #[test]
+    #[cfg(feature = "ml-diarization")]
+    fn speakers_that_converge_are_merged_into_the_earlier_one() {
+        let mut s = MlDiarizerState::new();
+        s.assign_segment(&[voice(0)], 5_000, 0.9, 10);
+        s.assign_segment(
+            &[vec![0.6, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            5_000,
+            0.9,
+            10,
+        );
+        s.assign_segment(&[voice(3)], 5_000, 0.9, 10);
+        assert_eq!(s.speaker_embeddings.len(), 3);
+
+        let merged = s.merge_similar(MERGE_SIMILARITY);
+        assert_eq!(merged, vec![(SpeakerId::Auto(1), SpeakerId::Auto(0))]);
+        assert_eq!(s.speaker_embeddings.len(), 2);
+        // Two different people stay apart, and nothing merges twice.
+        assert!(s.merge_similar(MERGE_SIMILARITY).is_empty());
+        // New speech from the merged voice lands on the survivor.
+        assert_eq!(
+            s.assign_segment(
+                &[vec![0.6, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+                5_000,
+                0.5,
+                10
+            ),
+            SpeakerId::Auto(0)
+        );
     }
 
     #[test]
