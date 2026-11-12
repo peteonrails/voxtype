@@ -873,9 +873,11 @@ Item {
           assistant: root.assistant
           feed: root.feed
           copiedKey: root.copiedKey
+          canOpenSettings: root.canOpenSettings
           onAgentMenuRequested: function(anchor) { agentMenu.openAt(anchor) }
           onCitationActivated: function(ms) { root.jumpTo(ms) }
           onCopyRequested: function(text, key) { root.copyRequested(text, key) }
+          onSettingsRequested: root.settingsRequested()
         }
       }
 

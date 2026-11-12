@@ -213,6 +213,14 @@ what is wrong instead of showing an empty pane:
   agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
   agent menu shows it disabled, with the reason.
 - **"Copying needs wl-copy"**: install `wl-clipboard`.
+- **"Couldn't write the summary"** at the top of the Summary tab: the backend
+  that writes summaries failed, and the card says which and why. The chip in
+  the tab's header names that backend; it can be a local model (an older
+  `[meeting.summary]` backend such as Ollama) even when questions go to an
+  agent. "status code 500" from `localhost:11434` means Ollama is running but
+  failed: check `ollama list` for the model, or choose **Use Claude instead**
+  (shown when a local model failed and you have allowed an agent), which runs
+  `voxtype meeting summarize <id> --agent claude` for this meeting only.
 
 ## Table of Contents
 
