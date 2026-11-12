@@ -229,6 +229,20 @@ Item {
     onActionFinished: function(action, ok, message) {
       if (!ok) root.actionError = message
     }
+    onRetitleFinished: function(extra, ok, message, result) {
+      var here = extra && extra.meeting === feed.meetingId
+      if (!ok) {
+        if (here) feed.title = extra.before
+        return
+      }
+      // The title as stored (one line, whitespace collapsed), not as typed.
+      if (here && result && result.title) feed.title = String(result.title)
+      // A finished meeting's two-person title names its speakers in the
+      // store, with no event to say so: read it again.
+      if (here && result && result.labelled && result.labelled.length > 0 && !feed.active)
+        storedProc.load(feed.meetingId, true)
+      root.refreshList()
+    }
     // The line was moved on screen before the CLI ran: keep it if it took
     // (with the daemon's version of the segment when --json gave one), put it
     // back if not.
@@ -277,6 +291,12 @@ Item {
 
   Connections {
     target: feed
+    // A rename from anywhere: the meetings list shows titles too.
+    function onRetitled(meetingId, title) { if (root.shown) root.refreshList() }
+  }
+
+  Connections {
+    target: feed
     function onMeetingStarted() {
       if (root.shown ? placement.minimized : !root.panelOpen) meetingCli.readShowOnStart()
     }
@@ -306,6 +326,18 @@ Item {
     root.actionError = ""
     feed.setAnnotation(segId, text, highlight)
     meetingCli.annotate(feed.meetingId, segId, text, highlight, { snapshot: snap })
+  }
+
+  // ------------------------------------------------------------ title
+
+  // Renamed in the view: shown at once, put back if the CLI refuses it.
+  function retitle(title) {
+    var next = String(title || "").trim()
+    if (next === "" || feed.meetingId === "" || next === feed.title) return
+    root.actionError = ""
+    var before = feed.title
+    feed.title = next
+    meetingCli.retitle(feed.meetingId, next, { meeting: feed.meetingId, before: before })
   }
 
   // ------------------------------------------------------------ line edits
@@ -628,8 +660,11 @@ Item {
     id: storedProc
     property string out: ""
     property string err: ""
-    function load(id) {
+    // Read again in place (`again`): same tab, no Ask hand-off.
+    property bool again: false
+    function load(id, again) {
       if (storedProc.running) return
+      storedProc.again = again === true
       storedProc.out = ""
       storedProc.err = ""
       storedProc.launch([root.bin, "meeting", "show", id, "--json"])
@@ -645,6 +680,7 @@ Item {
         return
       }
       if (data.metadata && data.metadata.summary) assistant.setStoredSummary(feed.meetingId, data.metadata.summary)
+      if (storedProc.again) return
       if (root.pendingAskId !== "") {
         assistant.showAsk(root.pendingAskId)
         root.pendingAskId = ""
@@ -710,6 +746,7 @@ Item {
     function onResumeRequested() { root.actionError = ""; meetingCli.resume() }
     function onStopRequested() { root.actionError = ""; meetingCli.stop() }
     function onStartRequested(title) { root.actionError = ""; meetingCli.start(title) }
+    function onRetitleRequested(title) { root.retitle(title) }
     function onRenameRequested(keys, name) {
       root.actionError = ""
       var list = []

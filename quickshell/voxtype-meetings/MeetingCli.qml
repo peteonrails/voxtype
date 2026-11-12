@@ -97,6 +97,14 @@ Item {
     root.enqueue("edit", ["meeting", "edit", meeting || "latest", String(segId), String(text), "--json"], extra)
   }
 
+  // A meeting's title (`meeting title <id> "<title>" --json`). `result` is
+  // its answer, {meeting_id, title (as stored), previous_title, live,
+  // labelled (speakers a finished meeting's title named)}, or null.
+  function retitle(meeting, title, extra) {
+    root.enqueue("title", ["meeting", "title", meeting || "latest", String(title), "--json"], extra)
+  }
+  signal retitleFinished(var extra, bool ok, string message, var result)
+
   // Back to the transcribed text.
   function resetText(meeting, segId, extra) {
     root.enqueue("edit", ["meeting", "edit", meeting || "latest", String(segId), "--reset", "--json"], extra)
@@ -139,10 +147,19 @@ Item {
       var extra = actionProc.extra
       var ok = exitCode === 0
       var what = action === "annotate" ? "notes on lines" : action === "reassign" ? "moving lines"
-        : action === "edit" ? "editing lines" : action === "delete-line" ? "deleting lines" : "voxtype meeting " + action
+        : action === "edit" ? "editing lines" : action === "delete-line" ? "deleting lines"
+        : action === "title" ? "renaming meetings" : "voxtype meeting " + action
       var message = ok ? "" : (MT.cliProblem(actionProc.err, what) || ("voxtype meeting " + action + " exited " + exitCode))
       actionProc.action = ""
       if (ok && action === "label" && extra) root.labelApplied(extra.key, extra.name)
+      if (action === "title") {
+        var result = null
+        if (ok) {
+          try { result = JSON.parse(actionProc.out) } catch (e) { result = null }
+          if (!result || typeof result !== "object") result = null
+        }
+        root.retitleFinished(extra, ok, message, result)
+      }
       if (action === "reassign" || action === "annotate" || action === "edit" || action === "delete-line") {
         var segment = null
         if (ok) {
@@ -165,6 +182,7 @@ Item {
       if (action === "reassign") root.reassignFinished(extra, false, message, null)
       if (action === "annotate") root.annotateFinished(extra, false, message, null)
       if (action === "edit" || action === "delete-line") root.segmentActionFinished(action, extra, false, message, null)
+      if (action === "title") root.retitleFinished(extra, false, message, null)
       root.actionFinished(action, false, message)
       Qt.callLater(root.pump)
     }
