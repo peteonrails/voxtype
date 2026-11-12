@@ -7,6 +7,7 @@ use crate::meeting::data::{
     MeetingData, MeetingId, MeetingMetadata, MeetingStatus, SegmentAnnotation, Transcript,
     TranscriptSegment,
 };
+use crate::meeting::manifest::{Manifest, MeetingContext, MANIFEST_FILE};
 use crate::meeting::notes::MeetingNotes;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -49,6 +50,9 @@ pub enum StorageError {
         first: Option<u32>,
         last: Option<u32>,
     },
+
+    #[error("A line's text cannot be empty; use `meeting delete-line` to remove it")]
+    EmptyText,
 
     #[error("An annotation needs text, --highlight, or both")]
     EmptyAnnotation,
@@ -99,6 +103,19 @@ fn speaker_list(speakers: &[String]) -> String {
     } else {
         speakers.join(", ")
     }
+}
+
+/// How a meeting's per-line edits fared when its transcript was replaced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SegmentEditCarry {
+    /// Speaker moves, text edits and deleted lines moved to a new line
+    pub edits_carried: usize,
+    /// Those with no new line to go to
+    pub edits_dropped: usize,
+    /// Those removed because they were not to be kept
+    pub edits_discarded: usize,
+    pub annotations_carried: usize,
+    pub annotations_dropped: usize,
 }
 
 /// Meeting storage configuration
@@ -215,6 +232,23 @@ impl MeetingStorage {
                 PRIMARY KEY (meeting_id, segment_id)
             );
 
+            -- A line's text as the user corrected it, and lines the user
+            -- deleted (kept, so they can be restored). Applied like the
+            -- speaker overrides above.
+            CREATE TABLE IF NOT EXISTS segment_text_edits (
+                meeting_id TEXT NOT NULL,
+                segment_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, segment_id)
+            );
+            CREATE TABLE IF NOT EXISTS segment_deletions (
+                meeting_id TEXT NOT NULL,
+                segment_id INTEGER NOT NULL,
+                deleted_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, segment_id)
+            );
+
             -- A note or highlight the user attached to one line, applied
             -- like the speaker overrides above.
             CREATE TABLE IF NOT EXISTS segment_annotations (
@@ -226,6 +260,24 @@ impl MeetingStorage {
                 PRIMARY KEY (meeting_id, segment_id)
             );
 
+            -- What a meeting was recorded with, fixed at its start, for
+            -- meeting.json.
+            CREATE TABLE IF NOT EXISTS meeting_context (
+                meeting_id TEXT PRIMARY KEY,
+                engine TEXT,
+                model TEXT,
+                diarization TEXT,
+                voxtype_version TEXT
+            );
+
+            -- Figures `meeting list` shows without opening each transcript:
+            -- the number of speakers as displayed (labels and moves applied),
+            -- refreshed on every transcript save.
+            CREATE TABLE IF NOT EXISTS meeting_stats (
+                meeting_id TEXT PRIMARY KEY,
+                speaker_count INTEGER NOT NULL
+            );
+
             -- The meeting's summary (MeetingSummary as JSON) and what wrote it.
             CREATE TABLE IF NOT EXISTS meeting_summaries (
                 meeting_id TEXT PRIMARY KEY,
@@ -235,6 +287,27 @@ impl MeetingStorage {
             );
             "#,
         )?;
+
+        // Columns added after the table first shipped. ALTER TABLE has no IF
+        // NOT EXISTS, so ask first; older binaries ignore the extra column.
+        let has_url = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('meetings') WHERE name = 'url'")?
+            .exists([])?;
+        if !has_url {
+            self.conn
+                .execute_batch("ALTER TABLE meetings ADD COLUMN url TEXT;")?;
+        }
+        let has_echo_cancel = self
+            .conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('meeting_context') WHERE name = 'echo_cancel'",
+            )?
+            .exists([])?;
+        if !has_echo_cancel {
+            self.conn
+                .execute_batch("ALTER TABLE meeting_context ADD COLUMN echo_cancel TEXT;")?;
+        }
         Ok(())
     }
 
@@ -247,8 +320,8 @@ impl MeetingStorage {
         // Insert into database
         self.conn.execute(
             r#"
-            INSERT INTO meetings (id, title, started_at, status, storage_path, audio_retained, model)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO meetings (id, title, started_at, status, storage_path, audio_retained, model, url)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
                 metadata.id.to_string(),
@@ -258,6 +331,7 @@ impl MeetingStorage {
                 meeting_dir.to_string_lossy().to_string(),
                 metadata.audio_retained as i32,
                 metadata.model,
+                metadata.url,
             ],
         )?;
 
@@ -281,7 +355,8 @@ impl MeetingStorage {
                 chunk_count = ?6,
                 audio_retained = ?7,
                 model = ?8,
-                synced_at = ?9
+                synced_at = ?9,
+                url = ?10
             WHERE id = ?1
             "#,
             params![
@@ -294,6 +369,7 @@ impl MeetingStorage {
                 metadata.audio_retained as i32,
                 metadata.model,
                 metadata.synced_at.map(|dt| dt.timestamp()),
+                metadata.url,
             ],
         )?;
 
@@ -311,6 +387,7 @@ impl MeetingStorage {
                 Some(_) => serde_json::to_string_pretty(metadata)?,
             };
             std::fs::write(metadata_path, json)?;
+            self.refresh_manifest(&metadata.id);
         }
 
         Ok(())
@@ -319,6 +396,11 @@ impl MeetingStorage {
     /// Mark any active/paused meetings as completed.
     /// Called on daemon startup to clean up meetings orphaned by a previous crash or restart.
     pub fn complete_stale_meetings(&self) -> Result<u32, StorageError> {
+        let stale: Vec<String> = self
+            .conn
+            .prepare("SELECT id FROM meetings WHERE status IN ('active', 'paused')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
         let now = Utc::now().timestamp();
         let count = self.conn.execute(
             r#"
@@ -330,6 +412,11 @@ impl MeetingStorage {
             "#,
             params![now],
         )?;
+        // Their manifests still say "active"; the audio a crash left
+        // behind is already playable, so the manifest is all that is stale.
+        for id in stale.iter().filter_map(|id| MeetingId::parse(id).ok()) {
+            self.refresh_manifest(&id);
+        }
         Ok(count as u32)
     }
 
@@ -340,7 +427,7 @@ impl MeetingStorage {
             .query_row(
                 r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -356,6 +443,7 @@ impl MeetingStorage {
                         storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                         audio_retained: row.get::<_, i32>(8)? != 0,
                         model: row.get(9)?,
+                        url: row.get(11)?,
                         summary: None,
                         synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
                     })
@@ -417,7 +505,7 @@ impl MeetingStorage {
         let sql = if limit.is_some() {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings
                 ORDER BY started_at DESC
                 LIMIT ?1
@@ -425,7 +513,7 @@ impl MeetingStorage {
         } else {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
-                       chunk_count, storage_path, audio_retained, model, synced_at
+                       chunk_count, storage_path, audio_retained, model, synced_at, url
                 FROM meetings
                 ORDER BY started_at DESC
                 "#
@@ -444,6 +532,7 @@ impl MeetingStorage {
                 storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                 audio_retained: row.get::<_, i32>(8)? != 0,
                 model: row.get(9)?,
+                url: row.get(11)?,
                 summary: None,
                 synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
             })
@@ -458,6 +547,75 @@ impl MeetingStorage {
         };
 
         Ok(meetings)
+    }
+
+    /// Meetings for `meeting list --json`: each one's metadata plus whether
+    /// it has a summary and how many speakers it shows. Both come from the
+    /// index; a meeting saved before the speaker count was kept is counted
+    /// from its transcript once and remembered.
+    pub fn list_meeting_entries(
+        &self,
+        limit: Option<u32>,
+    ) -> Result<Vec<MeetingListEntry>, StorageError> {
+        let meetings = self.list_meetings(limit)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT m.id,
+                   EXISTS (SELECT 1 FROM meeting_summaries s WHERE s.meeting_id = m.id),
+                   st.speaker_count
+            FROM meetings m LEFT JOIN meeting_stats st ON st.meeting_id = m.id
+            "#,
+        )?;
+        let known: std::collections::HashMap<String, (bool, Option<u32>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, bool>(1)?, row.get::<_, Option<u32>>(2)?),
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut entries = Vec::with_capacity(meetings.len());
+        for metadata in meetings {
+            let (has_summary, count) = known
+                .get(&metadata.id.to_string())
+                .cloned()
+                .unwrap_or((false, None));
+            let speaker_count = match count {
+                Some(n) => n,
+                None => self.backfill_speaker_count(&metadata.id),
+            };
+            entries.push(MeetingListEntry {
+                metadata,
+                has_summary,
+                speaker_count,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Count a meeting's speakers from its transcript and remember it. A
+    /// meeting without a transcript yet has none and is not remembered.
+    fn backfill_speaker_count(&self, meeting_id: &MeetingId) -> u32 {
+        match self.load_transcript(meeting_id) {
+            Ok(transcript) => {
+                let _ = self.store_speaker_count(meeting_id, &transcript);
+                displayed_speaker_count(&transcript)
+            }
+            Err(_) => 0,
+        }
+    }
+
+    fn store_speaker_count(
+        &self,
+        meeting_id: &MeetingId,
+        transcript: &Transcript,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meeting_stats (meeting_id, speaker_count) VALUES (?1, ?2)",
+            params![meeting_id.to_string(), displayed_speaker_count(transcript)],
+        )?;
+        Ok(())
     }
 
     /// Get the most recent meeting
@@ -491,7 +649,11 @@ impl MeetingStorage {
         std::fs::write(transcript_path, serde_json::to_string_pretty(&edited)?)?;
 
         // transcript.md beside it, so the folder reads without voxtype.
+        // Deleted lines stay in transcript.json as tombstones but count for
+        // nothing: not in the markdown, and not toward speaker_count.
         let notes = self.load_notes(meeting_id)?.notes;
+        edited.remove_deleted();
+        self.store_speaker_count(meeting_id, &edited)?;
         let data = MeetingData {
             metadata,
             transcript: edited,
@@ -500,6 +662,9 @@ impl MeetingStorage {
         if let Err(e) = write_transcript_markdown(&storage_path, &data) {
             tracing::warn!("Failed to write transcript.md: {}", e);
         }
+        // Every hand edit (label, reassign, text, delete) saves through
+        // here, and each can change meeting.json's speakers.
+        self.refresh_manifest(meeting_id);
 
         Ok(())
     }
@@ -515,11 +680,26 @@ impl MeetingStorage {
         transcript.apply_speaker_overrides(&self.get_speaker_overrides(meeting_id)?);
         transcript.apply_speaker_labels(&self.get_speaker_labels(meeting_id)?);
         transcript.apply_annotations(&self.get_annotations(meeting_id)?);
+        transcript.apply_text_edits(&self.get_text_edits(meeting_id)?);
+        transcript.apply_deletions(&self.get_deletions(meeting_id)?);
         Ok(())
     }
 
-    /// Load transcript from filesystem
+    /// Load the transcript as voxtype shows it: every edit applied and
+    /// deleted lines left out.
     pub fn load_transcript(&self, meeting_id: &MeetingId) -> Result<Transcript, StorageError> {
+        let mut transcript = self.load_transcript_all(meeting_id)?;
+        transcript.remove_deleted();
+        Ok(transcript)
+    }
+
+    /// Load the transcript with deleted lines still in it, marked `deleted`.
+    /// Anything that saves the transcript back must start from this, or the
+    /// deleted lines would be lost for good.
+    pub(crate) fn load_transcript_all(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<Transcript, StorageError> {
         let metadata = self
             .get_meeting(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
@@ -576,9 +756,23 @@ impl MeetingStorage {
             params![meeting_id.to_string()],
         )?;
         self.conn.execute(
+            "DELETE FROM meeting_context WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        self.conn.execute(
             "DELETE FROM meeting_summaries WHERE meeting_id = ?1",
             params![meeting_id.to_string()],
         )?;
+        self.conn.execute(
+            "DELETE FROM meeting_stats WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
+        for table in ["segment_text_edits", "segment_deletions"] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE meeting_id = ?1"),
+                params![meeting_id.to_string()],
+            )?;
+        }
 
         // Delete files if storage path exists
         if let Some(metadata) = metadata {
@@ -662,7 +856,7 @@ impl MeetingStorage {
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
 
         // A meeting that has not finished its first chunk has no file yet.
-        let transcript = match self.load_transcript(meeting_id) {
+        let transcript = match self.load_transcript_all(meeting_id) {
             Ok(t) => t,
             Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 Transcript::new()
@@ -829,6 +1023,107 @@ impl MeetingStorage {
         self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
     }
 
+    /// Replace one line's text with a correction. The transcribed text is
+    /// kept and shown as `original_text`; [`MeetingStorage::reset_segment_text`]
+    /// restores it. `rewrite` as for [`MeetingStorage::reassign_segment`].
+    pub fn edit_segment_text(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        text: &str,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(StorageError::EmptyText);
+        }
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO segment_text_edits (meeting_id, segment_id, text, updated_at) \
+             VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+            params![meeting_id.to_string(), segment_id, text],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Give a line back the text it was transcribed with.
+    pub fn reset_segment_text(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "DELETE FROM segment_text_edits WHERE meeting_id = ?1 AND segment_id = ?2",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Hide one line. It stays in transcript.json, marked deleted, so
+    /// [`MeetingStorage::restore_segment`] can bring it back; everything that
+    /// reads the meeting through voxtype leaves it out. Returns the line,
+    /// marked deleted.
+    pub fn delete_segment(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO segment_deletions (meeting_id, segment_id) VALUES (?1, ?2)",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// Bring back a deleted line.
+    pub fn restore_segment(
+        &self,
+        meeting_id: &MeetingId,
+        segment_id: u32,
+        rewrite: bool,
+    ) -> Result<TranscriptSegment, StorageError> {
+        let mut transcript = self.transcript_with_segment(meeting_id, segment_id)?;
+        self.conn.execute(
+            "DELETE FROM segment_deletions WHERE meeting_id = ?1 AND segment_id = ?2",
+            params![meeting_id.to_string(), segment_id],
+        )?;
+        self.finish_segment_change(meeting_id, &mut transcript, segment_id, rewrite)
+    }
+
+    /// The user's text corrections: segment ID to text.
+    pub fn get_text_edits(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<std::collections::HashMap<u32, String>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT segment_id, text FROM segment_text_edits WHERE meeting_id = ?1")?;
+        let edits = stmt
+            .query_map(params![meeting_id.to_string()], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        Ok(edits)
+    }
+
+    /// The segment IDs the user deleted.
+    pub fn get_deletions(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<std::collections::HashSet<u32>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT segment_id FROM segment_deletions WHERE meeting_id = ?1")?;
+        let deleted = stmt
+            .query_map(params![meeting_id.to_string()], |row| row.get::<_, u32>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        Ok(deleted)
+    }
+
     /// The user's notes and highlights: segment ID to annotation.
     pub fn get_annotations(
         &self,
@@ -887,6 +1182,7 @@ impl MeetingStorage {
         std::fs::write(&staged, notes)?;
         std::fs::rename(&staged, &path)?;
         self.refresh_transcript_markdown(meeting_id);
+        self.refresh_manifest(meeting_id);
         self.load_notes(meeting_id)
     }
 
@@ -918,6 +1214,168 @@ impl MeetingStorage {
         }
     }
 
+    /// Move the meeting's per-line edits from old segment IDs to new ones,
+    /// after its transcript was replaced (`meeting retranscribe`).
+    ///
+    /// Annotations always follow `mapping`. Speaker moves, text edits and
+    /// deleted lines follow it with `keep_edits`, and are dropped without.
+    /// An edit whose line has no entry in `mapping`, or whose new line
+    /// already took another edit of the same kind, is dropped. One
+    /// transaction: a failure leaves the edits as they were.
+    pub fn remap_segment_edits(
+        &self,
+        meeting_id: &MeetingId,
+        mapping: &std::collections::HashMap<u32, u32>,
+        keep_edits: bool,
+    ) -> Result<SegmentEditCarry, StorageError> {
+        // Moved rows are parked above every real ID first, so a new ID that
+        // equals an old one not yet moved cannot collide with it.
+        const PARKED: i64 = 1 << 40;
+        let id = meeting_id.to_string();
+        let tx = self.conn.unchecked_transaction()?;
+        let remap = |table: &str| -> Result<(usize, usize), StorageError> {
+            let olds: Vec<i64> = tx
+                .prepare(&format!(
+                    "SELECT segment_id FROM {table} WHERE meeting_id = ?1"
+                ))?
+                .query_map(params![id], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            let mut carried = 0;
+            for old in olds {
+                if let Some(&new) = u32::try_from(old).ok().and_then(|o| mapping.get(&o)) {
+                    carried += tx.execute(
+                        &format!(
+                            "UPDATE OR IGNORE {table} SET segment_id = ?3 \
+                             WHERE meeting_id = ?1 AND segment_id = ?2"
+                        ),
+                        params![id, old, new as i64 + PARKED],
+                    )?;
+                }
+            }
+            let dropped = tx.execute(
+                &format!("DELETE FROM {table} WHERE meeting_id = ?1 AND segment_id < ?2"),
+                params![id, PARKED],
+            )?;
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET segment_id = segment_id - ?2 \
+                     WHERE meeting_id = ?1 AND segment_id >= ?2"
+                ),
+                params![id, PARKED],
+            )?;
+            Ok((carried, dropped))
+        };
+
+        let mut carry = SegmentEditCarry::default();
+        for table in [
+            "segment_speaker_overrides",
+            "segment_text_edits",
+            "segment_deletions",
+        ] {
+            if keep_edits {
+                let (carried, dropped) = remap(table)?;
+                carry.edits_carried += carried;
+                carry.edits_dropped += dropped;
+            } else {
+                carry.edits_discarded += tx.execute(
+                    &format!("DELETE FROM {table} WHERE meeting_id = ?1"),
+                    params![id],
+                )?;
+            }
+        }
+        let (carried, dropped) = remap("segment_annotations")?;
+        carry.annotations_carried = carried;
+        carry.annotations_dropped = dropped;
+        tx.commit()?;
+        Ok(carry)
+    }
+
+    /// Record what the meeting is recorded with, and rewrite its manifest.
+    pub fn set_context(
+        &self,
+        meeting_id: &MeetingId,
+        context: &MeetingContext,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO meeting_context
+                (meeting_id, engine, model, diarization, voxtype_version, echo_cancel)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                meeting_id.to_string(),
+                context.engine,
+                context.model,
+                context.diarization,
+                context.voxtype_version,
+                context.echo_cancel,
+            ],
+        )?;
+        self.refresh_manifest(meeting_id);
+        Ok(())
+    }
+
+    /// What the meeting was recorded with; empty for meetings recorded
+    /// before voxtype kept it.
+    pub fn get_context(&self, meeting_id: &MeetingId) -> Result<MeetingContext, StorageError> {
+        Ok(self
+            .conn
+            .query_row(
+                r#"
+                SELECT engine, model, diarization, voxtype_version, echo_cancel
+                FROM meeting_context WHERE meeting_id = ?1
+                "#,
+                params![meeting_id.to_string()],
+                |row| {
+                    Ok(MeetingContext {
+                        engine: row.get(0)?,
+                        model: row.get(1)?,
+                        diarization: row.get(2)?,
+                        voxtype_version: row.get(3)?,
+                        echo_cancel: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Write the meeting's `meeting.json` from what is saved, and return
+    /// its path.
+    pub fn write_manifest(&self, meeting_id: &MeetingId) -> Result<PathBuf, StorageError> {
+        let metadata = self
+            .get_meeting(meeting_id)?
+            .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
+        let dir = metadata
+            .storage_path
+            .clone()
+            .ok_or(StorageError::PathNotConfigured)?;
+        let transcript = match self.load_transcript(meeting_id) {
+            Ok(t) => t,
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                Transcript::new()
+            }
+            Err(e) => return Err(e),
+        };
+        let manifest = Manifest::build(
+            &dir,
+            &metadata,
+            &self.get_context(meeting_id)?,
+            &transcript.speaker_keys(),
+            &self.get_speaker_labels(meeting_id)?,
+        );
+        manifest.write(&dir)?;
+        Ok(dir.join(MANIFEST_FILE))
+    }
+
+    /// Rewrite `meeting.json` after a change. Best effort: a failure is
+    /// logged, and the next change writes it again.
+    pub fn refresh_manifest(&self, meeting_id: &MeetingId) {
+        if let Err(e) = self.write_manifest(meeting_id) {
+            tracing::warn!("Failed to write meeting.json for {}: {}", meeting_id, e);
+        }
+    }
+
     /// Lines moved to another speaker by hand: segment ID to speaker ID.
     pub fn get_speaker_overrides(
         &self,
@@ -943,7 +1401,7 @@ impl MeetingStorage {
     ) -> Result<Transcript, StorageError> {
         self.get_meeting(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
-        let transcript = match self.load_transcript(meeting_id) {
+        let transcript = match self.load_transcript_all(meeting_id) {
             Ok(t) => t,
             Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 Transcript::new()
@@ -1038,6 +1496,31 @@ impl MeetingStorage {
     }
 }
 
+/// A meeting as `meeting list --json` lists it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MeetingListEntry {
+    #[serde(flatten)]
+    pub metadata: MeetingMetadata,
+    /// Whether a summary is saved for the meeting
+    pub has_summary: bool,
+    /// Distinct speakers as displayed, with labels and moved lines applied;
+    /// two speakers given the same name count once
+    pub speaker_count: u32,
+}
+
+/// Distinct displayed speakers among lines that say something.
+fn displayed_speaker_count(transcript: &Transcript) -> u32 {
+    let mut names: Vec<String> = transcript
+        .segments
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|s| s.speaker_display())
+        .collect();
+    names.sort();
+    names.dedup();
+    names.len() as u32
+}
+
 /// Speaker IDs in `transcript` that `speaker` names, most specific match first.
 fn resolve_speaker_keys(transcript: &Transcript, speaker: &str) -> Vec<String> {
     let speaker = speaker.trim();
@@ -1109,6 +1592,134 @@ mod tests {
         };
         let storage = MeetingStorage::open(config).unwrap();
         (storage, temp_dir)
+    }
+
+    /// A stored meeting with one line per (speaker id, text).
+    fn meeting_with_lines(storage: &MeetingStorage, lines: &[(&str, &str)]) -> MeetingId {
+        let mut metadata = MeetingMetadata::new(Some("Stats".into()));
+        metadata.storage_path = Some(storage.create_meeting(&metadata).unwrap());
+        let mut t = Transcript::new();
+        for (i, (speaker, text)) in lines.iter().enumerate() {
+            let mut seg = TranscriptSegment::new(
+                i as u32,
+                i as u64 * 1000,
+                i as u64 * 1000 + 900,
+                text.to_string(),
+                0,
+            );
+            seg.speaker_id = Some(speaker.to_string());
+            t.add_segment(seg);
+        }
+        storage.save_transcript(&metadata.id, &t).unwrap();
+        metadata.id
+    }
+
+    fn entry(storage: &MeetingStorage, id: &MeetingId) -> (bool, u32) {
+        let e = storage
+            .list_meeting_entries(None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.metadata.id == *id)
+            .unwrap();
+        (e.has_summary, e.speaker_count)
+    }
+
+    #[test]
+    fn list_entries_count_displayed_speakers_and_flag_summaries() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(
+            &storage,
+            &[
+                ("You", "hi"),
+                ("Remote 1", "hello"),
+                ("Remote 2", "hey"),
+                ("Remote 3", "   "),
+            ],
+        );
+        // A speaker with only an empty line does not count.
+        assert_eq!(entry(&storage, &id), (false, 3));
+
+        // Two speakers given one name display, and count, as one.
+        storage.set_speaker_label(&id, "Remote 1", "Dana").unwrap();
+        storage.set_speaker_label(&id, "Remote 2", "Dana").unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+
+        // Moving the only "You" line to Dana leaves one speaker.
+        storage.reassign_segment(&id, 0, "Dana", true).unwrap();
+        assert_eq!(entry(&storage, &id), (false, 1));
+
+        let summary = crate::meeting::data::MeetingSummary {
+            summary: "s".into(),
+            key_points: vec![],
+            action_items: vec![],
+            decisions: vec![],
+            chapters: vec![],
+            generated_at: Utc::now(),
+            model: None,
+        };
+        storage.save_summary(&id, &summary).unwrap();
+        assert_eq!(entry(&storage, &id), (true, 1));
+
+        let json = serde_json::to_value(storage.list_meeting_entries(None).unwrap()).unwrap();
+        assert_eq!(json[0]["has_summary"], true);
+        assert_eq!(json[0]["speaker_count"], 1);
+        assert_eq!(json[0]["id"], id.to_string());
+        assert!(
+            json[0].get("title").is_some(),
+            "metadata stays flat: {json}"
+        );
+    }
+
+    #[test]
+    fn a_deleted_line_does_not_count_its_speaker() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(&storage, &[("You", "hi"), ("Remote", "hello")]);
+        assert_eq!(entry(&storage, &id), (false, 2));
+
+        // Deleting Remote's only line leaves You alone, even though the
+        // tombstone stays in transcript.json.
+        storage.delete_segment(&id, 1, true).unwrap();
+        assert_eq!(entry(&storage, &id), (false, 1));
+
+        storage.restore_segment(&id, 1, true).unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+    }
+
+    #[test]
+    fn list_entries_read_the_index_not_the_transcript() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(&storage, &[("You", "a"), ("Remote", "b")]);
+        let path = storage
+            .get_meeting_path(&id)
+            .unwrap()
+            .join("transcript.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+    }
+
+    #[test]
+    fn list_entries_backfill_meetings_saved_before_the_count() {
+        let (storage, _dir) = create_test_storage();
+        let id = meeting_with_lines(&storage, &[("You", "a"), ("Remote", "b")]);
+        storage
+            .conn
+            .execute("DELETE FROM meeting_stats", [])
+            .unwrap();
+        assert_eq!(entry(&storage, &id), (false, 2));
+        let stored: u32 = storage
+            .conn
+            .query_row(
+                "SELECT speaker_count FROM meeting_stats WHERE meeting_id = ?1",
+                params![id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 2);
+
+        // A meeting with no transcript yet has none, and nothing is stored.
+        let mut fresh = MeetingMetadata::new(None);
+        fresh.storage_path = Some(storage.create_meeting(&fresh).unwrap());
+        assert_eq!(entry(&storage, &fresh.id), (false, 0));
     }
 
     #[test]
@@ -2003,6 +2614,167 @@ mod tests {
         storage.annotate_segment(&id, 2, "x", false, true).unwrap();
         storage.delete_meeting(&id).unwrap();
         assert!(storage.get_annotations(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_meetings_link_round_trips() {
+        let (storage, _temp) = create_test_storage();
+        let mut metadata = MeetingMetadata::new(None);
+        metadata.url = Some("https://meet.example.com/x".to_string());
+        storage.create_meeting(&metadata).unwrap();
+        let loaded = storage.get_meeting(&metadata.id).unwrap().unwrap();
+        assert_eq!(loaded.url.as_deref(), Some("https://meet.example.com/x"));
+        assert_eq!(
+            storage.list_meetings(None).unwrap()[0].url.as_deref(),
+            Some("https://meet.example.com/x")
+        );
+    }
+
+    /// An index from before meeting links gains the column on open.
+    #[test]
+    fn an_index_without_the_url_column_is_upgraded() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = Connection::open(temp.path().join("index.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meetings (id TEXT PRIMARY KEY, title TEXT, started_at INTEGER NOT NULL, \
+                 ended_at INTEGER, duration_secs INTEGER, status TEXT NOT NULL DEFAULT 'active', \
+                 chunk_count INTEGER NOT NULL DEFAULT 0, storage_path TEXT, \
+                 audio_retained INTEGER NOT NULL DEFAULT 0, model TEXT, synced_at INTEGER, \
+                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')));\
+                 INSERT INTO meetings (id, started_at) VALUES ('6f1c2a5e-0000-4000-8000-000000000001', 0);",
+            )
+            .unwrap();
+        }
+        let storage = MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        })
+        .unwrap();
+        let old = storage.list_meetings(None).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].url, None);
+        // Opening again does not try to add it twice.
+        drop(storage);
+        MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+        })
+        .unwrap();
+    }
+
+    fn raw_file(storage: &MeetingStorage, id: &MeetingId) -> Transcript {
+        let path = storage
+            .get_meeting_path(id)
+            .unwrap()
+            .join("transcript.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn edit_replaces_a_lines_text_and_reset_restores_it() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+
+        let seg = storage
+            .edit_segment_text(&id, 2, " We ship Friday. ", true)
+            .unwrap();
+        assert_eq!(seg.text, "We ship Friday.");
+        assert_eq!(seg.original_text.as_deref(), Some("line 2"));
+        assert_eq!(
+            storage.load_transcript(&id).unwrap().segments[2].text,
+            "We ship Friday."
+        );
+
+        let seg = storage.reset_segment_text(&id, 2, true).unwrap();
+        assert_eq!(seg.text, "line 2");
+        assert_eq!(seg.original_text, None);
+
+        assert!(matches!(
+            storage.edit_segment_text(&id, 2, "  ", true),
+            Err(StorageError::EmptyText)
+        ));
+        assert!(matches!(
+            storage.edit_segment_text(&id, 9, "x", true),
+            Err(StorageError::UnknownSegment { segment: 9, .. })
+        ));
+    }
+
+    #[test]
+    fn an_edit_survives_the_daemons_next_save() {
+        let (storage, _temp) = create_test_storage();
+        let (id, in_memory) = hybrid_meeting(&storage);
+        storage
+            .edit_segment_text(&id, 1, "Corrected", false)
+            .unwrap();
+        storage.save_transcript(&id, &in_memory).unwrap();
+        let line = &storage.load_transcript(&id).unwrap().segments[1];
+        assert_eq!(line.text, "Corrected");
+        assert_eq!(line.original_text.as_deref(), Some("line 1"));
+    }
+
+    /// A deleted line is gone from everything that reads the meeting, but
+    /// kept in the file so it can come back, even across later saves.
+    #[test]
+    fn delete_hides_a_line_everywhere_but_keeps_it_for_restore() {
+        let (storage, _temp) = create_test_storage();
+        let (id, in_memory) = hybrid_meeting(&storage);
+
+        let seg = storage.delete_segment(&id, 2, true).unwrap();
+        assert!(seg.deleted);
+        let shown: Vec<u32> = storage
+            .load_transcript(&id)
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(shown, vec![0, 1, 3]);
+        assert_eq!(
+            storage
+                .load_meeting_data(&id)
+                .unwrap()
+                .transcript
+                .segments
+                .len(),
+            3
+        );
+        let md = std::fs::read_to_string(
+            storage
+                .get_meeting_path(&id)
+                .unwrap()
+                .join(TRANSCRIPT_MARKDOWN_FILE),
+        )
+        .unwrap();
+        assert!(!md.contains("line 2"), "{md}");
+
+        // The daemon's next save, and other edits, keep the tombstone.
+        storage.save_transcript(&id, &in_memory).unwrap();
+        storage.set_speaker_label(&id, "You", "Pete").unwrap();
+        storage.reassign_segment(&id, 3, "You", true).unwrap();
+        let file = raw_file(&storage, &id);
+        assert_eq!(file.segments.len(), 4);
+        assert!(file.segments[2].deleted);
+        assert_eq!(storage.load_transcript(&id).unwrap().segments.len(), 3);
+
+        let seg = storage.restore_segment(&id, 2, true).unwrap();
+        assert!(!seg.deleted);
+        assert_eq!(seg.text, "line 2");
+        assert_eq!(storage.load_transcript(&id).unwrap().segments.len(), 4);
+        assert!(!raw_file(&storage, &id).segments[2].deleted);
+    }
+
+    #[test]
+    fn deleting_a_meeting_drops_its_edits_and_deletions() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = hybrid_meeting(&storage);
+        storage.edit_segment_text(&id, 1, "x", true).unwrap();
+        storage.delete_segment(&id, 2, true).unwrap();
+        storage.delete_meeting(&id).unwrap();
+        assert!(storage.get_text_edits(&id).unwrap().is_empty());
+        assert!(storage.get_deletions(&id).unwrap().is_empty());
     }
 
     #[test]

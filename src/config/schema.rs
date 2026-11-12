@@ -251,7 +251,7 @@ const FEEDBACK_THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const OUTPUT_MODE_CHOICES: &[&str] = &["type", "clipboard", "paste", "file"];
 const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
-const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
+const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "webrtc", "gtcrn", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
@@ -284,6 +284,19 @@ const ICON_THEME_CHOICES: &[&str] = &[
     "arrows",
     "text",
 ];
+
+/// Old names a closed key still accepts, written as their current name.
+/// They are not offered as choices; a config that still holds one loads as
+/// before, since the field itself is a plain string.
+fn choice_alias(key: &str, raw: &str) -> Option<&'static str> {
+    match (key, raw) {
+        // Renamed in 1.3.0 before release: "aec" and "off" shipped in test
+        // builds.
+        ("meeting.audio.echo_cancel", "aec") => Some("webrtc"),
+        ("meeting.audio.echo_cancel", "off") => Some("disabled"),
+        _ => None,
+    }
+}
 
 const fn closed(choices: &'static [&'static str]) -> KeyType {
     KeyType::Enum {
@@ -1359,6 +1372,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Allow `voxtype meeting` to record and transcribe long sessions.",
     ),
     spec(
+        "meeting.offer_enable",
+        "meeting",
+        "offer_enable",
+        KeyType::Bool,
+        "Meeting",
+        "Offer meeting mode",
+        "While meeting mode is off, the tray offers to turn it on. Set false to stop the offer.",
+    ),
+    spec(
+        "meeting.status_notifications",
+        "meeting",
+        "status_notifications",
+        closed(crate::meeting::status_notice::STATUS_MODES),
+        "Meeting",
+        "Meeting status notifications",
+        "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -1374,7 +1405,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(ECHO_CANCEL_CHOICES),
         "Meeting",
         "Echo cancellation",
-        "auto runs GTCRN enhancement plus transcript dedup on the mic track. Set disabled if PipeWire already cancels echo.",
+        "auto cancels speaker echo with PipeWire's WebRTC canceller unless the output is headphones, GTCRN otherwise. webrtc forces it, gtcrn is the old behaviour, disabled is neither.",
     ),
     spec(
         "meeting.diarization.enabled",
@@ -2199,13 +2230,49 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Minutes before a meeting stops on its own. 0 is unlimited.",
     ),
     spec(
+        "meeting.show_view_on_start",
+        "meeting",
+        "show_view_on_start",
+        KeyType::Bool,
+        "Meeting",
+        "Show meeting view on start",
+        "Open the live meeting view in the Omarchy shell when a meeting starts.",
+    ),
+    spec(
+        "meeting.view_opacity",
+        "meeting",
+        "view_opacity",
+        KeyType::Float { min: 0.3, max: 1.0 },
+        "Meeting",
+        "Meeting view opacity",
+        "Background opacity of the meeting view while the pointer is elsewhere. Text stays opaque.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
         KeyType::Bool,
         "Meeting",
         "Keep audio",
-        "Keep the raw meeting audio after transcription.",
+        "Keep the meeting's mic, loopback and mixed audio as Opus in its folder.",
+    ),
+    spec(
+        "meeting.post_meeting_command",
+        "meeting",
+        "post_meeting_command",
+        KeyType::String,
+        "Meeting",
+        "Post-meeting command",
+        "Shell command run once a meeting's folder is final. Gets VOXTYPE_MEETING_DIR.",
+    ),
+    spec(
+        "meeting.post_meeting_timeout_secs",
+        "meeting",
+        "post_meeting_timeout_secs",
+        KeyType::Int { min: 1, max: 86400 },
+        "Meeting",
+        "Post-meeting timeout",
+        "Seconds before the post-meeting command is killed.",
     ),
     spec(
         "meeting.storage_path",
@@ -2215,6 +2282,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting",
         "Storage path",
         "Where meetings are stored. auto uses ~/.local/share/voxtype/meetings.",
+    ),
+    spec(
+        "meeting.audio.echo_guard",
+        "meeting.audio",
+        "echo_guard",
+        KeyType::Bool,
+        "Meeting",
+        "Echo guard",
+        "Keep the call heard through your speakers out of your lines: drop mic lines that are only its echo, unless the mic level shows you speaking.",
+    ),
+    spec(
+        "meeting.audio.echo_fuzzy_max_words",
+        "meeting.audio",
+        "echo_fuzzy_max_words",
+        KeyType::Int { min: 1, max: 12 },
+        "Meeting",
+        "Misheard echo length",
+        "Longest mic line, in words, checked for misheard echo.",
     ),
     spec(
         "meeting.audio.mic_device",
@@ -2359,6 +2444,33 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting",
         "Summary timeout",
         "Seconds to wait for a summary request.",
+    ),
+    spec(
+        "meeting.detect.enabled",
+        "meeting.detect",
+        "enabled",
+        KeyType::Bool,
+        "Meeting",
+        "Offer to record calls",
+        "Notice a Zoom, Teams or Google Meet call starting and offer to record it. Unset is on for Omarchy, off elsewhere. Needs meeting mode on.",
+    ),
+    spec(
+        "meeting.detect.auto_record_apps",
+        "meeting.detect",
+        "auto_record_apps",
+        KeyType::String,
+        "Meeting",
+        "Record without asking",
+        "Comma-separated call apps (Zoom, Google Meet, Microsoft Teams) whose calls are recorded without a prompt.",
+    ),
+    spec(
+        "meeting.detect.debounce_secs",
+        "meeting.detect",
+        "debounce_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Call detection delay",
+        "Seconds a call app must hold the mic before the prompt, so a quick mic test does not count.",
     ),
     spec(
         "meeting.summary.auto",
@@ -2637,6 +2749,9 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
         KeyType::Enum { choices, open } => {
             if choices.contains(&raw) {
                 return Ok(TypedValue::Str(raw.to_string()));
+            }
+            if let Some(canonical) = choice_alias(spec.key, raw) {
+                return Ok(TypedValue::Str(canonical.to_string()));
             }
             if open {
                 if raw.is_empty() {
@@ -2937,6 +3052,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "vad.threshold" => f32_json(cfg.vad.threshold),
 
         "meeting.enabled" => json!(cfg.meeting.enabled),
+        "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
+        "meeting.status_notifications" => json!(cfg.meeting.status_notifications),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),
@@ -3045,8 +3162,16 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
+        "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
+        "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
+        "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
+        // Two places are all an opacity needs, and an f32 such as 0.8 would
+        // otherwise read back as 0.800000011920929.
+        "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
+        "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),
+        "meeting.audio.echo_fuzzy_max_words" => json!(cfg.meeting.audio.echo_fuzzy_max_words),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
         "meeting.diarization.backend" => json!(cfg.meeting.diarization.backend),
         "meeting.diarization.max_speakers" => json!(cfg.meeting.diarization.max_speakers),
@@ -3064,6 +3189,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
         "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
+        "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
+        "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {
+            [] => Json::Null,
+            apps => json!(apps.join(",")),
+        },
+        "meeting.detect.debounce_secs" => json!(cfg.meeting.detect.debounce_secs),
         "meeting.summary.auto" => json!(cfg.meeting.summary.auto),
         "meeting.assistant.local_only" => json!(cfg.meeting.assistant.local_only),
         "meeting.assistant.agent" => opt_str(cfg.meeting.assistant.agent.as_ref()),

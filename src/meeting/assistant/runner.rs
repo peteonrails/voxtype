@@ -30,6 +30,20 @@
 //! Since a command tool remains, codex also runs inside a bubblewrap jail
 //! that sees nothing from the real HOME but its `auth.json` ([`super::jail`]).
 //!
+//! **pi** (`pi --help`, pi 1.5.2):
+//! - `--print, -p`: "Non-interactive mode: process prompt and exit".
+//! - `--no-tools, -nt`: "Disable all tools by default (built-in and
+//!   extension)"; `--no-mcp`: "no servers connect and no MCP tools";
+//!   `--no-extensions`, `--no-skills`, `--no-prompt-templates`: none of
+//!   those load either.
+//! - `--no-context-files`: no AGENTS.md or CLAUDE.md; `--no-approve`:
+//!   "Ignore project-local files"; `--no-session`: "Don't save session".
+//! - `--system-prompt`: replaces the coding-assistant prompt.
+//! - `@files`: "Include files in initial message". The help documents no
+//!   stdin prompt, so the prompt goes in as an attached file, which also
+//!   keeps a long transcript clear of the per-argument size limit.
+//! - `--mode text` (the default) prints the final answer; nothing streams.
+//!
 //! The agent always runs in a fresh empty directory, so no project
 //! instructions (CLAUDE.md, AGENTS.md) are picked up from the cwd.
 
@@ -81,6 +95,36 @@ pub fn claude_args() -> Vec<String> {
     .map(|s| s.to_string())
     .collect()
 }
+
+/// Arguments for `pi`, with the prompt attached from `prompt_file`.
+pub fn pi_args(prompt_file: &Path) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--print",
+        "--mode",
+        "text",
+        "--no-tools",
+        "--no-mcp",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-context-files",
+        "--no-approve",
+        "--no-session",
+        "--system-prompt",
+        SYSTEM_PROMPT,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push(format!("@{}", prompt_file.display()));
+    args.push("--".into());
+    args.push(PI_INSTRUCTION.into());
+    args
+}
+
+/// The message pi gets beside the attached prompt.
+pub const PI_INSTRUCTION: &str =
+    "The attached file is the meeting and the request. Answer the request it ends with.";
 
 /// Arguments for `codex`, prompt on stdin, answer written to `last_message`.
 pub fn codex_args(workdir: &Path, last_message: &Path) -> Vec<String> {
@@ -136,6 +180,24 @@ pub fn run_agent(
                 prompt,
                 timeout,
                 claude_line,
+                on_text,
+            )?;
+            Ok(out)
+        }
+        "pi" => {
+            let run_dir = workdir.path().join("cwd");
+            std::fs::create_dir_all(&run_dir)
+                .map_err(|e| agent_err(agent, format!("cannot create a working directory: {e}")))?;
+            // spawn_and_collect writes the prompt beside the cwd.
+            let args = pi_args(&workdir.path().join("prompt.txt"));
+            let out = spawn_and_collect(
+                agent,
+                &agent.path,
+                &args,
+                &run_dir,
+                prompt,
+                timeout,
+                |line| Line::Delta(format!("{line}\n")),
                 on_text,
             )?;
             Ok(out)
@@ -421,6 +483,27 @@ mod tests {
             assert!(args.iter().any(|a| a == flag), "{flag}");
         }
         assert!(!args.iter().any(|a| a.contains("dangerously")));
+    }
+
+    #[test]
+    fn pi_args_turn_every_tool_off_and_attach_the_prompt() {
+        let args = pi_args(Path::new("/w/prompt.txt"));
+        assert_eq!(args[0], "--print");
+        for flag in [
+            "--no-tools",
+            "--no-mcp",
+            "--no-extensions",
+            "--no-skills",
+            "--no-context-files",
+            "--no-session",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "{flag}");
+        }
+        let at = args.iter().position(|a| a == "@/w/prompt.txt").unwrap();
+        assert_eq!(args[at + 1], "--");
+        assert!(!args
+            .iter()
+            .any(|a| a == "--tools" || a == "-t" || a == "--approve"));
     }
 
     #[test]

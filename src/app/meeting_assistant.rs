@@ -149,12 +149,13 @@ pub(crate) async fn run_ask(
     args: AskArgs,
 ) -> anyhow::Result<()> {
     let settings = AssistantSettings::from_config(config);
-    let fail = |e: &AssistantError, json: bool| -> ! {
+    let fail = |e: &AssistantError, backend: Option<&Backend>, json: bool| -> ! {
         if json {
             json_line(serde_json::json!({
                 "event": "error",
                 "code": e.code(),
                 "message": e.to_string(),
+                "backend": backend.map(Backend::display_name),
             }));
         } else {
             eprintln!("Error: {e}");
@@ -178,7 +179,7 @@ pub(crate) async fn run_ask(
     };
     let backend = match backend_for(&settings, &overrides, !args.json && interactive()) {
         Ok(b) => b,
-        Err(e) => fail(&e, args.json),
+        Err(e) => fail(&e, None, args.json),
     };
 
     let meeting_id = meeting.metadata.id.to_string();
@@ -228,7 +229,7 @@ pub(crate) async fn run_ask(
             if !json {
                 println!();
             }
-            fail(&e, json)
+            fail(&e, Some(&backend), json)
         }
     };
     if json {
@@ -469,9 +470,10 @@ pub(crate) async fn run_summarize(
             };
             // Ask for consent up front on a terminal, like `ask` does. The
             // older "local"/"remote" summarizers need none.
-            let legacy = matches!(settings.summary_backend.as_str(), "local" | "remote")
-                && overrides.agent.is_none()
-                && !overrides.local;
+            let legacy = matches!(
+                assistant::choose_summary_backend(&settings, &overrides),
+                Ok(assistant::SummaryBackend::Legacy(_))
+            );
             if interactive() && !legacy {
                 match backend_for(&settings, &overrides, true) {
                     Ok(Backend::Agent(a)) => overrides.agent = Some(a.id),
@@ -491,6 +493,9 @@ pub(crate) async fn run_summarize(
             })
             .await?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Some(failed) = &outcome.fell_back_from {
+                eprintln!("{failed} failed; summarized with the local model instead.");
+            }
             eprintln!(
                 "Summarized by {}{}",
                 outcome.agent_name,

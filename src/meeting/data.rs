@@ -104,6 +104,15 @@ pub struct TranscriptSegment {
     /// (`meeting annotate`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<SegmentAnnotation>,
+    /// The text as transcribed, when the user corrected it with
+    /// `meeting edit`; `text` then holds the correction
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
+    /// Hidden with `meeting delete-line`. Deleted lines stay in
+    /// transcript.json so they can be restored, and are left out of
+    /// everything that reads a meeting through voxtype.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
     /// Confidence score (0.0 - 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -124,6 +133,8 @@ impl TranscriptSegment {
             speaker_label: None,
             original_speaker: None,
             annotation: None,
+            original_text: None,
+            deleted: false,
             confidence: None,
             chunk_id,
         }
@@ -173,6 +184,13 @@ pub struct Transcript {
     pub total_chunks: u32,
 }
 
+/// What [`Transcript::resolve_echo_lines`] did, by segment ID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EchoLines {
+    pub dropped: Vec<u32>,
+    pub moved: Vec<u32>,
+}
+
 impl Transcript {
     /// Create a new empty transcript
     pub fn new() -> Self {
@@ -198,17 +216,100 @@ impl Transcript {
         self.segments.sort_by_key(|s| s.start_ms);
     }
 
+    /// Settle microphone lines the audio showed to be only the remote side's
+    /// echo ([`crate::meeting::echo::EchoProbe::echo_only`]), whatever their
+    /// length.
+    ///
+    /// When the loopback has the same speech at the same time, even part of
+    /// it, the line is dropped: the loopback's own line already holds those
+    /// words, transcribed from the clean signal, and keeping the echo would
+    /// show them twice. When it does not (the loopback's transcript missed
+    /// them, or the echo was not speech the loopback engine recognised),
+    /// dropping would lose the only copy, so the line moves to the remote
+    /// speaker it overlaps instead (`Remote` if none), keeping its text and
+    /// its microphone source. `meeting reassign <id> You` moves it back.
+    pub fn resolve_echo_lines(&mut self, echo_ids: &std::collections::HashSet<u32>) -> EchoLines {
+        use crate::meeting::echo::{normalize_word, overlapping_loopback_words, same_speech};
+        let mut outcome = EchoLines::default();
+        let snapshot = self.segments.clone();
+        for seg in self.segments.iter_mut() {
+            if seg.source != AudioSource::Microphone
+                || seg.deleted
+                || !echo_ids.contains(&seg.id)
+                || seg.text.trim().is_empty()
+            {
+                continue;
+            }
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if same_speech(&words, &overlapping_loopback_words(seg, &snapshot)) {
+                tracing::debug!("Dropping echo of the remote side: {:?}", seg.text);
+                seg.text.clear();
+                outcome.dropped.push(seg.id);
+                continue;
+            }
+            let remote = snapshot
+                .iter()
+                .filter(|s| s.source == AudioSource::Loopback && !s.deleted)
+                .map(|s| {
+                    let overlap =
+                        seg.end_ms.min(s.end_ms) as i64 - seg.start_ms.max(s.start_ms) as i64;
+                    (overlap, s)
+                })
+                .filter(|(overlap, _)| *overlap > 0)
+                .max_by_key(|(overlap, _)| *overlap)
+                .map(|(_, s)| s);
+            tracing::debug!(
+                "Moving echo of the remote side to {}: {:?}",
+                remote
+                    .and_then(|s| s.speaker_id.as_deref())
+                    .unwrap_or("Remote"),
+                seg.text
+            );
+            seg.speaker_id = Some(
+                remote
+                    .and_then(|s| s.speaker_id.clone())
+                    .unwrap_or_else(|| "Remote".to_string()),
+            );
+            seg.speaker_label = remote.and_then(|s| s.speaker_label.clone());
+            outcome.moved.push(seg.id);
+        }
+        self.segments.retain(|s| !s.text.trim().is_empty());
+        outcome
+    }
+
     /// Remove echoed phrases from mic segments that match loopback transcripts.
     /// Works at the phrase level: finds runs of consecutive words in a mic segment
     /// that appear in any loopback segment and strips them out, keeping the user's
     /// actual speech. Returns the number of words removed.
     pub fn dedup_bleed_through(&mut self) -> usize {
+        let exact_only = crate::meeting::echo::EchoRules {
+            guard: false,
+            ..Default::default()
+        };
+        self.dedup_bleed_through_with(&exact_only, &|_| false)
+    }
+
+    /// [`Transcript::dedup_bleed_through`] with the short-line rules set by
+    /// `rules`: misheard short echoes too when `rules.guard`. A microphone
+    /// segment for which `own_voice` is true (the audio shows you speaking,
+    /// see [`crate::meeting::echo::EchoProbe`]) is never taken for a short
+    /// echo, so a "yes" you say while the remote says "yes" stays.
+    pub fn dedup_bleed_through_with(
+        &mut self,
+        rules: &crate::meeting::echo::EchoRules,
+        own_voice: &dyn Fn(&TranscriptSegment) -> bool,
+    ) -> usize {
         // Build a set of loopback n-grams for fast lookup.
         // We use 4-grams as the minimum match length to avoid false positives.
         let min_ngram = 4;
 
-        let total_removed =
-            self.dedup_short_echoes(min_ngram) + self.dedup_echoed_phrases(min_ngram);
+        let total_removed = self.dedup_short_echoes(min_ngram, rules, own_voice)
+            + self.dedup_echoed_phrases(min_ngram);
 
         // A segment that was all echo is gone, not an empty line.
         self.segments.retain(|s| !s.text.trim().is_empty());
@@ -220,8 +321,14 @@ impl Transcript {
     /// is echo when a loopback segment overlapping it in time holds the same
     /// words in the same order. The overlap is what keeps a reply you make
     /// later in the same words.
-    fn dedup_short_echoes(&mut self, min_ngram: usize) -> usize {
-        const TOLERANCE_MS: u64 = 1000;
+    fn dedup_short_echoes(
+        &mut self,
+        min_ngram: usize,
+        rules: &crate::meeting::echo::EchoRules,
+        own_voice: &dyn Fn(&TranscriptSegment) -> bool,
+    ) -> usize {
+        use crate::meeting::echo::{fuzzy_echo, normalize_word, overlapping_loopback_words};
+        const TOLERANCE_MS: u64 = crate::meeting::echo::ECHO_TOLERANCE_MS;
         let loopback: Vec<(u64, u64, Vec<String>)> = self
             .segments
             .iter()
@@ -229,22 +336,47 @@ impl Transcript {
             .map(|s| (s.start_ms, s.end_ms, normalize_for_dedup(&s.text)))
             .collect();
 
+        // Misheard echoes, judged before any line is cleared.
+        let fuzzy: Vec<bool> = self
+            .segments
+            .iter()
+            .map(|seg| {
+                rules.guard
+                    && seg.source == AudioSource::Microphone
+                    && !own_voice(seg)
+                    && fuzzy_echo(
+                        &seg.text
+                            .split_whitespace()
+                            .map(normalize_word)
+                            .filter(|w| !w.is_empty())
+                            .collect::<Vec<_>>(),
+                        &overlapping_loopback_words(seg, &self.segments),
+                        rules.fuzzy_max_words,
+                    )
+            })
+            .collect();
+
         let mut removed = 0;
-        for seg in &mut self.segments {
-            if seg.source != AudioSource::Microphone {
+        for (seg, fuzzy) in self.segments.iter_mut().zip(fuzzy) {
+            if seg.source != AudioSource::Microphone || own_voice(seg) {
                 continue;
             }
             let words = normalize_for_dedup(&seg.text);
-            if words.is_empty() || words.len() >= min_ngram {
+            if words.is_empty() {
                 continue;
             }
-            let echoed = loopback.iter().any(|(start, end, said)| {
-                seg.start_ms < end + TOLERANCE_MS
-                    && *start < seg.end_ms + TOLERANCE_MS
-                    && said.windows(words.len()).any(|w| w == words.as_slice())
-            });
-            if echoed {
-                tracing::debug!("Stripping short echo: {:?}", seg.text);
+            let exact = words.len() < min_ngram
+                && loopback.iter().any(|(start, end, said)| {
+                    seg.start_ms < end + TOLERANCE_MS
+                        && *start < seg.end_ms + TOLERANCE_MS
+                        && said.windows(words.len()).any(|w| w == words.as_slice())
+                });
+            if exact || fuzzy {
+                tracing::debug!(
+                    "Stripping short echo{}: {:?}",
+                    if exact { "" } else { " (misheard)" },
+                    seg.text
+                );
                 removed += words.len();
                 seg.text.clear();
             }
@@ -465,6 +597,34 @@ impl Transcript {
         }
     }
 
+    /// Apply the user's corrections: `edits` maps a segment ID to its new
+    /// text. A line without an edit goes back to what was transcribed.
+    pub fn apply_text_edits(&mut self, edits: &std::collections::HashMap<u32, String>) {
+        for segment in &mut self.segments {
+            if let Some(original) = segment.original_text.take() {
+                segment.text = original;
+            }
+            if let Some(edit) = edits.get(&segment.id) {
+                if *edit != segment.text {
+                    segment.original_text =
+                        Some(std::mem::replace(&mut segment.text, edit.clone()));
+                }
+            }
+        }
+    }
+
+    /// Mark the lines the user deleted; every other line is not deleted.
+    pub fn apply_deletions(&mut self, deleted: &std::collections::HashSet<u32>) {
+        for segment in &mut self.segments {
+            segment.deleted = deleted.contains(&segment.id);
+        }
+    }
+
+    /// Drop deleted lines, for anything that shows or reads the meeting.
+    pub fn remove_deleted(&mut self) {
+        self.segments.retain(|s| !s.deleted);
+    }
+
     /// Rename a speaker ID across the transcript, including lines moved to
     /// or away from it by hand.
     pub fn rename_speaker(&mut self, from: &str, to: &str) -> usize {
@@ -543,6 +703,9 @@ pub struct MeetingMetadata {
     /// Whisper model used
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The call's link, from `meeting start --url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Summary (Phase 5)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<MeetingSummary>,
@@ -565,6 +728,7 @@ impl MeetingMetadata {
             storage_path: None,
             audio_retained: false,
             model: None,
+            url: None,
             summary: None,
             synced_at: None,
         }
@@ -1200,6 +1364,155 @@ mod tests {
         assert_eq!(lines(&t), vec!["Remote: Sounds good.", "You: Sounds good."]);
     }
 
+    /// The demo's remote line and what the microphone made of its echo.
+    fn misheard_echo(mic_start: u64, mic_text: &str) -> Transcript {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            10_320,
+            16_290,
+            AudioSource::Loopback,
+            "Great! I tested the Amarky package this morning, and the settings panel opened without any problems.",
+        ));
+        t.add_segment(said(
+            1,
+            mic_start,
+            mic_start + 900,
+            AudioSource::Microphone,
+            mic_text,
+        ));
+        t
+    }
+
+    const FUZZY: crate::meeting::echo::EchoRules = crate::meeting::echo::EchoRules {
+        guard: true,
+        fuzzy_max_words: 4,
+    };
+
+    /// Lines the audio called echo: dropped when the loopback says the same
+    /// at the time, otherwise moved to the remote speaker they overlap.
+    #[test]
+    fn echo_lines_are_dropped_when_confirmed_and_moved_when_not() {
+        let mut t = Transcript::new();
+        let mut remote = said(
+            0,
+            10_000,
+            16_000,
+            AudioSource::Loopback,
+            "Great! I tested the Amarky package this morning.",
+        );
+        remote.speaker_id = Some("Remote 1".into());
+        remote.speaker_label = Some("Dana".into());
+        t.add_segment(remote);
+        let mut long_echo = said(
+            1,
+            10_060,
+            13_000,
+            AudioSource::Microphone,
+            "great i tasted the omarky package this mourning",
+        );
+        long_echo.speaker_id = Some("You".into());
+        t.add_segment(long_echo);
+        let mut unheard = said(
+            2,
+            13_100,
+            16_000,
+            AudioSource::Microphone,
+            "mm hmm yeah okay",
+        );
+        unheard.speaker_id = Some("You".into());
+        t.add_segment(unheard);
+        let mut alone = said(3, 40_000, 42_000, AudioSource::Microphone, "la la la");
+        alone.speaker_id = Some("You".into());
+        t.add_segment(alone);
+        let mut yours = said(
+            4,
+            12_000,
+            14_000,
+            AudioSource::Microphone,
+            "We should check that.",
+        );
+        yours.speaker_id = Some("You".into());
+        t.add_segment(yours);
+
+        let ids: std::collections::HashSet<u32> = [1, 2, 3].into_iter().collect();
+        let settled = t.resolve_echo_lines(&ids);
+        assert_eq!(settled.dropped, vec![1]);
+        assert_eq!(settled.moved, vec![2, 3]);
+        let speakers: Vec<(u32, String, Option<String>)> = t
+            .segments
+            .iter()
+            .map(|s| (s.id, s.speaker_id.clone().unwrap(), s.speaker_label.clone()))
+            .collect();
+        assert_eq!(
+            speakers,
+            vec![
+                (0, "Remote 1".into(), Some("Dana".into())),
+                (4, "You".into(), None),
+                (2, "Remote 1".into(), Some("Dana".into())),
+                (3, "Remote".into(), None),
+            ]
+        );
+        // Moved lines keep their words and where they were heard.
+        let moved = t.segments.iter().find(|s| s.id == 2).unwrap();
+        assert_eq!(moved.text, "mm hmm yeah okay");
+        assert_eq!(moved.source, AudioSource::Microphone);
+    }
+
+    #[test]
+    fn fuzzy_rule_drops_a_misheard_short_echo() {
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        assert_eq!(t.dedup_bleed_through_with(&FUZZY, &|_| false), 2);
+        assert_eq!(lines(&t).len(), 1);
+
+        // The exact rule alone keeps it: these are not the remote's words.
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t)[1], "You: Omarky problem.");
+    }
+
+    #[test]
+    fn fuzzy_rule_keeps_your_voice_late_lines_and_long_lines() {
+        // The audio showed you speaking.
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        t.dedup_bleed_through_with(&FUZZY, &|s| s.id == 1);
+        assert_eq!(lines(&t)[1], "You: Omarky problem.");
+
+        // Well after the remote line.
+        let mut t = misheard_echo(20_000, "Omarky problem.");
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t).len(), 2);
+
+        // Longer than fuzzy_max_words.
+        let mut t = misheard_echo(15_000, "tested the Omarky package this");
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t).len(), 2);
+    }
+
+    /// "Yes" said while the remote also says "yes" is caught by the exact
+    /// rule on text alone; the audio is what keeps it.
+    #[test]
+    fn own_voice_keeps_an_exact_short_reply() {
+        let remote_yes = || {
+            let mut t = Transcript::new();
+            t.add_segment(said(
+                0,
+                4_000,
+                6_000,
+                AudioSource::Loopback,
+                "Yes, ship it.",
+            ));
+            t.add_segment(said(1, 4_100, 4_600, AudioSource::Microphone, "Yes."));
+            t
+        };
+        let mut t = remote_yes();
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t), vec!["Remote: Yes, ship it."]);
+        let mut t = remote_yes();
+        t.dedup_bleed_through_with(&FUZZY, &|s| s.id == 1);
+        assert_eq!(lines(&t), vec!["Remote: Yes, ship it.", "You: Yes."]);
+    }
+
     fn spoken_by(id: u32, speaker: &str) -> TranscriptSegment {
         let mut seg =
             TranscriptSegment::new(id, id as u64 * 1000, id as u64 * 1000 + 900, "x".into(), 0);
@@ -1307,6 +1620,54 @@ mod tests {
         assert_eq!(t.segments[1].annotation, None);
         let json = serde_json::to_value(&t.segments[1]).unwrap();
         assert!(json.get("annotation").is_none());
+    }
+
+    #[test]
+    fn text_edits_replace_a_line_and_remember_the_transcription() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        let mut edits = std::collections::HashMap::new();
+        edits.insert(1, "corrected".to_string());
+
+        t.apply_text_edits(&edits);
+        t.apply_text_edits(&edits);
+        assert_eq!(t.segments[1].text, "corrected");
+        assert_eq!(t.segments[1].original_text.as_deref(), Some("x"));
+        assert_eq!(t.segments[0].original_text, None);
+
+        t.apply_text_edits(&std::collections::HashMap::new());
+        assert_eq!(t.segments[1].text, "x");
+        assert_eq!(t.segments[1].original_text, None);
+
+        // An edit that matches the transcription is no edit.
+        edits.insert(1, "x".to_string());
+        t.apply_text_edits(&edits);
+        assert_eq!(t.segments[1].original_text, None);
+    }
+
+    #[test]
+    fn deletions_mark_lines_and_remove_deleted_drops_them() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        t.apply_deletions(&[1].into_iter().collect());
+        assert!(t.segments[1].deleted);
+        assert_eq!(
+            serde_json::to_value(&t.segments[1]).unwrap()["deleted"],
+            true
+        );
+        assert!(serde_json::to_value(&t.segments[0])
+            .unwrap()
+            .get("deleted")
+            .is_none());
+
+        let mut shown = t.clone();
+        shown.remove_deleted();
+        assert_eq!(shown.segments.len(), 1);
+
+        t.apply_deletions(&std::collections::HashSet::new());
+        assert!(!t.segments[1].deleted);
     }
 
     #[test]

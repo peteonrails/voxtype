@@ -414,6 +414,24 @@ pub(crate) async fn dispatch(
                         },
                     )?;
                 }
+                Some(SetupAction::Skill {
+                    status,
+                    json,
+                    remove,
+                    force,
+                    target,
+                }) => {
+                    if !json {
+                        warn_if_root("skill");
+                    }
+                    setup::skill::run(setup::skill::CliArgs {
+                        status,
+                        json,
+                        remove,
+                        force,
+                        target,
+                    })?;
+                }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");
                     if status {
@@ -575,6 +593,13 @@ pub(crate) async fn dispatch(
 
         Commands::Record { action } => {
             send_record_command(&config, action, top_level_model.as_deref())?;
+        }
+
+        Commands::Meeting {
+            action: voxtype::MeetingAction::Suggest { dry_run, watch },
+        } => {
+            super::meeting::run_meeting_suggest(&config, cli.config.clone(), dry_run, watch)
+                .await?;
         }
 
         Commands::Meeting { action } => {

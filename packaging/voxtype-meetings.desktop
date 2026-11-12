@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Voxtype Meetings
+GenericName=Meeting Transcripts
+Comment=Browse, search and export meetings transcribed by voxtype
+Exec=voxtype meeting view
+Icon=voxtype
+Categories=AudioVideo;Audio;Recorder;
+Keywords=voxtype;meeting;meetings;transcript;transcription;notes;recording;
+Terminal=false
+StartupWMClass=voxtype

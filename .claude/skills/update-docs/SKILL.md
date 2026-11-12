@@ -25,6 +25,7 @@ Guide for updating voxtype documentation across all locations.
 | Troubleshooting | `docs/TROUBLESHOOTING.md` | New error conditions, fixes |
 | FAQ | `docs/FAQ.md` | Common questions |
 | README | `README.md` | Major features, installation changes |
+| User setup skill | `skills/voxtype-setup/SKILL.md` | Every release: new or changed commands, config keys, engines, models, output options |
 | Website News | `website/news/index.html` | Every release |
 | GitHub Release | GitHub Releases | Every release |
 | Obsidian Vault | `~/Documents/markdown-notes/Voxtype/` | Session notes, decisions |
@@ -183,6 +184,7 @@ Add to the website's contributors or about page if significant contribution.
 - [ ] Create GitHub release with notes
 - [ ] Update `packaging/arch-bin/voxtype-bin.install` post_upgrade message
 - [ ] Credit contributors in Cargo.toml and README
+- [ ] Check `skills/voxtype-setup/SKILL.md`: every command and config key it names still exists (`voxtype --help`, `voxtype config schema`), its recommendations cover what shipped, and anything it calls planned (built-in history, #209) is updated once released
 - [ ] Save session notes to Obsidian vault
 
 ## CLI Help Text

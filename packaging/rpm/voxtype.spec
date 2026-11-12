@@ -110,6 +110,14 @@ install -D -m 644 packaging/voxtype-configure.desktop \
 install -D -m 755 packaging/scripts/voxtype-configure-launcher \
     %{buildroot}%{_bindir}/voxtype-configure-launcher
 
+# Voxtype Meetings launcher entry, and the icon both entries use
+install -D -m 644 packaging/voxtype-meetings.desktop \
+    %{buildroot}%{_datadir}/applications/voxtype-meetings.desktop
+install -D -m 644 assets/icon.svg \
+    %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/voxtype.svg
+install -D -m 644 assets/icon.png \
+    %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/voxtype.png
+
 %check
 export CARGO_HOME=%{_builddir}/cargo
 # Only test with AVX2 build to avoid SIGILL in build environments
@@ -209,6 +217,9 @@ rm -f %{_bindir}/voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 %{_datadir}/applications/voxtype-configure.desktop
 %{_bindir}/voxtype-configure-launcher
+%{_datadir}/applications/voxtype-meetings.desktop
+%{_datadir}/icons/hicolor/scalable/apps/voxtype.svg
+%{_datadir}/icons/hicolor/128x128/apps/voxtype.png
 
 %changelog
 * Fri Dec 20 2025 Peter Jackson <pete@peteonrails.com> - 0.4.1-1
