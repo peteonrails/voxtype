@@ -132,6 +132,7 @@ Item {
           else if (s === "minimize") tc.driveMinimize()
           else if (s === "pill-states") tc.drivePillStates()
           else if (s === "pill-idle") tc.drivePillIdle()
+          else if (s === "pill-wave") tc.drivePillWave()
           else if (s === "minimize-autoopen") tc.driveMinimizeAutoOpen()
           else if (s === "resize") tc.driveResize()
           else if (s === "move") tc.driveMove()
@@ -1531,6 +1532,34 @@ Item {
       shot("pill-summarizing", true)
       waitFor(function() { return txt("pillState") === "Ended" && /^1:0\d · Summary ready$/.test(txt("pillElapsed")) }, "Ended with the summary: " + pillSays(), 8000)
       shot("pill-ended", true)
+    }
+
+    function drivePillWave() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      minimizeNow()
+      var narrow = placement().pillWidth
+      wait(400)
+      check(!shown(find(view(), "pillWave")), "no strip before any levels (an older daemon)")
+      var wave = find(view(), "pillWave")
+      function peak(list) { return Math.max.apply(null, list) }
+      for (var i = 0; i < 12; i++) {
+        ctl({ cmd: "levels", t_ms: 100 * i, mic: -40 + (i % 4) * 6, mic_peak: -20, loopback: null, loopback_peak: null })
+        wait(100)
+      }
+      waitFor(function() { return shown(wave) && peak(wave.micSamples) > 0 }, "the mic moves the strip")
+      check(!wave.hasCall && peak(wave.callSamples) === 0, "no call track while loopback is null")
+      for (var j = 0; j < 12; j++) {
+        ctl({ cmd: "levels", t_ms: 1200 + 100 * j, mic: -30, mic_peak: -20, loopback: -18 - (j % 3) * 8, loopback_peak: -10 })
+        wait(100)
+      }
+      waitFor(function() { return wave.hasCall && peak(wave.callSamples) > 0 }, "the call track")
+      var p = placement()
+      check(p.pillWidth > narrow && p.pillWidth <= p.pillMaxWidth, "room for the strip, within the maximum: " + narrow + " -> " + p.pillWidth)
+      shot("pill-wave", true)
+      // Levels stop: the strip runs flat (28 samples at 10 Hz).
+      waitFor(function() { return peak(wave.micSamples) === 0 && peak(wave.callSamples) === 0 }, "flat when levels stop", 5000)
+      check(shown(wave), "the strip stays, flat")
     }
 
     function drivePillIdle() {

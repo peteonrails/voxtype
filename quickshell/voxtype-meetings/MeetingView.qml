@@ -491,6 +491,16 @@ Item {
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
       }
+      // While recording, once the daemon sends levels: the last few
+      // seconds of them. Nothing from a daemon that sends none.
+      PillWave {
+        objectName: "pillWave"
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.status === "recording" && root.busy !== "stop" && root.feed !== null && root.feed.levelsAt > 0
+        active: root.minimized && visible
+        theme: root.theme
+        feed: root.feed
+      }
       MeetingButton {
         objectName: "pillStart"
         anchors.verticalCenter: parent.verticalCenter

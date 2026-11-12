@@ -76,6 +76,10 @@ Scenarios:
               click to expand, the --minimize/--expand requests
   pill-states the pill through a meeting: Paused, Finishing..., Ended with
               its length, Summarizing with the agent, Summary ready
+  pill-wave   while recording, the pill's live strip of mic and call levels:
+              none before any `levels` event (an older daemon), moving while
+              they arrive, the call track once loopback has a level, flat
+              again when they stop
   pill-idle   no meeting: "No meeting" and Start, which starts one; a long
               title is elided within the pill's maximum width
   minimize-autoopen  a meeting start while minimized expands the one window
@@ -180,7 +184,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
-             "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
+             "minimize", "pill-states", "pill-wave", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real",
@@ -340,6 +344,7 @@ INITIAL = {
     "export": lambda: [running_meeting()],
     "minimize": lambda: [running_meeting()],
     "pill-states": lambda: [running_meeting()],
+    "pill-wave": lambda: [running_meeting()],
     "resize": lambda: [running_meeting()],
     "move": lambda: [running_meeting()],
     "opacity": lambda: [running_meeting()],
@@ -723,6 +728,8 @@ def check_calls(scenario, calls, runtime_notes=""):
                         ["config", "set", "meeting.assistant.local_only", "false"],
                         ["config", "set", "meeting.assistant.agent", "codex"],
                         ["config", "set", "meeting.assistant.local_only", "false"]], "config writes")
+        expect(meeting, [], "meeting commands")
+    elif scenario == "pill-wave":
         expect(meeting, [], "meeting commands")
     elif scenario == "pill-states":
         expect(meeting, [["meeting", "pause"], ["meeting", "resume"], ["meeting", "stop"]], "meeting commands")
