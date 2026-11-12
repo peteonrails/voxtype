@@ -47,6 +47,17 @@ state["values"] for exactly those keys and reject anything else (exit 2);
 `config validate-selection` exits 0, so the panel's restart flow runs through
 to `systemctl --user restart voxtype` (see fake-systemctl.py).
 
+state["calendar"] makes `meeting calendar` answer (detect-140's contract,
+0654756f), adds the Meeting section's calendar keys to the schema, with a
+key either side, and lists the iCal link in the schema's `secrets` (f2f27cc3). Absent, `meeting calendar` exits 2 like a CLI without it.
+It holds {"link": {"host", "events", "next", "last_error"} or None,
+"source_without_link": "command"|"plugin"|None}. `set-ics - --json` reads
+the link from stdin (an argv link is refused here, so a panel that passes it
+there fails) and records each one read in state["calendar_stdin"].
+state["calendar_set_fail"] is a stderr line to fail with (exit 1; the link
+is kept as it was). `clear --json` drops the link. state["calendar_keys"]
+adds the keys alone, as a schema from a CLI without `secrets`.
+
 Accept behavior is scripted per attempt by state["accept_script"]: "fail",
 "slow" (one progress line, then wait to be cancelled) or "ok". After the script
 runs out, attempts succeed.
@@ -201,10 +212,38 @@ def schema(state):
                             "are only its echo, unless the mic level shows you speaking.",
              "value": guard, "file_value": None, "engine": None, "compiled": True, "restart_required": True},
         ]
-    return {
+    if state.get("calendar") is not None or state.get("calendar_keys"):
+        def meeting_key(key, kind, label, value, **extra):
+            spec = {"key": key, "type": kind, "section": "Meeting", "label": label, "description": "",
+                    "value": value, "file_value": None, "engine": None, "compiled": True,
+                    "restart_required": False}
+            spec.update(extra)
+            return spec
+        keys += [
+            meeting_key("meeting.show_view_on_start", "bool", "Show meeting view on start", True),
+            meeting_key("meeting.calendar.command", "string", "Calendar command", ""),
+            meeting_key("meeting.calendar.window_mins", "int", "Calendar window", 10, min=0, max=120),
+            meeting_key("meeting.calendar.timeout_secs", "int", "Calendar timeout", 5, min=1, max=60),
+            meeting_key("meeting.view_opacity", "float", "View opacity", 0.8, min=0.2, max=1.0),
+        ]
+    doc = {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
         "engine": engine, "replacements": {}, "keys": keys,
     }
+    if state.get("calendar") is not None:
+        link = state["calendar"].get("link")
+        doc["secrets"] = [{
+            "key": "meeting.calendar.ics_link", "type": "secret", "section": "Meeting",
+            "label": "Calendar (iCal link)",
+            "description": "Your calendar's private iCal link. Meetings that start without a title you chose "
+                           "are named after the calendar event happening then.",
+            "help": LINK_HELP, "set": link is not None, "host": link.get("host") if link else None,
+            "last_error": link.get("last_error") if link else None,
+            "set_command": ["meeting", "calendar", "set-ics", "-", "--json"],
+            "clear_command": ["meeting", "calendar", "clear", "--json"],
+            "status_command": ["meeting", "calendar", "status", "--json"],
+        }]
+    return doc
 
 
 def models(state):
@@ -282,6 +321,65 @@ def omarchy_status(state):
         "path": "/home/u/.config/omarchy/plugins/io.voxtype.settings",
         "installed_version": "1.2.0" if link == "copy" else "1.2.1",
     } | ({} if state.get("copy_dismissed") is None else {"copy_dismissed": state["copy_dismissed"]})
+
+
+LINK_HELP = ("Where to find your calendar's private iCal link:\n"
+             "  Google Calendar: Settings, your calendar, Integrate calendar,\n"
+             "    then \"Secret address in iCal format\".")
+
+
+def calendar(state, args):
+    cal = state.get("calendar")
+    if cal is None:
+        print("error: unrecognized subcommand 'calendar'", file=sys.stderr)
+        return 2
+    if args == ["status", "--json"]:
+        link = cal.get("link")
+        source = "calendar_link" if link else cal.get("source_without_link")
+        print(json.dumps({
+            "source": source,
+            "calendar_link": {
+                "set": link is not None,
+                "host": link.get("host") if link else None,
+                "fetched_at": link.get("fetched_at") if link else None,
+                "last_error": link.get("last_error") if link else None,
+                "events": link.get("events") if link else None,
+                "next": link.get("next") if link else None,
+            },
+            "command": "next-meeting --json" if source == "command" else None,
+            "plugin_command": "omarchy-next-meeting" if source == "plugin" else None,
+            "window_mins": 10,
+            "link_help": LINK_HELP,
+        }, indent=2))
+        return 0
+    if args[:1] == ["set-ics"]:
+        if args[1:2] != ["-"]:
+            print("error: the fake only takes the link on stdin", file=sys.stderr)
+            return 2
+        line = sys.stdin.readline()
+        state.setdefault("calendar_stdin", []).append(line)
+        save(state)
+        link = line.strip()
+        if state.get("calendar_set_fail"):
+            print("Error: " + state["calendar_set_fail"], file=sys.stderr)
+            return 1
+        if not link.startswith(("https://", "http://", "webcal://")):
+            print("Error: That is not a calendar link: it must start with https://, http:// or webcal://",
+                  file=sys.stderr)
+            return 1
+        host = link.split("://", 1)[1].split("/", 1)[0]
+        cal["link"] = {"host": host, "events": 2, "fetched_at": int(time.time()), "last_error": None,
+                       "next": {"title": "Design review", "start": "2026-11-13T15:00:00Z"}}
+        save(state)
+        print(json.dumps({"set": True, "host": host, "events": 2}))
+        return 0
+    if args == ["clear", "--json"]:
+        had = cal.get("link") is not None
+        cal["link"] = None
+        save(state)
+        print(json.dumps({"cleared": had}))
+        return 0
+    return 2
 
 
 def main():
@@ -384,6 +482,8 @@ def main():
             save(state)
         else:
             return 2
+    elif args[:2] == ["meeting", "calendar"]:
+        return calendar(state, args[2:])
     elif args[:2] == ["setup", "migrate"]:
         if state.get("no_migrate"):
             print("error: unrecognized subcommand 'migrate'", file=sys.stderr)

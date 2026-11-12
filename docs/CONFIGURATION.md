@@ -3870,7 +3870,7 @@ voxtype config set meeting.view_opacity 0.6
 **Default:** `true`
 **Required:** No
 
-Name the speakers of a two-person meeting from its title. In a meeting titled "Pete <> Andrew standup", "Pete / Chris", "Pete and Chris 1:1" or "Chris - Pete sync", the side that is you names your microphone (`You`) and the other side names every remote voice. You are recognized by `my_name` when it is set, and by your account's full name (the GECOS field), and a first-name match is enough. If neither side of the title is you, if both could be, or if the title names three or more people, nothing is named. A name you give with `voxtype meeting label` is never replaced. It applies to live meetings, imports with separate microphone and remote channels, and `voxtype meeting retranscribe`. See [Naming Speakers from the Title](MEETING_MODE.md#naming-speakers-from-the-title).
+Name the speakers of a two-person meeting from its title. In a meeting titled "Pete <> Andrew standup", "Pete / Chris", "Pete and Chris 1:1" or "Chris - Pete sync", the side that is you names your microphone (`You`) and the other side names every remote voice. You are recognized by `my_name` when it is set, and by your account's full name (the GECOS field), or by your login name as a first name when the account has no full name, and a first-name match is enough. If neither side of the title is you, if both could be, or if the title names three or more people, nothing is named. A name you give with `voxtype meeting label` is never replaced. It applies to live meetings, imports with separate microphone and remote channels, and `voxtype meeting retranscribe`. See [Naming Speakers from the Title](MEETING_MODE.md#naming-speakers-from-the-title).
 
 ```bash
 voxtype config set meeting.auto_label_from_title false
@@ -4241,7 +4241,9 @@ max_transcript_chars = 100000
 
 ## [meeting.calendar]
 
-A title from your calendar for a meeting that starts without one. See [Titles from Your Calendar](MEETING_MODE.md#titles-from-your-calendar).
+A title from your calendar for a meeting that starts without one you chose. See [Titles from Your Calendar](MEETING_MODE.md#titles-from-your-calendar).
+
+The calendar's private iCal link, the first place voxtype looks, is not a setting: it is a secret, kept outside `config.toml` by `voxtype meeting calendar set-ics`.
 
 ### command
 
@@ -4249,10 +4251,10 @@ A title from your calendar for a meeting that starts without one. See [Titles fr
 **Default:** `""`
 **Required:** No
 
-A command printing the next meeting as JSON, in the format of the Omarchy Next Meeting widget. Empty uses that widget's `agendaCommand` when the widget is on your Omarchy bar, and otherwise asks no calendar. It runs through `bash -lc` with `~/.local/bin` and `~/bin` first on `PATH`.
+A command printing the next meeting as JSON, in the format of the Omarchy Next Meeting widget. Asked when no iCal link is set or the link has no event near the meeting's start. Empty uses that widget's own command when the widget is on your Omarchy bar, and otherwise asks nothing. It runs through `bash -lc` with `~/.local/bin` and `~/bin` first on `PATH`.
 
 ```bash
-voxtype config set meeting.calendar.command "agenda --next-json"
+voxtype config set meeting.calendar.command "~/bin/next-meeting --json"
 ```
 
 ### window_mins
@@ -4261,7 +4263,7 @@ voxtype config set meeting.calendar.command "agenda --next-json"
 **Default:** `10`
 **Required:** No
 
-An event names the meeting when it is running, or when it starts within this many minutes before or after the meeting starts.
+An event names the meeting when it is in progress, or when it starts within this many minutes before or after the meeting starts.
 
 ### timeout_secs
 
@@ -4269,7 +4271,7 @@ An event names the meeting when it is running, or when it starts within this man
 **Default:** `3`
 **Required:** No
 
-Seconds to wait for the calendar command. It runs alongside the recording, so a slow calendar never delays the start; past this, the meeting keeps its title.
+Seconds to wait for the calendar command. The lookup runs alongside the recording, so a slow calendar never delays the start; past this, the meeting keeps its title. Fetching the iCal link has its own 30 second limit and runs in the background.
 
 ---
 

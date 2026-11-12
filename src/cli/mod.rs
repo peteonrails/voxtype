@@ -16,7 +16,9 @@ mod setup;
 pub use commands::Commands;
 pub use config::ConfigAction;
 pub use info::InfoAction;
-pub use meeting::{AssistantAction, MeetingAction, TodoistAction};
+pub use meeting::{
+    AssistantAction, CalendarAction, MeetingAction, TodoistAction, CALENDAR_LINK_HELP,
+};
 pub use record::{OutputModeOverride, RecordAction};
 pub use root::Cli;
 pub use setup::{CompositorType, SetupAction};

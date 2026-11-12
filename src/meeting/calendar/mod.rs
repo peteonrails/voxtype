@@ -11,6 +11,9 @@
 //! and `error`. It is `[meeting.calendar] command`, or else the plugin's
 //! own `agendaCommand` when that plugin is on the Omarchy bar.
 
+pub mod ics;
+pub mod source;
+
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -222,7 +225,7 @@ pub enum CalendarError {
     TimedOut(u64),
     #[error("the calendar command failed ({0})")]
     Failed(String),
-    #[error("the calendar command printed something other than the agenda JSON: {0}")]
+    #[error("the calendar command printed something other than the calendar JSON: {0}")]
     BadJson(String),
 }
 
@@ -284,6 +287,142 @@ pub async fn lookup(
     window_mins: u32,
 ) -> Result<Option<Found>, CalendarError> {
     Ok(pick(&ask(command, timeout).await?, window_mins))
+}
+
+/// A title for a meeting starting now, and where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Titled {
+    pub title: String,
+    pub url: Option<String>,
+    /// "the calendar link", "[meeting.calendar] command" or "the Next
+    /// Meeting plugin"
+    pub source: &'static str,
+}
+
+/// Seconds a fetch of the calendar link may take.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Everything a lookup reads, so tests can point it elsewhere.
+#[derive(Debug, Clone)]
+pub struct Lookup {
+    pub settings: crate::config::MeetingCalendarConfig,
+    pub store: source::Store,
+    /// The XDG config directory (`~/.config`), where Omarchy's plugins are
+    pub config_dir: Option<std::path::PathBuf>,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+impl Lookup {
+    /// Today's settings and places.
+    pub fn current(settings: &crate::config::MeetingCalendarConfig) -> Self {
+        Self {
+            settings: settings.clone(),
+            store: source::Store::new(source::Store::default_dir()),
+            config_dir: crate::config::Config::config_dir()
+                .and_then(|voxtype| voxtype.parent().map(Path::to_path_buf)),
+            now: chrono::Utc::now(),
+        }
+    }
+
+    /// The command to ask: configured, else the plugin's.
+    pub fn command(&self) -> Option<Command> {
+        resolve(&self.settings.command, self.config_dir.as_deref()?)
+    }
+
+    /// The calendar's name for a meeting starting now: from the calendar
+    /// link, then the command, then the Next Meeting plugin, each tried
+    /// only when the one before has nothing. Every miss and failure is
+    /// logged at debug, never with the link.
+    pub async fn title(&self) -> Option<Titled> {
+        if self.store.settings().is_some() {
+            match self.title_from_link().await {
+                Ok(Some(t)) => return Some(t),
+                Ok(None) => tracing::debug!(
+                    "No event in the calendar link within {} min of the meeting's start",
+                    self.settings.window_mins
+                ),
+                Err(e) => tracing::debug!("No title from the calendar link: {}", e),
+            }
+        }
+        let command = self.command()?;
+        let timeout = Duration::from_secs(self.settings.timeout_secs.max(1));
+        match lookup(&command, timeout, self.settings.window_mins).await {
+            Ok(Some(found)) => Some(Titled {
+                title: found.title,
+                url: found.url,
+                source: command.source,
+            }),
+            Ok(None) => {
+                tracing::debug!(
+                    "No calendar event within {} min of the meeting's start ({})",
+                    self.settings.window_mins,
+                    command.source
+                );
+                None
+            }
+            Err(e) => {
+                tracing::debug!("No title from the calendar ({}): {}", command.source, e);
+                None
+            }
+        }
+    }
+
+    /// From the events cached from the link, fetched now when there are
+    /// none yet.
+    async fn title_from_link(&self) -> Result<Option<Titled>, source::IcsError> {
+        let cached = match self.store.cached() {
+            Some(c) => c,
+            None => {
+                let store = self.store.clone();
+                let now = self.now;
+                tokio::task::spawn_blocking(move || store.refresh(now, FETCH_TIMEOUT))
+                    .await
+                    .map_err(|e| source::IcsError::Io(e.to_string()))??;
+                self.store.cached().unwrap_or_default()
+            }
+        };
+        Ok(
+            ics::pick(&cached.events, self.now, self.settings.window_mins).map(|e| Titled {
+                title: e.title.clone(),
+                url: e.url.clone(),
+                source: "the calendar link",
+            }),
+        )
+    }
+}
+
+/// Keep the calendar link's events fresh: fetch when the daemon starts,
+/// then every [`source::REFRESH_EVERY`], and soon after a new link is set.
+/// Runs for the daemon's life; does nothing while no link is set.
+pub async fn refresh_forever(store: source::Store) {
+    let mut last_error: Option<String> = None;
+    let mut retry_at = chrono::Utc::now();
+    loop {
+        let now = chrono::Utc::now();
+        if store.settings().is_some() && store.stale(now) && now >= retry_at {
+            let s = store.clone();
+            let result = tokio::task::spawn_blocking(move || s.refresh(now, FETCH_TIMEOUT)).await;
+            match result {
+                Ok(Ok(n)) => {
+                    if last_error.take().is_some() {
+                        tracing::info!("Calendar link reachable again");
+                    }
+                    tracing::debug!("Calendar link fetched: {} events in the next 48 hours", n);
+                }
+                Ok(Err(e)) => {
+                    // The message names the host, never the link.
+                    let text = e.to_string();
+                    if last_error.as_deref() != Some(text.as_str()) {
+                        tracing::info!("Calendar link not fetched: {}", text);
+                    }
+                    last_error = Some(text);
+                    retry_at = now + chrono::Duration::minutes(5);
+                }
+                Err(e) => tracing::debug!("Calendar fetch task failed: {}", e),
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +634,111 @@ mod tests {
         assert_eq!(
             lookup(&cmd, Duration::from_secs(3), 10).await.unwrap(),
             found("From the plugin", None)
+        );
+    }
+
+    fn lookup_in(dir: &Path, command: &str, now: &str) -> Lookup {
+        Lookup {
+            settings: crate::config::MeetingCalendarConfig {
+                command: command.into(),
+                window_mins: 10,
+                timeout_secs: 3,
+            },
+            store: source::Store::new(dir.join("state")),
+            config_dir: Some(dir.join("config")),
+            now: chrono::DateTime::parse_from_rfc3339(now)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    /// A link set and its events cached, as the daemon's refresh leaves it.
+    fn cache_fixture(store: &source::Store, fetched: &str) {
+        let at = chrono::DateTime::parse_from_rfc3339(fetched)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store
+            .set_link("https://calendar.example.com/private-secret/basic.ics")
+            .unwrap();
+        let events = ics::events_between(
+            ics::tests::FIXTURE,
+            at - chrono::Duration::days(1),
+            at + source::AHEAD,
+        )
+        .unwrap();
+        std::fs::write(
+            store.dir.join(source::EVENTS_FILE),
+            serde_json::to_string(&source::Cached {
+                fetched_at: at.timestamp(),
+                events,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    const COMMAND: &str = r#"echo '{"title":"From the command","ongoing":true}'"#;
+
+    #[tokio::test]
+    async fn the_calendar_link_comes_first_then_the_command_then_the_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = "2026-11-12T13:55:00Z";
+
+        // Nothing set up: no title.
+        assert_eq!(lookup_in(dir.path(), "", at).title().await, None);
+
+        // The plugin on the bar.
+        plugin(
+            &dir.path().join("config"),
+            r#"{"bar":{"layout":{"right":[{"id":"peteonrails.next-meeting","agendaCommand":"echo '{\"title\":\"From the plugin\",\"ongoing\":true}'"}]}}}"#,
+            None,
+        );
+        let t = lookup_in(dir.path(), "", at).title().await.unwrap();
+        assert_eq!(
+            (t.title.as_str(), t.source),
+            ("From the plugin", "the Next Meeting plugin")
+        );
+
+        // A configured command beats the plugin.
+        let t = lookup_in(dir.path(), COMMAND, at).title().await.unwrap();
+        assert_eq!(
+            (t.title.as_str(), t.source),
+            ("From the command", "[meeting.calendar] command")
+        );
+
+        // The calendar link beats both, with the event's meeting link.
+        let l = lookup_in(dir.path(), COMMAND, at);
+        cache_fixture(&l.store, at);
+        let t = l.title().await.unwrap();
+        assert_eq!(t.title, "Design review, with NY");
+        assert_eq!(t.source, "the calendar link");
+        assert_eq!(
+            t.url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+
+        // No event near the start in the link: the command answers.
+        let l = lookup_in(dir.path(), COMMAND, "2026-11-12T16:00:00Z");
+        let t = l.title().await.unwrap();
+        assert_eq!(t.source, "[meeting.calendar] command");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_link_falls_through_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = lookup_in(dir.path(), COMMAND, "2026-11-12T13:55:00Z");
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        l.store
+            .set_link(&format!("http://127.0.0.1:{port}/private-secret/basic.ics"))
+            .unwrap();
+        let t = l.title().await.unwrap();
+        assert_eq!(t.source, "[meeting.calendar] command");
+        let recorded = l.store.settings().unwrap().last_error.unwrap();
+        assert!(
+            recorded.contains("127.0.0.1") && !recorded.contains("private-secret"),
+            "{recorded}"
         );
     }
 }

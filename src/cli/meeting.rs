@@ -45,6 +45,11 @@ pub enum MeetingAction {
         #[arg(long)]
         url: Option<String>,
 
+        /// A title taken from the call's window, as call detection gives
+        /// it. Unlike --title, a title from your calendar replaces it.
+        #[arg(long, value_name = "TITLE", conflicts_with = "title")]
+        window_title: Option<String>,
+
         /// Diarization backend override for this meeting only.
         ///
         /// `simple` attributes by audio source (You vs Remote) — best for 1:1 calls.
@@ -293,6 +298,9 @@ pub enum MeetingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Meeting titles from your calendar: the private iCal link
+    #[command(subcommand)]
+    Calendar(CalendarAction),
     /// Give a meeting a new title
     ///
     /// Works on a meeting that is recording, paused or finished. The new
@@ -1033,6 +1041,63 @@ pub enum TodoistAction {
         json: bool,
     },
     /// Show whether Todoist is connected
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Where to find the link, and what it gives away: for `--help`, the
+/// docs, and the Settings entry.
+pub const CALENDAR_LINK_HELP: &str = "Where to find your calendar's private iCal link:
+  Google Calendar: Settings, your calendar under \"Settings for my calendars\",
+    Integrate calendar, then \"Secret address in iCal format\".
+  Outlook: Settings, Calendar, Shared calendars, Publish a calendar. Pick the
+    calendar and \"Can view all details\", Publish, then copy the ICS link.
+  iCloud: on iCloud.com, the share button beside the calendar, tick
+    \"Public Calendar\", then copy the webcal:// link.
+  Fastmail: Settings, Calendars, the calendar's Edit & share, then its
+    read-only iCalendar URL.
+
+The link lets anyone who has it read your calendar. Voxtype keeps it in
+~/.local/state/voxtype/calendar.json, readable only by you, never in
+config.toml and never in logs. If it leaks, reset the secret address in your
+calendar's settings and set the new one.";
+
+/// `voxtype meeting calendar` actions
+#[derive(Subcommand)]
+pub enum CalendarAction {
+    /// Set your calendar's private iCal link
+    ///
+    /// A meeting that starts without a title (or with only the call
+    /// window's) is named after the calendar event happening then. The
+    /// daemon fetches the link in the background every 15 minutes.
+    ///
+    /// Pass - to read the link from stdin, which keeps it out of your
+    /// shell history. The link is fetched once to check it, unless
+    /// --no-check.
+    #[command(after_help = CALENDAR_LINK_HELP)]
+    SetIcs {
+        /// The link (https://, http:// or webcal://), or - to read it
+        /// from stdin
+        link: String,
+
+        /// Save without fetching it first
+        #[arg(long)]
+        no_check: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget the iCal link and the events fetched from it
+    Clear {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show where meeting titles come from, and the next event
     Status {
         /// Output as JSON
         #[arg(long)]

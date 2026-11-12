@@ -42,7 +42,10 @@ pub(crate) async fn run_meeting_command(
             model,
             language,
             url,
+            window_title,
         } => {
+            let title_from_window = title.is_none() && window_title.is_some();
+            let title = title.or(window_title);
             // Check if meeting mode is enabled
             if !config.meeting.enabled {
                 eprintln!("Error: Meeting mode is disabled in config.");
@@ -60,6 +63,7 @@ pub(crate) async fn run_meeting_command(
                 model,
                 language,
                 url: url.filter(|u| !u.trim().is_empty()),
+                title_from_window,
             };
             if let Err(e) = meeting::start::meeting_transcription_config(config, &options) {
                 eprintln!("Error: {}", e);
@@ -655,6 +659,13 @@ pub(crate) async fn run_meeting_command(
             .await?;
         }
 
+        MeetingAction::Calendar(action) => {
+            if let Err(e) = run_calendar(config, action) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+
         MeetingAction::Title {
             meeting_id,
             title,
@@ -1106,6 +1117,7 @@ pub(crate) async fn run_meeting_command(
                     model,
                     language,
                     url: None,
+                    ..Default::default()
                 },
                 diarization,
                 date,
@@ -1160,6 +1172,7 @@ pub(crate) async fn run_meeting_command(
                     model,
                     language,
                     url: None,
+                    ..Default::default()
                 },
                 diarization,
                 keep_edits: !discard_edits,
@@ -2066,6 +2079,160 @@ fn run_actions(
     }
     if failed > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `voxtype meeting calendar set-ics|clear|status`.
+fn run_calendar(config: &config::Config, action: voxtype::CalendarAction) -> anyhow::Result<()> {
+    use meeting::calendar::{self, source};
+    use voxtype::CalendarAction;
+    let lookup = calendar::Lookup::current(&config.meeting.calendar);
+    let store = &lookup.store;
+    match action {
+        CalendarAction::SetIcs {
+            link,
+            no_check,
+            json,
+        } => {
+            let link = if link == "-" {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line
+            } else {
+                link
+            };
+            let link = source::normalize_link(&link)?;
+            let previous = store.settings();
+            store.set_link(&link)?;
+            let checked = if no_check {
+                None
+            } else {
+                match store.refresh(chrono::Utc::now(), calendar::FETCH_TIMEOUT) {
+                    Ok(n) => Some(n),
+                    Err(e) => {
+                        // Keep the link that worked, if there was one.
+                        match previous {
+                            Some(p) => store.save_settings(&p)?,
+                            None => {
+                                store.clear();
+                            }
+                        }
+                        return Err(e.into());
+                    }
+                }
+            };
+            let host = source::host(&link);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"set": true, "host": host, "events": checked})
+                );
+            } else {
+                match checked {
+                    Some(n) => println!(
+                        "Calendar link set ({host}): {n} event(s) in the next 48 hours. Meetings that start untitled take their title from it."
+                    ),
+                    None => println!("Calendar link set ({host}). It is fetched in the background."),
+                }
+            }
+        }
+        CalendarAction::Clear { json } => {
+            let had = store.clear();
+            if json {
+                println!("{}", serde_json::json!({ "cleared": had }));
+            } else if had {
+                println!("Calendar link forgotten, with everything fetched from it.");
+            } else {
+                println!("No calendar link was set.");
+            }
+        }
+        CalendarAction::Status { json } => {
+            let settings = store.settings();
+            let cached = store.cached();
+            let now = chrono::Utc::now();
+            let next = cached.as_ref().and_then(|c| {
+                c.events
+                    .iter()
+                    .find(|e| e.end > now)
+                    .map(|e| (e.title.clone(), e.start))
+            });
+            let configured_command = Some(config.meeting.calendar.command.trim())
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+            let command = lookup.command();
+            let plugin_command = command
+                .as_ref()
+                .filter(|_| configured_command.is_none())
+                .map(|c| c.command.clone());
+            let source_name = if settings.is_some() {
+                Some("calendar_link")
+            } else if configured_command.is_some() {
+                Some("command")
+            } else if plugin_command.is_some() {
+                Some("plugin")
+            } else {
+                None
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "source": source_name,
+                        "calendar_link": {
+                            "set": settings.is_some(),
+                            "host": settings.as_ref().map(|s| source::host(&s.url)),
+                            "fetched_at": settings.as_ref().and_then(|s| s.fetched_at),
+                            "last_error": settings.as_ref().and_then(|s| s.last_error.clone()),
+                            "events": cached.as_ref().map(|c| c.events.iter().filter(|e| e.end > now).count()),
+                            "next": next.as_ref().map(|(t, s)| serde_json::json!({"title": t, "start": s})),
+                        },
+                        "command": configured_command,
+                        "plugin_command": plugin_command,
+                        "window_mins": config.meeting.calendar.window_mins,
+                        "link_help": source::LINK_HELP,
+                    }))?
+                );
+            } else {
+                match &settings {
+                    Some(s) => {
+                        println!("Calendar link: set ({})", source::host(&s.url));
+                        match s.fetched_at.and_then(|t| chrono::DateTime::from_timestamp(t, 0)) {
+                            Some(t) => println!(
+                                "  Fetched {}",
+                                t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                            ),
+                            None => println!("  Not fetched yet"),
+                        }
+                        if let Some(e) = &s.last_error {
+                            println!("  Last fetch failed: {e}");
+                        }
+                        if let Some((title, start)) = &next {
+                            println!(
+                                "  Next: {} at {}",
+                                title,
+                                start.with_timezone(&chrono::Local).format("%a %H:%M")
+                            );
+                        }
+                    }
+                    None => println!(
+                        "Calendar link: not set (voxtype meeting calendar set-ics --help says where to find it)"
+                    ),
+                }
+                if let Some(c) = &configured_command {
+                    println!("Calendar command: {c}");
+                } else if let Some(c) = &plugin_command {
+                    println!("Calendar command: {c} (from the Omarchy Next Meeting widget)");
+                }
+                match source_name {
+                    Some(_) => println!(
+                        "Untitled meetings take the title of an event running or starting within {} min.",
+                        config.meeting.calendar.window_mins
+                    ),
+                    None => println!("Meetings are not titled from a calendar."),
+                }
+            }
+        }
     }
     Ok(())
 }

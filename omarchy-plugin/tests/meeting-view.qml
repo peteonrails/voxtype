@@ -172,6 +172,12 @@ Item {
           else if (s === "search-old") tc.driveSearchOld()
           else if (s === "soundcheck-no-loopback") tc.driveSoundCheckNoLoopback()
           else if (s === "soundcheck-error") tc.driveSoundCheckError()
+          else if (s === "title") tc.driveTitle()
+          else if (s === "title-external") tc.driveTitleExternal()
+          else if (s === "title-past") tc.driveTitlePast()
+          else if (s === "title-fail") tc.driveTitleFail()
+          else if (s === "title-labelled") tc.driveTitleLabelled()
+          else if (s === "title-real") tc.driveTitleReal()
           else if (s === "live-labels") tc.driveLiveLabels()
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
@@ -1356,18 +1362,35 @@ Item {
       shot("old-voxtype")
     }
 
+    // Every Copy that worked, as the view noted it. "Copied" shows for 1.5 s,
+    // which a polling wait can miss on a loaded machine; the change can't be.
+    property var copiedKeys: []
+    function copiedSeen(prefix) {
+      for (var i = 0; i < tc.copiedKeys.length; i++) if (tc.copiedKeys[i].indexOf(prefix) === 0) return true
+      return false
+    }
+
     function driveCopy() {
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // Each entry also says what the button read at that moment.
+      view().copiedKeyChanged.connect(function() {
+        var key = view().copiedKey
+        if (key === "") return
+        var button = key === "summary" ? find(view(), "summaryCopy")
+          : find(find(view(), "askThread").itemAtIndex(1), "answerCopy")
+        tc.copiedKeys = tc.copiedKeys.concat([key + "=" + (button ? String(button.text) : "?")])
+      })
       tab("ask")
       typeAsk("What did we decide?")
       waitFor(function() { return answered(1) }, "answered", 8000)
       var row = find(view(), "askThread").itemAtIndex(1)
       var copy = find(row, "answerCopy")
       check(shown(copy) && String(copy.text) === "Copy", "Copy on the answer")
-      mouseClick(copy, copy.width / 2, copy.height / 2)
-      waitFor(function() { return String(copy.text) === "Copied" }, "Copied")
-      shot("copied")
+      click(copy, "Copy on the answer")
+      waitFor(function() { return tc.copiedSeen("answer:") }, "Copied: " + JSON.stringify(tc.copiedKeys), 8000)
+      check(tc.copiedKeys[0].slice(-7) === "=Copied", "the button said Copied: " + tc.copiedKeys[0])
+      if (String(copy.text) === "Copied") shot("copied")
 
       click(find(view(), "stopButton"), "Stop")
       waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
@@ -1376,11 +1399,12 @@ Item {
       waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary", 8000)
       var scopy = find(view(), "summaryCopy")
       click(scopy, "Copy summary")
-      waitFor(function() { return String(scopy.text) === "Copied" }, "summary Copied")
+      waitFor(function() { return tc.copiedSeen("summary") }, "summary Copied: " + JSON.stringify(tc.copiedKeys), 8000)
+      check(tc.copiedKeys[tc.copiedKeys.length - 1] === "summary=Copied", "the summary button said Copied: " + JSON.stringify(tc.copiedKeys))
 
       // Without wl-copy, say what is missing.
       host.ctrl().copyCommand = "/nonexistent/wl-copy"
-      waitFor(function() { return String(scopy.text) === "Copy" }, "label back")
+      waitFor(function() { return String(scopy.text) === "Copy" }, "label back", 8000)
       click(scopy, "Copy without wl-copy")
       waitFor(function() { return shown(find(view(), "actionError")) }, "the reason")
       check(view().actionError === "Copying needs /nonexistent/wl-copy (the wl-clipboard package), which is not installed.", "message: " + view().actionError)
@@ -1934,6 +1958,129 @@ Item {
       check(speakerOf("Here it is.") === "Chris", "and after it: " + speakerOf("Here it is."))
       var names = renderedChips()
       check(names.indexOf("Remote 1") === -1 && names.indexOf("Remote 2") === -1, "no bare ids in the chips: " + JSON.stringify(names))
+    }
+
+    function editTitle() {
+      click(find(view(), "meetingTitle"), "the title")
+      var f = find(view(), "titleEditField")
+      waitFor(function() { return shown(f) && f.activeFocus }, "the title field, focused")
+      return f
+    }
+
+    function driveTitle() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var f = editTitle()
+      check(String(f.text) === "Standup", "starts with the title: " + f.text)
+      // Escape leaves it as it was.
+      f.text = "Nope"
+      keyClick(Qt.Key_Escape)
+      waitFor(function() { return shown(find(view(), "meetingTitle")) && txt("meetingTitle") === "Standup" }, "cancelled")
+      check(host.viewOpen(), "Escape in the field does not close the view")
+      // Empty is refused.
+      f = editTitle()
+      f.text = "   "
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return txt("titleError") === "A meeting needs a title." && shown(f) }, "refused: " + txt("titleError"))
+      shot("title-empty")
+      f.text = "Release sync"
+      keyClick(Qt.Key_Return)
+      check(txt("meetingTitle") === "Release sync" && !shown(find(view(), "titleError")), "renamed at once: " + txt("meetingTitle"))
+      waitFor(idleCli, "title stored")
+      wait(300)
+      check(txt("meetingTitle") === "Release sync", "kept after the daemon")
+      shot("title")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return feed().ended }, "ended", 6000)
+      click(find(view(), "backButton"), "back to the list")
+      waitFor(function() { return shown(find(view(), "meetingRow_0")) }, "the list")
+      waitFor(function() { return String(find(find(view(), "meetingRow_0"), "meetingRowTitle").text) === "Release sync" }, "the list has the new title", 6000)
+    }
+
+    function driveTitleExternal() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // Renamed elsewhere (the CLI, or a calendar title after the start).
+      ctl({ cmd: "title", title: "Weekly sync with Dana" })
+      waitFor(function() { return txt("meetingTitle") === "Weekly sync with Dana" }, "the header follows: " + txt("meetingTitle"))
+      // A meeting with nothing said yet shows its title in the pill.
+      ctl({ cmd: "stop" })
+      waitFor(function() { return feed().ended }, "ended", 6000)
+      ctl({ cmd: "start", title: "" })
+      waitFor(function() { return feed().status === "recording" && lines().length === 0 }, "a new meeting", 6000)
+      minimizeNow()
+      ctl({ cmd: "title", title: "Design review (from the calendar)" })
+      waitFor(function() { return txt("pillState") === "Design review (from the calendar)" }, "the pill follows: " + txt("pillState"))
+      shot("title-pill", true)
+    }
+
+    function driveTitlePast() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_1")) }, "the list")
+      click(find(view(), "meetingRow_1"), "1:1 with Sam")
+      waitFor(function() { return txt("meetingTitle") === "1:1 with Sam" }, "opened")
+      var f = editTitle()
+      f.text = "1:1 with Sam and Dana"
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return txt("meetingTitle") === "1:1 with Sam and Dana" }, "renamed")
+      waitFor(idleCli, "stored")
+      click(find(view(), "backButton"), "back")
+      waitFor(function() { return String(find(find(view(), "meetingRow_1"), "meetingRowTitle").text) === "1:1 with Sam and Dana" }, "the list follows", 6000)
+    }
+
+    // "Pete <> Sam" names a finished meeting's speakers in the store, with
+    // no event to say so: the view reads the meeting again, on the same tab.
+    function driveTitleLabelled() {
+      openView()
+      waitFor(function() { return shown(find(view(), "meetingRow_1")) }, "the list")
+      click(find(view(), "meetingRow_1"), "1:1 with Sam")
+      waitFor(function() { return txt("meetingTitle") === "1:1 with Sam" && lines().length === 3 }, "opened")
+      check(speakerOf("Busy, but good.") !== "Sam", "not named yet: " + speakerOf("Busy, but good."))
+      var f = editTitle()
+      f.text = "Pete <> Sam"
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return speakerOf("Busy, but good.") === "Sam" && speakerOf("How was the week?") === "Pete" },
+              "named from the title: " + speakerOf("Busy, but good.") + ", " + speakerOf("How was the week?"))
+      check(txt("meetingTitle") === "Pete <> Sam", "title: " + txt("meetingTitle"))
+      check(view().currentTab === "transcript" && lines().length === 3, "read again in place: " + view().currentTab)
+      waitFor(idleCli, "stored")
+      shot("title-labelled")
+    }
+
+    // Against a real voxtype and a real meetings store (REAL_VOXTYPE).
+    function driveTitleReal() {
+      openView()
+      waitFor(function() {
+        var row = find(view(), "meetingRow_0")
+        return shown(row) && String(find(row, "meetingRowTitle").text) === "Zoom call"
+      }, "the real store's list")
+      check(!shown(find(view(), "meetingRow_1")), "one meeting in the store")
+      click(find(view(), "meetingRow_0"), "Zoom call")
+      waitFor(function() { return txt("meetingTitle") === "Zoom call" && lines().length === 2 }, "opened from the store")
+      var f = editTitle()
+      f.text = "  Weekly   sync  with Dana "
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return txt("meetingTitle") === "Weekly sync with Dana" }, "the title as stored: " + txt("meetingTitle"))
+      waitFor(idleCli, "stored")
+      check(view().actionError === "", "no error: " + view().actionError)
+      shot("title-real")
+      click(find(view(), "backButton"), "back")
+      waitFor(function() {
+        var row = find(view(), "meetingRow_0")
+        return shown(row) && String(find(row, "meetingRowTitle").text) === "Weekly sync with Dana"
+      }, "the list reads the store again", 6000)
+    }
+
+    function driveTitleFail() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var f = editTitle()
+      f.text = "A very long title"
+      keyClick(Qt.Key_Return)
+      waitFor(function() { return shown(find(view(), "actionError")) }, "refusal shown")
+      check(view().actionError.indexOf("Meeting titles are limited to 200 characters.") !== -1, "the CLI's reason: " + view().actionError)
+      waitFor(function() { return txt("meetingTitle") === "Standup" }, "put back: " + txt("meetingTitle"))
+      shot("title-fail")
     }
 
     function driveSummaryError() {

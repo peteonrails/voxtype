@@ -81,6 +81,9 @@ Item {
   // Notes changed outside this view (`notes_updated`). `notes` is the new text
   // when the event carries it, otherwise null and the reader fetches it.
   signal notesUpdated(string meetingId, var notes)
+  // The meeting was renamed (`meeting title`, or a title from the calendar
+  // after the start): the view's title follows; lists re-read.
+  signal retitled(string meetingId, string title)
   // The summary is written (`summary_ready`). The daemon's event carries the
   // MeetingSummary as `summary` (and summary.md's `path`); `markdown` is ""
   // unless an event carries text.
@@ -522,6 +525,11 @@ Item {
       if (!ev.meeting_id || String(ev.meeting_id) === root.meetingId) root.removeRow(Number(ev.segment_id))
     } else if (kind === "speaker_renamed") {
       root.renameSpeaker(String(ev.from || ""), String(ev.to || ""))
+    } else if (kind === "title_changed") {
+      var mid = ev.meeting_id ? String(ev.meeting_id) : root.meetingId
+      var t = String(ev.title || "")
+      if (mid === root.meetingId && t !== "") root.title = t
+      root.retitled(mid, t)
     } else if (kind === "status") {
       var next = String(ev.status || "")
       if (next === "") return

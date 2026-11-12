@@ -3030,40 +3030,26 @@ impl Daemon {
     /// started is called. A title found is stored and sent back through the
     /// retitle trigger, unless the meeting got a real title meanwhile. Any
     /// failure leaves the title as it is.
-    fn title_from_calendar(&self, meeting_id: meeting::MeetingId, storage: StorageConfig) {
-        let settings = self.config.meeting.calendar.clone();
-        let Some(command) = Config::config_dir()
-            .and_then(|voxtype_dir| voxtype_dir.parent().map(|p| p.to_path_buf()))
-            .and_then(|config_dir| meeting::calendar::resolve(&settings.command, &config_dir))
-        else {
-            tracing::debug!("No calendar command: meeting title left as it is");
-            return;
-        };
+    fn title_from_calendar(
+        &self,
+        meeting_id: meeting::MeetingId,
+        storage: StorageConfig,
+        started_title: Option<String>,
+    ) {
+        let lookup = meeting::calendar::Lookup::current(&self.config.meeting.calendar);
         tokio::spawn(async move {
-            let timeout = std::time::Duration::from_secs(settings.timeout_secs.max(1));
-            let found =
-                match meeting::calendar::lookup(&command, timeout, settings.window_mins).await {
-                    Ok(Some(found)) => found,
-                    Ok(None) => {
-                        tracing::debug!(
-                            "No calendar event within {} min of the meeting's start ({})",
-                            settings.window_mins,
-                            command.source
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::debug!("No title from the calendar ({}): {}", command.source, e);
-                        return;
-                    }
-                };
+            let Some(found) = lookup.title().await else {
+                return;
+            };
+            let source = found.source;
             let stored = tokio::task::spawn_blocking(move || {
                 let storage = meeting::MeetingStorage::open(storage).map_err(|e| e.to_string())?;
                 let current = storage
                     .get_meeting(&meeting_id)
                     .map_err(|e| e.to_string())?
                     .ok_or("the meeting is gone")?;
-                if !meeting::calendar::is_replaceable(current.title.as_deref()) {
+                // Retitled by hand meanwhile: that title stays.
+                if current.title != started_title {
                     return Err(format!(
                         "it was titled {:?} meanwhile",
                         current.title.unwrap_or_default()
@@ -3082,10 +3068,10 @@ impl Daemon {
             match stored {
                 Ok(Ok(done)) => {
                     tracing::info!(
-                        "Meeting {} titled {:?} from the calendar ({})",
+                        "Meeting {} titled {:?} from {}",
                         meeting_id,
                         done.title,
-                        command.source
+                        source
                     );
                     let trigger = meeting::retitle::Retitle {
                         meeting_id: meeting_id.to_string(),
@@ -3223,7 +3209,11 @@ impl Daemon {
         };
         let title_for_hud = title.clone();
 
-        let calendar_title_wanted = meeting::calendar::is_replaceable(title.as_deref());
+        // A title from the call window, a detection placeholder or none at
+        // all gives way to the calendar's; one the user typed never does.
+        let calendar_title_wanted =
+            options.title_from_window || meeting::calendar::is_replaceable(title.as_deref());
+        let started_title = title.clone();
         let meeting_config = meeting::MeetingConfig {
             enabled: self.config.meeting.enabled,
             chunk_duration_secs: self.config.meeting.chunk_duration_secs,
@@ -3299,7 +3289,11 @@ impl Daemon {
                         tracing::info!("Meeting started: {}", meeting_id);
                         self.start_meeting_levels(capture.meters(), &id_str);
                         if calendar_title_wanted {
-                            self.title_from_calendar(meeting_id, storage_for_calendar.clone());
+                            self.title_from_calendar(
+                                meeting_id,
+                                storage_for_calendar.clone(),
+                                started_title.clone(),
+                            );
                         }
                         self.meeting_audio_capture = Some(capture);
 
@@ -5084,6 +5078,17 @@ impl Daemon {
         let _meeting_detector =
             meeting::detect::runner::spawn_in_daemon(&self.config, self.config_path.clone());
 
+        // Keep the calendar link's events fresh for meeting titles. It does
+        // nothing until `voxtype meeting calendar set-ics` sets a link.
+        let calendar_refresh = self.config.meeting.enabled.then(|| {
+            tokio::spawn(meeting::calendar::refresh_forever(
+                meeting::calendar::source::Store::new(
+                    meeting::calendar::source::Store::default_dir(),
+                ),
+            ))
+        });
+        let _calendar_refresh = AbortOnDrop(calendar_refresh);
+
         crate::daemon_status::publish_version();
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);
@@ -6464,6 +6469,17 @@ impl Daemon {
         // tracing output above is already out; anything that starts buffering
         // daemon output has to flush before reaching here.
         unsafe { libc::_exit(0) };
+    }
+}
+
+/// Stops a background task when the daemon's run ends.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
     }
 }
 

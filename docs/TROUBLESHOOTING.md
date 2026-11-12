@@ -1875,16 +1875,22 @@ The meeting itself never depends on the summary: if summarizing fails, the trans
 
 ## Meeting Titles: The Calendar Title Was Not Used
 
-A meeting takes its title from the calendar only when it started without a real title (none, "Zoom call", "Google Meet call", "Teams call" or the date-only default) and an event is running or starts within `[meeting.calendar] window_mins` of the start. Anything else is logged at debug level. Run the daemon with `-vv`, or look in the journal:
+Start with what voxtype sees:
 
 ```bash
+voxtype meeting calendar status
 journalctl --user -u voxtype --since "15 minutes ago" | grep -i calendar
 ```
 
-- **"No calendar command"**: `[meeting.calendar] command` is empty and the Omarchy Next Meeting widget is not on your bar. Set the command.
-- **"ran past 3 s"**: the calendar answered too slowly. Raise `[meeting.calendar] timeout_secs`.
-- **"printed something other than the agenda JSON"**: run the command yourself (`bash -lc '<command>'`) and check it prints one JSON object and nothing else. A login profile that prints a greeting breaks it.
-- **"No calendar event within 10 min"**: the event was further from the start than the window. Raise `window_mins`, or set the title by hand with `voxtype meeting title latest "<title>"`.
+A meeting takes its title from the calendar only when it started without a title you chose, and an event was in progress or started within `[meeting.calendar] window_mins` of the start.
+
+- **"Last fetch failed: The calendar server (...) answered 404"** (or 401, 403, 410): the link was reset or unpublished. Copy the secret iCal address again and run `voxtype meeting calendar set-ics -`.
+- **"Could not reach the calendar server"**: no network when the daemon fetched. It tries again within 15 minutes and uses the last good fetch meanwhile.
+- **"did not return a calendar"**: the link points at a web page, often a sign-in page, rather than the iCal feed. Use the secret or published iCal address, not the calendar's ordinary web address.
+- **"No event in the calendar link within 10 min"**: the event was further from the start than the window, or was an all-day event, which never names a meeting. Raise `window_mins`, or set the title with `voxtype meeting title latest "<title>"`.
+- **A calendar command: "ran past 3 s"**: raise `[meeting.calendar] timeout_secs`. **"printed something other than the calendar JSON"**: run the command yourself (`bash -lc '<command>'`) and check it prints one JSON object and nothing else; a login profile that prints a greeting breaks it.
+
+Voxtype never logs the iCal link itself, only its server, so these lines are safe to share in a bug report.
 
 ## Systemd Service Issues
 

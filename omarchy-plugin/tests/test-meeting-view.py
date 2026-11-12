@@ -180,6 +180,21 @@ Scenarios:
               Allow, Send to Todoist for one ticked item, Remind me... in 15
               min through a recording omarchy-reminder, then all, the sent
               one skipped
+  title       a click on the title edits it: Enter saves (`meeting title`) and
+              the header changes at once; Escape cancels; an empty title is
+              refused; after the meeting the list shows the new title
+  title-external  a title_changed from elsewhere (the CLI, a calendar title
+              arriving after the start) updates the header and the pill
+  title-past  renaming a past meeting opened from the list, and the list
+  title-fail  a refused rename goes back, with the CLI's reason
+  title-labelled  a past meeting's two-person title names its speakers: the
+              view reads the meeting again, on the same tab, and the lines
+              carry the names
+  title-real  renaming a past meeting against a real voxtype (REAL_VOXTYPE,
+              run only when set): the list, the meeting and the rename all
+              come from a real meetings store; the header shows the title as
+              stored (whitespace collapsed), the store has it, and the real
+              CLI refuses an empty one the way the fake does
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -225,7 +240,8 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
              "actions", "actions-connect", "actions-old", "actions-real", "waveform-real", "waveform-real-mixed",
-             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
+             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing",
+             "title", "title-external", "title-past", "title-fail", "title-labelled", "title-real")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -476,6 +492,9 @@ INITIAL = {
     "play": lambda: [running_meeting()],
     "play-no-audio": lambda: [running_meeting()],
     "play-errors": lambda: [running_meeting()],
+    "title": lambda: [running_meeting()],
+    "title-external": lambda: [running_meeting()],
+    "title-fail": lambda: [running_meeting()],
     "summary-error": lambda: [running_meeting()],
     "levels": lambda: [running_meeting()],
     "share": lambda: [running_meeting()],
@@ -529,6 +548,8 @@ STATE = {
     "opacity": {"view_opacity": 0.5},
     "play": {"play_speed": 10},
     "play-no-audio": {"audio_retained": False},
+    "title-fail": {"title_fail": "Meeting titles are limited to 200 characters."},
+    "title-labelled": {"title_labels": {"You": "Pete", "Remote": "Sam"}},
     "play-errors": {"play_error": "This meeting was recorded without keeping audio. "
                                   "Turn on meeting.retain_audio for future meetings."},
     "scroll-tabs": {"summary_json": LONG_SUMMARY},
@@ -578,6 +599,33 @@ PAST_SUMMARY = {
     "chapters": [{"start_ms": 3000, "title": "Layout"}, {"start_ms": 61000, "title": "Who builds what"}],
     "generated_at": "2026-11-10T16:00:00Z", "model": "claude",
 }
+
+
+# The finished meeting title-real seeds in a real store.
+TITLED = "c4000000-0000-4000-8000-000000000005"
+
+
+def seed_titled(real, data_home, config_home):
+    """A real voxtype's meetings store holding one finished meeting, "Zoom
+    call". The real binary makes the schema; the row and folder are written
+    here."""
+    (config_home / "voxtype").mkdir(parents=True)
+    (config_home / "voxtype" / "config.toml").write_text("")
+    env = dict(os.environ, XDG_DATA_HOME=str(data_home), XDG_CONFIG_HOME=str(config_home))
+    subprocess.run([real, "meeting", "list", "--json"], env=env, capture_output=True, check=True)
+    store = data_home / "voxtype" / "meetings"
+    folder = store / TITLED
+    folder.mkdir(parents=True)
+    (folder / "transcript.json").write_text(json.dumps({"segments": [
+        seg(0, 2, "Can you see my screen?", "microphone", "You", 0),
+        seg(1, 9, "Yes, the roadmap.", "loopback", "Remote", 0)], "total_chunks": 1}))
+    now = int(time.time())
+    db = sqlite3.connect(store / "index.db")
+    db.execute("INSERT INTO meetings (id, title, started_at, ended_at, duration_secs, status, chunk_count, storage_path, "
+               "audio_retained) VALUES (?, 'Zoom call', ?, ?, 70, 'completed', 1, ?, 0)",
+               (TITLED, now - 900, now - 830, str(folder)))
+    db.commit()
+    db.close()
 
 
 def past_meetings(data, scenario):
@@ -643,7 +691,8 @@ def past_meetings(data, scenario):
 
 
 PAST_SCENARIOS = {"list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
-                  "list-old", "export-past", "search", "search-old", "recovery", "recovery-socket", "recovery-old"}
+                  "list-old", "export-past", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
+                  "title-past", "title-labelled"}
 
 
 def run(scenario, host, shell, evidence):
@@ -748,6 +797,11 @@ def run(scenario, host, shell, evidence):
             real = os.environ["REAL_VOXTYPE"]
             seed_interrupted(real, r.root / "xdg-data")
             real_env = {"REAL_VOXTYPE": real, "REAL_SCENARIO": "1", "XDG_DATA_HOME": str(r.root / "xdg-data")}
+        if scenario == "title-real":
+            real = os.environ["REAL_VOXTYPE"]
+            seed_titled(real, r.root / "xdg-data", r.root / "xdg-config")
+            real_env = {"REAL_VOXTYPE": real, "REAL_SCENARIO": "1", "REAL_STORE": "1",
+                        "XDG_DATA_HOME": str(r.root / "xdg-data"), "XDG_CONFIG_HOME": str(r.root / "xdg-config")}
         server = subprocess.Popen([sys.executable, "-I", str(FAKE_SOCK), str(sock), str(ctl), str(srv_log),
                                    str(snapshot)])
         try:
@@ -807,8 +861,27 @@ def run(scenario, host, shell, evidence):
         if (documents / "Voxtype").exists():
             (documents / "Voxtype").chmod(0o700)
 
+        # What the real store kept, and the real CLI's refusal of an empty title.
+        real_title = real_folder = empty_refusal = None
+        if scenario == "title-real":
+            env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), **real_env)
+            shown = subprocess.run([real, "meeting", "show", TITLED, "--json"], env=env, capture_output=True, text=True)
+            meta = json.loads(shown.stdout)["metadata"] if shown.returncode == 0 else {}
+            real_title = meta.get("title", shown.stderr.strip())
+            real_folder = meta.get("storage_path")
+            empty = subprocess.run([real, "meeting", "title", TITLED, "   ", "--json"], env=env,
+                                   capture_output=True, text=True)
+            empty_refusal = (empty.returncode, empty.stdout, empty.stderr.strip())
+
     problems = h.driver_problems(output, code, "MEETING_VIEW", scenario)
     problems += check_calls(scenario, calls, runtime_notes=str(runtime / "voxtype"))
+    if scenario == "title-real":
+        if real_title != "Weekly sync with Dana":
+            problems.append("the real store's title: %r" % real_title)
+        if real_folder is None or not real_folder.endswith("/" + TITLED):
+            problems.append("the folder keeps its name: %r" % real_folder)
+        if empty_refusal != (1, "", "Error: A meeting title can't be empty."):
+            problems.append("an empty title, from the real CLI: %r" % (empty_refusal,))
     if scenario == "notes" and saved_notes != "Mine":
         problems.append("notes on disk: %r, expected 'Mine'" % saved_notes)
     if scenario == "share" and opened_paths != ["/home/u/Documents/Voxtype"]:
@@ -858,7 +931,8 @@ def run(scenario, host, shell, evidence):
 
 
 def read_only(argv):
-    """Reads the view makes on its own (notes, assistant status, show)."""
+    """Reads made without the user asking (notes, assistant status, show, and
+    the Settings panel's calendar status)."""
     if argv[:3] == ["meeting", "assistant", "status"] or argv[:2] in (["meeting", "show"], ["meeting", "list"]):
         return True
     # The Settings panel's read of the name suggestion (Your name).
@@ -867,6 +941,9 @@ def read_only(argv):
     if argv == ["meeting", "play", "--status", "--json"] or argv[:2] == ["meeting", "waveform"] \
             or argv == ["meeting", "recover", "--json"] \
             or (argv[:2] == ["meeting", "actions"] and len(argv) == 4 and argv[3] == "--json"):
+        return True
+    # The Settings panel's calendar link row, when it is open.
+    if argv == ["meeting", "calendar", "status", "--json"]:
         return True
     return argv[:2] == ["meeting", "notes"] and "--set-file" not in argv
 
@@ -991,6 +1068,19 @@ def check_calls(scenario, calls, runtime_notes=""):
         start = ["meeting", "play", MEETING_ID, "--segment", "2", "--track", "mixed", "--json"]
         expect(meeting, [start, ["meeting", "play", "--stop", "--json"], start, ["meeting", "play", "--stop", "--json"]],
                "meeting commands")
+    elif scenario == "title":
+        expect(meeting, [["meeting", "title", MEETING_ID, "Release sync", "--json"], ["meeting", "stop"]], "meeting commands")
+    elif scenario == "title-external":
+        expect(meeting, [], "meeting commands")
+    elif scenario == "title-past":
+        expect(meeting, [["meeting", "title", PAST["one2one"], "1:1 with Sam and Dana", "--json"]], "meeting commands")
+    elif scenario == "title-fail":
+        expect(meeting, [["meeting", "title", MEETING_ID, "A very long title", "--json"]], "meeting commands")
+    elif scenario == "title-labelled":
+        expect(meeting, [["meeting", "title", PAST["one2one"], "Pete <> Sam", "--json"]], "meeting commands")
+    elif scenario == "title-real":
+        # Trimmed in the view; the inner spaces are the CLI's to collapse.
+        expect(meeting, [["meeting", "title", TITLED, "Weekly   sync  with Dana", "--json"]], "meeting commands")
     elif scenario == "play-no-audio":
         expect(meeting, [], "meeting commands")
     elif scenario == "play-errors":
@@ -1140,9 +1230,9 @@ def main():
         for scenario in args.scenario or SCENARIOS:
             if host != "omarchy" and scenario in OMARCHY_ONLY:
                 continue
-            # Needs a real voxtype with `meeting recover` / `meeting share`.
+            # Needs a real voxtype with `meeting recover` / `meeting share` / `meeting title`.
             if scenario in ("recovery-real", "share-real", "share-real-unavailable", "actions-real", "waveform-real",
-                            "waveform-real-mixed") \
+                            "waveform-real-mixed", "title-real") \
                     and not os.environ.get("REAL_VOXTYPE"):
                 continue
             output, problems, calls = run(scenario, host, args.shell, args.evidence)

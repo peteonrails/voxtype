@@ -301,11 +301,17 @@ fn is_name_word(word: &str) -> bool {
 pub struct Me {
     /// The names the user goes by, the one to label with first.
     names: Vec<String>,
+    /// The login name, used only when no name is known, and only ever as
+    /// a first name: "pete" matches "Pete" in a title, never "Pete Smith"
+    /// over "Pete Jones".
+    login: Option<String>,
 }
 
 impl Me {
     /// The user as `meeting.my_name` names them, or else as the account's
-    /// full name (GECOS) does. `None` when neither is known.
+    /// full name (GECOS) does, or else, when the account has no full name,
+    /// by its login name as a first name. `None` when none of these is
+    /// known or usable.
     pub fn resolve(my_name: Option<&str>) -> Option<Self> {
         let names: Vec<String> = my_name
             .map(str::to_string)
@@ -314,13 +320,30 @@ impl Me {
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .collect();
-        (!names.is_empty()).then_some(Self { names })
+        if !names.is_empty() {
+            return Some(Self { names, login: None });
+        }
+        let login = account_login().filter(|l| usable_login(l))?;
+        Some(Self {
+            names: Vec::new(),
+            login: Some(login.to_lowercase()),
+        })
     }
 
     /// A user known by these names, the first being what to label with.
     pub fn named(names: &[&str]) -> Self {
         Self {
             names: names.iter().map(|n| n.to_string()).collect(),
+            login: None,
+        }
+    }
+
+    /// A user known only by a login name.
+    #[cfg(test)]
+    pub(crate) fn logged_in_as(login: &str) -> Self {
+        Self {
+            names: Vec::new(),
+            login: Some(login.to_lowercase()),
         }
     }
 
@@ -341,7 +364,47 @@ impl Me {
             })
             .max()
             .unwrap_or(0)
+            .max(u8::from(
+                self.login.as_deref().is_some_and(|l| first(side) == l),
+            ))
     }
+}
+
+/// Login names that are not a person's first name.
+const NOT_FIRST_NAMES: &[&str] = &[
+    "root",
+    "admin",
+    "administrator",
+    "user",
+    "guest",
+    "test",
+    "demo",
+    "ubuntu",
+    "debian",
+    "arch",
+    "fedora",
+    "nixos",
+    "alarm",
+    "pi",
+    "deck",
+    "liveuser",
+    "live",
+    "vagrant",
+    "docker",
+    "builder",
+    "build",
+    "dev",
+    "home",
+    "me",
+    "owner",
+];
+
+/// Whether a login name can stand for a first name: letters only, at least
+/// two of them, and not a system or placeholder account.
+fn usable_login(login: &str) -> bool {
+    login.chars().count() >= 2
+        && login.chars().all(char::is_alphabetic)
+        && !NOT_FIRST_NAMES.contains(&login.to_lowercase().as_str())
 }
 
 #[cfg(test)]
@@ -358,17 +421,37 @@ pub(crate) fn set_account_name_for_test(name: Option<&str>) {
     TEST_ACCOUNT_NAME.with(|n| *n.borrow_mut() = Some(name.map(str::to_string)));
 }
 
-/// The account's full name: the first comma-separated field of GECOS.
-fn account_full_name() -> Option<String> {
+#[cfg(test)]
+thread_local! {
+    static TEST_LOGIN: std::cell::RefCell<Option<Option<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Make this thread's tests see `login` as the account's login name.
+#[cfg(test)]
+pub(crate) fn set_login_for_test(login: Option<&str>) {
+    TEST_LOGIN.with(|n| *n.borrow_mut() = Some(login.map(str::to_string)));
+}
+
+/// The account's login name, from the account database, else $USER.
+fn account_login() -> Option<String> {
     #[cfg(test)]
-    if let Some(name) = TEST_ACCOUNT_NAME.with(|n| n.borrow().clone()) {
-        return name;
+    if let Some(login) = TEST_LOGIN.with(|n| n.borrow().clone()) {
+        return login;
     }
+    passwd_field(|pwd| pwd.pw_name)
+        .or_else(|| std::env::var("USER").ok())
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+}
+
+/// One string field of the current user's passwd entry.
+fn passwd_field(field: impl Fn(&libc::passwd) -> *mut libc::c_char) -> Option<String> {
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut buf = vec![0 as libc::c_char; 4096];
     let mut result: *mut libc::passwd = std::ptr::null_mut();
     // SAFETY: every pointer is to a live local sized as passed, and the
-    // strings read below point into `buf`, which outlives them.
+    // string read below points into `buf`, which outlives it.
     let rc = unsafe {
         libc::getpwuid_r(
             libc::getuid(),
@@ -378,10 +461,24 @@ fn account_full_name() -> Option<String> {
             &mut result,
         )
     };
-    if rc != 0 || result.is_null() || pwd.pw_gecos.is_null() {
+    let ptr = field(&pwd);
+    if rc != 0 || result.is_null() || ptr.is_null() {
         return None;
     }
-    let gecos = unsafe { std::ffi::CStr::from_ptr(pwd.pw_gecos) }.to_string_lossy();
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// The account's full name: the first comma-separated field of GECOS.
+fn account_full_name() -> Option<String> {
+    #[cfg(test)]
+    if let Some(name) = TEST_ACCOUNT_NAME.with(|n| n.borrow().clone()) {
+        return name;
+    }
+    let gecos = passwd_field(|pwd| pwd.pw_gecos)?;
     let full = gecos.split(',').next().unwrap_or("").trim().to_string();
     (!full.is_empty()).then_some(full)
 }
@@ -400,13 +497,14 @@ pub struct TitleLabels {
 pub fn labels_for(title: &str, me: &Me) -> Option<TitleLabels> {
     let (a, b) = parse_pair(title)?;
     let (score_a, score_b) = (me.match_score(&a), me.match_score(&b));
-    let other = match score_a.cmp(&score_b) {
-        std::cmp::Ordering::Greater => b,
-        std::cmp::Ordering::Less => a,
+    let (mine, other) = match score_a.cmp(&score_b) {
+        std::cmp::Ordering::Greater => (a, b),
+        std::cmp::Ordering::Less => (b, a),
         std::cmp::Ordering::Equal => return None,
     };
     Some(TitleLabels {
-        you: me.names[0].clone(),
+        // Known only by a login name: the title spells the name better.
+        you: me.names.first().cloned().unwrap_or(mine),
         other,
     })
 }
@@ -657,8 +755,53 @@ mod tests {
         assert_eq!(Me::resolve(Some("")).unwrap().names, ["Pete Jackson"]);
         assert_eq!(Me::resolve(None).unwrap().names, ["Pete Jackson"]);
         set_account_name_for_test(None);
+        set_login_for_test(None);
         assert_eq!(Me::resolve(None), None, "nobody to match a title against");
         assert_eq!(Me::resolve(Some("Pete")).unwrap().names, ["Pete"]);
+    }
+
+    /// An account with an empty GECOS field, as on Pete's machine
+    /// (`pete:x:1000:1000::...`): the login name stands in as a first name.
+    #[test]
+    fn with_no_full_name_the_login_name_places_you() {
+        set_account_name_for_test(None);
+        set_login_for_test(Some("pete"));
+        let me = Me::resolve(None).unwrap();
+        assert_eq!(me, Me::logged_in_as("pete"));
+        let labels = labels_for("Pete <> Chad", &me).unwrap();
+        assert_eq!(
+            (labels.you.as_str(), labels.other.as_str()),
+            ("Pete", "Chad")
+        );
+        let labels = labels_for("Chad / Pete Jackson weekly", &me).unwrap();
+        assert_eq!(
+            (labels.you.as_str(), labels.other.as_str()),
+            ("Pete Jackson", "Chad")
+        );
+        // Only ever a first name: two Petes stay a tie.
+        assert_eq!(labels_for("Pete Smith <> Pete Jones", &me), None);
+        assert_eq!(labels_for("Andrew <> Chad", &me), None);
+
+        // A full name, when there is one, wins over the login.
+        set_account_name_for_test(Some("Peter Jackson"));
+        let me = Me::resolve(None).unwrap();
+        assert_eq!(me, Me::named(&["Peter Jackson"]));
+        assert_eq!(labels_for("Pete <> Chad", &me), None, "Pete is not Peter");
+        // And my_name wins over both.
+        assert_eq!(Me::resolve(Some("Pete")).unwrap().names[0], "Pete");
+    }
+
+    #[test]
+    fn system_and_odd_logins_name_nobody() {
+        set_account_name_for_test(None);
+        for login in [
+            "root", "user", "deck", "pi", "u1000", "12345", "p", "pete.j", "pete_j", "",
+        ] {
+            set_login_for_test(Some(login));
+            assert_eq!(Me::resolve(None), None, "{login:?}");
+        }
+        set_login_for_test(Some("Zoë"));
+        assert!(Me::resolve(None).is_some(), "letters beyond ASCII count");
     }
 
     #[test]

@@ -106,8 +106,8 @@ pub mod tui;
 pub mod vad;
 
 pub use cli::{
-    AssistantAction, Cli, Commands, CompositorType, ConfigAction, InfoAction, MeetingAction,
-    OutputModeOverride, RecordAction, SetupAction, TodoistAction,
+    AssistantAction, CalendarAction, Cli, Commands, CompositorType, ConfigAction, InfoAction,
+    MeetingAction, OutputModeOverride, RecordAction, SetupAction, TodoistAction,
 };
 pub use config::Config;
 pub use daemon::Daemon;

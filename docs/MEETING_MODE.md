@@ -214,7 +214,7 @@ The daemon acts on meeting commands between audio chunks, so while it is transcr
 
 The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
 
-The header shows the meeting title, how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. While it records, two small meters beside "Listening…" show your microphone (**You**) and, when the meeting records the call, the other side (**Call**), so a muted mic or a silent call shows up before the first chunk is transcribed. They empty while paused. Below it are four tabs:
+The header shows the meeting title (click it to rename the meeting: Enter saves with `voxtype meeting title`, Escape cancels; a rename made elsewhere, or a title taken from the calendar after the start, shows up at once; renaming a finished meeting to a two-person title such as "Pete <> Chad" shows the names on its lines right away), how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. While it records, two small meters beside "Listening…" show your microphone (**You**) and, when the meeting records the call, the other side (**Call**), so a muted mic or a silent call shows up before the first chunk is transcribed. They empty while paused. Below it are four tabs:
 
 - **Transcript**: one line per utterance with its timestamp and speaker, in the order it was spoken. It scrolls to each new line unless you have scrolled up; **Jump to latest** takes you back.
   - A chip for each speaker. Click one to name the speaker, which runs `voxtype meeting label` for you. Give two speakers the same name and they become one chip.
@@ -340,7 +340,7 @@ For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket a
 
 ## Meeting Detection
 
-Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting as `voxtype meeting start --window-title` would, titled from the call window (and named from your calendar instead, when [it can be](#titles-from-your-calendar)) when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
 
 Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
 
@@ -380,27 +380,62 @@ Detection never records by itself, except for apps you list in `auto_record_apps
 
 ### Titles from Your Calendar
 
-A meeting that starts without a real title can take one from your calendar. That covers a meeting started with no `--title`, one recorded from the detection prompt when the call window only said "Zoom call", "Google Meet call" or "Teams call", and the date-only default ("Meeting 2026-11-12 14:00"). A title you gave yourself is never replaced.
+A meeting that starts without a title you chose can take its name from your calendar. That covers a meeting started with no `--title`, one recorded from the detection prompt (whose title comes from the call window: "Weekly sync", or just "Zoom call", "Google Meet call" or "Teams call"), and the date-only default ("Meeting 2026-11-12 14:00"). A title you typed with `--title` or `voxtype meeting title` is never replaced.
 
-Voxtype runs a calendar command when the meeting starts and uses the event that is running now, or that starts within `window_mins` (10 by default) either side of the meeting's start. When the first event has been running a long time and the next one starts within the window, the next one is taken, since that is the call you are joining. The event's link is stored too, when the meeting has none. Then the title names the speakers of a 1:1 as usual. The lookup runs alongside the recording, so it never delays the start.
+The event used is the one in progress when the meeting starts, or starting within `[meeting.calendar] window_mins` (10 by default) before or after; with several, the one whose start is nearest. Its title becomes the meeting's, and its video call link (Zoom, Meet, Teams and the like) is stored when the meeting has none. Then a 1:1 title names the speakers as usual. The lookup runs alongside the recording and never delays the start: the title arrives a moment later, through the same path as [Retitling a Meeting](#retitling-a-meeting).
 
-The command prints one JSON object, the format of the Omarchy [Next Meeting](https://github.com/peteonrails/omarchy-next-meeting) bar widget:
+Voxtype asks these in order and takes the first answer:
+
+1. **Your calendar's iCal link.** Works with any calendar that publishes one.
+2. **A calendar command**, `[meeting.calendar] command`.
+3. **The Omarchy Next Meeting widget**, when it is installed and on your bar and nothing above is set up.
+
+Without any of them, the call window's title or the default stays.
+
+#### The iCal link
+
+Google Calendar, Outlook, iCloud and Fastmail all give each calendar a private link that serves it in iCalendar format. Set it once:
+
+```bash
+voxtype meeting calendar set-ics -        # paste the link, then Enter
+voxtype meeting calendar status           # where titles come from, the next event
+voxtype meeting calendar clear            # forget the link and what was fetched
+```
+
+In Omarchy you can also set it from Settings: the Meeting section has a **Calendar (iCal link)** row above the calendar settings. Paste the link and press Set; the field is masked and empties once the link is saved, and the row then shows the server, when it was last fetched, the next event and any fetch error, with Clear to forget the link. "Where to find it" shows the steps below.
+
+`-` reads the link from the terminal, which keeps it out of your shell history; `set-ics <link>` works too. `set-ics` fetches the link once to check it, and refuses one that does not return a calendar (`--no-check` saves it anyway). `voxtype meeting calendar set-ics --help` says where each service keeps the link:
+
+- **Google Calendar:** Settings, your calendar under "Settings for my calendars", Integrate calendar, then "Secret address in iCal format".
+- **Outlook:** Settings, Calendar, Shared calendars, Publish a calendar. Pick the calendar and "Can view all details", Publish, then copy the ICS link.
+- **iCloud:** on iCloud.com, the share button beside the calendar, tick "Public Calendar", then copy the `webcal://` link.
+- **Fastmail:** Settings, Calendars, the calendar's Edit & share, then its read-only iCalendar URL.
+
+**The link lets anyone who has it read your calendar.** Voxtype keeps it in `~/.local/state/voxtype/calendar.json`, readable only by you, never in `config.toml`, and never writes it to a log: messages name only the server (`calendar.google.com`). If the link leaks, reset the secret address in your calendar's settings and set the new one.
+
+While meeting mode is on, the daemon fetches the link when it starts and every 15 minutes after, asking the server whether anything changed when the server supports that, and keeps the events of the next 48 hours (also readable only by you). Repeating events are expanded, including skipped and moved occurrences, times follow each event's time zone, and all-day and cancelled events are left out. A fetch that fails keeps the events from the last good one and is shown by `voxtype meeting calendar status`.
+
+#### A calendar command
+
+For anything else, point voxtype at a command that prints the next meeting as one JSON object, the format of the Omarchy [Next Meeting](https://github.com/peteonrails/omarchy-next-meeting) widget:
 
 ```json
-{"title": "Pete <> Chad Bi-Weekly", "start_iso": "2026-11-12T14:00", "minutes_until": -2, "ongoing": true, "url": "https://zoom.us/j/123",
+{"title": "Design review", "start_iso": "2026-11-12T14:00", "minutes_until": -2, "ongoing": true, "url": "https://meet.google.com/abc-defg-hij",
  "next": {"title": "Retro", "start_iso": "2026-11-12T15:00", "minutes_until": 58}}
 ```
 
-`{"empty": true}` means nothing is coming up, and `"error"` that the calendar could not be read. If you use that widget, there is nothing to set up: with `[meeting.calendar] command` left empty, voxtype runs the widget's own `agendaCommand` (read from the bar's settings in `~/.config/omarchy/shell.json`), the same way the widget does. Otherwise point voxtype at any command that prints this JSON:
+`{"empty": true}` means nothing is coming up, and `"error"` that the calendar could not be read. The first event counts when it is running or starts within the window; `next` counts on the same terms, and wins over a first event that has been running a long time.
 
 ```toml
 [meeting.calendar]
-command = "agenda --next-json"
+command = "~/bin/next-meeting --json"   # for example
 window_mins = 10
 timeout_secs = 3
 ```
 
-The command runs through `bash -lc`, with `~/.local/bin` and `~/bin` first on `PATH`. If it fails, takes longer than `timeout_secs`, or prints something else, the meeting keeps the title it had, and the reason is logged at debug level.
+The command runs through `bash -lc`, with `~/.local/bin` and `~/bin` first on `PATH`. If you use the Next Meeting widget, there is nothing to set: voxtype runs the widget's own command, read from the bar's settings in `~/.config/omarchy/shell.json`, which it never changes.
+
+Whatever goes wrong (no answer within `timeout_secs`, a failed fetch, output that is not the expected JSON, no event near the start) leaves the title as it was, with the reason logged at debug level.
 
 ### Checking what it sees
 
@@ -498,6 +533,8 @@ Every meeting then shows your side as "Pete": the live view, exports, `transcrip
 A two-person meeting usually says who is in it: "Pete <> Andrew standup", "Andrew <> Pete Standup", "Pete / Chris", "Pete x Chris", "Pete & Chris", "Pete and Chris 1:1", "1:1 Pete/Chris" or "Chris - Pete sync". When a meeting's title reads like that, voxtype names the speakers for you. The side of the title that is you names your microphone, and the other side names every remote voice. In a 1:1 every remote voice is the same person, so this also tidies up a diarizer that heard one person as `Remote 1`, `Remote 2` and `Remote 3`.
 
 You are recognized by [your name](#your-name) (`meeting.my_name`) when it is set, and otherwise, or as well, by your account's full name (the GECOS field, as `getent passwd $USER` shows it). Matching ignores case, and a first name is enough: an account named "Pete Jackson" matches a title that says "Pete". Your microphone is labelled with `my_name` when it is set, and otherwise with your full name.
+
+Many accounts have no full name set (`getent passwd $USER` shows an empty field between the colons, as in `pete:x:1000:1000::/home/pete:/bin/bash`). Then your login name stands in as a first name: the login `pete` matches "Pete" in a title, and your microphone is labelled as the title spells it. A login name is only ever matched as a first name, and only when it is letters alone and not an account such as `root`, `user` or `deck`. To be matched by your full name, set it with `sudo chfn -f "Pete Jackson" $USER`.
 
 The rules are strict on purpose, because a wrong name is worse than none. Each name is one or two capitalized words. Words like standup, sync, weekly, check-in and 1:1 before or after the names are ignored. Nothing is named when:
 

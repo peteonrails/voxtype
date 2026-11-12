@@ -22,7 +22,7 @@ pub trait MeetingControl: Send {
     async fn stop(&mut self) -> anyhow::Result<()>;
 }
 
-/// Runs `voxtype meeting start --title ...`, the same path a user's command
+/// Runs `voxtype meeting start --window-title ...`, the same path a user's command
 /// takes, so every check it makes (meeting mode enabled, daemon up, nothing
 /// already recording) applies to a prompt's Record too.
 pub struct CliMeetingControl {
@@ -63,7 +63,8 @@ impl CliMeetingControl {
 #[async_trait]
 impl MeetingControl for CliMeetingControl {
     async fn start(&mut self, title: &str) -> anyhow::Result<()> {
-        self.run(&["meeting", "start", "--title", title]).await
+        self.run(&["meeting", "start", "--window-title", title])
+            .await
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -1006,7 +1007,7 @@ mod tests {
         control.start("Meet - abc-defg-hij").await.unwrap();
         assert_eq!(
             std::fs::read_to_string(&out).unwrap(),
-            "--config|/etc/vt.toml|meeting|start|--title|Meet - abc-defg-hij|"
+            "--config|/etc/vt.toml|meeting|start|--window-title|Meet - abc-defg-hij|"
         );
     }
 }

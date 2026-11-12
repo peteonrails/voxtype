@@ -56,6 +56,10 @@ hound = "3"  # WAV file reading/writing
 
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
+# Meeting titles from a calendar's iCal link: parsing, recurrence, time zones
+icalendar = { version = "0.16", default-features = false, features = ["parser"] }
+rrule = "0.14"
+chrono-tz = "0.10"
 
 # WebSocket client for Soniox streaming backend
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

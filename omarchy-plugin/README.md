@@ -438,6 +438,8 @@ Inside the panel:
 |---|---|
 | Read every setting | `voxtype config schema --json` |
 | Write a setting | `voxtype config set <key> <value>` |
+| Set a secret from the schema's `secrets` list (the calendar's iCal link) | its `set_command` (`voxtype meeting calendar set-ics - --json`), with the value on stdin, never in argv |
+| Clear a secret, and read its status | its `clear_command` and `status_command` (`voxtype meeting calendar clear --json`, `status --json`) |
 | Clear an override | `voxtype config unset <key>` |
 | Model list per engine | `voxtype info models --json` |
 | Which engines this build has | `voxtype info engines --json` |
@@ -531,6 +533,24 @@ the meeting ends, pause/resume/stop through finalizing, opening on a start
 socket that goes away and a daemon restart, the idle state and a refused start,
 no daemon at all, and auto-scroll. `--evidence` also saves a screenshot of the
 view in each state.
+
+### Calendar link test
+
+```bash
+python3 omarchy-plugin/tests/test-calendar-link.py [--evidence DIR] [--scenario NAME]
+REAL_VOXTYPE=target/debug/voxtype python3 omarchy-plugin/tests/test-calendar-link.py --scenario real
+```
+
+Same harness and isolation rules as the tests above. The schema's `secrets`
+entry for the calendar's iCal link, shown as a row on the Meeting section
+above the calendar keys: setting a link (a refused one stays in the field,
+a good one empties it and the status line takes over), a 404 from the
+server, a saved link whose last fetch failed, Clear, the keyboard cursor and
+search, and a schema without `secrets`, which shows no row. Every scenario checks that the
+link reached `set-ics -` on stdin and never appeared in argv or in the shell's
+log. `real` (run only when `REAL_VOXTYPE` is set) hands `config schema` and
+`meeting calendar` to that binary, which fetches a feed from a local HTTP
+server.
 
 ### Schema boundary regression test
 
