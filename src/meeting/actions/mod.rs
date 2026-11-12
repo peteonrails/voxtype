@@ -7,6 +7,7 @@
 //! already went.
 
 pub mod due;
+pub mod oauth;
 pub mod reminder;
 pub mod todoist;
 

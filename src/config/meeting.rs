@@ -470,6 +470,12 @@ pub struct MeetingActionsConfig {
     /// Todoist project ID new tasks go to; unset is the Inbox
     #[serde(default)]
     pub todoist_project_id: Option<String>,
+
+    /// A file holding a Todoist personal API token, used instead of
+    /// connecting with `voxtype meeting todoist connect` (for a machine
+    /// without a browser). The token itself never goes in config.toml.
+    #[serde(default)]
+    pub todoist_token_file: Option<String>,
 }
 
 fn default_remind_in_mins() -> u32 {
@@ -481,6 +487,7 @@ impl Default for MeetingActionsConfig {
         Self {
             remind_in_mins: default_remind_in_mins(),
             todoist_project_id: None,
+            todoist_token_file: None,
         }
     }
 }
