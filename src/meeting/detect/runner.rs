@@ -13,7 +13,7 @@ use super::notify::{self, Notice, Notifier, Response};
 use super::{
     describe, hyprland, pipewire, read_activity, Activity, Call, Detector, Event, Snapshot,
 };
-use crate::config::Config;
+use crate::config::{CallEnd, Config};
 
 /// Starts and stops meetings.
 #[async_trait]
@@ -76,6 +76,42 @@ impl MeetingControl for CliMeetingControl {
 enum Asking {
     Record(Call),
     Stop,
+    /// "Call ended, stopping in N s": its Keep recording cancels the stop.
+    AutoStop,
+}
+
+/// What to do when a detected call ends while a meeting records
+/// (`[meeting.detect] on_call_end` and `stop_grace_secs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallEndPolicy {
+    pub mode: CallEnd,
+    pub grace: Duration,
+}
+
+impl CallEndPolicy {
+    pub fn from_config(detect: &crate::config::MeetingDetectConfig) -> Self {
+        Self {
+            mode: detect.call_end(),
+            grace: Duration::from_secs(u64::from(detect.stop_grace_secs)),
+        }
+    }
+}
+
+impl Default for CallEndPolicy {
+    fn default() -> Self {
+        Self {
+            mode: CallEnd::Stop,
+            grace: Duration::from_secs(20),
+        }
+    }
+}
+
+/// A stop waiting out its grace period.
+#[derive(Debug, Clone)]
+struct PendingStop {
+    at: tokio::time::Instant,
+    app: String,
+    notice: Option<u32>,
 }
 
 /// Turns detector events into notifications, and the user's answers into
@@ -84,17 +120,36 @@ pub struct Controller<N: Notifier, M: MeetingControl> {
     notifier: N,
     control: M,
     open: HashMap<u32, Asking>,
+    call_end: CallEndPolicy,
+    pending_stop: Option<PendingStop>,
 }
+
+/// The prompt's reminder that voxtype tells no one else.
+pub const CONSENT_LINE: &str = "Let the others know you're transcribing.";
 
 pub fn record_notice(call: &Call) -> Notice {
     Notice {
         summary: format!("{} call detected", call.app),
-        body: format!("Record \"{}\" as a meeting?", call.title),
+        body: format!("Record \"{}\" as a meeting?\n{}", call.title, CONSENT_LINE),
         actions: vec![
             (notify::ACTION_DEFAULT.into(), "Record".into()),
             (notify::ACTION_RECORD.into(), "Record".into()),
             (notify::ACTION_DISMISS.into(), "Dismiss".into()),
         ],
+    }
+}
+
+/// The notice before an automatic stop. The only button keeps recording;
+/// closing it lets the stop go ahead.
+pub fn auto_stop_notice(call: &Call, grace: Duration) -> Notice {
+    Notice {
+        summary: "Call ended".into(),
+        body: format!(
+            "{} released the microphone. Stopping the recording in {} s.",
+            call.app,
+            grace.as_secs()
+        ),
+        actions: vec![(notify::ACTION_KEEP.into(), "Keep recording".into())],
     }
 }
 
@@ -118,6 +173,52 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
             notifier,
             control,
             open: HashMap::new(),
+            call_end: CallEndPolicy::default(),
+            pending_stop: None,
+        }
+    }
+
+    pub fn with_call_end(mut self, policy: CallEndPolicy) -> Self {
+        self.call_end = policy;
+        self
+    }
+
+    /// When the waiting automatic stop is due, if one is.
+    pub fn stop_due_at(&self) -> Option<tokio::time::Instant> {
+        self.pending_stop.as_ref().map(|p| p.at)
+    }
+
+    /// Drop the waiting automatic stop, closing its notice.
+    async fn cancel_stop(&mut self, why: &str) {
+        if let Some(p) = self.pending_stop.take() {
+            tracing::info!("Meeting detection: not stopping the meeting: {}", why);
+            if let Some(id) = p.notice {
+                self.open.remove(&id);
+                self.notifier.close(id).await;
+            }
+        }
+    }
+
+    /// The grace period is over: stop the meeting, unless it already
+    /// stopped some other way.
+    pub async fn fire_due_stop(&mut self, meeting_active: bool) {
+        let Some(p) = self.pending_stop.take() else {
+            return;
+        };
+        if let Some(id) = p.notice {
+            self.open.remove(&id);
+            self.notifier.close(id).await;
+        }
+        if !meeting_active {
+            tracing::info!("Meeting detection: the meeting had already stopped");
+            return;
+        }
+        tracing::info!(
+            "Meeting detection: stopping the meeting, the {} call ended",
+            p.app
+        );
+        if let Err(e) = self.control.stop().await {
+            tracing::warn!("Could not stop the meeting: {}", e);
         }
     }
 
@@ -152,16 +253,63 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                     self.open.remove(&id);
                     self.notifier.close(id).await;
                 }
-                if *offer_stop {
-                    match self.notifier.show(&stop_notice(call)).await {
-                        Ok(id) => {
-                            self.open.insert(id, Asking::Stop);
+                if !*offer_stop {
+                    return;
+                }
+                match self.call_end.mode {
+                    CallEnd::Keep => tracing::info!(
+                        "Meeting detection: the {} call ended; keeping the meeting (on_call_end = keep)",
+                        call.app
+                    ),
+                    CallEnd::Ask => {
+                        tracing::info!(
+                            "Meeting detection: the {} call ended; asking whether to stop",
+                            call.app
+                        );
+                        match self.notifier.show(&stop_notice(call)).await {
+                            Ok(id) => {
+                                self.open.insert(id, Asking::Stop);
+                            }
+                            Err(e) => tracing::warn!("Could not show the stop prompt: {}", e),
                         }
-                        Err(e) => tracing::warn!("Could not show the stop prompt: {}", e),
+                    }
+                    CallEnd::Stop => {
+                        let grace = self.call_end.grace;
+                        tracing::info!(
+                            "Meeting detection: the {} call ended; stopping the meeting in {} s unless kept",
+                            call.app,
+                            grace.as_secs()
+                        );
+                        let notice = match self.notifier.show(&auto_stop_notice(call, grace)).await {
+                            Ok(id) => {
+                                self.open.insert(id, Asking::AutoStop);
+                                Some(id)
+                            }
+                            Err(e) => {
+                                tracing::warn!("Could not show the stop notice: {}", e);
+                                None
+                            }
+                        };
+                        self.pending_stop = Some(PendingStop {
+                            at: tokio::time::Instant::now() + grace,
+                            app: call.app.clone(),
+                            notice,
+                        });
                     }
                 }
             }
-            Event::Seen { .. } | Event::Held { .. } | Event::Brief { .. } => {}
+            Event::Seen { call, .. } => {
+                // The same app back on the mic within the grace period: the
+                // call went on after all.
+                if self
+                    .pending_stop
+                    .as_ref()
+                    .is_some_and(|p| p.app == call.app)
+                {
+                    self.cancel_stop("the call came back").await;
+                }
+            }
+            Event::Held { .. } | Event::Brief { .. } => {}
         }
     }
 
@@ -180,11 +328,19 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                 self.notifier.close(id).await;
             }
             (Asking::Stop, notify::ACTION_STOP | notify::ACTION_DEFAULT) => {
+                tracing::info!("Meeting detection: stopping the meeting, as asked");
                 if let Err(e) = self.control.stop().await {
                     tracing::warn!("Could not stop the meeting: {}", e);
                 }
                 self.notifier.close(id).await;
             }
+            (Asking::AutoStop, notify::ACTION_KEEP) => {
+                // Put it back so cancel_stop closes it with the stop.
+                self.open.insert(id, Asking::AutoStop);
+                self.cancel_stop("Keep recording chosen").await;
+            }
+            // Dismissing the notice does not keep the meeting going.
+            (Asking::AutoStop, _) => {}
             (_, notify::CLOSED) => {}
             (_, _) => self.notifier.close(id).await,
         }
@@ -308,7 +464,19 @@ pub async fn run<N: Notifier, M: MeetingControl>(
     let mut last_dump: Option<Instant> = None;
 
     loop {
+        let stop_at = controller.as_ref().and_then(|c| c.stop_due_at());
         tokio::select! {
+            _ = async {
+                match stop_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(c) = controller.as_mut() {
+                    c.fire_due_stop(activity.read().meeting_active).await;
+                }
+                continue;
+            }
             changed = async {
                 match changes.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -371,7 +539,9 @@ pub async fn run<N: Notifier, M: MeetingControl>(
         };
         let events = detector.evaluate(&snap, activity.read(), Instant::now());
         for event in &events {
-            tracing::debug!("meeting detect: {}", describe(event));
+            // Info, not debug: when a call does not stop or start a meeting,
+            // the journal has to say what detection saw.
+            tracing::info!("Meeting detection: {}", describe(event));
             if print {
                 println!("{}  {}", timestamp(), describe(event));
             }
@@ -437,7 +607,8 @@ pub async fn suggest(
     let control = CliMeetingControl::current(config_path)?;
     println!("Watching for calls; prompts are live. Ctrl+C to stop.");
     let mode = Mode::Live {
-        controller: Controller::new(notifier, control),
+        controller: Controller::new(notifier, control)
+            .with_call_end(CallEndPolicy::from_config(&config.meeting.detect)),
         responses,
         print: true,
     };
@@ -482,6 +653,7 @@ pub fn spawn_in_daemon(config: &Config, config_path: Option<PathBuf>) -> Option<
     }
     let detector = Detector::new(config.meeting.detect.clone());
     let activity = ActivitySource::from_config(config);
+    let call_end = CallEndPolicy::from_config(&config.meeting.detect);
     let control = match CliMeetingControl::current(config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -505,9 +677,13 @@ pub fn spawn_in_daemon(config: &Config, config_path: Option<PathBuf>) -> Option<
             }
         };
         let _ = std::fs::write(marker_path(), std::process::id().to_string());
-        tracing::info!("Meeting detection on: will offer to record calls");
+        tracing::info!(
+            "Meeting detection on: will offer to record calls (on_call_end = {:?}, grace {} s)",
+            call_end.mode,
+            call_end.grace.as_secs()
+        );
         let mode = Mode::Live {
-            controller: Controller::new(notifier, control),
+            controller: Controller::new(notifier, control).with_call_end(call_end),
             responses,
             print: false,
         };
@@ -599,7 +775,7 @@ mod tests {
         assert_eq!(
             log.take(),
             vec![
-                "show 1 Record \"Meet - abc-defg-hij\" as a meeting? [default,record,dismiss]",
+                "show 1 Record \"Meet - abc-defg-hij\" as a meeting?\nLet the others know you're transcribing. [default,record,dismiss]",
                 "start Meet - abc-defg-hij",
                 "close 1",
             ]
@@ -654,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn call_end_closes_the_stale_prompt_and_offers_stop() {
         let log = Log::default();
-        let mut c = controller(&log);
+        let mut c = controller(&log).with_call_end(ask_policy());
         c.on_event(&Event::Prompt(call("Zoom", "Zoom Meeting")))
             .await;
         c.on_event(&Event::Ended {
@@ -666,7 +842,7 @@ mod tests {
         assert_eq!(
             log.take(),
             vec![
-                "show 1 Record \"Zoom Meeting\" as a meeting? [default,record,dismiss]",
+                "show 1 Record \"Zoom Meeting\" as a meeting?\nLet the others know you're transcribing. [default,record,dismiss]",
                 "close 1",
                 "show 2 Zoom released the microphone. Stop the meeting recording? [stop,keep]",
                 "stop",
@@ -675,10 +851,132 @@ mod tests {
         );
     }
 
+    fn ask_policy() -> CallEndPolicy {
+        CallEndPolicy {
+            mode: CallEnd::Ask,
+            grace: Duration::from_secs(20),
+        }
+    }
+
+    fn ended(app: &str, meeting_active: bool) -> Event {
+        Event::Ended {
+            call: call(app, "Zoom call"),
+            offer_stop: meeting_active,
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_mode_announces_then_stops_after_the_grace_period() {
+        let log = Log::default();
+        let mut c = controller(&log);
+        assert_eq!(
+            c.call_end,
+            CallEndPolicy::default(),
+            "stop after 20 s by default"
+        );
+        let before = tokio::time::Instant::now();
+        c.on_event(&ended("Zoom", true)).await;
+        assert_eq!(
+            log.take(),
+            vec!["show 1 Zoom released the microphone. Stopping the recording in 20 s. [keep]"]
+        );
+        let at = c.stop_due_at().expect("a stop is waiting");
+        assert!(at >= before + Duration::from_secs(20) && at <= before + Duration::from_secs(21));
+        // Dismissing the notice does not keep the meeting.
+        c.on_response((1, "closed".into())).await;
+        assert!(c.stop_due_at().is_some());
+        c.fire_due_stop(true).await;
+        assert_eq!(log.take(), vec!["close 1", "stop"]);
+        assert_eq!(c.stop_due_at(), None);
+    }
+
+    #[tokio::test]
+    async fn keep_recording_cancels_the_automatic_stop() {
+        let log = Log::default();
+        let mut c = controller(&log);
+        c.on_event(&ended("Zoom", true)).await;
+        c.on_response((1, "keep".into())).await;
+        assert_eq!(c.stop_due_at(), None);
+        c.fire_due_stop(true).await;
+        let log = log.take();
+        assert!(!log.contains(&"stop".to_string()), "{log:?}");
+        assert!(log.contains(&"close 1".to_string()), "{log:?}");
+    }
+
+    #[tokio::test]
+    async fn the_call_coming_back_cancels_the_stop() {
+        let log = Log::default();
+        let mut c = controller(&log);
+        c.on_event(&ended("Zoom", true)).await;
+        c.on_event(&Event::Seen {
+            call: call("Microsoft Teams", "Teams call"),
+            settle: Duration::from_secs(5),
+        })
+        .await;
+        assert!(
+            c.stop_due_at().is_some(),
+            "another app's call changes nothing"
+        );
+        c.on_event(&Event::Seen {
+            call: call("Zoom", "Zoom call"),
+            settle: Duration::from_secs(5),
+        })
+        .await;
+        assert_eq!(c.stop_due_at(), None);
+        assert!(!log.take().contains(&"stop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_meeting_stopped_meanwhile_is_not_stopped_again() {
+        let log = Log::default();
+        let mut c = controller(&log);
+        c.on_event(&ended("Zoom", true)).await;
+        log.take();
+        c.fire_due_stop(false).await;
+        assert_eq!(log.take(), vec!["close 1"]);
+    }
+
+    #[tokio::test]
+    async fn keep_mode_leaves_the_meeting_running() {
+        let log = Log::default();
+        let mut c = controller(&log).with_call_end(CallEndPolicy {
+            mode: CallEnd::Keep,
+            grace: Duration::from_secs(20),
+        });
+        c.on_event(&ended("Zoom", true)).await;
+        assert!(log.take().is_empty(), "no notice, no stop");
+        assert_eq!(c.stop_due_at(), None);
+    }
+
+    #[tokio::test]
+    async fn no_meeting_means_nothing_to_stop_in_every_mode() {
+        for mode in [CallEnd::Stop, CallEnd::Ask, CallEnd::Keep] {
+            let log = Log::default();
+            let mut c = controller(&log).with_call_end(CallEndPolicy {
+                mode,
+                grace: Duration::from_secs(20),
+            });
+            c.on_event(&ended("Zoom", false)).await;
+            assert!(log.take().is_empty(), "{mode:?}");
+            assert_eq!(c.stop_due_at(), None, "{mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zero_grace_period_stops_at_once() {
+        let log = Log::default();
+        let mut c = controller(&log).with_call_end(CallEndPolicy {
+            mode: CallEnd::Stop,
+            grace: Duration::ZERO,
+        });
+        c.on_event(&ended("Zoom", true)).await;
+        assert!(c.stop_due_at().unwrap() <= tokio::time::Instant::now());
+    }
+
     #[tokio::test]
     async fn keep_recording_does_not_stop() {
         let log = Log::default();
-        let mut c = controller(&log);
+        let mut c = controller(&log).with_call_end(ask_policy());
         c.on_event(&Event::Ended {
             call: call("Zoom", "Zoom Meeting"),
             offer_stop: true,

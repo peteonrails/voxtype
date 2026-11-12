@@ -38,6 +38,7 @@ pub mod manifest;
 pub mod meeting_recorder;
 pub mod my_name;
 pub mod notes;
+pub mod notice;
 pub mod playback;
 pub mod recover;
 pub mod retained_audio;
@@ -50,6 +51,7 @@ pub mod state;
 pub mod status_notice;
 pub mod storage;
 pub mod summary;
+pub mod title_labels;
 #[cfg(unix)]
 pub mod view;
 pub mod view_presence;
@@ -90,6 +92,9 @@ pub struct MeetingConfig {
     pub diarization: Option<diarization::DiarizationConfig>,
     /// The short-line echo rules (`[meeting.audio] echo_fuzzy`)
     pub echo_rules: echo::EchoRules,
+    /// Name the speakers of a two-person meeting from its title
+    /// (`meeting.auto_label_from_title`)
+    pub auto_label_from_title: bool,
 }
 
 impl Default for MeetingConfig {
@@ -103,6 +108,7 @@ impl Default for MeetingConfig {
             vad_threshold: 0.01,
             diarization: None,
             echo_rules: echo::EchoRules::default(),
+            auto_label_from_title: true,
         }
     }
 }
@@ -179,6 +185,11 @@ pub struct MeetingDaemon {
     echo_cancelled: bool,
     /// Assistant settings for the summary written when a meeting stops
     assistant: Option<assistant::AssistantSettings>,
+    /// The user, for naming speakers from a meeting's title; `None` when
+    /// that is off or the user's name is unknown
+    me: Option<title_labels::Me>,
+    /// The names the running meeting's title gives its two sides
+    title_labels: Option<title_labels::TitleLabels>,
 }
 
 impl MeetingDaemon {
@@ -238,6 +249,12 @@ impl MeetingDaemon {
             }
         });
 
+        // No setting names the user yet: the account's full name does.
+        let me = config
+            .auto_label_from_title
+            .then(|| title_labels::Me::resolve(None))
+            .flatten();
+
         Ok(Self {
             config,
             state: MeetingState::Idle,
@@ -257,6 +274,8 @@ impl MeetingDaemon {
             own_voice_ids: Default::default(),
             echo_cancelled: false,
             assistant: Some(assistant::AssistantSettings::from_config(app_config)),
+            me,
+            title_labels: None,
         })
     }
 
@@ -288,6 +307,8 @@ impl MeetingDaemon {
             own_voice_ids: Default::default(),
             echo_cancelled: false,
             assistant: None,
+            me: None,
+            title_labels: None,
         }
     }
 
@@ -326,6 +347,15 @@ impl MeetingDaemon {
         let meeting_id = meeting.metadata.id;
         let title = meeting.metadata.title.clone();
         let started_at = meeting.metadata.started_at;
+        self.title_labels = self.me.as_ref().and_then(|me| {
+            let labels = title_labels::labels_for(title.as_deref()?, me)?;
+            tracing::info!(
+                "Naming speakers from the title: You as {:?}, every remote voice as {:?}",
+                labels.you,
+                labels.other
+            );
+            Some(labels)
+        });
         let (diarization_enabled, diarization_backend) = match &self.config.diarization {
             Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
             None => (false, None),
@@ -617,8 +647,15 @@ impl MeetingDaemon {
         let mut echo_ids = std::collections::HashSet::new();
         // Lines the audio measured and found no voice of yours in.
         let mut quiet_ids = std::collections::HashSet::new();
+        // Loopback lines with no speech on the loopback under them.
+        let mut silent_remote_ids = std::collections::HashSet::new();
         if let Some(probe) = &probe {
             for seg in done.iter().flat_map(|(_, segments)| segments) {
+                if seg.source == AudioSource::Loopback
+                    && !probe.remote_speech(seg.start_ms, seg.end_ms)
+                {
+                    silent_remote_ids.insert(seg.id);
+                }
                 if seg.source != AudioSource::Microphone {
                     continue;
                 }
@@ -634,10 +671,22 @@ impl MeetingDaemon {
         }
         if !rules.guard {
             quiet_ids.clear();
+            silent_remote_ids.clear();
         }
         if had_loopback || !echo_ids.is_empty() || !quiet_ids.is_empty() {
             let own = &self.own_voice_ids;
             if let Some(ref mut meeting) = self.current_meeting {
+                if !silent_remote_ids.is_empty() {
+                    let dropped = meeting
+                        .transcript
+                        .drop_remote_no_speech_lines(&silent_remote_ids);
+                    if !dropped.is_empty() {
+                        tracing::info!(
+                            "Echo guard: dropped {} no-speech phrase(s) on the loopback with no remote speech under them",
+                            dropped.len()
+                        );
+                    }
+                }
                 // A no-speech phrase is no one's line: dropped before an
                 // echo line could move it to the remote speaker.
                 if !quiet_ids.is_empty() {
@@ -801,6 +850,37 @@ impl MeetingDaemon {
         count
     }
 
+    /// Name the speakers the title names (see [`title_labels`]) among
+    /// the meeting so far and `new` segments, leaving any speaker that has a
+    /// name alone. A speaker heard before but only named now has its earlier
+    /// lines updated on the live feed.
+    async fn label_from_title(&mut self, new: &[TranscriptSegment]) {
+        let (Some(labels), Some(meeting)) = (&self.title_labels, &self.current_meeting) else {
+            return;
+        };
+        let id = meeting.metadata.id;
+        let pairs =
+            title_labels::assignments(labels, meeting.transcript.segments.iter().chain(new));
+        let mut earlier = false;
+        for (key, label) in pairs {
+            match self.storage.label_speaker_if_unlabeled(&id, &key, &label) {
+                Ok(true) => {
+                    tracing::info!("Named {} as {} from the meeting title", key, label);
+                    earlier |= meeting
+                        .transcript
+                        .segments
+                        .iter()
+                        .any(|s| s.speaker_key() == key);
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("Failed to name {} from the title: {}", key, e),
+            }
+        }
+        if earlier {
+            self.apply_segment_edits().await;
+        }
+    }
+
     /// Persist after every chunk, not just on stop(): a crash mid-meeting
     /// would otherwise lose the whole transcript, and `meeting show --json`
     /// would report nothing while a meeting is in progress. One small JSON
@@ -905,6 +985,8 @@ impl MeetingDaemon {
                 self.rename_speaker(&from, &to).await;
             }
         }
+
+        self.label_from_title(&result.segments).await;
 
         // Names given with `meeting label` mid-meeting, so the live feed
         // shows them too. A failed lookup only costs the names.
@@ -2202,6 +2284,68 @@ mod tests {
         assert_eq!(live, saved);
     }
 
+    impl ReleaseSync {
+        /// A line on the loopback, `text`, at `at` seconds for `frames`
+        /// frames at a steady `level`, with no echo of it on the mic (the
+        /// canceller took it out).
+        fn with_remote_line(mut self, at: f32, text: &str, frames: usize, level: f32) -> Self {
+            let freq = 4100.0 + 200.0 * self.lines.len() as f32;
+            let first = (at / 0.03) as usize * Self::FRAME;
+            for n in first..(first + frames * Self::FRAME).min(self.loopback.len()) {
+                let t = n as f32 / 16000.0;
+                self.loopback[n] += std::f32::consts::SQRT_2
+                    * level
+                    * (2.0 * std::f32::consts::PI * freq * t).sin();
+            }
+            self.lines.push(DemoLine {
+                freq,
+                text: Some(text.to_string()),
+            });
+            self
+        }
+    }
+
+    /// Pete's Zoom call had a "Thank you." on the far side at 00:56, as the
+    /// call was joined, with nobody speaking: the engine's no-speech phrase
+    /// for near-silence or a tone on the loopback. Here it comes from sound
+    /// just under the meeting's VAD level, between two remote lines, and
+    /// the guard drops it; so does a "you" the same way.
+    #[tokio::test]
+    async fn a_no_speech_phrase_on_a_silent_loopback_is_dropped() {
+        let load = || {
+            ReleaseSync::load_in(&cancelled_room(), &[])
+                .with_remote_line(18.0, "Thank you.", 20, 0.008)
+                .with_remote_line(20.5, "you", 10, 0.008)
+        };
+        let mut h = harness().await;
+        let (saved, live) = load().run(&mut h).await;
+        assert_eq!(saved, demo_lines(&[]), "{saved:#?}");
+        assert_eq!(live, saved);
+
+        let mut h = harness().await;
+        h.daemon.config.echo_rules.guard = false;
+        let (saved, _) = load().run(&mut h).await;
+        assert!(
+            saved.contains(&"Remote: Thank you.".to_string()),
+            "{saved:#?}"
+        );
+        assert!(saved.contains(&"Remote: you".to_string()), "{saved:#?}");
+    }
+
+    /// A "Thank you." the far side really says, at speaking level, stays.
+    #[tokio::test]
+    async fn a_thank_you_the_remote_says_stays() {
+        let mut h = harness().await;
+        let (saved, live) = ReleaseSync::load_in(&cancelled_room(), &[])
+            .with_remote_line(18.0, "Thank you.", 20, 0.08)
+            .run(&mut h)
+            .await;
+        let mut expected = demo_lines(&[]);
+        expected.insert(3, "Remote: Thank you.".to_string());
+        assert_eq!(saved, expected, "{saved:#?}");
+        assert_eq!(live, saved);
+    }
+
     /// Clusters each loopback chunk as the next new voice: Auto(0), then
     /// Auto(1), standing in for ECAPA hearing a second remote speaker.
     struct NewVoicePerChunk(AtomicU32);
@@ -2298,6 +2442,180 @@ mod tests {
                 ("Remote 2", "Sam"),
             ])
         );
+    }
+
+    /// A meeting titled `title`, hybrid-diarized with a new remote voice
+    /// every chunk, run by a user named Pete Jackson.
+    async fn titled_harness(title: &str) -> Harness {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+                my_name: None,
+            },
+            ..Default::default()
+        };
+        let (tx, events) = mpsc::channel(64);
+        let mut daemon = MeetingDaemon::for_test(
+            config.clone(),
+            Arc::new(CountingTranscriber(AtomicU32::new(0))),
+            Some(Box::new(diarization::hybrid::HybridDiarizer::new(
+                Box::new(NewVoicePerChunk(AtomicU32::new(0))),
+            ))),
+            tx,
+        );
+        daemon.me = Some(title_labels::Me::named(&["Pete Jackson"]));
+        daemon.start(Some(title.to_string()), None).await.unwrap();
+        Harness {
+            daemon,
+            config,
+            events,
+            _dir: dir,
+        }
+    }
+
+    /// Each live line as "speaker key: name shown".
+    fn live_names(events: &mut mpsc::Receiver<MeetingEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                MeetingEvent::ChunkProcessed { segments, .. } => out.extend(
+                    segments
+                        .iter()
+                        .map(|s| format!("{}: {}", s.speaker_key(), s.speaker_display())),
+                ),
+                MeetingEvent::SegmentUpdated { segment } => out.push(format!(
+                    "updated {}: {}",
+                    segment.speaker_key(),
+                    segment.speaker_display()
+                )),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// In a 1:1 every remote voice is the other person, so a voice the
+    /// diarizer first hears mid-meeting is named on arrival.
+    #[tokio::test]
+    async fn a_one_to_one_title_names_every_remote_voice_as_it_appears() {
+        let mut h = titled_harness("Chris <> Pete weekly").await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.pair(&[], &[(5.0, 7.0)]).await;
+
+        assert_eq!(
+            live_names(&mut h.events),
+            [
+                "You: Pete Jackson",
+                "Remote: Chris",
+                "You: Pete Jackson",
+                "Remote 2: Chris",
+                "Remote 3: Chris",
+            ]
+        );
+        h.daemon.stop().await.unwrap();
+        let saved: Vec<(String, String)> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.speaker_display()))
+            .collect();
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            saved,
+            pairs(&[
+                ("You", "Pete Jackson"),
+                ("Remote 1", "Chris"),
+                ("You", "Pete Jackson"),
+                ("Remote 2", "Chris"),
+                ("Remote 3", "Chris"),
+            ])
+        );
+    }
+
+    /// A name given by hand stays, on the speaker it was given to, while
+    /// voices heard later still get the title's name.
+    #[tokio::test]
+    async fn a_hand_label_is_never_replaced_by_the_title() {
+        let mut h = titled_harness("Pete / Chris").await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        // The second voice really is someone else, and the user says so.
+        cli.set_speaker_label(&id, "Remote", "Sam").unwrap();
+        cli.set_speaker_label(&id, "You", "PJ").unwrap();
+        h.daemon.apply_segment_edits().await;
+
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+        let names: Vec<String> = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(names, ["PJ", "Sam", "PJ", "Chris"]);
+    }
+
+    /// A title that is not two people, or that does not name the user,
+    /// leaves every speaker as the diarizer named it.
+    #[tokio::test]
+    async fn other_titles_name_nobody() {
+        for title in ["Q4 planning", "Andrew <> Chris", "Pete, Andrew, Sam sync"] {
+            let mut h = titled_harness(title).await;
+            h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+            assert_eq!(live_names(&mut h.events), ["You: You", "Remote: Remote"]);
+        }
+    }
+
+    /// Off, a qualifying title changes nothing.
+    #[tokio::test]
+    async fn turned_off_the_title_names_nobody() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = MeetingConfig {
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+                my_name: None,
+            },
+            auto_label_from_title: false,
+            ..Default::default()
+        };
+        title_labels::set_account_name_for_test(Some("Pete Jackson"));
+        let (tx, _events) = mpsc::channel(64);
+        let mut app = crate::config::Config::default();
+        app.whisper.model = "/nonexistent/ggml-model.bin".into();
+        // Constructing the real daemon resolves the user only when on.
+        let off = MeetingDaemon::new(
+            config.clone(),
+            &app,
+            tx.clone(),
+            Some(Arc::new(CountingTranscriber(AtomicU32::new(0)))),
+        )
+        .unwrap();
+        assert!(off.me.is_none());
+        let on = MeetingDaemon::new(
+            MeetingConfig {
+                auto_label_from_title: true,
+                ..config
+            },
+            &app,
+            tx,
+            Some(Arc::new(CountingTranscriber(AtomicU32::new(0)))),
+        )
+        .unwrap();
+        assert_eq!(on.me, Some(title_labels::Me::named(&["Pete Jackson"])));
     }
 
     fn drain(events: &mut mpsc::Receiver<MeetingEvent>) -> Vec<String> {

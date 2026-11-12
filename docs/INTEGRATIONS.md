@@ -372,12 +372,23 @@ ten a second while a meeting records.
 #### `hello`
 
 ```json
-{"event": "hello", "status": "recording", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Release sync", "started_at": "2026-11-11T15:00:04Z", "chunk_count": 1, "diarization": {"enabled": true, "backend": "hybrid"}, "echo_cancel": "webrtc", "segments": [{"id": 0, "start_ms": 1410, "end_ms": 3090, "text": "Okay, let's start the release sync.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}, {"id": 1, "start_ms": 3750, "end_ms": 8310, "text": "The build for 1.2.1 passed on every variant last night.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}]}
+{"event": "hello", "status": "recording", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Release sync", "started_at": "2026-11-11T15:00:04Z", "chunk_count": 1, "diarization": {"enabled": true, "backend": "hybrid"}, "echo_cancel": "webrtc", "recording_notice": false, "segments": [{"id": 0, "start_ms": 1410, "end_ms": 3090, "text": "Okay, let's start the release sync.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}, {"id": 1, "start_ms": 3750, "end_ms": 8310, "text": "The build for 1.2.1 passed on every variant last night.", "source": "microphone", "speaker_id": "You", "chunk_id": 0}]}
 ```
 
 `status` is `idle`, `recording`, `paused` or `finalizing`. With no meeting it
 is `idle`, `meeting_id`, `title` and `started_at` are absent, and
-`segments` is empty. `segments` is every line so far, in order of
+`segments` is empty.
+
+`recording_notice` is `true` while the user has not acknowledged the
+recording-consent notice ([Meeting Mode](MEETING_MODE.md#recording-consent)).
+A view should show the notice on a running meeting while it is `true`, with
+a way to acknowledge it that runs `voxtype meeting notice --ack`. Every
+`status` event carries the same field, so an acknowledgement made anywhere
+reaches every view at once: the daemon repeats the current `status` with
+`recording_notice: false` when it sees one. An older daemon sends no
+`recording_notice`; read that as `false`.
+
+`segments` is every line so far, in order of
 `start_ms`, with every change below already applied and hidden lines left
 out.
 
@@ -440,12 +451,16 @@ The notes changed. The event carries no text: read them with
 #### `status`
 
 ```json
-{"event": "status", "status": "paused"}
-{"event": "status", "status": "recording"}
-{"event": "status", "status": "finalizing"}
-{"event": "status", "status": "idle"}
-{"event": "status", "status": "summarizing", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed"}
+{"event": "status", "status": "paused", "recording_notice": false}
+{"event": "status", "status": "recording", "recording_notice": true}
+{"event": "status", "status": "finalizing", "recording_notice": false}
+{"event": "status", "status": "idle", "recording_notice": false}
+{"event": "status", "status": "summarizing", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "recording_notice": false}
 ```
+
+`recording_notice` is as in `hello`. A `status` repeating the current state
+with a changed `recording_notice` is the daemon passing on an
+acknowledgement; nothing else changed.
 
 A meeting goes `recording` (when it starts and on resume), `paused`,
 `finalizing` after `meeting stop`, and `idle` once it has ended and its
@@ -634,6 +649,24 @@ otherwise `succeeded`, `failed (exit N)`, `timed out` or
 `{"discarded": "<id>"}`. Both take a full ID or a unique prefix, exit 1 for
 a meeting that is not interrupted (finished, or recording now), and have the
 daemon send `recoverable` again.
+
+### The recording-consent notice: `meeting notice`
+
+```sh
+voxtype meeting notice --json
+voxtype meeting notice --ack [--json]
+```
+
+```json
+{"notice": "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.", "acknowledged": false, "acknowledged_at": null}
+```
+
+`notice` is the text to show, word for word. `--ack` records the
+acknowledgement (the first time is kept in `acknowledged_at`, RFC 3339 UTC)
+in `$XDG_STATE_HOME/voxtype/recording-notice.json` and tells a running
+daemon, which repeats its current `status` with `recording_notice: false`.
+Neither form prompts or blocks. `meeting start` prints the notice on stderr,
+prefixed `Note:`, while it is unacknowledged; its stdout is unchanged.
 
 ### Changing a transcript
 

@@ -371,6 +371,8 @@ pub struct EchoProbe {
     /// times the microphone's own noise floor if that is higher, so that a
     /// noisy room or a low threshold does not read as speech between words.
     mic_floor: f32,
+    /// The same for the loopback: below it, the far side is silent.
+    loopback_floor: f32,
     /// Echo delay in frames and microphone/loopback level ratio, when the
     /// chunk had enough remote speech to measure them.
     path: Option<(usize, f32)>,
@@ -413,6 +415,7 @@ impl EchoProbe {
             loopback_start_ms,
             threshold: threshold.max(1e-4),
             mic_floor: 0.0,
+            loopback_floor: 0.0,
             path: None,
             cancelled: false,
         };
@@ -422,6 +425,10 @@ impl EchoProbe {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let noise = sorted.get(sorted.len() / 10).copied().unwrap_or(0.0);
         probe.mic_floor = probe.threshold.max(3.0 * noise);
+        let mut sorted = probe.loopback.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let noise = sorted.get(sorted.len() / 10).copied().unwrap_or(0.0);
+        probe.loopback_floor = probe.threshold.max(3.0 * noise);
         probe
     }
 
@@ -521,6 +528,34 @@ impl EchoProbe {
         }
         let covered = voiced.iter().filter(|&&i| remote_speaks(i)).count();
         covered as f32 >= voiced.len() as f32 * ECHO_EXPLAINED
+    }
+
+    /// Whether the loopback between `start_ms` and `end_ms` (on the
+    /// loopback's timeline) holds speech: a run of frames above its floor
+    /// as long as an onset of your own voice ([`OWN_VOICE_FRAMES`]). A span
+    /// the chunk does not cover counts as speech, so a line is never
+    /// dropped on a guess.
+    pub fn remote_speech(&self, start_ms: u64, end_ms: u64) -> bool {
+        let first = (start_ms.saturating_sub(self.loopback_start_ms) / FRAME_MS) as usize;
+        let last = (end_ms
+            .saturating_sub(self.loopback_start_ms)
+            .div_ceil(FRAME_MS) as usize)
+            .min(self.loopback.len());
+        if start_ms < self.loopback_start_ms || first >= last {
+            return true;
+        }
+        let mut run = 0;
+        for &level in &self.loopback[first..last] {
+            if level > self.loopback_floor {
+                run += 1;
+                if run >= OWN_VOICE_FRAMES {
+                    return true;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        false
     }
 
     fn frames(&self, start_ms: u64, end_ms: u64) -> std::ops::Range<usize> {
@@ -725,6 +760,20 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn the_loopback_holds_speech_only_where_it_is_voiced() {
+        let remote = tone(6.0, &[(1.0, 3.0, 0.1)]);
+        let mic = tone(6.0, &[]);
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
+        assert!(probe.remote_speech(1_200, 2_000));
+        assert!(!probe.remote_speech(3_500, 5_500));
+        // A span the chunk does not cover is not known to be silent.
+        assert!(probe.remote_speech(7_000, 8_000));
+        let late = EchoProbe::new(&mic, 30_000, &remote, 30_000, RATE, 0.01);
+        assert!(late.remote_speech(29_000, 29_500));
+        assert!(!late.remote_speech(33_500, 35_000));
     }
 
     #[test]

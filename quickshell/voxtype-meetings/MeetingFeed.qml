@@ -55,6 +55,9 @@ Item {
   property real levelsAt: 0
   property bool loopbackSeen: false
   property string lastError: ""
+  // The daemon's `recording_notice`: the recording-consent notice has not
+  // been acknowledged yet. Absent (an older daemon) reads as false.
+  property bool recordingNotice: false
 
   // speaker key → human name, from segments' speaker_label and from renames
   // made here. Replaced (never mutated) so bindings see each change.
@@ -484,6 +487,7 @@ Item {
     // Every event is tagged `event`. `type` is accepted too: an early draft
     // of the segment_updated contract used it.
     var kind = String(ev.event || ev.type || "")
+    if (kind === "hello" || kind === "status") root.recordingNotice = ev.recording_notice === true
     if (kind === "hello") {
       root.handleHello(ev)
     } else if (kind === "segments") {

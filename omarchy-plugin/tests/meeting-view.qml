@@ -170,6 +170,8 @@ Item {
           else if (s === "summary-local-error") tc.driveSummaryLocalError()
           else if (s === "summary-error-cli") tc.driveSummaryErrorCli()
           else if (s === "summary-stale") tc.driveSummaryStale()
+          else if (s === "notice") tc.driveNotice(true)
+          else if (s === "notice-acked") tc.driveNotice(false)
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -333,6 +335,57 @@ Item {
     }
 
     // ------------------------------------------------------------ scenarios
+
+    // The recording-consent notice. `pending`: the daemon says it has not
+    // been acknowledged (recording_notice true on hello and status).
+    function driveNotice(pending) {
+      var wording = "Laws on recording and transcribing conversations differ by place, and some require "
+          + "everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them "
+          + "know you're using a meeting assistant."
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var card = find(view(), "recordingNotice")
+      check(card !== null, "notice card exists")
+      if (pending) {
+        waitFor(function() { return shown(card) }, "notice shown on a running meeting")
+        check(txt("recordingNoticeText") === wording, "wording: " + txt("recordingNoticeText"))
+        check(shown(find(view(), "recordingNoticeAck")) && find(view(), "recordingNoticeAck").text === "Got it",
+              "Got it button")
+        // At the top of the card: above the tabs and the transcript.
+        var tabs = find(view(), "tabBar")
+        check(card.mapToItem(view(), 0, 0).y < tabs.mapToItem(view(), 0, 0).y, "above the tabs")
+        shot("notice")
+      } else {
+        wait(400)
+        check(!shown(card), "an acknowledged notice is never shown")
+      }
+
+      // Ended: no notice, whatever its state.
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended: " + txt("meetingState"))
+      check(!shown(card), "no notice on an ended meeting")
+
+      // A meeting that starts with the view open.
+      find(view(), "endedTitleField").text = "Second"
+      click(find(view(), "endedStartButton"), "Start meeting")
+      waitFor(function() { return feed().status === "recording" && txt("meetingTitle") === "Second" },
+              "new meeting: " + txt("meetingTitle"))
+      if (!pending) {
+        wait(400)
+        check(!shown(card), "still never shown at a start")
+        return
+      }
+      waitFor(function() { return shown(card) }, "notice shown at a start")
+
+      // Got it: hidden at once, `meeting notice --ack` runs, and the daemon's
+      // status confirms it for every view.
+      click(find(view(), "recordingNoticeAck"), "Got it")
+      check(!shown(card), "hidden at once")
+      waitFor(function() { return feed().recordingNotice === false }, "daemon confirmed the acknowledgement")
+      wait(300)
+      check(!shown(card), "stays hidden")
+      shot("notice-acked")
+    }
 
     function driveLive() {
       openView()
@@ -1485,16 +1538,24 @@ Item {
       minimizeNow()
       var win = host.ctrl().window
       check(host.viewOpen(), "the view is still open (the pill is the view)")
-      check(txt("pillState") === "Standup" && /^1:0\d$/.test(txt("pillElapsed")), "title and time: " + pillSays())
+      check(/^1:0\d$/.test(txt("pillLineTime")) && txt("pillState") === "Remote: The build went green overnight.",
+            "time and the newest line: " + txt("pillLineTime") + " " + txt("pillState"))
+      check(!shown(find(view(), "pillElapsed")), "the time shown once")
       check(shown(find(view(), "pillDot")) && find(view(), "pillDot").color === view().theme.urgent, "a red dot while recording")
       check(!shown(find(view(), "pillStart")), "no Start while recording")
       // Sized to what it says, inside the bounds, and on the card's outer
       // (right) edge.
-      check(win.implicitHeight === 40 && win.implicitWidth >= p.pillMinWidth && win.implicitWidth < 260,
+      check(win.implicitHeight === 40 && win.implicitWidth >= p.pillMinWidth && win.implicitWidth < p.pillMaxWidth,
             "fits its text: " + win.implicitWidth + "x" + win.implicitHeight)
       check(Math.abs(win.implicitWidth - p.pillWidth) < 1, "the window is the pill")
       check(p.left + p.pillWidth === cardRight, "right edge kept: " + (p.left + p.pillWidth) + " vs " + cardRight)
       shot("pill", true)
+      // A long line fills the pill's maximum width, elided.
+      ctl({ cmd: "segments", chunk_id: 2, segments: [seg(5, 50, "So the plan is to cut the tag after lunch, run the smoke tests on the Ivy Bridge VM, and only then push the AUR update.", "loopback", "Remote", 2)] })
+      waitFor(function() { return txt("pillState").indexOf("Remote: So the plan") === 0 }, "the newest line: " + txt("pillState"))
+      waitFor(function() { return p.pillWidth === p.pillMaxWidth && find(view(), "pillState").truncated }, "elided at the maximum width: " + p.pillWidth)
+      check(p.left + p.pillWidth === cardRight, "right edge still kept")
+      shot("pill-long-line", true)
       // Dragged, it moves; expanded, the card is back on screen beside it.
       var drag = find(view(), "pillDrag")
       mousePress(drag, 20, 20)
@@ -1557,7 +1618,8 @@ Item {
       minimizeNow()
       var p = placement()
       check(p.pillWidth <= p.pillMaxWidth && p.pillWidth > narrow, "wider, within the maximum: " + p.pillWidth)
-      check(find(view(), "pillState").truncated, "the title elided")
+      check(txt("pillState").indexOf("Quarterly") === 0 && find(view(), "pillState").truncated, "the title, elided, before any line")
+      check(shown(find(view(), "pillElapsed")) && !shown(find(view(), "pillLineTime")), "the time after the title")
       shot("pill-long-title", true)
     }
 

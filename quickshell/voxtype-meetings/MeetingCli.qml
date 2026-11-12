@@ -43,6 +43,8 @@ Item {
   }
 
   function pause() { root.enqueue("pause", ["meeting", "pause"]) }
+  // Record that the recording-consent notice was read.
+  function ackNotice() { root.enqueue("notice", ["meeting", "notice", "--ack"]) }
   function resume() { root.enqueue("resume", ["meeting", "resume"]) }
   function stop() { root.enqueue("stop", ["meeting", "stop"]) }
 

@@ -21,6 +21,8 @@ fake meeting.sock's control file (FAKE_MEETING_CTL; see fake-meeting-sock.py):
                                 with --json prints the updated segment, which
                                 carries `original_speaker` (the pipeline's key)
                                 while it is overridden, as the daemon's does
+  meeting notice --ack          the fake socket's recording_notice goes
+                                false, as the daemon's ack trigger does
   config get meeting.show_view_on_start
                                 state["show_view_on_start"] (default true);
                                 state["no_show_key"] exits 2 like a CLI that
@@ -1022,6 +1024,9 @@ def main():
         return search(state, args[2:])
     elif action == "soundcheck":
         return soundcheck(state, args[2:])
+    elif action == "notice" and args[2:] == ["--ack"]:
+        control({"cmd": "notice", "pending": False})
+        print("Acknowledged.")
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))

@@ -551,6 +551,7 @@ pub fn meeting_config_for(config: &Config, diarization: Option<&str>) -> Meeting
                 vad_rms_floor: d.vad_rms_floor,
             }),
         echo_rules: (&config.meeting.audio).into(),
+        auto_label_from_title: config.meeting.auto_label_from_title,
     }
 }
 
@@ -917,6 +918,52 @@ pub(crate) mod tests {
         assert_eq!(last.state, "done");
         assert_eq!(last.chunks_done, last.chunks_total);
         assert_eq!(last.meeting_id, outcome.meeting_id);
+    }
+
+    /// A 1:1's title names both sides of an imported call.
+    #[tokio::test]
+    async fn an_imported_one_to_one_is_named_from_its_title() {
+        if !ffmpeg_present() {
+            return;
+        }
+        crate::meeting::title_labels::set_account_name_for_test(Some("Pete Jackson"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("Pete <> Chris standup.wav");
+        wav(&file, 10.0, &[&[(1.0, 3.0)], &[(5.0, 7.0)]]);
+        let config = config_in(&dir.path().join("meetings"));
+        let request = ImportRequest {
+            file,
+            channels: Some("mic,loopback".to_string()),
+            ..Default::default()
+        };
+        let outcome = import(&config, &request, counting(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(outcome.title, "Pete <> Chris standup");
+        let storage = MeetingStorage::open(meeting_config_for(&config, None).storage).unwrap();
+        let id = MeetingId::parse(&outcome.meeting_id).unwrap();
+        let names: Vec<String> = storage
+            .load_transcript(&id)
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect();
+        assert_eq!(names, ["Pete Jackson", "Chris"]);
+
+        // A mono file has no sides to name.
+        let mono = dir.path().join("Chris <> Pete.wav");
+        wav(&mono, 10.0, &[&[(1.0, 3.0), (5.0, 7.0)]]);
+        let request = ImportRequest {
+            file: mono,
+            ..Default::default()
+        };
+        let outcome = import(&config, &request, counting(), &mut |_| {})
+            .await
+            .unwrap();
+        let id = MeetingId::parse(&outcome.meeting_id).unwrap();
+        let labels = storage.get_speaker_labels(&id).unwrap();
+        assert!(labels.is_empty(), "{labels:?}");
     }
 
     #[tokio::test]

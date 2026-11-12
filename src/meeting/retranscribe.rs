@@ -204,6 +204,13 @@ pub async fn retranscribe(
     let mapping = map_segments(&old, &new.segments);
     let edits = storage.remap_segment_edits(&id, &mapping, request.keep_edits)?;
     storage.save_transcript(&id, &new)?;
+    // The scratch meeting named its speakers in the scratch store; the new
+    // speaker IDs need the names here too.
+    if config.meeting.auto_label_from_title {
+        if let Some(me) = crate::meeting::title_labels::Me::resolve(None) {
+            crate::meeting::title_labels::label_stored(&storage, &id, &me)?;
+        }
+    }
 
     let engine = format!("{:?}", effective.engine).to_lowercase();
     let model = effective.model_name().to_string();
@@ -396,6 +403,62 @@ mod tests {
             .collect();
         assert_eq!(speakers, ["You", "Dana", "You"]);
         assert_ne!(data.transcript.segments[0].text, "Hello there");
+    }
+
+    /// Retranscribing names the new speakers from the title, and keeps a
+    /// name given by hand.
+    #[tokio::test]
+    async fn retranscribing_names_speakers_from_the_title() {
+        if !ffmpeg_present() {
+            return;
+        }
+        crate::meeting::title_labels::set_account_name_for_test(Some("Pete Jackson"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("call.wav");
+        wav(&file, 12.0, &[&[(1.0, 3.0)], &[(5.0, 7.0)]]);
+        let mut config = config_in(&dir.path().join("meetings"));
+        // Imported before the setting was on, then retitled.
+        config.meeting.auto_label_from_title = false;
+        let imported = import(
+            &config,
+            &ImportRequest {
+                file,
+                title: Some("1:1 Pete/Chris".to_string()),
+                channels: Some("mic,loopback".to_string()),
+                ..Default::default()
+            },
+            counting(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let storage =
+            MeetingStorage::open(meeting_config_for(&config, None).storage.clone()).unwrap();
+        let id = MeetingId::parse(&imported.meeting_id).unwrap();
+        let names = |storage: &MeetingStorage| -> Vec<String> {
+            storage
+                .load_transcript(&id)
+                .unwrap()
+                .segments
+                .iter()
+                .map(|s| s.speaker_display())
+                .collect()
+        };
+        assert_eq!(names(&storage), ["You", "Remote"]);
+        storage.set_speaker_label(&id, "You", "PJ").unwrap();
+
+        config.meeting.auto_label_from_title = true;
+        let request = RetranscribeRequest {
+            meeting: "latest".to_string(),
+            keep_edits: true,
+            ..Default::default()
+        };
+        retranscribe(&config, &request, counting(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(names(&storage), ["PJ", "Chris"]);
+        let labels = storage.get_speaker_labels(&id).unwrap();
+        assert_eq!(labels.get("Remote").map(String::as_str), Some("Chris"));
     }
 
     #[tokio::test]

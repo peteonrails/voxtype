@@ -71,13 +71,14 @@ Scenarios:
               Open meeting folder
   export-past an SRT export of a past meeting (all five formats offered),
               and its folder
-  minimize    the pill while recording (red dot, title, elapsed), sized to
-              what it says, on the card's outer edge and dragged with it;
+  minimize    the pill while recording (red dot, elapsed, the newest line),
+              sized to what it says up to 460 px, where a long line elides;
+              on the card's outer edge and dragged with it;
               click to expand, the --minimize/--expand requests
   pill-states the pill through a meeting: Paused, Finishing..., Ended with
               its length, Summarizing with the agent, Summary ready
-  pill-idle   no meeting: "No meeting" and Start, which starts one; a long
-              title is elided within the pill's maximum width
+  pill-idle   no meeting: "No meeting" and Start, which starts one; before
+              anything is said the pill shows the title, a long one elided
   minimize-autoopen  a meeting start while minimized expands the one window
   resize      the inner-edge handle (clamped 280 px to half the screen) and
               compact height
@@ -171,6 +172,11 @@ Scenarios:
   idle        the idle state, a failed start, a start with a title
   nodaemon    no socket at all, then the daemon arrives
   scroll      auto-scroll follows new lines until the user scrolls up
+  notice      the recording-consent notice: shown at the top of a running
+              meeting while unacknowledged, also on a meeting that starts
+              with the view open; "Got it" hides it and runs
+              `meeting notice --ack`
+  notice-acked  acknowledged already: never shown, at open or at a start
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -200,7 +206,8 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
-             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing")
+             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing",
+             "notice", "notice-acked")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -409,6 +416,8 @@ INITIAL = {
     "summary-local-error": lambda: [running_meeting()],
     "summary-error-cli": lambda: [running_meeting()],
     "summary-stale": lambda: [running_meeting()],
+    "notice": lambda: [running_meeting(), {"cmd": "notice", "pending": True}],
+    "notice-acked": lambda: [running_meeting()],
 }
 
 STALE = ["c3000000-0000-4000-8000-000000000003", "c3000000-0000-4000-8000-000000000004"]
@@ -828,6 +837,11 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [["meeting", "pause"], ["meeting", "resume"], ["meeting", "stop"]], "meeting commands")
     elif scenario == "pill-idle":
         expect(meeting, [["meeting", "start"]], "meeting commands")
+    elif scenario == "notice":
+        expect(meeting, [["meeting", "stop"], ["meeting", "start", "--title", "Second"],
+                         ["meeting", "notice", "--ack"]], "meeting commands")
+    elif scenario == "notice-acked":
+        expect(meeting, [["meeting", "stop"], ["meeting", "start", "--title", "Second"]], "meeting commands")
     elif scenario in ("cli-missing", "daemon-old", "old-voxtype", "minimize", "minimize-autoopen", "resize", "move",
                       "opacity", "view-state"):
         pass

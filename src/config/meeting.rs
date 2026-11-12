@@ -90,6 +90,13 @@ pub struct MeetingConfig {
     #[serde(default = "default_view_opacity")]
     pub view_opacity: f32,
 
+    /// Name the speakers of a two-person meeting from its title: in
+    /// "Pete <> Andrew standup" the side that is you names your microphone
+    /// and the other names every remote voice. A name given by hand is
+    /// never replaced.
+    #[serde(default = "default_true")]
+    pub auto_label_from_title: bool,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -526,6 +533,7 @@ impl Default for MeetingConfig {
             show_view_on_start: true,
             view: default_meeting_view(),
             view_opacity: default_view_opacity(),
+            auto_label_from_title: true,
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),

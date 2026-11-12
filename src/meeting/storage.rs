@@ -1119,6 +1119,22 @@ impl MeetingStorage {
         Ok(keys)
     }
 
+    /// Name `speaker_key` unless it already has a name, so a name the user
+    /// gave by hand is never replaced. Returns whether it was named.
+    pub fn label_speaker_if_unlabeled(
+        &self,
+        meeting_id: &MeetingId,
+        speaker_key: &str,
+        label: &str,
+    ) -> Result<bool, StorageError> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO speaker_name_labels (meeting_id, speaker_key, label) \
+             VALUES (?1, ?2, ?3)",
+            params![meeting_id.to_string(), speaker_key, label],
+        )?;
+        Ok(inserted > 0)
+    }
+
     /// Move a speaker's label to a new speaker ID, for when the diarizer
     /// renames a speaker mid-meeting. A label already on `to` wins.
     pub fn rename_speaker_key(
