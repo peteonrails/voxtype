@@ -47,9 +47,11 @@ Item {
         readonly property bool played: root.positionMs >= 0 && (index + 1) / root.count * root.duration <= root.positionMs
         Rectangle {
           width: Math.max(1, parent.width - 1)
-          height: Math.max(1, (bars.height / 2) * root.frac(root.wave.mic[index]))
-          anchors.bottom: parent.verticalCenter
-          color: root.theme.accent
+          height: Math.max(1, (root.wave.micTrack === "mixed" ? bars.height : bars.height / 2) * root.frac(root.wave.mic[index]))
+          // Both sides in one track (an import): centred, in a neutral colour.
+          anchors.bottom: root.wave.micTrack === "mixed" ? undefined : parent.verticalCenter
+          anchors.verticalCenter: root.wave.micTrack === "mixed" ? parent.verticalCenter : undefined
+          color: root.wave.micTrack === "mixed" ? root.theme.alpha(root.theme.fg, 0.75) : root.theme.accent
           opacity: parent.played ? 1.0 : 0.6
         }
         Rectangle {
