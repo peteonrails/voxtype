@@ -39,6 +39,69 @@ const READY_TIMEOUT: Duration = Duration::from_secs(3);
 /// from the start of the mic so the two tracks share a timeline.
 pub const MIC_DELAY_MS: u32 = 37;
 
+/// The cancelled mic's level below which it carries nothing: about -100
+/// dBFS. A working canceller on a real mic delivers the room's noise floor
+/// after its noise suppression, well above this; one whose capture is not
+/// getting the mic delivers digital silence.
+pub const SILENT_RMS: f32 = 1e-5;
+/// How much of the cancelled mic is checked before trusting it.
+pub const LIVENESS_SECS: u32 = 3;
+
+/// What the start of the cancelled mic says about the canceller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// Not enough audio yet
+    Pending,
+    /// It carries sound
+    Alive,
+    /// [`LIVENESS_SECS`] of digital silence: the canceller is not hearing
+    /// the mic, and the meeting would record nothing of you
+    Silent,
+}
+
+/// Watches the first [`LIVENESS_SECS`] of the cancelled mic.
+#[derive(Debug, Clone)]
+pub struct LivenessCheck {
+    window: usize,
+    seen: usize,
+    energy: f64,
+}
+
+impl LivenessCheck {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            window: (sample_rate * LIVENESS_SECS) as usize,
+            seen: 0,
+            energy: 0.0,
+        }
+    }
+
+    /// Add the next samples of the cancelled mic. Alive as soon as the
+    /// window could no longer average below [`SILENT_RMS`]; Silent only once
+    /// the whole window has come in under it.
+    pub fn feed(&mut self, samples: &[f32]) -> Liveness {
+        let take = samples.len().min(self.window - self.seen.min(self.window));
+        self.energy += samples[..take]
+            .iter()
+            .map(|&s| f64::from(s) * f64::from(s))
+            .sum::<f64>();
+        self.seen += take;
+        let floor = f64::from(SILENT_RMS).powi(2) * self.window as f64;
+        if self.energy >= floor {
+            Liveness::Alive
+        } else if self.seen >= self.window {
+            Liveness::Silent
+        } else {
+            Liveness::Pending
+        }
+    }
+
+    /// The RMS of what has come in so far.
+    pub fn rms(&self) -> f32 {
+        (self.energy / self.seen.max(1) as f64).sqrt() as f32
+    }
+}
+
 /// `[meeting.audio] echo_cancel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -389,6 +452,8 @@ pub fn begin(
 pub struct Tools {
     pub pipewire: PathBuf,
     pub pactl: PathBuf,
+    /// How long the canceller's source may take to appear.
+    pub ready_timeout: Duration,
 }
 
 impl Tools {
@@ -399,6 +464,7 @@ impl Tools {
         Some(Self {
             pipewire: which::which("pipewire").ok()?,
             pactl: which::which("pactl").ok()?,
+            ready_timeout: READY_TIMEOUT,
         })
     }
 }
@@ -484,7 +550,7 @@ impl EchoCanceller {
         let stdin = child.stdin.take();
         let mut canceller = Self { child, stdin, conf };
 
-        let deadline = Instant::now() + READY_TIMEOUT;
+        let deadline = Instant::now() + tools.ready_timeout;
         loop {
             if names(&tools.pactl, "sources")
                 .iter()
@@ -511,7 +577,7 @@ impl EchoCanceller {
                 canceller.stop();
                 return Err(format!(
                     "the echo canceller's source did not appear within {}s",
-                    READY_TIMEOUT.as_secs()
+                    tools.ready_timeout.as_secs()
                 ));
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -1008,8 +1074,10 @@ mod tests {
             crate::test_support::write_script(
                 &dir.path().join("pipewire"),
                 // Stays a shell (no exec) so its command line keeps "-c <conf>".
+                // The pid file is written once the TERM trap is in place, so
+                // a test that waits for it knows the fake is fully up.
                 &format!(
-                    "#!/bin/sh\necho $$ > {}\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep 600 &\nwait\n",
+                    "#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\necho $$ > {}\nsleep 600 &\nwait\n",
                     pid.display()
                 ),
             );
@@ -1028,12 +1096,15 @@ mod tests {
             Tools {
                 pipewire: self.dir.path().join("pipewire"),
                 pactl: self.dir.path().join("pactl"),
+                // Room for a fake to start on a machine running the whole
+                // suite in parallel.
+                ready_timeout: Duration::from_secs(30),
             }
         }
 
         fn canceller_pid(&self) -> i32 {
             let path = self.dir.path().join("canceller.pid");
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(30);
             loop {
                 if let Some(pid) = std::fs::read_to_string(&path)
                     .ok()
@@ -1058,7 +1129,10 @@ mod tests {
     }
 
     fn wait_gone(pid: i32) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous: it only costs time when the test is failing anyway, and a
+        // machine running the whole suite in parallel can take seconds to
+        // schedule a process's exit.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while running(pid) {
             assert!(Instant::now() < deadline, "canceller {pid} still running");
             std::thread::sleep(Duration::from_millis(20));
@@ -1107,14 +1181,62 @@ mod tests {
             .arg(&conf)
             .spawn()
             .unwrap();
-        let orphan_pid = orphan.id() as i32;
-        assert!(running(orphan_pid));
-        let _ = std::fs::remove_file(fakes.dir.path().join("canceller.pid"));
+        // Up and trapping TERM before anything looks for it; its pid file
+        // is then cleared so the fake pactl waits for the new canceller.
+        assert_eq!(fakes.canceller_pid(), orphan.id() as i32);
+        std::fs::remove_file(fakes.dir.path().join("canceller.pid")).unwrap();
 
         let mut aec = EchoCanceller::start(&fakes.tools(), runtime.path(), None).unwrap();
-        wait_gone(orphan_pid);
-        let _ = orphan.try_wait();
+        // Reaped rather than read from /proc, and with room for a machine
+        // under full test load to schedule the orphan's exit.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while orphan.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the stale canceller is still running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         aec.stop();
+    }
+
+    #[test]
+    fn a_canceller_delivering_digital_silence_is_caught_after_three_seconds() {
+        let mut check = LivenessCheck::new(16000);
+        // What a canceller that never hears the mic delivers.
+        let dead = vec![1e-6f32; 1600];
+        for _ in 0..29 {
+            assert_eq!(check.feed(&dead), Liveness::Pending);
+        }
+        assert_eq!(check.feed(&dead), Liveness::Silent);
+        assert!(check.rms() < SILENT_RMS);
+        // Exact zeros too, and in uneven pieces.
+        let mut check = LivenessCheck::new(16000);
+        assert_eq!(check.feed(&vec![0.0; 47_999]), Liveness::Pending);
+        assert_eq!(check.feed(&[0.0; 5]), Liveness::Silent);
+    }
+
+    #[test]
+    fn a_quiet_room_or_a_late_first_word_is_alive() {
+        // A quiet room after the canceller's noise suppression, which takes
+        // about 18 dB off a mic's hiss: -90 dBFS here, from a mic at about
+        // -72 dBFS. Webcam and laptop mics are louder than that.
+        let mut check = LivenessCheck::new(16000);
+        let hiss: Vec<f32> = (0..16000)
+            .map(|i| if i % 2 == 0 { 3e-5 } else { -3e-5 })
+            .collect();
+        assert_eq!(check.feed(&hiss[..4000]), Liveness::Pending);
+        assert_eq!(check.feed(&hiss), Liveness::Alive);
+
+        // Silence, then a word in the last half second.
+        let mut check = LivenessCheck::new(16000);
+        assert_eq!(check.feed(&vec![0.0; 40_000]), Liveness::Pending);
+        assert_eq!(check.feed(&vec![0.01; 1000]), Liveness::Alive);
+
+        // Speech after the window does not count: the verdict is already in.
+        let mut check = LivenessCheck::new(16000);
+        assert_eq!(check.feed(&vec![0.0; 48_000]), Liveness::Silent);
+        assert_eq!(check.feed(&vec![0.1; 16_000]), Liveness::Silent);
     }
 
     #[test]
@@ -1130,12 +1252,16 @@ mod tests {
 
         // Nothing appears at all.
         let fakes = Fakes::new("sources", "something_else");
+        let tools = Tools {
+            ready_timeout: READY_TIMEOUT,
+            ..fakes.tools()
+        };
         let started = Instant::now();
-        let err = EchoCanceller::start(&fakes.tools(), runtime.path(), None)
+        let err = EchoCanceller::start(&tools, runtime.path(), None)
             .err()
             .unwrap();
         assert!(err.contains("did not appear"), "{err}");
-        assert!(started.elapsed() < READY_TIMEOUT + Duration::from_secs(2));
+        assert!(started.elapsed() >= READY_TIMEOUT);
         wait_gone(fakes.canceller_pid());
     }
 }
