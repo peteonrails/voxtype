@@ -4131,7 +4131,9 @@ max_transcript_chars = 100000
 
 ## [meeting.calendar]
 
-A title from your calendar for a meeting that starts without one. See [Titles from Your Calendar](MEETING_MODE.md#titles-from-your-calendar).
+A title from your calendar for a meeting that starts without one you chose. See [Titles from Your Calendar](MEETING_MODE.md#titles-from-your-calendar).
+
+The calendar's private iCal link, the first place voxtype looks, is not a setting: it is a secret, kept outside `config.toml` by `voxtype meeting calendar set-ics`.
 
 ### command
 
@@ -4139,10 +4141,10 @@ A title from your calendar for a meeting that starts without one. See [Titles fr
 **Default:** `""`
 **Required:** No
 
-A command printing the next meeting as JSON, in the format of the Omarchy Next Meeting widget. Empty uses that widget's `agendaCommand` when the widget is on your Omarchy bar, and otherwise asks no calendar. It runs through `bash -lc` with `~/.local/bin` and `~/bin` first on `PATH`.
+A command printing the next meeting as JSON, in the format of the Omarchy Next Meeting widget. Asked when no iCal link is set or the link has no event near the meeting's start. Empty uses that widget's own command when the widget is on your Omarchy bar, and otherwise asks nothing. It runs through `bash -lc` with `~/.local/bin` and `~/bin` first on `PATH`.
 
 ```bash
-voxtype config set meeting.calendar.command "agenda --next-json"
+voxtype config set meeting.calendar.command "~/bin/next-meeting --json"
 ```
 
 ### window_mins
@@ -4151,7 +4153,7 @@ voxtype config set meeting.calendar.command "agenda --next-json"
 **Default:** `10`
 **Required:** No
 
-An event names the meeting when it is running, or when it starts within this many minutes before or after the meeting starts.
+An event names the meeting when it is in progress, or when it starts within this many minutes before or after the meeting starts.
 
 ### timeout_secs
 
@@ -4159,7 +4161,7 @@ An event names the meeting when it is running, or when it starts within this man
 **Default:** `3`
 **Required:** No
 
-Seconds to wait for the calendar command. It runs alongside the recording, so a slow calendar never delays the start; past this, the meeting keeps its title.
+Seconds to wait for the calendar command. The lookup runs alongside the recording, so a slow calendar never delays the start; past this, the meeting keeps its title. Fetching the iCal link has its own 30 second limit and runs in the background.
 
 ---
 

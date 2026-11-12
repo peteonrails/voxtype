@@ -94,6 +94,7 @@ mod tests {
             model: model.map(str::to_string),
             language: language.map(str::to_string),
             url: None,
+            ..Default::default()
         }
     }
 

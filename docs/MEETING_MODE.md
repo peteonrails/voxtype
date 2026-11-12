@@ -258,7 +258,7 @@ The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INT
 
 ## Meeting Detection
 
-Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting exactly as `voxtype meeting start --title` would, titled from the call window when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting as `voxtype meeting start --window-title` would, titled from the call window (and named from your calendar instead, when [it can be](#titles-from-your-calendar)) when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
 
 Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
 
@@ -298,27 +298,60 @@ Detection never records by itself, except for apps you list in `auto_record_apps
 
 ### Titles from Your Calendar
 
-A meeting that starts without a real title can take one from your calendar. That covers a meeting started with no `--title`, one recorded from the detection prompt when the call window only said "Zoom call", "Google Meet call" or "Teams call", and the date-only default ("Meeting 2026-11-12 14:00"). A title you gave yourself is never replaced.
+A meeting that starts without a title you chose can take its name from your calendar. That covers a meeting started with no `--title`, one recorded from the detection prompt (whose title comes from the call window: "Weekly sync", or just "Zoom call", "Google Meet call" or "Teams call"), and the date-only default ("Meeting 2026-11-12 14:00"). A title you typed with `--title` or `voxtype meeting title` is never replaced.
 
-Voxtype runs a calendar command when the meeting starts and uses the event that is running now, or that starts within `window_mins` (10 by default) either side of the meeting's start. When the first event has been running a long time and the next one starts within the window, the next one is taken, since that is the call you are joining. The event's link is stored too, when the meeting has none. Then the title names the speakers of a 1:1 as usual. The lookup runs alongside the recording, so it never delays the start.
+The event used is the one in progress when the meeting starts, or starting within `[meeting.calendar] window_mins` (10 by default) before or after; with several, the one whose start is nearest. Its title becomes the meeting's, and its video call link (Zoom, Meet, Teams and the like) is stored when the meeting has none. Then a 1:1 title names the speakers as usual. The lookup runs alongside the recording and never delays the start: the title arrives a moment later, through the same path as [Retitling a Meeting](#retitling-a-meeting).
 
-The command prints one JSON object, the format of the Omarchy [Next Meeting](https://github.com/peteonrails/omarchy-next-meeting) bar widget:
+Voxtype asks these in order and takes the first answer:
+
+1. **Your calendar's iCal link.** Works with any calendar that publishes one.
+2. **A calendar command**, `[meeting.calendar] command`.
+3. **The Omarchy Next Meeting widget**, when it is installed and on your bar and nothing above is set up.
+
+Without any of them, the call window's title or the default stays.
+
+#### The iCal link
+
+Google Calendar, Outlook, iCloud and Fastmail all give each calendar a private link that serves it in iCalendar format. Set it once:
+
+```bash
+voxtype meeting calendar set-ics -        # paste the link, then Enter
+voxtype meeting calendar status           # where titles come from, the next event
+voxtype meeting calendar clear            # forget the link and what was fetched
+```
+
+`-` reads the link from the terminal, which keeps it out of your shell history; `set-ics <link>` works too. `set-ics` fetches the link once to check it, and refuses one that does not return a calendar (`--no-check` saves it anyway). `voxtype meeting calendar set-ics --help` says where each service keeps the link:
+
+- **Google Calendar:** Settings, your calendar under "Settings for my calendars", Integrate calendar, then "Secret address in iCal format".
+- **Outlook:** Settings, Calendar, Shared calendars, Publish a calendar. Pick the calendar and "Can view all details", Publish, then copy the ICS link.
+- **iCloud:** on iCloud.com, the share button beside the calendar, tick "Public Calendar", then copy the `webcal://` link.
+- **Fastmail:** Settings, Calendars, the calendar's Edit & share, then its read-only iCalendar URL.
+
+**The link lets anyone who has it read your calendar.** Voxtype keeps it in `~/.local/state/voxtype/calendar.json`, readable only by you, never in `config.toml`, and never writes it to a log: messages name only the server (`calendar.google.com`). If the link leaks, reset the secret address in your calendar's settings and set the new one.
+
+While meeting mode is on, the daemon fetches the link when it starts and every 15 minutes after, asking the server whether anything changed when the server supports that, and keeps the events of the next 48 hours (also readable only by you). Repeating events are expanded, including skipped and moved occurrences, times follow each event's time zone, and all-day and cancelled events are left out. A fetch that fails keeps the events from the last good one and is shown by `voxtype meeting calendar status`.
+
+#### A calendar command
+
+For anything else, point voxtype at a command that prints the next meeting as one JSON object, the format of the Omarchy [Next Meeting](https://github.com/peteonrails/omarchy-next-meeting) widget:
 
 ```json
-{"title": "Pete <> Chad Bi-Weekly", "start_iso": "2026-11-12T14:00", "minutes_until": -2, "ongoing": true, "url": "https://zoom.us/j/123",
+{"title": "Design review", "start_iso": "2026-11-12T14:00", "minutes_until": -2, "ongoing": true, "url": "https://meet.google.com/abc-defg-hij",
  "next": {"title": "Retro", "start_iso": "2026-11-12T15:00", "minutes_until": 58}}
 ```
 
-`{"empty": true}` means nothing is coming up, and `"error"` that the calendar could not be read. If you use that widget, there is nothing to set up: with `[meeting.calendar] command` left empty, voxtype runs the widget's own `agendaCommand` (read from the bar's settings in `~/.config/omarchy/shell.json`), the same way the widget does. Otherwise point voxtype at any command that prints this JSON:
+`{"empty": true}` means nothing is coming up, and `"error"` that the calendar could not be read. The first event counts when it is running or starts within the window; `next` counts on the same terms, and wins over a first event that has been running a long time.
 
 ```toml
 [meeting.calendar]
-command = "agenda --next-json"
+command = "~/bin/next-meeting --json"   # for example
 window_mins = 10
 timeout_secs = 3
 ```
 
-The command runs through `bash -lc`, with `~/.local/bin` and `~/bin` first on `PATH`. If it fails, takes longer than `timeout_secs`, or prints something else, the meeting keeps the title it had, and the reason is logged at debug level.
+The command runs through `bash -lc`, with `~/.local/bin` and `~/bin` first on `PATH`. If you use the Next Meeting widget, there is nothing to set: voxtype runs the widget's own command, read from the bar's settings in `~/.config/omarchy/shell.json`, which it never changes.
+
+Whatever goes wrong (no answer within `timeout_secs`, a failed fetch, output that is not the expected JSON, no event near the start) leaves the title as it was, with the reason logged at debug level.
 
 ### Checking what it sees
 
