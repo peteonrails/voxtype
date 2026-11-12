@@ -1390,6 +1390,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
     ),
     spec(
+        "meeting.my_name",
+        "meeting",
+        "my_name",
+        KeyType::String,
+        "Meeting",
+        "Your name",
+        "Shown instead of \"You\" for your side of a meeting, in the view, exports, summaries and search.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -2236,8 +2245,18 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Meeting",
         "Show meeting view on start",
-        "Open the live meeting view in the Omarchy shell when a meeting starts.",
+        "Open the live meeting view when a meeting starts: the Quickshell view, or the GTK4 window when the meeting view resolves to it.",
     ),
+    spec(
+        "meeting.view",
+        "meeting",
+        "view",
+        closed(crate::meeting::view::frontend::VIEW_CHOICES),
+        "Meeting",
+        "Meeting view",
+        "Which meeting view opens: auto uses Quickshell, then the GTK4 window; terminal runs `meeting watch` and is never automatic.",
+    )
+    .live(),
     spec(
         "meeting.view_opacity",
         "meeting",
@@ -3054,6 +3073,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.enabled" => json!(cfg.meeting.enabled),
         "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
         "meeting.status_notifications" => json!(cfg.meeting.status_notifications),
+        "meeting.my_name" => opt_str(cfg.meeting.my_name.as_ref()),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),
@@ -3165,6 +3185,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
         "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
         "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
+        "meeting.view" => json!(cfg.meeting.view),
         // Two places are all an opacity needs, and an f32 such as 0.8 would
         // otherwise read back as 0.800000011920929.
         "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),

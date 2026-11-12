@@ -65,6 +65,7 @@ done
 COMPANION_BINARIES=(
     "voxtype-${VERSION}-linux-x86_64-osd"
     "voxtype-${VERSION}-linux-x86_64-osd-gtk4"
+    "voxtype-${VERSION}-linux-x86_64-meetings-gtk4"
     "voxtype-${VERSION}-linux-x86_64-osd-quickshell"
     "voxtype-${VERSION}-linux-x86_64-audio-bridge"
 )

@@ -145,6 +145,8 @@ pub struct AssistantSettings {
     pub summary_backend: String,
     pub summary: crate::meeting::summary::SummaryConfig,
     pub env: AssistantEnv,
+    /// `[meeting] my_name`: who the user is, shown for "You" in prompts.
+    pub my_name: Option<String>,
 }
 
 impl AssistantSettings {
@@ -168,6 +170,13 @@ impl AssistantSettings {
                 timeout_secs: s.timeout_secs,
             },
             env: AssistantEnv::from_process(),
+            my_name: cfg
+                .meeting
+                .my_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string),
         }
     }
 
@@ -478,10 +487,23 @@ pub fn build_context(
     last: Option<Duration>,
     backend: &Backend,
 ) -> Result<prompt::Context, AssistantError> {
+    // Storage already shows my_name for "You"; applying it again here keeps
+    // a caller that loaded the meeting some other way consistent.
+    let shown;
+    let meeting = match settings.my_name.as_deref() {
+        Some(name) => {
+            let mut m = meeting.clone();
+            m.transcript.apply_my_name(name);
+            shown = m;
+            &shown
+        }
+        None => meeting,
+    };
     let header = prompt::header(meeting, Utc::now());
     let all = prompt::lines(&meeting.transcript.segments);
     let mut ctx = prompt::Context {
         header,
+        reader: prompt::reader_line(&meeting.transcript.segments, settings.my_name.as_deref()),
         notes: read_notes(meeting),
         annotations: read_annotations(meeting, 0),
         ..Default::default()
@@ -813,6 +835,49 @@ mod tests {
     }
 
     #[test]
+    fn my_name_names_the_user_in_the_prompt() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&["You agreed [00:52]."], "You agreed [00:52].");
+        // No label on "You": storage opened without my_name, as a caller
+        // that loads the meeting another way would hand it over.
+        let m = sb.meeting(
+            "Release sync",
+            &[
+                (41, "Remote 1", "We ship on Friday."),
+                (52, "You", "Agreed."),
+            ],
+        );
+        let m = sb.reload(&m);
+        let mut settings = sb.settings();
+        settings.my_name = Some("Pete".into());
+        let (record, _) = collect(&settings, &m, "What did I agree to?", None);
+        record.unwrap();
+        let p = sb.claude_stdin(0);
+        assert!(p.contains("Speakers: Remote 1, Pete (You)."), "{p}");
+        assert!(p.contains("\nThe user asking is Pete (You).\n"), "{p}");
+        assert!(p.contains("[00:52] Pete: Agreed.\n"), "{p}");
+        assert!(!p.contains("] You:"), "{p}");
+    }
+
+    #[test]
+    fn without_my_name_the_reader_is_the_you_speaker() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&["ok"], "ok");
+        let m = sb.meeting("Release sync", &[(52, "You", "Agreed.")]);
+        let m = sb.reload(&m);
+        collect(&sb.settings(), &m, "What did I say?", None)
+            .0
+            .unwrap();
+        let p = sb.claude_stdin(0);
+        assert!(p.contains("\nThe user asking is the speaker You.\n"), "{p}");
+        assert!(p.contains("[00:52] You: Agreed.\n"), "{p}");
+    }
+
+    #[test]
     fn ask_sends_named_lines_and_records_the_answer() {
         let sb = Sandbox::new();
         sb.fake_claude();
@@ -852,7 +917,9 @@ mod tests {
             "{p}"
         );
         assert!(
-            p.contains("\nPete (You) is the person reading this. Refer to them as Pete"),
+            p.contains(
+                "\nThe user asking is Pete (You).\nWrite about the user in the second person"
+            ),
             "{p}"
         );
         assert!(p.contains(

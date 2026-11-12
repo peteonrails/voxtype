@@ -107,8 +107,9 @@ Item {
 
   signal segmentActionFinished(string action, var extra, bool ok, string message, var segment)
 
-  // `[meeting] show_view_on_start`. A CLI that predates the key exits non-zero
-  // on it; that reads as the default, which is on.
+  // `[meeting] show_view_on_start`, then `[meeting] view`. A CLI that
+  // predates either key exits non-zero on it; that reads as the default,
+  // which is on, in this view.
   function readShowOnStart() {
     if (configProc.running) return
     configProc.out = ""
@@ -177,7 +178,30 @@ Item {
       onStreamFinished: configProc.out = String(text || "").trim()
     }
     onExited: function(exitCode) {
-      root.showOnStartRead(exitCode !== 0 || configProc.out !== "false")
+      if (exitCode === 0 && configProc.out === "false") {
+        root.showOnStartRead(false)
+        return
+      }
+      // On: unless `[meeting] view` sends meetings to another view (the
+      // GTK4 window, a terminal, or none), which the daemon opens instead.
+      viewProc.out = ""
+      viewProc.launch([root.bin, "config", "get", "meeting.view"])
+    }
+    onFailedToStart: root.showOnStartRead(true)
+  }
+
+  MeetingProcess {
+    id: viewProc
+    property string out: ""
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: viewProc.out = String(text || "").trim().toLowerCase()
+    }
+    // A CLI without the key exits non-zero: that is the Quickshell view.
+    onExited: function(exitCode) {
+      var other = ["gtk4", "gtk", "terminal", "tui", "none", "off", "disabled"]
+      root.showOnStartRead(exitCode !== 0 || other.indexOf(viewProc.out) === -1)
     }
     onFailedToStart: root.showOnStartRead(true)
   }

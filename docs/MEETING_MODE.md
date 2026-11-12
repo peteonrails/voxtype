@@ -20,10 +20,13 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Listing Past Meetings](#listing-past-meetings)
   - [Viewing a Meeting](#viewing-a-meeting)
   - [Labeling Speakers](#labeling-speakers)
+  - [Your Name](#your-name)
+  - [Searching Meetings](#searching-meetings)
   - [Moving a Line to Another Speaker](#moving-a-line-to-another-speaker)
   - [Correcting and Deleting Lines](#correcting-and-deleting-lines)
   - [Annotating a Line](#annotating-a-line)
   - [Notes](#notes)
+  - [Watching a Meeting in the Terminal](#watching-a-meeting-in-the-terminal)
   - [Exporting Transcripts](#exporting-transcripts)
   - [Deleting Meetings](#deleting-meetings)
 - [Meeting Audio](#meeting-audio)
@@ -220,6 +223,9 @@ voxtype meeting view latest --tab summary
 voxtype meeting view --ask last-5m --no-open   # answer arrives as a notification
 ```
 
+`voxtype meeting view` opens the view that `[meeting] view` picks (see [Without Quickshell](#without-quickshell-the-meeting-window) below); on a Quickshell desktop that is this one.
+
+
 In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
 
 An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
@@ -234,6 +240,38 @@ To stop it opening on its own:
 ```bash
 voxtype config set meeting.show_view_on_start false
 ```
+
+### Without Quickshell: the meeting window
+
+On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, the meeting opens in an ordinary window, `voxtype-meetings-gtk4`, which you can move, resize and alt-tab to like any other. It opens by itself when a meeting starts (`show_view_on_start`, as above), and `voxtype meeting view` opens it or brings it forward. It shows the meeting as the Quickshell view's Transcript tab does:
+
+- the state, title and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar, and a level meter for your microphone and the call while the daemon sends levels;
+- the transcript, one colored line per utterance in the order it was spoken, following new lines until you scroll up (**Follow new lines** goes back). A corrected line is marked "(edited)", a moved line says who the diarizer gave it to ("(was Remote 1)"), highlighted lines are tinted, notes sit under their lines, deleted lines disappear, and while the meeting's audio plays (`voxtype meeting play`) the line being heard has a ▶;
+- a button per speaker that renames them (`voxtype meeting label`, once for each speaker merged under that name); **Move line to…** and **Note on line…** for the selected line; your **Notes** with **Save notes**; an **Ask** box whose answer streams in under it; and the **Summary** once it is written;
+- with no meeting running, **Start meeting** with an optional title, and your recent meetings. **Meetings** in the title bar goes back to that list.
+
+A past meeting opened from the list is read-only: its transcript, speakers and notes, and its summary as saved in `summary.md`. Ask still works on it. To fix a past meeting, use the `voxtype meeting` commands, the Quickshell view or `voxtype meeting watch`. A meeting that starts while you are reading one takes over the window.
+
+Every button runs the matching `voxtype meeting` command, so it behaves as the command line does. A second `voxtype meeting view` brings the open window forward instead of opening another. A window the daemon opened at the start of a meeting closes if the daemon is stopped or restarted (it runs as part of the voxtype service); one you opened yourself reconnects.
+
+Choosing `gtk4` (or `terminal` or `none`) on a Quickshell desktop keeps the Quickshell view from opening on its own, and `voxtype meeting view` opens the chosen view instead.
+
+Which view opens is `[meeting] view`:
+
+| Value | Opens |
+|-------|-------|
+| `auto` (default) | The Quickshell view when Quickshell can run here, else the GTK4 window when it is installed and GTK 4 loads, else nothing |
+| `quickshell` | The Quickshell view (the Omarchy plugin or the standalone shell) |
+| `gtk4` | The GTK4 window |
+| `terminal` | `voxtype meeting watch`, in this terminal or a new one through `xdg-terminal-exec` |
+| `none` | Nothing |
+
+```bash
+voxtype config set meeting.view gtk4
+VOXTYPE_MEETING_VIEW=terminal voxtype meeting view
+```
+
+The deb and rpm packages install the window as `/usr/lib/voxtype/voxtype-meetings-gtk4`; it needs GTK 4 (`libgtk-4-1` on Debian and Ubuntu, `gtk4` on Fedora and Arch) but not gtk4-layer-shell.
 
 The view reads the daemon's meeting socket, described in [INTEGRATIONS.md](./INTEGRATIONS.md#the-live-feed-meetingsock). It does not open over an open Voxtype Settings panel.
 
@@ -340,6 +378,34 @@ The speaker can be the ID as the transcript shows it (matched without regard to 
 
 Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
 
+### Your Name
+
+Rather than labelling `You` in every meeting, set your name once:
+
+```bash
+voxtype config set meeting.my_name "Pete"
+```
+
+Every meeting then shows your side as "Pete": the live view, exports, `transcript.md`, summaries and search. The meeting assistant is told who you are ("The user asking is Pete (You)."), so a question like "what did I agree to?" means your lines. It is a display name only, never saved into the transcript, and a label you set for one meeting still wins there. `voxtype meeting my-name` shows the setting, or the full name on your account as a suggestion when it is unset; voxtype never sets it on its own.
+
+### Searching Meetings
+
+```bash
+voxtype meeting search budget
+voxtype meeting search budget review --speaker Dana
+voxtype meeting search '"next quarter"' --since 2026-11-01
+voxtype meeting search deploy* --limit 5 --json
+```
+
+Search covers every meeting's transcript as you see it (names, moved lines and corrections applied, deleted lines left out), plus titles, notes and summaries. Every word has to appear in the same line (or the same title, notes or summary). Matching ignores case and accents. Put a phrase in double quotes to keep it together, and end a word with `*` to match words that start with it. The best matches come first, each with the meeting, the time in the meeting, the speaker, and the matching text with the match marked « like this ».
+
+- `--speaker NAME` keeps only lines from that speaker, as the transcript shows them. Your `my_name` also finds lines shown as "You".
+- `--since DATE` keeps only meetings started on or after a date (`2026-11-01`) or a time (`2026-11-01T09:00:00Z`).
+- `--limit N` caps the number of matches (default 20).
+- `--json` prints the matches for scripts and the meeting view; see [INTEGRATIONS.md](INTEGRATIONS.md#searching-meetings-meeting-search---json).
+
+Search uses an index in `index.db` that every change keeps current. Meetings recorded before search existed are indexed the first time you search, which can take a moment with many meetings.
+
 ### Moving a Line to Another Speaker
 
 When the diarizer gives a single line to the wrong person, move that line on its own:
@@ -397,6 +463,35 @@ voxtype meeting notes latest --json                  # {meeting_id, notes, updat
 
 Exports and `transcript.md` show the notes at the top, under "Notes".
 
+### Watching a Meeting in the Terminal
+
+`voxtype meeting watch` shows the running meeting in the terminal, on any desktop and over SSH:
+
+```bash
+voxtype meeting watch
+```
+
+- The header shows the state (recording, paused, finalizing, summarizing, ended), the title and the elapsed time. While a meeting records it also shows a level meter for your microphone and the call, if the daemon sends levels; while its audio plays (`voxtype meeting play`) it says "▶ playing" and marks the line being heard; and while `meeting import` or `meeting retranscribe` works on it, how far it has got.
+- The transcript fills in as each chunk is transcribed, each line with its time and speaker in that speaker's color, and annotations under their lines. A corrected line is marked "(edited)", a line moved to another speaker shows who the diarizer gave it to ("(was Remote 1)"), highlighted lines are yellow, and deleted lines disappear (and come back if restored). It follows new lines; scroll up (↑, PgUp, Home) to read back and it stops following, and End follows again.
+- The side panel lists the speakers, merged by the names you gave them, and the summary once it is written.
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause or resume |
+| `s` | Stop (asks first) |
+| `l` | Name a speaker: pick one, type the name (`meeting label`, once for each speaker merged under that name) |
+| `r` | Move the selected line to another speaker: pick one, or "New speaker…" and type a name (`meeting reassign`) |
+| `n` | Add a note to the selected line (`meeting annotate`) |
+| `a` | Ask the assistant about the meeting; the answer streams into a pane at the bottom (`meeting ask`) |
+| `Esc` | Close the answer, or go to the list of meetings |
+| `q` | Quit |
+
+Each key runs the matching `voxtype meeting` command, so it behaves exactly as typing it would, including the assistant's consent: if transcripts have not been allowed to go to an agent yet, the answer pane says how to allow it.
+
+With no meeting running, `watch` lists recent meetings with their length, speaker count and whether they have a summary. Enter opens one (ended meetings still take `r`, `n` and `a`), Esc goes back, and a meeting that starts meanwhile appears at the top of the list. If the daemon restarts, the view says it is reconnecting and catches up when it is back.
+
+For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket as NDJSON (see [INTEGRATIONS.md](INTEGRATIONS.md)), reconnecting on its own; every connection starts with a `hello` snapshot.
+
 ### Exporting Transcripts
 
 ```bash
@@ -436,7 +531,7 @@ voxtype meeting export latest --format vtt --output meeting.vtt
 
 Markdown and JSON exports start with your notes and the summary when the meeting has them, and plain text with the notes. Annotations appear under their lines, and deleted lines are left out.
 
-Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did.
+Every format lists the conversation in the order it was spoken: your lines and remote lines are interleaved by start time, and each line carries its own timestamp. Within each chunk the daemon transcribes every utterance separately, splitting at pauses of 0.7 seconds or more, so a line's timestamp is when that utterance began rather than when its chunk did. Parakeet, ONNX or GGUF, also times every word, so an utterance holding several sentences gives a line per sentence, each at its own start, and a line ends with its last word rather than at the pause after it. Cohere has no word times (its GGUF model decodes without timestamps), so it keeps one line per utterance. Whisper, where a short clip costs as much as a whole chunk, transcribes the chunk in one call and uses the segments Whisper times itself, one per sentence or phrase. Each segment's start and end are then fitted to the speech inside it, since Whisper counts a pause before a sentence as part of it, and a segment over pure silence (a hallucinated "Thank you.") is dropped. This covers local Whisper with or without `gpu_isolation`, `whisper-cli` (`backend = "cli"`, which times every segment in its JSON output), and remote Whisper on a server that returns segments for `response_format=verbose_json` (OpenAI, whisper.cpp server and most compatible servers). The first meeting chunk asks the server for them; a server that refuses or ignores the format is remembered and gets one line per chunk, as before, for the rest of the daemon's run.
 
 ### Deleting Meetings
 

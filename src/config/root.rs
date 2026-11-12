@@ -352,6 +352,12 @@ impl Config {
         let _ = CONFIG_PATH_OVERRIDE.set(path);
     }
 
+    /// The `--config` file this process was started with, if any, for
+    /// passing on to child `voxtype` processes.
+    pub fn path_override() -> Option<PathBuf> {
+        CONFIG_PATH_OVERRIDE.get().cloned()
+    }
+
     /// Get the system-wide config file path.
     pub fn system_path() -> PathBuf {
         PathBuf::from(Self::SYSTEM_PATH)

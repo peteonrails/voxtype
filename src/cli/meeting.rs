@@ -373,6 +373,56 @@ pub enum MeetingAction {
         json: bool,
     },
 
+    /// Search across meetings
+    ///
+    /// Full-text search over every meeting's transcript lines as they are
+    /// displayed (speaker names, moved lines and text corrections applied;
+    /// deleted lines left out), and over titles, notes and summaries. Every
+    /// word must appear. Put a phrase in double quotes (inside single quotes
+    /// for the shell) to keep it together, and end a word with * to match
+    /// words starting with it. Best matches come first. Meetings recorded
+    /// before search existed are indexed the first time you search.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting search budget\n  \
+        voxtype meeting search budget review --speaker Dana\n  \
+        voxtype meeting search '\"next quarter\"' --since 2026-11-01\n  \
+        voxtype meeting search deploy* --limit 5 --json")]
+    Search {
+        /// Words to find
+        #[arg(required = true, num_args = 1.., value_name = "QUERY")]
+        query: Vec<String>,
+
+        /// Show at most this many matches
+        #[arg(long, short, default_value = "20")]
+        limit: u32,
+
+        /// Only lines spoken by this speaker, as shown in the transcript
+        /// (case-insensitive). Your `[meeting] my_name` also finds "You".
+        #[arg(long, value_name = "NAME")]
+        speaker: Option<String>,
+
+        /// Only meetings started on or after this date (2026-11-01) or time
+        /// (2026-11-01T09:00:00Z)
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the name meetings use for you, or a suggestion for it
+    ///
+    /// Meetings show your side as "You" unless `[meeting] my_name` is set.
+    /// This prints the setting and, when it is unset, the full name on your
+    /// account as a suggestion. It never sets anything.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting my-name\n  \
+        voxtype config set meeting.my_name \"Pete\"")]
+    MyName {
+        /// Output as JSON: {"my_name": ..., "suggestion": ...}
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the live meeting view
     ///
     /// Asks whichever meeting view is running to open: the Voxtype plugin in
@@ -381,6 +431,12 @@ pub enum MeetingAction {
     /// $XDG_RUNTIME_DIR/voxtype/meeting-view.request, so this command does not
     /// need to know which one you use. An Ask notification's Open action runs
     /// it. Nothing opens if neither is running.
+    ///
+    /// Without Quickshell (GNOME, Plasma, Sway, X11), this opens the meeting
+    /// window `voxtype-meetings-gtk4` instead. `[meeting] view` (or
+    /// VOXTYPE_MEETING_VIEW) chooses: auto, quickshell, gtk4, terminal (runs
+    /// `voxtype meeting watch`) or none. --minimize and --expand only act on
+    /// the Quickshell view.
     ///
     /// With a meeting ID other than the current one, the view opens on that
     /// meeting's saved transcript. --ask asks one of the view's quick
@@ -624,6 +680,26 @@ pub enum MeetingAction {
         /// Use the local model (Ollama) instead of an agent
         #[arg(long, conflicts_with = "agent")]
         local: bool,
+    },
+    /// Watch the meeting in the terminal
+    ///
+    /// Shows the running meeting live: state and elapsed time, the
+    /// transcript as it is transcribed (following new lines until you
+    /// scroll up; End follows again), and its speakers. Keys: p pause or
+    /// resume, s stop, r move the selected line to another speaker, n note
+    /// on the selected line, a ask the assistant, q quit. With no meeting
+    /// running it lists recent meetings; Enter opens one, Esc goes back.
+    ///
+    /// --json prints the daemon's meeting.sock events as NDJSON instead,
+    /// for scripts: one JSON object per line, starting with a `hello`
+    /// snapshot, and a new `hello` after the daemon restarts.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting watch\n  \
+        voxtype meeting watch --json | jq -c 'select(.event == \"segments\")'")]
+    Watch {
+        /// Print the live events as NDJSON instead of drawing the screen
+        #[arg(long)]
+        json: bool,
     },
     /// Choose and allow the agent that answers questions and writes summaries
     #[command(after_help = "Examples:\n  \

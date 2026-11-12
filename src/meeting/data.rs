@@ -43,6 +43,9 @@ impl std::str::FromStr for MeetingId {
     }
 }
 
+/// The speaker key of the user's own side of a meeting.
+pub const MY_SPEAKER_KEY: &str = "You";
+
 /// Audio source for speaker attribution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -607,6 +610,22 @@ impl Transcript {
         for segment in &mut self.segments {
             if let Some(label) = labels.get(&segment.speaker_key()) {
                 segment.speaker_label = Some(label.clone());
+            }
+        }
+    }
+
+    /// Show `name` for the user's own side: every "You" line that has no
+    /// label of its own gets `name` as its label. The speaker stays keyed
+    /// "You", so attribution and `meeting label` work as before, and a
+    /// label set by hand wins. For display only; never saved.
+    pub fn apply_my_name(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        for segment in &mut self.segments {
+            if segment.speaker_label.is_none() && segment.speaker_key() == MY_SPEAKER_KEY {
+                segment.speaker_label = Some(name.to_string());
             }
         }
     }
@@ -1770,5 +1789,47 @@ mod tests {
         transcript.add_segment(TranscriptSegment::new(0, 0, 5000, "A".to_string(), 0));
         transcript.add_segment(TranscriptSegment::new(1, 5000, 12000, "B".to_string(), 1));
         assert_eq!(transcript.duration_ms(), 12000);
+    }
+
+    #[test]
+    fn my_name_labels_only_the_unlabelled_you_side() {
+        let mut t = Transcript::new();
+        let line = |id: u32, source: AudioSource| {
+            let mut s = TranscriptSegment::new(
+                id,
+                id as u64 * 1000,
+                id as u64 * 1000 + 900,
+                "Hi".into(),
+                0,
+            );
+            s.source = source;
+            s
+        };
+        let you = line(0, AudioSource::Microphone);
+        let remote = line(1, AudioSource::Loopback);
+        let mut labelled = line(2, AudioSource::Microphone);
+        labelled.speaker_label = Some("Peter J".into());
+        t.add_segment(you);
+        t.add_segment(remote);
+        t.add_segment(labelled);
+
+        t.apply_my_name("  Pete ");
+        let shown: Vec<_> = t
+            .segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.speaker_display()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("You".to_string(), "Pete".to_string()),
+                ("Remote".to_string(), "Remote".to_string()),
+                ("You".to_string(), "Peter J".to_string()),
+            ]
+        );
+        let mut blank = t.clone();
+        blank.segments[1].speaker_label = None;
+        blank.apply_my_name("   ");
+        assert_eq!(blank.segments[1].speaker_display(), "Remote");
     }
 }

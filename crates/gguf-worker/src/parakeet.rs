@@ -8,7 +8,7 @@ use crate::config::ParakeetConfig;
 use crate::error::TranscribeError;
 use crate::gguf::{self, GgufEngine, GgufLoad, GgufSession};
 use crate::window;
-use crate::Transcriber;
+use crate::{Reply, Transcriber};
 use transcribe_cpp::RunOptions;
 
 const ENGINE: GgufEngine = GgufEngine {
@@ -71,8 +71,19 @@ impl ParakeetGgufTranscriber {
 
 impl Transcriber for ParakeetGgufTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        Ok(self.transcribe_words(samples)?.text)
+    }
+
+    /// transcribe.cpp times Parakeet's tokens from the TDT decoder's own
+    /// durations and groups them into words, so a single pass comes back
+    /// with word times. A windowed pass does not: its words would need
+    /// stitching across the overlap, and it is one line as before.
+    fn transcribe_words(&self, samples: &[f32]) -> Result<Reply, TranscribeError> {
         if samples.is_empty() {
-            return Ok(String::new());
+            return Ok(Reply {
+                text: String::new(),
+                words: Vec::new(),
+            });
         }
         let mut session = self.session.lock()?;
         // v3 detects the language itself; a hint only selects a prompt on
@@ -83,6 +94,7 @@ impl Transcriber for ParakeetGgufTranscriber {
         // transcribe.cpp's Parakeet encoder uses full attention, so memory
         // grows with the square of the input length and a long recording
         // can exhaust the GPU. Window it exactly as the ONNX path does.
+        let mut words = Vec::new();
         let text = if self.max_window > 0 && samples.len() > self.max_window {
             let spans = window::windows(samples.len(), self.max_window, self.window_overlap);
             tracing::info!(
@@ -99,10 +111,9 @@ impl Transcriber for ParakeetGgufTranscriber {
             }
             merged
         } else {
-            gguf::run(&mut session, samples, &options)?
-                .text
-                .trim()
-                .to_string()
+            let transcript = gguf::run(&mut session, samples, &options)?;
+            words = word_times(&transcript.words);
+            transcript.text.trim().to_string()
         };
 
         tracing::info!(
@@ -110,8 +121,17 @@ impl Transcriber for ParakeetGgufTranscriber {
             samples.len() as f32 / SAMPLE_RATE as f32,
             start.elapsed().as_secs_f32()
         );
-        Ok(text)
+        Ok(Reply { text, words })
     }
+}
+
+/// transcribe.cpp's word rows as (text, start ms, end ms), blank ones dropped.
+fn word_times(words: &[transcribe_cpp::Word]) -> Vec<(String, i64, i64)> {
+    words
+        .iter()
+        .filter(|w| !w.text.trim().is_empty())
+        .map(|w| (w.text.trim().to_string(), w.t0_ms, w.t1_ms.max(w.t0_ms)))
+        .collect()
 }
 
 #[cfg(test)]

@@ -366,6 +366,101 @@ If your default microphone is a filter such as `camera-effects-mic`
 filter over …" and names the real microphone: the canceller records that one,
 under the filter. Check that the named microphone is the one you speak into.
 
+## 14. The terminal view (3 minutes)
+
+`voxtype meeting watch` draws the same meeting in a terminal, for desktops
+without a meeting window and over SSH. Run it in a terminal of its own.
+
+```bash
+voxtype meeting watch
+```
+
+Expected, with no meeting running:
+
+- **Meetings** lists recent meetings, newest first, with length, speaker count
+  and `summary` on those that have one. Enter opens one as **■ Ended** with its
+  transcript and speakers; Esc goes back.
+
+Start a meeting from another terminal and talk for a minute:
+
+```bash
+voxtype meeting start --title "Watch check"
+```
+
+Expected:
+
+- The list gives way to **● REC  Watch check** and the elapsed time. Lines
+  arrive once per chunk, each with its time and speaker color.
+- If the daemon sends levels, `mic ▮▮▯▯▯ call ▯▯▯▯▯` moves while you speak and
+  empties when you pause.
+- `p` pauses (**❚❚ Paused**, the meter empties) and `p` resumes.
+- `l`, pick **You**, Enter, type `Me`, Enter: the footer says "Name You: done"
+  and the chip and every line say **Me**.
+- `r` on a line moves it to another speaker; it then reads "(was You)".
+- In the other terminal, `voxtype meeting edit latest <id> "Corrected."`
+  marks the line "(edited)" and `voxtype meeting delete-line latest <id>`
+  removes it; `--restore` brings it back in place.
+- `s`, then `y`, stops: **… Finalizing**, then **… Summarizing** if
+  summaries are on, then **■ Ended** with the summary in the side panel.
+- `systemctl --user restart voxtype` while watching shows "reconnecting…"
+  until the daemon is back.
+
+```bash
+voxtype meeting watch --json | head -3
+```
+
+Expected: the first line is a `hello` event, as on the socket itself.
+
+## 15. The GTK4 window (3 minutes)
+
+The window for desktops without Quickshell. On Omarchy, point the view at it
+for this step; GNOME, Plasma or Sway without Quickshell resolve to it with the
+default `auto`.
+
+```bash
+ls /usr/lib/voxtype/voxtype-meetings-gtk4
+voxtype config set meeting.view gtk4
+omarchy-restart-shell     # Omarchy only: the shell reads meeting.view
+voxtype meeting view
+```
+
+Expected, with no meeting running:
+
+- An ordinary window titled "Meetings - Voxtype" that tiles, moves and
+  alt-tabs like any other. **Start meeting** with a title field above
+  **Recent meetings**, newest first, with `· summary` on those that have one.
+- Pick a meeting with a summary: its transcript, speakers and notes, marked
+  "Past meeting: read-only", with no Move or Note buttons, and its summary as
+  `summary.md` reads (headings, bullets). Ask still answers.
+- **Meetings** goes back to the list.
+
+Type `GTK check` in the title field and press **Start meeting**. Talk for a
+minute.
+
+Expected:
+
+- The Quickshell view does not open; the window switches to **● Recording
+  GTK check** and the elapsed time, with two level meters that move while you
+  speak.
+- Lines arrive once per chunk in speaker colors. Click **You**, type `Me`,
+  OK: the button and every line say **Me**.
+- Select a line, **Move line to…**, pick another speaker: it reads
+  "(was You)". In a terminal, `voxtype meeting edit latest <id> "Fixed."`
+  marks it "(edited)" and `voxtype meeting delete-line latest <id>` removes it.
+- **Pause** shows **❚❚ Paused** and the meters disappear; **Resume**.
+- Close the window, stop the meeting with `voxtype meeting stop`, and start
+  another with `voxtype meeting start --title "Auto open"`: the window opens
+  by itself. The daemon log says so:
+  `journalctl --user -u voxtype | grep "Meeting view on start"`.
+- **Stop**, confirm: **Finalizing…**, then the summary under **Summary**.
+
+Put the view back:
+
+```bash
+voxtype config set meeting.view auto
+omarchy-restart-shell     # Omarchy only
+```
+
 ## Clean up
 
 ```bash
@@ -392,3 +487,6 @@ systemctl --user restart voxtype
 | 10 Kept audio and playback | | |
 | 11 Tray offer | | |
 | 12 Standalone host | | |
+| 13 Speaker echo | | |
+| 14 Terminal view | | |
+| 15 GTK4 window | | |

@@ -524,6 +524,7 @@ pub fn meeting_config_for(config: &Config, diarization: Option<&str>) -> Meeting
             },
             retain_audio: false,
             max_meetings: 0,
+            my_name: config.meeting.my_name.clone(),
         },
         // Import writes its audio files itself, from the original.
         retain_audio: false,

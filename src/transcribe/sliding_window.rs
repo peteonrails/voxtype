@@ -250,6 +250,17 @@ impl Transcriber for SlidingWindowStreamingTranscriber {
         self.base.transcribe(samples)
     }
 
+    fn transcribe_timed(
+        &self,
+        samples: &[f32],
+    ) -> Result<Vec<super::TimedSegment>, TranscribeError> {
+        self.base.transcribe_timed(samples)
+    }
+
+    fn short_clips_are_cheap(&self) -> bool {
+        self.base.short_clips_are_cheap()
+    }
+
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
         Some(self)
     }
