@@ -3854,7 +3854,7 @@ System audio loopback capture for recording remote meeting participants. Uses `p
 
 - `"auto"` - Detect a monitor source automatically via `pactl`. Prefers a source that is currently RUNNING (active audio output).
 - `"disabled"` - Mic-only capture, no loopback.
-- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`).
+- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`). When it is a sink's monitor, the echo canceller (`echo_cancel`) removes that sink's sound rather than the default output's, so a call played on a non-default output is cancelled too.
 
 To list available monitor sources:
 

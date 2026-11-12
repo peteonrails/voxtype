@@ -17,11 +17,13 @@
 #     level the control records them (a silent mic track would pass the
 #     echo checks)
 #   - disabled: the control, where they do
-# then a canceller that hears nothing (its capture pointed at a silent
-# source) must be left for the direct mic within seconds, and a meeting on
-# the canceller is killed with SIGKILL, and the canceller must be gone. The
-# loopback track is off, so transcript dedup (which also strips exact
-# echoes) cannot hide the echo from the control.
+# then a call played on a sink other than the default, named by
+# loopback_device, must be cancelled against that sink; a canceller
+# that hears nothing (its capture pointed at a silent source) must be left
+# for the direct mic within seconds; and a meeting on the canceller is
+# killed with SIGKILL, and the canceller must be gone. The loopback track is
+# off except in the call-sink case, which is judged on the kept audio, so
+# transcript dedup (which also strips exact echoes) cannot hide the echo.
 set -u
 BIN=$1; YOU=$2; REMOTE=$3
 [ -e /dev/snd ] && { echo "refusing: /dev/snd is visible, run this in an isolated session"; exit 2; }
@@ -50,7 +52,7 @@ sleep 1
 SI=$(pactl -f json list sink-inputs | python3 -c "import json,sys; print(next(i['index'] for i in json.load(sys.stdin) if str(i.get('owner_module'))=='$ECHO'))")
 pactl set-sink-input-volume $SI 0.12
 
-daemon() { # $1 = echo_cancel, $2 = mic_device (default "default")
+daemon() { # $1 = echo_cancel, $2 = mic_device (default "default"), $3 = loopback_device (default "disabled")
   cat > $XDG_CONFIG_HOME/voxtype/config.toml <<CFG
 engine = "whisper"
 [whisper]
@@ -69,7 +71,7 @@ mic_device = "${2:-default}"
 # No loopback track: transcript dedup strips mic lines the loopback also
 # holds, and with this test's perfect-copy echo it would hide the echo
 # from the control. Without it the test measures the canceller alone.
-loopback_device = "disabled"
+loopback_device = "${3:-disabled}"
 [meeting.summary]
 auto = false
 CFG
@@ -81,7 +83,7 @@ meeting() { # $1 = title, $2 = "call" or "echo"
   $BIN meeting start --title "$1" >/dev/null; state recording; sleep 1
   STATUS=$($BIN meeting status --json)
   HELLO=$(timeout 2 socat -u UNIX-CONNECT:$XDG_RUNTIME_DIR/voxtype/meeting.sock - 2>/dev/null | head -1)
-  paplay -d speakers "$REMOTE" & local p=$!
+  paplay -d ${CALL_SINK:-speakers} "$REMOTE" & local p=$!
   [ "$2" = call ] && paplay -d micsink "$YOU"
   wait $p; sleep 2
   $BIN meeting stop >/dev/null; state idle; sleep 1
@@ -172,6 +174,24 @@ echo "filter default source: unwrapped to mic, remote-only words on the mic trac
 [ "$LEAK" -gt 1 ] && fail "filter: $LEAK remote words reached the mic track"
 kill $DPID; wait $DPID 2>/dev/null
 pactl set-default-source mic; pactl unload-module $FX
+
+# The call on a sink other than the default, with loopback_device naming its
+# monitor: the canceller must remove that sink's sound, not the default's.
+pactl load-module module-null-sink sink_name=callsink >/dev/null
+CE=$(pactl load-module module-loopback source=callsink.monitor sink=micsink latency_msec=30); sleep 1
+CSI=$(pactl -f json list sink-inputs | python3 -c "import json,sys; print(next(i['index'] for i in json.load(sys.stdin) if str(i.get('owner_module'))=='$CE'))")
+pactl set-sink-input-volume $CSI 0.12
+daemon webrtc default callsink.monitor
+CALL_SINK=callsink meeting "call sink echo" echo; CALL_DB=$(mic_db 2>/dev/null || echo 0)
+CALL_SINK=callsink meeting "call sink call" call
+TEXT=$(mic_text); OWN=$(own_words "$TEXT")
+echo "call on callsink: echo-only mic $CALL_DB dBFS (control ${DB[disabled]}), your words kept: $OWN%"
+grep -q "cancelling callsink" $OUT/daemon.log || fail "call sink: the canceller did not take callsink as its reference"
+python3 -c "import sys; sys.exit(0 if float(sys.argv[2]) - float(sys.argv[1]) >= 20 else 1)" "$CALL_DB" "${DB[disabled]}" \
+  || fail "call sink: the echo of the call's sink was not cancelled"
+[ "$OWN" -ge 80 ] || fail "call sink: only $OWN% of your words reached the mic track"
+kill $DPID; wait $DPID 2>/dev/null
+pactl unload-module $CE
 
 # A canceller that hears nothing: a pipewire on the daemon's PATH points
 # its capture at a source nobody plays into. Within seconds the meeting
