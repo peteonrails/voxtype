@@ -730,7 +730,7 @@ pub fn on_outcome(
 pub fn draw(f: &mut Frame, app: &mut WatchApp, now: DateTime<Utc>) {
     let area = f.area();
     match app.screen {
-        Screen::List => draw_list(f, app, area),
+        Screen::List => draw_list(f, app, area, now),
         Screen::Meeting => draw_meeting(f, app, area, now),
     }
     match &app.modal {
@@ -1125,7 +1125,7 @@ fn draw_side(f: &mut Frame, app: &WatchApp, area: Rect) {
     );
 }
 
-fn draw_list(f: &mut Frame, app: &mut WatchApp, area: Rect) {
+fn draw_list(f: &mut Frame, app: &mut WatchApp, area: Rect, now: DateTime<Utc>) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1139,13 +1139,23 @@ fn draw_list(f: &mut Frame, app: &mut WatchApp, area: Rect) {
     } else {
         "Meetings (the daemon is not running)"
     };
-    f.render_widget(
-        Paragraph::new(Line::styled(
-            header,
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        rows[0],
-    );
+    let mut spans = vec![Span::styled(
+        header,
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    // A sound check shows its levels here, where no meeting is on screen.
+    if let Some(l) = app.live.current_levels(now).filter(|l| l.soundcheck) {
+        spans.push(Span::styled(
+            "  Sound check  ",
+            Style::default().fg(Color::Cyan),
+        ));
+        spans.extend(level_spans("mic", l.mic));
+        if l.loopback.is_some() {
+            spans.push(Span::raw(" "));
+            spans.extend(level_spans("call", l.loopback));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
     let mut items: Vec<ListItem> = Vec::new();
     if app.has_live_row() {

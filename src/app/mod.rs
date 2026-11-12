@@ -27,6 +27,7 @@ mod macos;
 mod meeting;
 mod meeting_assistant;
 mod meeting_recover;
+mod meeting_soundcheck;
 mod meeting_watch;
 mod migrate;
 mod overrides;
