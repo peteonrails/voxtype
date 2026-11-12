@@ -33,8 +33,7 @@ pub const ENDED_FILE: &str = "meeting_playback.ended";
 /// The daemon trigger that announces a playback change on meeting.sock.
 pub const TRIGGER: &str = "meeting_playback";
 
-/// `$0` of the pipeline's shell, so a PID from the state file is only
-/// signalled while it is still this shell.
+/// `$0` of the pipeline's shell, so `ps` shows what it is.
 const SHELL_NAME: &str = "voxtype-meeting-play";
 
 /// The players tried, in order. Each reads WAV on stdin.
@@ -221,6 +220,11 @@ struct PlaybackRecord {
     track: Track,
     from_ms: u64,
     pid: u32,
+    /// The shell's start time in clock ticks since boot, from
+    /// /proc/<pid>/stat: with `pid`, names this process and no later one
+    /// that reuses the PID.
+    #[serde(default)]
+    start_ticks: u64,
     started_at: DateTime<Utc>,
     token: String,
     file: PathBuf,
@@ -331,6 +335,7 @@ printf %s "$token" > "$runtime/meeting_playback.ended"
     }
     let child = cmd.spawn()?;
     let pid = child.id();
+    let start_ticks = proc_stat(pid).map(|(_, ticks)| ticks).unwrap_or(0);
     // Reaped by init once this command exits; the shell outlives it.
     drop(child);
 
@@ -339,6 +344,7 @@ printf %s "$token" > "$runtime/meeting_playback.ended"
         track,
         from_ms,
         pid,
+        start_ticks,
         started_at: Utc::now(),
         token,
         file: file.to_path_buf(),
@@ -388,7 +394,7 @@ pub fn status(runtime_dir: &Path) -> PlaybackStatus {
     };
     let ended = std::fs::read_to_string(runtime_dir.join(ENDED_FILE))
         .is_ok_and(|token| token == record.token);
-    let playing = !ended && is_our_shell(record.pid);
+    let playing = !ended && is_running(record.pid, record.start_ticks);
     let position_ms = playing.then(|| {
         let elapsed = (Utc::now() - record.started_at).num_milliseconds().max(0) as u64;
         record.from_ms + elapsed
@@ -404,24 +410,24 @@ pub fn status(runtime_dir: &Path) -> PlaybackStatus {
     }
 }
 
-/// Whether `pid` is still a playback shell, not a process that reused its
-/// PID.
-fn is_our_shell(pid: u32) -> bool {
-    std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
-        cmdline
-            .split(|&b| b == 0)
-            .any(|arg| arg == SHELL_NAME.as_bytes())
-    }) && !is_zombie(pid)
+/// Whether the playback shell started as `pid` at `start_ticks` is still
+/// running. Matching the start time, not the command line, both rules out a
+/// process that reused the PID and works in the moment after exec, before
+/// the kernel has filled in the new command line.
+fn is_running(pid: u32, start_ticks: u64) -> bool {
+    proc_stat(pid).is_some_and(|(state, ticks)| state != 'Z' && ticks == start_ticks)
 }
 
-fn is_zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next().map(|s| s == "Z"))
-        })
-        .unwrap_or(true)
+/// A process's state letter and start time (clock ticks since boot).
+fn proc_stat(pid: u32) -> Option<(char, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields after the parenthesised command name, which may hold spaces:
+    // state is the first, starttime (field 22) the twentieth.
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ticks = fields.nth(18)?.parse().ok()?;
+    Some((state, ticks))
 }
 
 fn read_record(runtime_dir: &Path) -> Option<PlaybackRecord> {
@@ -448,7 +454,6 @@ fn poke(runtime_dir: &Path) {
 mod tests {
     use super::*;
     use crate::meeting::{data::TranscriptSegment, MeetingMetadata, StorageConfig, Transcript};
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
     /// A directory of fake programs: none of them makes a sound.
@@ -463,10 +468,12 @@ mod tests {
             }
         }
 
+        /// Safe to run at once under parallel tests (no ETXTBSY).
         fn add(&self, name: &str, body: &str) {
-            let path = self.dir.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::write_script(
+                &self.dir.path().join(name),
+                &format!("#!/bin/sh\n{body}\n"),
+            );
         }
 
         /// ffmpeg that records its arguments and writes `bytes` bytes,
@@ -671,6 +678,32 @@ wc -c | tr -d ' ' > {log}.tmp && mv {log}.tmp {log}.bytes"#
         );
     }
 
+    fn alive(pid: u32) -> bool {
+        proc_stat(pid).is_some_and(|(state, _)| state != 'Z')
+    }
+
+    #[test]
+    fn a_process_is_known_by_its_start_time() {
+        let (_, ticks) = proc_stat(std::process::id()).unwrap();
+        assert!(ticks > 0);
+        assert!(is_running(std::process::id(), ticks));
+        assert!(!is_running(std::process::id(), ticks + 1), "a reused PID");
+        assert!(!is_running(u32::MAX, ticks));
+    }
+
+    fn diag(runtime: &Path, bin: &FakeBin, pid: u32) -> String {
+        format!(
+            "log={:?} ended={:?} stat={:?} cmdline={:?} ffmpeg={:?} paplay={:?}",
+            std::fs::read_to_string(runtime.join("meeting_playback.log")),
+            std::fs::read_to_string(runtime.join(ENDED_FILE)),
+            std::fs::read_to_string(format!("/proc/{pid}/stat")),
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|b| String::from_utf8_lossy(&b).replace('\0', " ")),
+            bin.read("ffmpeg.log"),
+            bin.read("paplay.log.bytes"),
+        )
+    }
+
     #[test]
     fn a_new_playback_stops_the_last_and_stop_stops_it() {
         let bin = FakeBin::new();
@@ -684,21 +717,28 @@ wc -c | tr -d ' ' > {log}.tmp && mv {log}.tmp {log}.bytes"#
 
         let first = start(runtime.path(), &tools, &id, Track::Mixed, &file, 0).unwrap();
         let s = status(runtime.path());
-        assert_eq!(s.state, "playing");
+        assert_eq!(
+            s.state,
+            "playing",
+            "{}",
+            diag(runtime.path(), &bin, first.pid)
+        );
         assert!(s.position_ms.unwrap() < 5_000);
 
         let second = start(runtime.path(), &tools, &id, Track::Mixed, &file, 2_000).unwrap();
-        wait_for("the first to die", || !is_our_shell(first.pid));
+        wait_for("the first to die", || !alive(first.pid));
         let s = status(runtime.path());
         assert_eq!(
             (s.state.as_str(), s.pid, s.from_ms),
-            ("playing", Some(second.pid), Some(2_000))
+            ("playing", Some(second.pid), Some(2_000)),
+            "{}",
+            diag(runtime.path(), &bin, second.pid)
         );
 
         let stopped = stop(runtime.path());
         assert_eq!(stopped.state, "playing", "reports what it stopped");
         assert_eq!(status(runtime.path()).state, "stopped");
-        wait_for("the second to die", || !is_our_shell(second.pid));
+        wait_for("the second to die", || !alive(second.pid));
         // Stopping again is harmless.
         assert_eq!(stop(runtime.path()).state, "stopped");
     }

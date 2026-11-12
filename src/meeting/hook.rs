@@ -120,7 +120,7 @@ pub async fn run_command(
         // Its own group, so a timeout kills whatever it started too, and
         // a signal meant for the daemon's terminal does not reach it.
         .process_group(0);
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             tracing::warn!("post_meeting_command could not start: {}", e);
@@ -128,50 +128,75 @@ pub async fn run_command(
         }
     };
     let pid = child.id();
-
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            let stdout = log_text(&output.stdout);
-            let stderr = log_text(&output.stderr);
-            if output.status.success() {
-                tracing::info!(
-                    "post_meeting_command finished for {}{}",
-                    meeting_id,
-                    if stdout.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {stdout}")
-                    }
-                );
-                HookOutcome::Succeeded
-            } else {
-                tracing::warn!(
-                    "post_meeting_command failed for {} ({}): {}",
-                    meeting_id,
-                    output.status,
-                    if stderr.is_empty() { &stdout } else { &stderr }
-                );
-                HookOutcome::Failed(output.status.code())
+    let read_all = |pipe: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
             }
-        }
+            buf
+        })
+    };
+    let stdout = read_all(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read_all(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(Ok(status)) => status,
         Ok(Err(e)) => {
             tracing::warn!("post_meeting_command for {}: {}", meeting_id, e);
-            HookOutcome::Failed(None)
+            return HookOutcome::Failed(None);
         }
         Err(_) => {
+            // Still running and not yet reaped, so its PID, which is also
+            // its group's ID, cannot have been reused: signalling the group
+            // reaches only the command and what it started.
             if let Some(pid) = pid {
                 let _ = nix::sys::signal::killpg(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGKILL,
                 );
             }
+            let _ = child.wait().await;
             tracing::warn!(
                 "post_meeting_command for {} ran past {}s and was killed",
                 meeting_id,
                 timeout.as_secs()
             );
-            HookOutcome::TimedOut
+            return HookOutcome::TimedOut;
         }
+    };
+
+    // Something it left running may still hold its output open; read what
+    // arrives before the deadline and leave the rest.
+    let output = |task: tokio::task::JoinHandle<Vec<u8>>| async move {
+        tokio::time::timeout_at(deadline, task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|bytes| log_text(&bytes))
+            .unwrap_or_default()
+    };
+    let (stdout, stderr) = (output(stdout).await, output(stderr).await);
+    if status.success() {
+        tracing::info!(
+            "post_meeting_command finished for {}{}",
+            meeting_id,
+            if stdout.is_empty() {
+                String::new()
+            } else {
+                format!(": {stdout}")
+            }
+        );
+        HookOutcome::Succeeded
+    } else {
+        tracing::warn!(
+            "post_meeting_command failed for {} ({}): {}",
+            meeting_id,
+            status,
+            if stderr.is_empty() { &stdout } else { &stderr }
+        );
+        HookOutcome::Failed(status.code())
     }
 }
 

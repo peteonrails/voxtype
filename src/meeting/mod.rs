@@ -1093,6 +1093,58 @@ mod tests {
         assert_eq!(m.url.as_deref(), Some(url));
     }
 
+    /// Labels and deletions after the meeting reach meeting.json: a speaker
+    /// whose only line was deleted is gone from it, while transcript.json
+    /// keeps the line as a tombstone.
+    #[tokio::test]
+    async fn manifest_follows_labels_and_deleted_lines() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        let id = h.daemon.stop().await.unwrap();
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let mine = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .find(|s| s.source == AudioSource::Microphone)
+            .unwrap()
+            .id;
+
+        cli.set_speaker_label(&id, "Remote", "Dana").unwrap();
+        cli.delete_segment(&id, mine, true).unwrap();
+
+        let m = h.manifest();
+        let speakers: Vec<(&str, &str)> = m
+            .speakers
+            .iter()
+            .map(|s| (s.id.as_str(), s.name.as_str()))
+            .collect();
+        assert_eq!(speakers, [("Remote", "Dana")]);
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(h.folder().join("transcript.json")).unwrap(),
+        )
+        .unwrap();
+        let tombstone = raw["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == mine)
+            .unwrap();
+        assert_eq!(tombstone["deleted"], true);
+        let listed = m
+            .files
+            .iter()
+            .find(|f| f.name == "transcript.json")
+            .unwrap();
+        assert_eq!(
+            listed.bytes,
+            std::fs::metadata(h.folder().join("transcript.json"))
+                .unwrap()
+                .len()
+        );
+    }
+
     #[tokio::test]
     async fn manifest_follows_notes_written_after_the_meeting() {
         let mut h = harness().await;
@@ -1217,6 +1269,25 @@ mod tests {
             .and_then(|rest| rest.split_whitespace().next())
             .is_some_and(|s| s != "Z");
         assert!(!running, "sleep {pid} outlived its timeout: {state}");
+    }
+
+    /// A command that exits but leaves something running with its output
+    /// open finishes when it exits, not when the leftover does.
+    #[tokio::test]
+    async fn a_post_meeting_command_that_leaves_a_child_running_still_finishes() {
+        let mut h = harness().await;
+        with_command(
+            &mut h,
+            "sleep 30 & echo $! > child.pid; echo started",
+            std::time::Duration::from_millis(800),
+        );
+        let id = h.daemon.stop().await.unwrap();
+        let started = std::time::Instant::now();
+        let outcome = h.daemon.post_meeting(id).run().await;
+        assert_eq!(outcome, Some(hook::HookOutcome::Succeeded));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let pid = std::fs::read_to_string(h.folder().join("child.pid")).unwrap();
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
     }
 
     #[tokio::test]

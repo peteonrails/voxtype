@@ -645,8 +645,42 @@ mod tests {
         assert_eq!(files, ["mic.opus", "mixed.opus"]);
     }
 
-    /// The encoder dies mid-meeting: what it wrote still plays, and the
-    /// meeting carries on without blocking.
+    /// Seconds of audio in the complete Ogg pages of an Opus file: the last
+    /// complete page's granule position (48 kHz samples) less the encoder's
+    /// pre-skip. This is exactly what a decoder can recover from the bytes
+    /// on disk, whatever the bitrate did.
+    fn flushed_secs(path: &Path) -> f64 {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        let (mut pos, mut pre_skip, mut granule) = (0, None, 0i64);
+        while pos + 27 <= bytes.len() && &bytes[pos..pos + 4] == b"OggS" {
+            let segments = bytes[pos + 26] as usize;
+            let header = 27 + segments;
+            if pos + header > bytes.len() {
+                break;
+            }
+            let body: usize = bytes[pos + 27..pos + header]
+                .iter()
+                .map(|&b| b as usize)
+                .sum();
+            if pos + header + body > bytes.len() {
+                break; // the page being written when it died
+            }
+            let page = &bytes[pos + header..pos + header + body];
+            if pre_skip.is_none() && page.starts_with(b"OpusHead") {
+                pre_skip = Some(u16::from_le_bytes([page[10], page[11]]) as i64);
+            }
+            let g = i64::from_le_bytes(bytes[pos + 6..pos + 14].try_into().unwrap());
+            if g > 0 {
+                granule = g;
+            }
+            pos += header + body;
+        }
+        (granule - pre_skip.unwrap_or(0)).max(0) as f64 / 48_000.0
+    }
+
+    /// The encoder dies mid-meeting: everything it had flushed still
+    /// decodes, the other tracks are unaffected, and the meeting carries
+    /// on without blocking.
     #[test]
     fn a_killed_encoder_leaves_the_audio_written_so_far() {
         let Some(encoder) = ffmpeg() else { return };
@@ -655,12 +689,13 @@ mod tests {
         for _ in 0..10 {
             audio.push(tone(1.0, 0.5), Vec::new());
         }
-        // Let ffmpeg encode what it was given, then kill it unannounced.
+        // Kill ffmpeg unannounced once at least two seconds are on disk in
+        // complete pages, however long encoding takes under load.
         let mic_path = dir.path().join("mic.opus");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::fs::metadata(&mic_path).map(|m| m.len()).unwrap_or(0) < 20_000 {
-            assert!(Instant::now() < deadline, "ffmpeg wrote nothing");
-            std::thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while flushed_secs(&mic_path) < 2.0 {
+            assert!(Instant::now() < deadline, "ffmpeg flushed nothing");
+            std::thread::sleep(Duration::from_millis(20));
         }
         let mic_pid = audio.encoder_pids()[0];
         nix::sys::signal::kill(
@@ -668,18 +703,20 @@ mod tests {
             nix::sys::signal::Signal::SIGKILL,
         )
         .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
         // More audio after the crash goes nowhere, without an error.
         audio.push(tone(1.0, 0.5), Vec::new());
         assert!(audio.finish());
 
-        let recovered = decode(&mic_path);
+        // The file is final now. What its complete pages hold is what must
+        // decode, no more and no less (to within one 20 ms Opus frame).
+        let flushed = flushed_secs(&mic_path);
+        assert!(flushed >= 2.0, "{flushed}s flushed");
+        let recovered = secs(decode(&mic_path).len()) as f64;
         assert!(
-            secs(recovered.len()) > 7.0,
-            "only {}s recovered",
-            secs(recovered.len())
+            (recovered - flushed).abs() <= 0.021,
+            "{recovered}s decoded of {flushed}s flushed"
         );
-        assert!(rms(&recovered[16000..32000]) > 0.2);
+        assert!(rms(&decode(&mic_path)[16000..32000]) > 0.2);
         // The other track was not affected.
         assert!((secs(decode(&dir.path().join("mixed.opus")).len()) - 11.0).abs() < 0.1);
     }

@@ -729,12 +729,15 @@ The fields:
   `active` by a crash becomes `completed` the next time the daemon starts.
 - `started_at`, `ended_at`: RFC 3339, UTC. `duration_secs` is wall-clock
   time from start to stop.
-- `engine`, `model`: what the meeting was transcribed with, including a
-  `meeting start --engine` or `--model` override. `voxtype_version` is the
-  version that recorded it.
-- `speakers`: each speaker in the transcript, sorted by `id`. `id` is the
-  `speaker_id`; `name` is the name given with `meeting label`, or `id` when
-  there is none. Two speakers given the same name keep separate entries.
+- `engine`, `model`: the transcription engine and model the meeting used,
+  including a `meeting start --engine` or `--model` override.
+  `voxtype_version` is the version that recorded the meeting.
+- `speakers`: each speaker with at least one line in the transcript, sorted
+  by `id`; lines deleted with `meeting delete-line` do not count. `id` is the
+  speaker as the diarizer named it (the `speaker_id` in `transcript.json`, or
+  `You`/`Remote` without diarization); `name` is the name given with
+  `voxtype meeting label`, or `id` when there is none. Two speakers given the
+  same name keep separate entries.
 - `files`: the meeting's files that exist, in the order shown, with their
   size when the manifest was written. `kind` is one of `transcript`,
   `transcript_markdown`, `notes`, `summary`, `audio_mic`, `audio_loopback` or
@@ -748,9 +751,10 @@ saved answer per line, read them through `meeting show --json`),
 `assistant-context.json` (the assistant's running summary of a long
 meeting) and `metadata.json`. They are internal.
 
-The manifest is written when a meeting starts and rewritten when it stops,
-when its notes or summary change, and when a daemon restart completes a
-meeting a crash left open. To act once a meeting is finished, use
+The manifest is written when a meeting starts and rewritten after every
+chunk, when it stops, when its transcript is edited (labels, moves, text
+edits, deleted lines), when its notes or summary change, and when a daemon
+restart completes a meeting a crash left open. To act once a meeting is finished, use
 `[meeting] post_meeting_command` (see
 [Meeting Mode](MEETING_MODE.md#running-a-command-after-a-meeting)), which
 runs after the final rewrite with the folder and the manifest's path in

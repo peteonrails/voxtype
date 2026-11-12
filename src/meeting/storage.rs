@@ -639,6 +639,9 @@ impl MeetingStorage {
         if let Err(e) = write_transcript_markdown(&storage_path, &data) {
             tracing::warn!("Failed to write transcript.md: {}", e);
         }
+        // Every hand edit (label, reassign, text, delete) saves through
+        // here, and each can change meeting.json's speakers.
+        self.refresh_manifest(meeting_id);
 
         Ok(())
     }
