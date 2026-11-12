@@ -693,13 +693,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("args");
         let exe = dir.path().join("fake-voxtype");
-        std::fs::write(
+        crate::test_support::write_script(
             &exe,
-            format!("#!/bin/sh\nprintf '%s|' \"$@\" > '{}'\n", out.display()),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\nprintf '%s|' \"$@\" > '{}'\n", out.display()),
+        );
 
         let mut control = CliMeetingControl {
             exe,
