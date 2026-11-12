@@ -983,6 +983,14 @@ pub(crate) async fn run_meeting_command(
             super::meeting_watch::run_watch(json, levels, &meeting_config).await?;
         }
 
+        MeetingAction::Soundcheck {
+            seconds,
+            json,
+            stop,
+        } => {
+            super::meeting_soundcheck::run_soundcheck(config, seconds, json, stop).await?;
+        }
+
         MeetingAction::Assistant { action } => {
             super::meeting_assistant::run_assistant(config, action)?;
         }

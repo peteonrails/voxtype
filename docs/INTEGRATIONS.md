@@ -301,7 +301,8 @@ ten a second while a meeting records.
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
-| `levels` | About ten times a second while recording: each track's level |
+| `levels` | About ten times a second while recording or sound-checking: each track's level |
+| `soundcheck` | A sound check started or stopped |
 | `import_progress` | `meeting import` or `meeting retranscribe` finished a chunk |
 | `error` | Something failed |
 
@@ -431,12 +432,15 @@ and it sends them only while at least one client is connected.
 |-------|---------|
 | `mic`, `loopback` | RMS level of the window in dBFS, rounded to 0.1 dB: 0 is full scale, `-100` is silence. A speaking voice is typically -40 to -15 |
 | `mic_peak`, `loopback_peak` | The loudest sample of the window, in dBFS |
-| `t_ms` | Where the window ends on the meeting's timeline: microphone audio recorded so far, paused time left out, like `start_ms` on segments |
+| `t_ms` | Where the window ends on the meeting's timeline: microphone audio recorded so far, paused time left out, like `start_ms` on segments. During a sound check, time since it started |
+| `meeting_id` | The meeting measured; `null` during a sound check |
+| `soundcheck` | `true` during a sound check; absent otherwise |
 
 A track field is `null` when the meeting records no loopback, or when no
 audio from that track arrived in the window (for example right after a
-start). There are no `levels` while paused, finalizing or idle, and they
-are not part of `hello`; a meter should fall to silence when they stop.
+start). There are no `levels` while paused, finalizing or idle, unless a
+sound check runs, and they are not part of `hello`; a meter should fall to
+silence when they stop.
 They are best effort like every event: a client too slow for ten lines a
 second is disconnected, so read them promptly or use `--levels` from
 `voxtype meeting watch`, which reconnects.
@@ -447,6 +451,28 @@ To drive a 0 to 1 meter, map dBFS linearly from -60 to 0:
 ```sh
 voxtype meeting watch --levels | jq -c '[.t_ms, .mic, .loopback]'
 ```
+
+#### `soundcheck`
+
+```json
+{"event": "soundcheck", "state": "running", "seconds": 30, "echo_path": "aec", "mic": "voxtype_meeting_aec_source", "loopback": true}
+{"event": "soundcheck", "state": "stopped", "reason": "done"}
+{"event": "soundcheck", "state": "stopped", "reason": "error", "message": "Audio connection failed: ..."}
+```
+
+`voxtype meeting soundcheck` (below) asks the daemon to open the meeting's
+microphone and loopback exactly as a meeting would, record and transcribe
+nothing, and send `levels` with `"soundcheck": true` until it stops.
+
+- `running` says what the check, and so the next meeting, uses: `echo_path`
+  (`aec` for PipeWire's echo canceller, `gtcrn` or `off`, as
+  `meeting status --json` reports for a meeting), `mic` (the device, or the
+  canceller's source), and whether `loopback` is captured. It is sent again,
+  with the new `seconds`, when a check is extended.
+- `stopped` gives a `reason`: `done` (its time ran out), `stopped` (asked to),
+  `meeting` (a meeting needs the microphone; starting one ends the check) or
+  `error`, with a `message`, when the audio could not be opened. A request
+  made while a meeting records gets `stopped` with reason `meeting` at once.
 
 #### `import_progress`
 
@@ -706,6 +732,32 @@ The consent dialog's answers map to `voxtype meeting assistant allow <id>`,
 `voxtype config set meeting.assistant.local_only true` (or `ask --local` for
 one question), and doing nothing. `voxtype meeting assistant revoke <id>`
 withdraws consent.
+
+### Checking the audio: `meeting soundcheck`
+
+```sh
+voxtype meeting soundcheck [--seconds N] [--json]
+voxtype meeting soundcheck --stop
+```
+
+Opens the meeting's microphone and loopback as a meeting would, records and
+transcribes nothing, and prints both tracks' levels for `N` seconds (default
+30, at most 600) or until Ctrl+C. With `--json` it prints NDJSON: a
+`soundcheck` `running` event, `levels` events, and a `soundcheck` `stopped`
+event, in the shapes above. Without it, it draws two meters.
+
+While the daemon runs, the daemon does the check, because it owns the audio:
+the command asks for it through a trigger file and relays the events from
+meeting.sock, where every other client (the meeting view) sees them too. A
+second request while one runs extends it. `--stop` ends it from anywhere.
+The daemon ends it after `N` seconds even if the asking command is gone.
+Without the daemon, the command opens the audio itself the same way and
+prints the same lines.
+
+A meeting that is recording already has its levels, so the command refuses
+(exit 1) and points at `voxtype meeting watch --levels`. Exit status 1 also
+covers a check the audio could not be opened for, or one a starting meeting
+ended.
 
 ### Playing meeting audio: `meeting play`
 

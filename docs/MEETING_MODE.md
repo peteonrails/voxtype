@@ -28,6 +28,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Exporting Transcripts](#exporting-transcripts)
   - [Deleting Meetings](#deleting-meetings)
 - [Meeting Audio](#meeting-audio)
+  - [Checking the Audio](#checking-the-audio)
   - [Keeping the Audio](#keeping-the-audio)
   - [Playing a Meeting Back](#playing-a-meeting-back)
   - [Importing a Recording](#importing-a-recording)
@@ -470,6 +471,19 @@ Permanently deletes the meeting: its record, its folder and everything in it, au
 ---
 
 ## Meeting Audio
+
+### Checking the Audio
+
+Before a call, check that voxtype hears both sides:
+
+```bash
+voxtype meeting soundcheck                # 30 seconds of meters; Ctrl+C stops
+voxtype meeting soundcheck --seconds 60
+```
+
+It opens the meeting's microphone and loopback the way a meeting would (the same devices, and on speakers the same echo canceller), records and transcribes nothing, and shows a meter for each. Speak: the mic meter should move. Play something on the computer: the loopback meter should move, and with speakers the mic meter should stay low, because the echo canceller takes the speakers out of the mic. The first line says which echo handling the next meeting will use.
+
+During a meeting the levels are already live in `voxtype meeting watch --levels` and the meeting view, so the sound check refuses to run then. Starting a meeting ends a sound check.
 
 ### Keeping the Audio
 

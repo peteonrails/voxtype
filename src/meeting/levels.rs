@@ -107,7 +107,11 @@ impl MeetingMeters {
 /// A `levels` event's content. Levels are dBFS of the window's RMS and peak.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Levels {
-    pub meeting_id: String,
+    /// The meeting measured; `None` during a sound check.
+    pub meeting_id: Option<String>,
+    /// Present (and true) only during a sound check, which records nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub soundcheck: bool,
     /// Where the window ends on the meeting's timeline, in ms: microphone
     /// audio recorded so far, paused time left out, like transcript times.
     pub t_ms: u64,
@@ -125,7 +129,7 @@ pub struct Levels {
 /// level, not a backlog. Runs until the task is aborted.
 pub async fn run_publisher(
     meters: MeetingMeters,
-    meeting_id: String,
+    meeting_id: Option<String>,
     active: Arc<AtomicBool>,
     has_clients: impl Fn() -> bool + Send,
     send: impl Fn(Levels) + Send,
@@ -145,6 +149,7 @@ pub async fn run_publisher(
             continue;
         }
         send(Levels {
+            soundcheck: meeting_id.is_none(),
             meeting_id: meeting_id.clone(),
             t_ms: timeline_samples * 1000 / SAMPLE_RATE,
             mic: mic.map(|w| dbfs(w.rms)),
@@ -199,7 +204,7 @@ mod tests {
             let (meters, sent, clients) = (meters.clone(), sent.clone(), clients.clone());
             tokio::spawn(run_publisher(
                 meters,
-                "m1".into(),
+                Some("m1".into()),
                 active,
                 move || clients.load(Ordering::Relaxed),
                 move |l| sent.lock().unwrap().push(l),
@@ -228,7 +233,8 @@ mod tests {
         // 2 s: about 20 events, never more than one per 100 ms tick.
         assert!((19..=21).contains(&sent.len()), "{}", sent.len());
         let last = sent.last().unwrap();
-        assert_eq!(last.meeting_id, "m1");
+        assert_eq!(last.meeting_id.as_deref(), Some("m1"));
+        assert!(!last.soundcheck);
         assert_eq!(last.mic, Some(-9.0));
         assert_eq!(last.mic_peak, Some(-6.0));
         assert_eq!(last.loopback, Some(SILENCE_DBFS));
@@ -247,7 +253,7 @@ mod tests {
             let (m, s, c) = (meters.clone(), sent.clone(), clients.clone());
             tokio::spawn(run_publisher(
                 m,
-                "m1".into(),
+                Some("m1".into()),
                 active,
                 move || c.load(Ordering::Relaxed),
                 move |l| s.lock().unwrap().push(l),

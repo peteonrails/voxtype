@@ -757,6 +757,25 @@ fn check_meeting_notes() -> bool {
     take_trigger("meeting_notes")
 }
 
+/// A `voxtype meeting soundcheck` request, consumed.
+fn take_soundcheck_trigger() -> Option<meeting::soundcheck::Request> {
+    let file = Config::runtime_dir().join(meeting::soundcheck::TRIGGER);
+    let text = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    Some(meeting::soundcheck::Request::parse(&text))
+}
+
+/// A sound check the daemon is running.
+struct Soundcheck {
+    capture: audio::DualCapture,
+    /// The echo canceller the check records through; dropping it stops it.
+    _canceller: Option<audio::echo_cancel::EchoCanceller>,
+    levels: Option<tokio::task::JoinHandle<()>>,
+    deadline: std::time::Instant,
+    /// The `running` event, re-sent when the check is extended.
+    running: meeting::soundcheck::SoundcheckEvent,
+}
+
 fn take_trigger(name: &str) -> bool {
     let file = Config::runtime_dir().join(name);
     if file.exists() {
@@ -1181,6 +1200,8 @@ pub struct Daemon {
     meeting_state_file_path: Option<PathBuf>,
     // Audio capture for meeting mode (dual: mic + loopback)
     meeting_audio_capture: Option<audio::DualCapture>,
+    /// A running `voxtype meeting soundcheck`.
+    meeting_soundcheck: Option<Soundcheck>,
     /// The meeting.sock level publisher and its "recording, not paused" flag.
     meeting_levels: Option<(
         tokio::task::JoinHandle<()>,
@@ -1371,6 +1392,7 @@ impl Daemon {
             meeting_state_file_path,
             meeting_audio_capture: None,
             meeting_levels: None,
+            meeting_soundcheck: None,
             meeting_mic_buffer: Vec::new(),
             meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
@@ -3066,63 +3088,14 @@ impl Daemon {
         // the diarizer, and `meeting start` has already returned, so anyone
         // who starts talking then lost the opening of the meeting. The
         // capture buffers what arrives meanwhile, and the first chunk holds it.
-        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
-            "disabled" | "" => None,
-            other => Some(other),
-        };
-        let mut meeting_audio_config = self.config.audio.clone();
-        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
-        if !matches!(meeting_mic_device, "default" | "") {
-            tracing::info!(
-                "Meeting mic override: {} (dictation uses {})",
-                meeting_mic_device,
-                self.config.audio.device
-            );
-            meeting_audio_config.device = self.config.meeting.audio.mic_device.clone();
-        }
-        // On speakers the mic is recorded from PipeWire's echo canceller,
-        // so it starts first; anything that goes wrong falls back to GTCRN.
-        let echo_mode = audio::echo_cancel::Mode::parse(&self.config.meeting.audio.echo_cancel);
-        let mic_device = self.config.meeting.audio.mic_device.clone();
-        let (mut echo_path, mut echo_canceller) = tokio::task::spawn_blocking(move || {
-            audio::echo_cancel::begin(echo_mode, &mic_device, &Config::runtime_dir())
-        })
-        .await
-        .unwrap_or((audio::echo_cancel::EchoPath::Gtcrn, None));
-        let mut aec_capture = None;
-        if let Some(ref aec) = echo_canceller {
-            match audio::DualCapture::with_mic_source(aec.source(), loopback_device) {
-                Ok(mut capture) => match capture.start().await {
-                    Ok(()) => aec_capture = Some(capture),
-                    Err(e) => {
-                        tracing::warn!("Cannot record the echo-cancelled mic ({}); using GTCRN", e)
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("Cannot record the echo-cancelled mic ({}); using GTCRN", e)
-                }
-            }
-            if aec_capture.is_none() {
-                echo_canceller = None;
-                echo_path = audio::echo_cancel::EchoPath::Gtcrn;
-            }
-        }
-        let mut capture = match aec_capture {
-            Some(capture) => capture,
-            None => match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
-                Ok(capture) => capture,
-                Err(e) => {
-                    tracing::error!("Failed to create meeting audio capture: {}", e);
-                    return Err(crate::error::VoxtypeError::Audio(e));
-                }
-            },
-        };
-        if echo_canceller.is_none() {
-            if let Err(e) = capture.start().await {
-                tracing::error!("Failed to start meeting audio: {}", e);
-                return Err(crate::error::VoxtypeError::Audio(e));
-            }
-        }
+        // A sound check holds the same devices; it gives way.
+        self.stop_soundcheck("meeting").await;
+        let opened = meeting::soundcheck::open_capture(&self.config)
+            .await
+            .map_err(crate::error::VoxtypeError::Audio)?;
+        let mut capture = opened.capture;
+        let echo_path = opened.echo_path;
+        let mut echo_canceller = opened.canceller;
         if capture.has_loopback() {
             tracing::info!("Dual audio capture: mic + loopback");
         } else {
@@ -3248,12 +3221,100 @@ impl Daemon {
         let clients = hub.clone();
         let task = tokio::spawn(meeting::levels::run_publisher(
             meters,
-            meeting_id.to_string(),
+            Some(meeting_id.to_string()),
             active.clone(),
             move || clients.has_subscribers(),
             move |levels| hub.publish_levels(levels),
         ));
         self.meeting_levels = Some((task, active));
+    }
+
+    /// Start a sound check: the meeting's capture, opened as a meeting
+    /// would, its levels on meeting.sock, nothing recorded. Asking again
+    /// while one runs gives it `seconds` more.
+    async fn start_soundcheck(&mut self, seconds: u64) {
+        use meeting::soundcheck::SoundcheckEvent;
+        if self.meeting_daemon.is_some() {
+            self.publish_soundcheck(SoundcheckEvent::stopped(
+                "meeting",
+                Some("A meeting is recording; its levels are already on meeting.sock.".into()),
+            ));
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+        if let Some(sc) = self.meeting_soundcheck.as_mut() {
+            sc.deadline = deadline;
+            sc.running.seconds = Some(seconds);
+            let event = sc.running.clone();
+            self.publish_soundcheck(event);
+            return;
+        }
+        match meeting::soundcheck::open_capture(&self.config).await {
+            Ok(opened) => {
+                let running = SoundcheckEvent::running(&opened, seconds);
+                tracing::info!(
+                    "Sound check for {} s: mic {}, echo path {}, loopback {}",
+                    seconds,
+                    opened.mic,
+                    opened.echo_path.as_str(),
+                    opened.capture.has_loopback()
+                );
+                let levels = self.meeting_event_hub.clone().map(|hub| {
+                    let clients = hub.clone();
+                    tokio::spawn(meeting::levels::run_publisher(
+                        opened.capture.meters(),
+                        None,
+                        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        move || clients.has_subscribers(),
+                        move |l| hub.publish_levels(l),
+                    ))
+                });
+                self.meeting_soundcheck = Some(Soundcheck {
+                    capture: opened.capture,
+                    _canceller: opened.canceller,
+                    levels,
+                    deadline,
+                    running: running.clone(),
+                });
+                self.publish_soundcheck(running);
+            }
+            Err(e) => {
+                tracing::warn!("Sound check could not open the meeting audio: {}", e);
+                self.publish_soundcheck(SoundcheckEvent::stopped("error", Some(e.to_string())));
+            }
+        }
+    }
+
+    /// End a running sound check, saying why.
+    async fn stop_soundcheck(&mut self, reason: &str) {
+        let Some(mut sc) = self.meeting_soundcheck.take() else {
+            return;
+        };
+        if let Some(task) = sc.levels.take() {
+            task.abort();
+        }
+        let _ = sc.capture.stop().await;
+        drop(sc);
+        tracing::info!("Sound check ended ({})", reason);
+        self.publish_soundcheck(meeting::soundcheck::SoundcheckEvent::stopped(reason, None));
+    }
+
+    /// Keep a sound check's capture from piling up audio nobody records,
+    /// and end it when its time is up.
+    async fn tick_soundcheck(&mut self) {
+        let Some(sc) = self.meeting_soundcheck.as_mut() else {
+            return;
+        };
+        let _ = sc.capture.get_samples().await;
+        if std::time::Instant::now() >= sc.deadline {
+            self.stop_soundcheck("done").await;
+        }
+    }
+
+    fn publish_soundcheck(&self, event: meeting::soundcheck::SoundcheckEvent) {
+        if let Some(hub) = &self.meeting_event_hub {
+            hub.publish_soundcheck(event);
+        }
     }
 
     fn stop_meeting_levels(&mut self) {
@@ -3473,6 +3534,16 @@ impl Daemon {
     /// daemon refused cannot fire later against a different meeting.
     async fn handle_meeting_triggers(&mut self) -> bool {
         let mut changed = false;
+
+        if let Some(request) = take_soundcheck_trigger() {
+            match request {
+                meeting::soundcheck::Request::Start { seconds } => {
+                    self.start_soundcheck(seconds).await
+                }
+                meeting::soundcheck::Request::Stop => self.stop_soundcheck("stopped").await,
+            }
+        }
+        self.tick_soundcheck().await;
 
         if let Some(trigger) = check_meeting_start() {
             if !self.config.meeting.enabled {

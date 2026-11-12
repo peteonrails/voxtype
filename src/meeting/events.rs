@@ -193,6 +193,7 @@ enum WireEvent {
         from_ms: u64,
     },
     Levels(crate::meeting::levels::Levels),
+    Soundcheck(crate::meeting::soundcheck::SoundcheckEvent),
     Error {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -402,6 +403,11 @@ impl MeetingEventHub {
     /// Broadcast a `levels` event: the meeting's per-track levels.
     pub fn publish_levels(&self, levels: crate::meeting::levels::Levels) {
         self.publish(WireEvent::Levels(levels));
+    }
+
+    /// Broadcast a `soundcheck` event: a sound check started or stopped.
+    pub fn publish_soundcheck(&self, event: crate::meeting::soundcheck::SoundcheckEvent) {
+        self.publish(WireEvent::Soundcheck(event));
     }
 
     /// Is any client connected? Lets frequent events like `levels` skip
@@ -673,7 +679,8 @@ mod tests {
         }
 
         hub.publish_levels(crate::meeting::levels::Levels {
-            meeting_id: "m1".into(),
+            meeting_id: Some("m1".into()),
+            soundcheck: false,
             t_ms: 1200,
             mic: Some(-23.4),
             mic_peak: Some(-15.1),

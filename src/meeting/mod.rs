@@ -39,6 +39,7 @@ pub mod notes;
 pub mod playback;
 pub mod retained_audio;
 pub mod retranscribe;
+pub mod soundcheck;
 pub mod start;
 pub mod state;
 pub mod status_notice;
