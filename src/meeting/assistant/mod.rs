@@ -917,7 +917,9 @@ mod tests {
             "{p}"
         );
         assert!(
-            p.contains("\nThe user asking is Pete (You).\nWrite about the user in the second person"),
+            p.contains(
+                "\nThe user asking is Pete (You).\nWrite about the user in the second person"
+            ),
             "{p}"
         );
         assert!(p.contains(
