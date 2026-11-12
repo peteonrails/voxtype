@@ -157,6 +157,47 @@ pub(crate) async fn run_meeting_command(
                 "Meeting start requested{}. Check status with 'voxtype meeting status'.",
                 suffix
             );
+            // stderr only: scripts parse stdout. Never a prompt.
+            if meeting::notice::pending() {
+                eprintln!("Note: {}", meeting::notice::NOTICE);
+                eprintln!("{}", meeting::notice::ACK_HINT);
+            }
+        }
+
+        MeetingAction::Notice { ack, json } => {
+            let path = meeting::notice::path();
+            let state = if ack {
+                let state = meeting::notice::acknowledge(&path)?;
+                // A running daemon tells the meeting views; without one there
+                // is nothing to tell.
+                let _ = std::fs::write(
+                    config::Config::runtime_dir().join(meeting::notice::ACK_TRIGGER),
+                    "",
+                );
+                state
+            } else {
+                meeting::notice::load(&path)
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&meeting::notice::to_json(&state))?
+                );
+            } else {
+                println!("{}", meeting::notice::NOTICE);
+                println!();
+                match state.acknowledged_at {
+                    Some(at) if ack => println!(
+                        "Acknowledged. Voxtype will not show this again (first acknowledged {}).",
+                        at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                    ),
+                    Some(at) => println!(
+                        "Acknowledged {}.",
+                        at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                    ),
+                    None => println!("Not acknowledged yet. {}", meeting::notice::ACK_HINT),
+                }
+            }
         }
 
         MeetingAction::Stop => {

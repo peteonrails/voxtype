@@ -779,6 +779,7 @@ fn cleanup_meeting_files() {
         "meeting_resume",
         "meeting_edit",
         "meeting_notes",
+        meeting::notice::ACK_TRIGGER,
     ] {
         let file = runtime_dir.join(name);
         if file.exists() {
@@ -2925,6 +2926,9 @@ impl Daemon {
                 self.meeting_hud.meeting_id = Some(id.to_string());
             }
         }
+        // Read on every change, so views see an acknowledgement made from
+        // anywhere by the next status at the latest.
+        self.meeting_hud.recording_notice = meeting::notice::pending();
 
         if let Some(ref hub) = self.meeting_event_hub {
             hub.update_snapshot(&self.meeting_hud);
@@ -3154,6 +3158,8 @@ impl Daemon {
                             // Set once GTCRN has loaded or not, below.
                             echo_cancel: None,
                             segments: Vec::new(),
+                            // Set from the notice's state in update_meeting_state.
+                            recording_notice: false,
                         };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
@@ -3408,6 +3414,18 @@ impl Daemon {
     /// daemon refused cannot fire later against a different meeting.
     async fn handle_meeting_triggers(&mut self) -> bool {
         let mut changed = false;
+
+        // `meeting notice --ack` ran: tell every view now, not at the next
+        // state change.
+        let ack = Config::runtime_dir().join(meeting::notice::ACK_TRIGGER);
+        if ack.exists() {
+            let _ = std::fs::remove_file(&ack);
+            self.meeting_hud.recording_notice = meeting::notice::pending();
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.update_snapshot(&self.meeting_hud);
+                hub.publish_status(&self.meeting_hud.status);
+            }
+        }
 
         if let Some(trigger) = check_meeting_start() {
             if !self.config.meeting.enabled {
@@ -4705,6 +4723,8 @@ impl Daemon {
         match meeting::MeetingEventHub::start(meeting_socket.clone()).await {
             Ok(hub) => {
                 tracing::info!("Meeting event socket: {:?}", hub.socket_path());
+                self.meeting_hud.recording_notice = meeting::notice::pending();
+                hub.update_snapshot(&self.meeting_hud);
                 self.meeting_event_hub = Some(hub);
             }
             Err(e) => {
