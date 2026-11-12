@@ -30,6 +30,7 @@ pub(crate) async fn run_meeting_command(
         vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
         echo_rules: (&config.meeting.audio).into(),
+        auto_label_from_title: config.meeting.auto_label_from_title,
     };
 
     match action {

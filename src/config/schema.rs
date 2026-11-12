@@ -2248,6 +2248,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Background opacity of the meeting view while the pointer is elsewhere. Text stays opaque.",
     ),
     spec(
+        "meeting.auto_label_from_title",
+        "meeting",
+        "auto_label_from_title",
+        KeyType::Bool,
+        "Meeting",
+        "Name speakers from the title",
+        "In a two-person meeting titled like \"Pete <> Andrew standup\", name your microphone and every remote voice from the title. Names given by hand are kept.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
@@ -3186,6 +3195,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         // Two places are all an opacity needs, and an f32 such as 0.8 would
         // otherwise read back as 0.800000011920929.
         "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
+        "meeting.auto_label_from_title" => json!(cfg.meeting.auto_label_from_title),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),

@@ -362,6 +362,34 @@ The speaker can be the ID as the transcript shows it (matched without regard to 
 
 Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
 
+### Naming Speakers from the Title
+
+A two-person meeting usually says who is in it: "Pete <> Andrew standup", "Andrew <> Pete Standup", "Pete / Chris", "Pete x Chris", "Pete & Chris", "Pete and Chris 1:1", "1:1 Pete/Chris" or "Chris - Pete sync". When a meeting's title reads like that, voxtype names the speakers for you. The side of the title that is you names your microphone, and the other side names every remote voice. In a 1:1 every remote voice is the same person, so this also tidies up a diarizer that heard one person as `Remote 1`, `Remote 2` and `Remote 3`.
+
+You are recognized by your account's full name (the GECOS field, as `getent passwd $USER` shows it). Matching ignores case, and a first name is enough: an account named "Pete Jackson" matches a title that says "Pete". Your microphone is labelled with your full name.
+
+The rules are strict on purpose, because a wrong name is worse than none. Each name is one or two capitalized words. Words like standup, sync, weekly, check-in and 1:1 before or after the names are ignored. Nothing is named when:
+
+- the title names three or more people ("Pete, Andrew, Sam sync") or none ("Zoom call", "Q4 planning")
+- neither side is you, or both could be
+- the title has words voxtype does not recognize as names or meeting words ("Pete <> Andrew quick sync")
+
+Names are given when the meeting starts, and each remote voice is named as it first speaks, so the live view shows names from the first line. A name you give with `voxtype meeting label` always wins: voxtype only names speakers that have no name yet. If a second remote voice really is someone else, relabel that speaker by its ID:
+
+```bash
+voxtype meeting label latest "Remote 2" "Sam"
+```
+
+Use the ID rather than the name here: `voxtype meeting label latest Andrew Sam` would rename every speaker the title named Andrew.
+
+Imports name their speakers the same way when the file has separate microphone and remote channels (`--channels mic,loopback`), taking the title from `--title` or the file name. A single mixed track has no sides to tell apart, so nothing is named. `voxtype meeting retranscribe` names the speakers of the new transcript from the meeting's title too.
+
+To turn this off:
+
+```bash
+voxtype config set meeting.auto_label_from_title false
+```
+
 ### Moving a Line to Another Speaker
 
 When the diarizer gives a single line to the wrong person, move that line on its own:

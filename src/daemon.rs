@@ -3061,6 +3061,7 @@ impl Daemon {
             vad_threshold: self.config.meeting.audio.vad_threshold,
             diarization: diarization_config,
             echo_rules: (&self.config.meeting.audio).into(),
+            auto_label_from_title: self.config.meeting.auto_label_from_title,
         };
 
         // Start capturing before anything loads. Building the meeting daemon

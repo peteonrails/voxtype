@@ -2838,6 +2838,7 @@ storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
 retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the meeting folder
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
 show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
+auto_label_from_title = true     # Name both sides of "Pete <> Andrew standup" from the title
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)
