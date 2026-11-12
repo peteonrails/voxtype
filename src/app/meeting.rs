@@ -384,6 +384,116 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
+        MeetingAction::Share {
+            meeting_id,
+            transcript,
+            format,
+            to,
+            output,
+            command,
+            preview,
+            json,
+        } => {
+            use meeting::share::{self, ShareFormat, ShareRequest, ShareTarget, Tools};
+            let format = ShareFormat::parse(&format)
+                .ok_or_else(|| anyhow::anyhow!("Unknown share format '{}'", format))?;
+            let target = ShareTarget::parse(&to)
+                .ok_or_else(|| anyhow::anyhow!("Unknown share destination '{}'", to))?;
+            let data = match meeting::get_meeting(&meeting_config, &meeting_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error loading meeting: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let shared = share::compose(&data, transcript);
+            let command = command.or_else(|| config.meeting.share.command.clone());
+            let tools = Tools::default();
+
+            if preview {
+                // Email sends text, whatever --format says.
+                let shown = if target == ShareTarget::Email {
+                    ShareFormat::Text
+                } else {
+                    format
+                };
+                let body = shared.render(shown);
+                if json {
+                    let out = serde_json::json!({
+                        "meeting_id": shared.meeting_id,
+                        "title": shared.title,
+                        "subject": shared.subject,
+                        "format": shown.name(),
+                        "transcript": transcript,
+                        "sections": shared.sections,
+                        "transcript_lines": shared.transcript_lines,
+                        "chars": body.chars().count(),
+                        "body": body,
+                        "available": tools.available(command.as_deref()),
+                        "command": command,
+                        "folder": share::share_folder(&config.meeting.share.folder),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                } else {
+                    print!("{body}");
+                }
+                return Ok(());
+            }
+
+            let request = ShareRequest {
+                target,
+                format,
+                with_transcript: transcript,
+                output,
+                folder: config.meeting.share.folder.clone(),
+                command,
+                timeout: std::time::Duration::from_secs(config.meeting.share.timeout_secs),
+            };
+            match share::send(&data, &shared, &request, &tools).await {
+                Ok(outcome) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&outcome)?);
+                    } else {
+                        let what = if transcript {
+                            "Notes and transcript"
+                        } else {
+                            "Notes"
+                        };
+                        match target {
+                            ShareTarget::Clipboard => {
+                                println!("{what} for \"{}\" copied to the clipboard.", shared.title)
+                            }
+                            ShareTarget::File => println!(
+                                "{what} saved to {}",
+                                outcome
+                                    .path
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default()
+                            ),
+                            ShareTarget::Email => {
+                                println!("Opened a mail draft for \"{}\".", shared.title);
+                                if let Some(path) = &outcome.path {
+                                    println!("Attach {} before sending.", path.display());
+                                }
+                            }
+                            ShareTarget::Command => {
+                                println!("{what} sent to the share command.");
+                                if let Some(out) = outcome.command_status.filter(|o| !o.is_empty())
+                                {
+                                    println!("{out}");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error sharing meeting: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
         MeetingAction::Show { meeting_id, json } => {
             match meeting::get_meeting(&meeting_config, &meeting_id) {
                 Ok(meeting) if json => {

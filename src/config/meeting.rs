@@ -102,6 +102,11 @@ pub struct MeetingConfig {
     #[serde(default)]
     pub summary: MeetingSummaryConfig,
 
+    /// `voxtype meeting share`: where a saved share goes and the command
+    /// `--to command` pipes it to
+    #[serde(default)]
+    pub share: MeetingShareConfig,
+
     /// Call detection and the Record prompt
     #[serde(default)]
     pub detect: super::MeetingDetectConfig,
@@ -429,6 +434,44 @@ impl Default for MeetingSummaryConfig {
     }
 }
 
+/// `[meeting.share]`: what `voxtype meeting share` sends to
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct MeetingShareConfig {
+    /// Shell command `--to command` pipes the share to on stdin, for a chat
+    /// webhook, pandoc or an upload script. It runs through `sh -c` with
+    /// VOXTYPE_MEETING_ID, VOXTYPE_MEETING_TITLE, VOXTYPE_SHARE_FORMAT and
+    /// VOXTYPE_SHARE_FILE set.
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Seconds before the share command is killed
+    #[serde(default = "default_share_timeout")]
+    pub timeout_secs: u64,
+
+    /// Folder `--to file` writes into ("auto": ~/Documents/Voxtype, or the
+    /// XDG documents folder's Voxtype folder)
+    #[serde(default = "default_share_folder")]
+    pub folder: String,
+}
+
+fn default_share_timeout() -> u64 {
+    60
+}
+
+fn default_share_folder() -> String {
+    "auto".to_string()
+}
+
+impl Default for MeetingShareConfig {
+    fn default() -> Self {
+        Self {
+            command: None,
+            timeout_secs: default_share_timeout(),
+            folder: default_share_folder(),
+        }
+    }
+}
+
 impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
@@ -448,6 +491,7 @@ impl Default for MeetingConfig {
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
+            share: MeetingShareConfig::default(),
             detect: super::MeetingDetectConfig::default(),
             assistant: MeetingAssistantConfig::default(),
         }

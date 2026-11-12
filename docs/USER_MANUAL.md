@@ -2790,6 +2790,12 @@ voxtype meeting export <id> --output transcript.md     # Write to file
 voxtype meeting export <id> --timestamps --speakers    # Include timestamps and speaker labels
 voxtype meeting export <id> --metadata                 # Include metadata header
 
+# Share the summary and notes (and optionally the transcript)
+voxtype meeting share latest                           # Copy to the clipboard
+voxtype meeting share latest --transcript --to file    # Save to ~/Documents/Voxtype
+voxtype meeting share latest --to email                # Open a mail draft
+voxtype meeting share latest --preview                 # See what would be shared
+
 # Speaker labeling (replace auto-generated IDs with names)
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label <id> 0 "Bob"

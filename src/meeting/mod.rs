@@ -41,6 +41,7 @@ pub mod recover;
 pub mod retained_audio;
 pub mod retranscribe;
 pub mod search;
+pub mod share;
 pub mod start;
 pub mod state;
 pub mod status_notice;
