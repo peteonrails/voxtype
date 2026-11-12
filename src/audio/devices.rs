@@ -198,6 +198,12 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    fn write_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     #[test]
     fn a_wait_that_never_ends_gives_up_at_the_deadline() {
         let started = Instant::now();
@@ -216,7 +222,7 @@ mod tests {
     fn the_probe_child_is_killed_at_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let hang = dir.path().join("hang");
-        crate::test_support::write_script(&hang, "#!/bin/sh\nexec sleep 30\n");
+        write_script(&hang, "#!/bin/sh\nexec sleep 30\n");
         let started = Instant::now();
         let err = probe_input_devices(&hang, Duration::from_millis(300)).unwrap_err();
         assert!(matches!(err, AudioError::NoSoundServer(0)), "{err}");
@@ -227,7 +233,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
 
         let answer = dir.path().join("answer");
-        crate::test_support::write_script(&answer, "#!/bin/sh\nprintf 'default\\nUSB mic\\n'\n");
+        write_script(&answer, "#!/bin/sh\nprintf 'default\\nUSB mic\\n'\n");
         assert_eq!(
             probe_input_devices(&answer, Duration::from_secs(5)).unwrap(),
             vec!["default", "USB mic"]
