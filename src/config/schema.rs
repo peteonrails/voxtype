@@ -3374,6 +3374,12 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         "config_path": path.display().to_string(),
         "engine": cfg.engine.name(),
         "keys": keys,
+        // Values set through a command and never stored in config.toml.
+        "secrets": [crate::meeting::calendar::source::schema_entry(
+            &crate::meeting::calendar::source::Store::new(
+                crate::meeting::calendar::source::Store::default_dir(),
+            ),
+        )],
         "replacements": Json::Object(replacements),
         "profiles": profiles,
     })
@@ -3836,6 +3842,9 @@ mod tests {
         assert_eq!(doc["engine"], json!("whisper"));
         assert!(doc["replacements"].is_object());
         assert!(doc["profiles"].is_object());
+        let secrets = doc["secrets"].as_array().unwrap();
+        assert_eq!(secrets[0]["key"], "meeting.calendar.ics_link");
+        assert_eq!(secrets[0]["label"], "Calendar (iCal link)");
 
         let keys = doc["keys"].as_array().unwrap();
         assert_eq!(keys.len(), scalar_keys().count());

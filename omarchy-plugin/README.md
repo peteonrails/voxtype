@@ -438,6 +438,7 @@ Inside the panel:
 |---|---|
 | Read every setting | `voxtype config schema --json` |
 | Write a setting | `voxtype config set <key> <value>` |
+| Set a secret from the schema's `secrets` list (the calendar's iCal link) | its `set_command`, with the value on stdin |
 | Clear an override | `voxtype config unset <key>` |
 | Model list per engine | `voxtype info models --json` |
 | Which engines this build has | `voxtype info engines --json` |
