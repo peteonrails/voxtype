@@ -374,6 +374,9 @@ pub struct EchoProbe {
     /// Echo delay in frames and microphone/loopback level ratio, when the
     /// chunk had enough remote speech to measure them.
     path: Option<(usize, f32)>,
+    /// The microphone comes through PipeWire's echo canceller (see
+    /// [`EchoProbe::under_canceller`]).
+    cancelled: bool,
 }
 
 fn frame_rms(samples: &[f32], sample_rate: u32) -> Vec<f32> {
@@ -411,6 +414,7 @@ impl EchoProbe {
             threshold: threshold.max(1e-4),
             mic_floor: 0.0,
             path: None,
+            cancelled: false,
         };
         probe.path = probe.measure_path();
         // The quietest tenth of the chunk is the room with nobody talking.
@@ -459,13 +463,25 @@ impl EchoProbe {
         best.map(|(lag, ratio, _)| (lag, ratio))
     }
 
-    /// The loudest the echo of the loopback could be in microphone frame
-    /// `i`: the measured echo path, with a frame of slack either side of
-    /// its delay. That slack and the margin also cover a room's ringing:
-    /// the speaker-echo test still catches every echo line with reflections
-    /// dying away at 0.75 per frame. `None` without a measured path.
-    fn explained(&self, i: usize) -> Option<f32> {
-        let (lag, ratio) = self.path?;
+    /// The microphone is recorded through PipeWire's echo canceller. What
+    /// it leaves of the remote does not keep one level against the loopback:
+    /// near nothing once converged, then seconds of leak after the echo path
+    /// changes (a device switch, a new delay) while it converges again. The
+    /// chunk's measured ratio comes from the cancelled stretches, so the
+    /// leak reads as louder than echo can be, and a line made of it was kept
+    /// as yours. Under the canceller a line is echo when it holds no voice
+    /// of yours and its sound falls where the remote speaks (see
+    /// [`EchoProbe::echo_only`]).
+    pub fn under_canceller(mut self, cancelled: bool) -> Self {
+        self.cancelled = cancelled;
+        self
+    }
+
+    /// The loopback's level that microphone frame `i` would hear: the
+    /// loudest frame within one either side of the echo path's delay.
+    /// `None` without a measured path.
+    fn remote_level(&self, i: usize) -> Option<f32> {
+        let (lag, _) = self.path?;
         let offset = self.loopback_start_ms as i64 - self.mic_start_ms as i64;
         let shift = offset / FRAME_MS as i64;
         let centre = i as i64 - shift - lag as i64;
@@ -476,8 +492,35 @@ impl EchoProbe {
                 .copied()
                 .unwrap_or(0.0)
         };
-        let remote = (centre - 1..=centre + 1).map(level).fold(0.0f32, f32::max);
-        Some(ratio * remote)
+        Some((centre - 1..=centre + 1).map(level).fold(0.0f32, f32::max))
+    }
+
+    /// The loudest the echo of the loopback could be in microphone frame
+    /// `i`: the measured echo path, with a frame of slack either side of
+    /// its delay. That slack and the margin also cover a room's ringing:
+    /// the speaker-echo test still catches every echo line with reflections
+    /// dying away at 0.75 per frame. `None` without a measured path.
+    fn explained(&self, i: usize) -> Option<f32> {
+        let (_, ratio) = self.path?;
+        Some(ratio * self.remote_level(i)?)
+    }
+
+    /// Under the canceller: whether the microphone's sound between frames
+    /// falls where the remote speaks. Nine-tenths of its voiced frames
+    /// must; a line with no frame above the floor (the engine made words of
+    /// a faint residual) needs the remote speaking through half of it.
+    fn remote_covers(&self, frames: std::ops::Range<usize>) -> bool {
+        let remote_speaks = |i: usize| self.remote_level(i).unwrap_or(0.0) > self.threshold;
+        let voiced: Vec<usize> = frames
+            .clone()
+            .filter(|&i| self.mic[i] > self.mic_floor)
+            .collect();
+        if voiced.is_empty() {
+            let len = frames.len();
+            return len > 0 && frames.filter(|&i| remote_speaks(i)).count() * 2 >= len;
+        }
+        let covered = voiced.iter().filter(|&&i| remote_speaks(i)).count();
+        covered as f32 >= voiced.len() as f32 * ECHO_EXPLAINED
     }
 
     fn frames(&self, start_ms: u64, end_ms: u64) -> std::ops::Range<usize> {
@@ -524,9 +567,16 @@ impl EchoProbe {
     /// nine-tenths of it no louder than the echo path explains, and no
     /// stretch of your own voice. This is the test for lines of any length;
     /// a line with some of your speech in it is never echo.
+    ///
+    /// Under the canceller the level test is replaced: with no stretch of
+    /// your voice, a line whose sound falls where the remote speaks is the
+    /// canceller's leftover (see [`EchoProbe::under_canceller`]).
     pub fn echo_only(&self, start_ms: u64, end_ms: u64) -> bool {
         if self.path.is_none() || self.own_voice(start_ms, end_ms) {
             return false;
+        }
+        if self.cancelled {
+            return self.remote_covers(self.frames(start_ms, end_ms));
         }
         let (mut voiced, mut explained) = (0usize, 0usize);
         for i in self.frames(start_ms, end_ms) {
@@ -703,6 +753,78 @@ mod tests {
         let mic = with_echo(&remote, &tone(10.0, &[(6.0, 6.5, 0.05)]));
         let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
         assert!(probe.own_voice(5900, 6600));
+    }
+
+    /// The microphone through PipeWire's echo canceller: the remote's echo
+    /// cancelled to almost nothing (0.0005, 60 ms late), plus `leak`, what
+    /// the canceller lets through, as 90 ms bursts every 300 ms at `amp`
+    /// between `from` and `to` seconds. That is the shape the sandbox
+    /// measured for 4 s after the echo path's delay jumped from 30 to 150 ms:
+    /// a few frames at a time above the floor, never 150 ms in a row.
+    fn cancelled_mic(remote: &[f32], leak: Option<(f32, f32, f32)>) -> Vec<f32> {
+        let delay = (0.06 * RATE as f32) as usize;
+        let mut bursts = Vec::new();
+        if let Some((from, to, amp)) = leak {
+            let mut t = from;
+            while t + 0.09 <= to {
+                bursts.push((t, t + 0.09, amp));
+                t += 0.3;
+            }
+        }
+        let leak = tone(remote.len() as f32 / RATE as f32, &bursts);
+        (0..remote.len())
+            .map(|i| {
+                leak[i]
+                    + if i >= delay {
+                        0.0005 * remote[i - delay]
+                    } else {
+                        0.0
+                    }
+            })
+            .collect()
+    }
+
+    /// The sandbox's 7-word line after an echo-path change: no voice of
+    /// yours, every sound of it where the remote speaks, yet louder than the
+    /// cancelled chunk's ratio explains. Without the canceller flag the level
+    /// test keeps it as yours; with it, it is echo.
+    #[test]
+    fn the_cancellers_leak_while_it_reconverges_is_echo() {
+        let remote = tone(10.0, &[(0.5, 9.5, 0.5)]);
+        let mic = cancelled_mic(&remote, Some((6.0, 9.4, 0.03)));
+        let plain = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01);
+        assert!(!plain.own_voice(6000, 9500), "no 150 ms run of it");
+        assert!(
+            !plain.echo_only(6000, 9500),
+            "the level test alone keeps it"
+        );
+        let probe = plain.under_canceller(true);
+        assert!(probe.echo_only(6000, 9500));
+        // A faint residual the engine still made words of: nothing above
+        // the floor, the remote speaking throughout.
+        let quiet = cancelled_mic(&remote, None);
+        let probe = EchoProbe::new(&quiet, 0, &remote, 0, RATE, 0.01).under_canceller(true);
+        assert!(probe.echo_only(2000, 4000));
+    }
+
+    #[test]
+    fn under_the_canceller_your_voice_and_sound_without_the_remote_stay_yours() {
+        let remote = tone(10.0, &[(0.5, 5.0, 0.5)]);
+        // You say something over the remote at 2-2.6 s.
+        let mut mic = cancelled_mic(&remote, None);
+        for (m, o) in mic.iter_mut().zip(tone(10.0, &[(2.0, 2.6, 0.2)])) {
+            *m += o;
+        }
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01).under_canceller(true);
+        assert!(probe.own_voice(1800, 2800));
+        assert!(!probe.echo_only(1800, 2800));
+        // Bursts while the remote is silent are not its leftover.
+        let mic = cancelled_mic(&remote, Some((6.0, 9.0, 0.03)));
+        let probe = EchoProbe::new(&mic, 0, &remote, 0, RATE, 0.01).under_canceller(true);
+        assert!(!probe.own_voice(6000, 9000));
+        assert!(!probe.echo_only(6000, 9000));
+        // Silence while the remote is silent is no one's line either.
+        assert!(!probe.echo_only(7000, 9000));
     }
 
     /// The remote track at 0.3 into the microphone, 60 ms late.

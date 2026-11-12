@@ -165,6 +165,9 @@ pub struct MeetingDaemon {
     /// judged once, with their chunk's audio, and kept out of the short-echo
     /// rules on every later dedup pass, which has no audio for them.
     own_voice_ids: std::collections::HashSet<u32>,
+    /// The microphone is recorded through PipeWire's echo canceller, whose
+    /// leftover echo does not follow the loopback at a fixed level
+    echo_cancelled: bool,
     /// Assistant settings for the summary written when a meeting stops
     assistant: Option<assistant::AssistantSettings>,
 }
@@ -243,6 +246,7 @@ impl MeetingDaemon {
             audio: None,
             post_meeting: hook::PostMeetingSettings::from_config(app_config),
             own_voice_ids: Default::default(),
+            echo_cancelled: false,
             assistant: Some(assistant::AssistantSettings::from_config(app_config)),
         })
     }
@@ -273,6 +277,7 @@ impl MeetingDaemon {
             audio: None,
             post_meeting: hook::PostMeetingSettings::default(),
             own_voice_ids: Default::default(),
+            echo_cancelled: false,
             assistant: None,
         }
     }
@@ -473,7 +478,8 @@ impl MeetingDaemon {
 
     /// Record the echo handling the running meeting uses (`aec`, `gtcrn`
     /// or `off`), for meeting.json and `meeting status --json`.
-    pub fn record_echo_cancel(&self, path: &str) {
+    pub fn record_echo_cancel(&mut self, path: &str) {
+        self.echo_cancelled = path == "webrtc";
         let Some(id) = self.current_meeting_id() else {
             return;
         };
@@ -571,6 +577,7 @@ impl MeetingDaemon {
                 ChunkConfig::default().sample_rate,
                 self.config.vad_threshold,
             )
+            .under_canceller(self.echo_cancelled)
         });
         let mut done = Vec::new();
         for (samples, source) in [
