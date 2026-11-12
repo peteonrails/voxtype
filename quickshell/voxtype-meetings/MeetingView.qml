@@ -46,7 +46,10 @@ Item {
   signal searchResultRequested(string meetingId, int segmentId, real startMs)
   // The idle screen shows the sound check instead of the meetings list.
   property bool soundCheckOpen: false
-  onHasMeetingChanged: if (root.hasMeeting) root.soundCheckOpen = false
+  onHasMeetingChanged: {
+    if (root.hasMeeting) root.soundCheckOpen = false
+    else root.editingTitle = false
+  }
 
   function openSoundCheck() {
     if (!root.soundcheck) return
@@ -204,7 +207,6 @@ Item {
   signal retitleRequested(string title)
   property bool editingTitle: false
   property string titleError: ""
-  onHasMeetingChanged: if (!root.hasMeeting) root.editingTitle = false
 
   function beginTitleEdit() {
     if (!root.hasMeeting || !root.feed || root.feed.meetingId === "") return
