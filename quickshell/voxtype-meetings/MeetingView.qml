@@ -38,6 +38,13 @@ Item {
   // The daemon answers `voxtype status` although meeting.sock cannot be
   // reached: it is running without the socket.
   property bool daemonRunning: false
+  // This meeting's audio is playing; the track, and the line being heard.
+  property bool playingHere: false
+  property string playTrack: "mixed"
+  property int playingSegId: -1
+  signal playRequested(int segId)
+  signal stopPlaybackRequested()
+
   // A deleted line is waiting out its undo window.
   property bool pendingDelete: false
   // The last export, {path, folder}, or null.
@@ -597,6 +604,32 @@ Item {
         }
       }
 
+      // While this meeting's audio plays: what is playing, and Stop. A row of
+      // its own, so a narrow card does not push the header's buttons off.
+      RowLayout {
+        objectName: "transport"
+        Layout.fillWidth: true
+        visible: root.playingHere
+        spacing: root.theme.gap
+        Text {
+          objectName: "transportTrack"
+          Layout.fillWidth: true
+          text: "▶ Playing " + (root.playTrack === "mic" ? "your side" : root.playTrack === "loopback" ? "the others" : "both sides")
+          color: root.theme.accent
+          font.family: root.theme.fontFamily
+          font.pixelSize: root.theme.bodySmall
+          elide: Text.ElideRight
+        }
+        MeetingButton {
+          objectName: "transportStop"
+          theme: root.theme
+          // Not just "Stop": the meeting's own Stop is one row up.
+          text: "■ Stop audio"
+          bordered: true
+          onClicked: root.stopPlaybackRequested()
+        }
+      }
+
       // Listening, paused or finalizing, between chunks.
       RowLayout {
         objectName: "listeningIndicator"
@@ -806,6 +839,12 @@ Item {
           onNoteClicked: function(line, anchor) { root.openNoteEditor(line, anchor) }
           onEditRequested: function(segId, text) { root.editTextRequested(segId, text) }
           onResetTextRequested: function(segId) { root.resetTextRequested(segId) }
+          canPlay: !root.assistant || root.assistant.audioRetained !== false
+          audioKnownMissing: root.assistant !== null && root.assistant.audioRetained === false
+          canOpenSettings: root.canOpenSettings
+          playingSegId: root.playingSegId
+          onPlayRequested: function(segId) { root.playRequested(segId) }
+          onSettingsRequested: root.settingsRequested()
           onDeleteRequested: function(segId) { root.deleteLineRequested(segId) }
         }
 
@@ -1040,12 +1079,11 @@ Item {
       }
 
       Repeater {
+        // What `meeting export --format` accepts (srt and vtt are not yet).
         model: [
           { format: "markdown", label: "Markdown (.md)" },
           { format: "text", label: "Plain text (.txt)" },
-          { format: "json", label: "JSON (.json)" },
-          { format: "srt", label: "Subtitles (.srt)" },
-          { format: "vtt", label: "WebVTT (.vtt)" }
+          { format: "json", label: "JSON (.json)" }
         ]
         MeetingButton {
           required property var modelData

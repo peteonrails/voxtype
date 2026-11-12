@@ -71,6 +71,17 @@ The assistant (1.3.0 contract, see voxtype-meetings/MeetingAssistant.qml):
   meeting export M --format F --output PATH [--timestamps --speakers --metadata]
                                     writes a small stand-in file at PATH
 
+  meeting play M --segment S [--track T] --json | --status --json | --stop --json
+                                    playback without a player: a state file in
+                                    FAKE_MEETING_DATA, `position_ms` advancing at
+                                    state["play_speed"] (default 1) times real
+                                    time, and a `playback` event on the socket.
+                                    state["play_error"] is the stderr of a
+                                    refused play (exit 1)
+
+`show --json` reports metadata.audio_retained from state["audio_retained"]
+(default true). `export` accepts text, markdown and json, as the real one.
+
 A meeting ID may be a unique prefix, as with the real CLI. Edits to a past
 meeting rewrite its transcript.json; edits to the socket's meetings go through
 the socket, which announces live ones as segment_updated.
@@ -533,6 +544,9 @@ def export(state, args):
         print("error: Meeting not found: " + args[0], file=sys.stderr)
         return 1
     fmt = args[args.index("--format") + 1]
+    if fmt not in ("text", "txt", "markdown", "md", "json"):
+        print("Error: Unknown export format '%s'. Valid formats: text, markdown, json" % fmt, file=sys.stderr)
+        return 1
     out = args[args.index("--output") + 1]
     flags = [a for a in args if a in ("--timestamps", "--speakers", "--metadata")]
     with open(out, "w") as f:
@@ -540,6 +554,62 @@ def export(state, args):
         for s in segments_of(state, meeting) or []:
             f.write(s["text"] + "\n")
     print("Exported to %s" % out, file=sys.stderr)
+    return 0
+
+
+def play_path():
+    return os.path.join(os.environ["FAKE_MEETING_DATA"], "play.json")
+
+
+def play_state(state):
+    try:
+        with open(play_path()) as f:
+            p = json.load(f)
+    except FileNotFoundError:
+        return {"state": "stopped", "meeting_id": None, "track": None, "from_ms": None, "pid": None,
+                "started_at": None, "position_ms": None}
+    if p["state"] == "playing":
+        speed = state.get("play_speed", 1)
+        p["position_ms"] = int(p["from_ms"] + (time.time() - p["_t0"]) * 1000 * speed)
+    else:
+        p["position_ms"] = None
+    return p
+
+
+def play(state, args):
+    if "--status" in args:
+        p = play_state(state)
+        p.pop("_t0", None)
+        print(json.dumps(p))
+        return 0
+    if "--stop" in args:
+        p = play_state(state)
+        if p.get("meeting_id"):
+            p["state"] = "stopped"
+            p["position_ms"] = None
+            with open(play_path(), "w") as f:
+                json.dump(p, f)
+            control({"cmd": "playback", "meeting_id": p["meeting_id"], "track": p["track"], "state": "stopped",
+                      "from_ms": p["from_ms"]})
+        p.pop("_t0", None)
+        print(json.dumps(p))
+        return 0
+    if state.get("play_error"):
+        print(state["play_error"], file=sys.stderr)
+        return 1
+    meeting = resolve(state, args[0])
+    seg_id = args[args.index("--segment") + 1]
+    track = args[args.index("--track") + 1] if "--track" in args else "mixed"
+    seg = next((s for s in segments_of(state, meeting) or [] if str(s["id"]) == seg_id), None)
+    if seg is None:
+        print("Error: no segment %s in meeting %s" % (seg_id, meeting), file=sys.stderr)
+        return 1
+    p = {"state": "playing", "meeting_id": meeting, "track": track, "from_ms": seg["start_ms"], "pid": 4242,
+         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "_t0": time.time()}
+    with open(play_path(), "w") as f:
+        json.dump(p, f)
+    control({"cmd": "playback", "meeting_id": meeting, "track": track, "state": "playing", "from_ms": seg["start_ms"]})
+    print(json.dumps({"meeting_id": meeting, "track": track, "from_ms": seg["start_ms"], "pid": 4242}))
     return 0
 
 
@@ -578,7 +648,7 @@ def show(state, args_meeting):
     snap = snapshot()
     target = next(m for m in (snap.get("live"), snap.get("stored")) if m and m.get("meeting_id") == meeting)
     meta = {"id": meeting, "title": target.get("title"), "started_at": target.get("started_at"),
-            "status": "completed", "chunk_count": 3, "audio_retained": False,
+            "status": "completed", "chunk_count": 3, "audio_retained": state.get("audio_retained", True),
             "storage_path": os.path.join(os.environ["FAKE_MEETING_DATA"], "live-" + meeting)}
     if snap.get("summary"):
         meta["summary"] = snap["summary"]
@@ -664,6 +734,8 @@ def main():
         return delete_line(state, args[2:])
     elif action == "export":
         return export(state, args[2:])
+    elif action == "play":
+        return play(state, args[2:])
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))

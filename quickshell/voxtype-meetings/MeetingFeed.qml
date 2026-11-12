@@ -76,6 +76,8 @@ Item {
   // "meeting_id"}`. Not a change of the daemon's state, which is already
   // idle by then (and may be a new meeting's): it names the meeting.
   signal summarizing(string meetingId)
+  // `{"event":"playback", meeting_id, track, state, from_ms}`.
+  signal playbackEvent(var ev)
   // An `error` event naming a meeting, such as a failed summary.
   signal meetingError(string meetingId, string code, string message)
   // A meeting began while this feed was watching: an idle (or ended) meeting
@@ -473,6 +475,8 @@ Item {
                         ev.summary ? ev.summary : null)
     } else if (kind === "segment_updated") {
       root.updateSegment(ev.segment)
+    } else if (kind === "playback") {
+      root.playbackEvent(ev)
     } else if (kind === "segment_deleted") {
       // A deleted line: drop it. (A restored one comes back as a
       // segment_updated for a line not in the list, which inserts it.)

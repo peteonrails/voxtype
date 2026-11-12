@@ -19,6 +19,16 @@ Item {
   signal noteClicked(var line, var anchor)
   signal editRequested(int segId, string text)
   signal resetTextRequested(int segId)
+  signal playRequested(int segId)
+  signal settingsRequested()
+  // ▶ on lines unless the meeting is known to have kept no audio.
+  property bool canPlay: true
+  property bool audioKnownMissing: false
+  property bool canOpenSettings: false
+  // The line being heard while the meeting's audio plays.
+  property int playingSegId: -1
+  property bool audioHintDismissed: false
+  onAudioKnownMissingChanged: if (!root.audioKnownMissing) root.audioHintDismissed = false
   signal deleteRequested(int segId)
 
   // A small text action that shows on a line's hover.
@@ -166,6 +176,36 @@ Item {
       }
     }
 
+    // Once, not per line: why there is no ▶, and where it is turned on.
+    RowLayout {
+      objectName: "audioHint"
+      Layout.fillWidth: true
+      visible: root.audioKnownMissing && !root.audioHintDismissed
+      spacing: root.theme.md
+      Text {
+        Layout.fillWidth: true
+        text: "Audio not kept for this meeting, so lines cannot be played. "
+          + (root.canOpenSettings ? "Keep audio is in Settings, under Meeting." : "Set [meeting] retain_audio = true to keep it next time.")
+        color: root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.caption
+        wrapMode: Text.WordWrap
+      }
+      MeetingButton {
+        objectName: "audioHintSettings"
+        theme: root.theme
+        visible: root.canOpenSettings
+        text: "Settings"
+        onClicked: root.settingsRequested()
+      }
+      MeetingButton {
+        objectName: "audioHintDismiss"
+        theme: root.theme
+        text: "✕"
+        onClicked: root.audioHintDismissed = true
+      }
+    }
+
     Text {
       Layout.fillWidth: true
       visible: root.feed && root.feed.chips.length > 0
@@ -260,6 +300,18 @@ Item {
             visible: root.flashSegId === line.segId
           }
 
+          // The line being heard.
+          Rectangle {
+            objectName: "linePlaying"
+            anchors.fill: parent
+            anchors.margins: -root.theme.xs
+            radius: 4
+            color: root.theme.alpha(root.theme.accent, 0.12)
+            border.width: 1
+            border.color: root.theme.alpha(root.theme.accent, 0.5)
+            visible: root.playingSegId === line.segId
+          }
+
           // Hover shows "Add note" without taking clicks from anything.
           MouseArea {
             id: lineHover
@@ -329,17 +381,6 @@ Item {
                 }
 
                 Text {
-                  objectName: "lineEdited"
-                  visible: line.originalText !== ""
-                  anchors.baseline: speakerLabel.baseline
-                  text: "edited"
-                  color: root.theme.dim
-                  font.family: root.theme.fontFamily
-                  font.pixelSize: root.theme.caption
-                  font.italic: true
-                }
-
-                Text {
                   objectName: "lineMoved"
                   visible: line.originalSpeaker !== ""
                   anchors.baseline: speakerLabel.baseline
@@ -357,8 +398,16 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: root.theme.lg
                 visible: !line.editing
-                  && (lineHover.containsMouse || editAction.hovered || restoreAction.hovered || noteAction.hovered
-                    || deleteAction.hovered)
+                  && (lineHover.containsMouse || playAction.hovered || editAction.hovered
+                    || noteAction.hovered || deleteAction.hovered)
+
+                LineAction {
+                  id: playAction
+                  objectName: "linePlayButton"
+                  visible: root.canPlay
+                  text: "▶"
+                  onActivated: root.playRequested(line.segId)
+                }
 
                 // These open a text field, so they ask for the keyboard on
                 // hover: the click that opens the field then focuses it.
@@ -368,13 +417,6 @@ Item {
                   text: "Edit"
                   onActivated: line.beginEdit()
                   InputDemand { theme: root.theme; active: editAction.hovered }
-                }
-                LineAction {
-                  id: restoreAction
-                  objectName: "lineRestoreTextButton"
-                  visible: line.originalText !== ""
-                  text: "Restore original text"
-                  onActivated: root.resetTextRequested(line.segId)
                 }
                 LineAction {
                   id: noteAction
@@ -439,6 +481,27 @@ Item {
               font.family: root.theme.fontFamily
               font.pixelSize: root.theme.body
               wrapMode: Text.WordWrap
+            }
+
+            // An edited line says so under its text, with the way back. Its
+            // own row: the speaker's row has the hover actions on the right.
+            Row {
+              visible: line.originalText !== ""
+              spacing: root.theme.md
+              Text {
+                objectName: "lineEdited"
+                text: "edited ·"
+                color: root.theme.dim
+                font.family: root.theme.fontFamily
+                font.pixelSize: root.theme.caption
+                font.italic: true
+              }
+              LineAction {
+                id: restoreAction
+                objectName: "lineRestoreTextButton"
+                text: "Restore original text"
+                onActivated: root.resetTextRequested(line.segId)
+              }
             }
 
             Text {

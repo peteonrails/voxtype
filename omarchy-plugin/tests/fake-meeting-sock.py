@@ -38,6 +38,8 @@ fake-voxtype-meeting.py (which stands in for `voxtype meeting …`):
   {"cmd": "delete", "segment_id": N, "shape": "event"|"flag", "meeting_id": M?}
                                    remove a line; announce it as segment_deleted
                                    or as segment_updated with "deleted": true
+  {"cmd": "playback", "meeting_id", "track", "state", "from_ms"}
+                                   a playback event, as the daemon sends one
   {"cmd": "drop"}                  close every connection, keep listening
   {"cmd": "down"}                  close everything and remove the socket
   {"cmd": "up"}                    bind again
@@ -230,6 +232,9 @@ class Server:
                     self.broadcast({"event": "segment_deleted", "meeting_id": mid, "segment_id": cmd["segment_id"]})
             elif self.stored and mid == self.stored["meeting_id"]:
                 self.stored["segments"] = [s for s in self.stored["segments"] if s["id"] != cmd["segment_id"]]
+        elif kind == "playback":
+            self.broadcast({"event": "playback", "meeting_id": cmd["meeting_id"], "track": cmd["track"],
+                            "state": cmd["state"], "from_ms": cmd["from_ms"]})
         elif kind == "drop":
             self.drop()
         elif kind == "down":
