@@ -20,6 +20,8 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Listing Past Meetings](#listing-past-meetings)
   - [Viewing a Meeting](#viewing-a-meeting)
   - [Labeling Speakers](#labeling-speakers)
+  - [Your Name](#your-name)
+  - [Searching Meetings](#searching-meetings)
   - [Moving a Line to Another Speaker](#moving-a-line-to-another-speaker)
   - [Correcting and Deleting Lines](#correcting-and-deleting-lines)
   - [Annotating a Line](#annotating-a-line)
@@ -327,6 +329,34 @@ voxtype meeting label latest 1 "Bob"
 The speaker can be the ID as the transcript shows it (matched without regard to case), just the number for an ML speaker (`0` for `SPEAKER_00`), or a name you already assigned, which renames every speaker carrying it. A speaker the meeting does not contain is an error that lists the speakers it does contain, so a typo never reports success.
 
 Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
+
+### Your Name
+
+Rather than labelling `You` in every meeting, set your name once:
+
+```bash
+voxtype config set meeting.my_name "Pete"
+```
+
+Every meeting then shows your side as "Pete": the live view, exports, `transcript.md`, summaries and search. It is a display name only, never saved into the transcript, and a label you set for one meeting still wins there. `voxtype meeting my-name` shows the setting, or the full name on your account as a suggestion when it is unset; voxtype never sets it on its own.
+
+### Searching Meetings
+
+```bash
+voxtype meeting search budget
+voxtype meeting search budget review --speaker Dana
+voxtype meeting search '"next quarter"' --since 2026-11-01
+voxtype meeting search deploy* --limit 5 --json
+```
+
+Search covers every meeting's transcript as you see it (names, moved lines and corrections applied, deleted lines left out), plus titles, notes and summaries. Every word has to appear in the same line (or the same title, notes or summary). Matching ignores case and accents. Put a phrase in double quotes to keep it together, and end a word with `*` to match words that start with it. The best matches come first, each with the meeting, the time in the meeting, the speaker, and the matching text with the match marked « like this ».
+
+- `--speaker NAME` keeps only lines from that speaker, as the transcript shows them. Your `my_name` also finds lines shown as "You".
+- `--since DATE` keeps only meetings started on or after a date (`2026-11-01`) or a time (`2026-11-01T09:00:00Z`).
+- `--limit N` caps the number of matches (default 20).
+- `--json` prints the matches for scripts and the meeting view; see [INTEGRATIONS.md](INTEGRATIONS.md#searching-meetings-meeting-search---json).
+
+Search uses an index in `index.db` that every change keeps current. Meetings recorded before search existed are indexed the first time you search, which can take a moment with many meetings.
 
 ### Moving a Line to Another Speaker
 

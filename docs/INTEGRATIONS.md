@@ -252,6 +252,65 @@ Show a line as `speaker_label`, falling back to `speaker_id`. Two speakers
 with the same `speaker_label` are one person to the user. Microphone echo of
 the remote side is removed before segments are saved or sent.
 
+With `[meeting] my_name` set, every `You` line without a label of its own
+carries `my_name` as its `speaker_label` in `show`, exports and
+`meeting.sock`, while `speaker_id` stays `You`. Only `transcript.json` itself
+leaves it out. `voxtype meeting my-name --json` prints
+`{"my_name": "Pete" | null, "suggestion": "Pete Jackson" | null}`, the
+suggestion being the account's full name, offered only while `my_name` is
+unset. Voxtype never sets it; a view may offer the suggestion and run
+`voxtype config set meeting.my_name "<name>"` when the user accepts.
+
+### Searching meetings: `meeting search --json`
+
+```sh
+voxtype meeting search <words...> [--limit N] [--speaker NAME] [--since DATE] --json
+```
+
+Full-text search over transcript lines as displayed (labels, moved lines and
+corrections applied, deleted lines left out), titles, notes and summaries.
+Every word must appear in the same line; `"a phrase"` stays together and
+`word*` matches a prefix. Matching ignores case and accents. Best matches
+come first.
+
+```json
+{
+  "query": "deploy",
+  "speaker": null,
+  "since": null,
+  "results": [
+    {
+      "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed",
+      "title": "Release sync",
+      "date": "2026-11-11T15:00:04Z",
+      "kind": "segment",
+      "segment_id": 4,
+      "start_ms": 23040,
+      "speaker": "Dana",
+      "snippet": "Can we ship the «deploy» tool first?",
+      "snippet_plain": "Can we ship the deploy tool first?",
+      "highlights": [[16, 22]],
+      "rank": -1.73
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `meeting_id`, `title`, `date` | The meeting. `title` falls back to the date-based name; `date` is its start, RFC 3339 UTC |
+| `kind` | `segment` (a transcript line), `title`, `notes` or `summary` |
+| `segment_id`, `start_ms` | The line, as in `meeting show`; `null` unless `kind` is `segment`. Open the meeting at `start_ms`, or `meeting play <meeting> --segment <segment_id>` |
+| `speaker` | The line's speaker as displayed, `my_name` applied; `null` unless `kind` is `segment` |
+| `snippet` | The matching text around the match, each match wrapped in `«` and `»`. Long text is cut with `…` |
+| `snippet_plain`, `highlights` | The same text without the marks, and each match as `[start, end)` offsets into it, in Unicode characters (code points) |
+| `rank` | SQLite FTS5 bm25 score: lower is a better match. Results are already sorted |
+
+`--speaker` matches the displayed speaker ignoring case, and `my_name` also
+matches unlabelled `You` lines. `--since` takes `2026-11-01` (local
+midnight) or an RFC 3339 time. A query with no words exits non-zero with a
+message on stderr. The first search after an upgrade indexes older meetings.
+
 ### The live feed: `meeting.sock`
 
 The daemon publishes meeting events as newline-delimited JSON on a Unix
