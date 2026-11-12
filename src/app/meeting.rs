@@ -498,6 +498,71 @@ pub(crate) async fn run_meeting_command(
             println!("Meeting {} deleted.", meeting_id);
         }
 
+        MeetingAction::Title {
+            meeting_id,
+            title,
+            json,
+        } => {
+            use meeting::retitle;
+            let title = match retitle::clean_title(&title) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())?;
+            let id = match storage.resolve_meeting_id(&meeting_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let live = meeting_is_live(&id);
+            // A running meeting's transcript belongs to the daemon, which
+            // rewrites it and names the speakers when it hears of this.
+            let done = match retitle::retitle_stored(&storage, &id, &title, None, !live) {
+                Ok(done) => done,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut labelled = Vec::new();
+            if live {
+                retitle::write_trigger(
+                    &config::Config::runtime_dir(),
+                    &retitle::Retitle {
+                        meeting_id: id.to_string(),
+                        title: done.title.clone(),
+                        url: None,
+                    },
+                )?;
+            } else if config.meeting.auto_label_from_title {
+                if let Some(me) = meeting::title_labels::Me::resolve(None) {
+                    labelled = meeting::title_labels::label_stored(&storage, &id, &me)?;
+                }
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "meeting_id": done.meeting_id,
+                        "title": done.title,
+                        "previous_title": done.previous_title,
+                        "live": live,
+                        "labelled": labelled,
+                    }))?
+                );
+            } else {
+                println!("Meeting retitled \"{}\".", done.title);
+                if !labelled.is_empty() {
+                    println!("Named {} from the title.", labelled.join(", "));
+                }
+            }
+        }
+
         MeetingAction::Label {
             meeting_id,
             speaker_id,

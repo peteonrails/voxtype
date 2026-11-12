@@ -287,6 +287,7 @@ not per word: meetings are transcribed in chunks, not streamed. Show a
 | `segment_updated` | One line changed: moved, corrected, annotated, or restored |
 | `segment_deleted` | One line was hidden |
 | `notes_updated` | The meeting's notes changed |
+| `title_changed` | The meeting was retitled, by hand or from the calendar |
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
@@ -371,6 +372,14 @@ Drop the segment. It follows `meeting delete-line`.
 
 The notes changed. The event carries no text: read them with
 `voxtype meeting notes <meeting_id> --json`.
+
+#### `title_changed`
+
+```json
+{"event": "title_changed", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "title": "Pete <> Chad Bi-Weekly"}
+```
+
+Show the new title. It follows `voxtype meeting title`, or a title taken from the calendar just after the meeting started. The `hello` snapshot carries the new title from then on. Lines whose speakers the new title names follow as `segment_updated`.
 
 #### `status`
 

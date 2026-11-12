@@ -100,6 +100,10 @@ pub struct MeetingConfig {
     /// Call detection and the Record prompt
     #[serde(default)]
     pub detect: super::MeetingDetectConfig,
+
+    /// Titles from the calendar for meetings that start without one
+    #[serde(default)]
+    pub calendar: MeetingCalendarConfig,
     /// Meeting assistant: `meeting ask` and agent summaries
     #[serde(default)]
     pub assistant: MeetingAssistantConfig,
@@ -420,6 +424,44 @@ impl Default for MeetingSummaryConfig {
     }
 }
 
+/// `[meeting.calendar]`: a title from the calendar for a meeting that
+/// starts without one
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct MeetingCalendarConfig {
+    /// Command printing the next meeting as the Omarchy Next Meeting
+    /// plugin's JSON. Empty uses that plugin's `agendaCommand` when the
+    /// plugin is on the Omarchy bar, and is otherwise off.
+    #[serde(default)]
+    pub command: String,
+
+    /// An event counts when it is running, or starts within this many
+    /// minutes either side of the meeting's start
+    #[serde(default = "default_calendar_window")]
+    pub window_mins: u32,
+
+    /// Seconds to wait for the command
+    #[serde(default = "default_calendar_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_calendar_window() -> u32 {
+    10
+}
+
+fn default_calendar_timeout() -> u64 {
+    3
+}
+
+impl Default for MeetingCalendarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            window_mins: default_calendar_window(),
+            timeout_secs: default_calendar_timeout(),
+        }
+    }
+}
+
 impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
@@ -439,6 +481,7 @@ impl Default for MeetingConfig {
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
             detect: super::MeetingDetectConfig::default(),
+            calendar: MeetingCalendarConfig::default(),
             assistant: MeetingAssistantConfig::default(),
         }
     }

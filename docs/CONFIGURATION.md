@@ -4129,6 +4129,40 @@ max_transcript_chars = 100000
 
 ---
 
+## [meeting.calendar]
+
+A title from your calendar for a meeting that starts without one. See [Titles from Your Calendar](MEETING_MODE.md#titles-from-your-calendar).
+
+### command
+
+**Type:** String
+**Default:** `""`
+**Required:** No
+
+A command printing the next meeting as JSON, in the format of the Omarchy Next Meeting widget. Empty uses that widget's `agendaCommand` when the widget is on your Omarchy bar, and otherwise asks no calendar. It runs through `bash -lc` with `~/.local/bin` and `~/bin` first on `PATH`.
+
+```bash
+voxtype config set meeting.calendar.command "agenda --next-json"
+```
+
+### window_mins
+
+**Type:** Integer (0 to 120)
+**Default:** `10`
+**Required:** No
+
+An event names the meeting when it is running, or when it starts within this many minutes before or after the meeting starts.
+
+### timeout_secs
+
+**Type:** Integer (1 to 60)
+**Default:** `3`
+**Required:** No
+
+Seconds to wait for the calendar command. It runs alongside the recording, so a slow calendar never delays the start; past this, the meeting keeps its title.
+
+---
+
 ## [meeting.detect]
 
 Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browser) and offers to record it with a notification. Detection only suggests: nothing is recorded until you press Record, except for apps in `auto_record_apps`. It runs inside the daemon and only while `[meeting] enabled = true`. See [Meeting detection](MEETING_MODE.md#meeting-detection) for how calls are recognized.

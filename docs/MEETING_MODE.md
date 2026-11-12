@@ -16,10 +16,12 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [Meeting Detection](#meeting-detection)
   - [How calls are recognized](#how-calls-are-recognized)
   - [When it prompts](#when-it-prompts)
+  - [Titles from Your Calendar](#titles-from-your-calendar)
   - [Checking what it sees](#checking-what-it-sees)
 - [Working with Transcripts](#working-with-transcripts)
   - [Listing Past Meetings](#listing-past-meetings)
   - [Viewing a Meeting](#viewing-a-meeting)
+  - [Retitling a Meeting](#retitling-a-meeting)
   - [Labeling Speakers](#labeling-speakers)
   - [Moving a Line to Another Speaker](#moving-a-line-to-another-speaker)
   - [Correcting and Deleting Lines](#correcting-and-deleting-lines)
@@ -294,6 +296,30 @@ The setting is read when the daemon starts, so restart it after changing it.
 
 Detection never records by itself, except for apps you list in `auto_record_apps`.
 
+### Titles from Your Calendar
+
+A meeting that starts without a real title can take one from your calendar. That covers a meeting started with no `--title`, one recorded from the detection prompt when the call window only said "Zoom call", "Google Meet call" or "Teams call", and the date-only default ("Meeting 2026-11-12 14:00"). A title you gave yourself is never replaced.
+
+Voxtype runs a calendar command when the meeting starts and uses the event that is running now, or that starts within `window_mins` (10 by default) either side of the meeting's start. When the first event has been running a long time and the next one starts within the window, the next one is taken, since that is the call you are joining. The event's link is stored too, when the meeting has none. Then the title names the speakers of a 1:1 as usual. The lookup runs alongside the recording, so it never delays the start.
+
+The command prints one JSON object, the format of the Omarchy [Next Meeting](https://github.com/peteonrails/omarchy-next-meeting) bar widget:
+
+```json
+{"title": "Pete <> Chad Bi-Weekly", "start_iso": "2026-11-12T14:00", "minutes_until": -2, "ongoing": true, "url": "https://zoom.us/j/123",
+ "next": {"title": "Retro", "start_iso": "2026-11-12T15:00", "minutes_until": 58}}
+```
+
+`{"empty": true}` means nothing is coming up, and `"error"` that the calendar could not be read. If you use that widget, there is nothing to set up: with `[meeting.calendar] command` left empty, voxtype runs the widget's own `agendaCommand` (read from the bar's settings in `~/.config/omarchy/shell.json`), the same way the widget does. Otherwise point voxtype at any command that prints this JSON:
+
+```toml
+[meeting.calendar]
+command = "agenda --next-json"
+window_mins = 10
+timeout_secs = 3
+```
+
+The command runs through `bash -lc`, with `~/.local/bin` and `~/bin` first on `PATH`. If it fails, takes longer than `timeout_secs`, or prints something else, the meeting keeps the title it had, and the reason is logged at debug level.
+
 ### Checking what it sees
 
 ```bash
@@ -345,6 +371,19 @@ voxtype meeting show latest --json
 Shows a meeting's title, ID, start and end times, duration, status, number of chunks, the call's link if it has one, and its transcript's segment count, word count and speakers. It reads the saved transcript, which grows with every chunk, so it is current during a meeting too.
 
 Every command that takes a meeting accepts its full ID, the start of it (`a32baa9b`), or `latest` for the most recent.
+
+### Retitling a Meeting
+
+Give a meeting a new title at any point, while it records, while it is paused, or after it has finished:
+
+```bash
+voxtype meeting title latest "Pete <> Chad Bi-Weekly"
+voxtype meeting title 3f2a "Q4 planning" --json
+```
+
+The title is stored with the meeting at once, so `meeting list`, `meeting show`, `metadata.json`, `meeting.json` and `transcript.md` all use it. The meeting's folder keeps the name it was created with. While the meeting is running, the live meeting view changes title straight away. An empty title is refused.
+
+A two-person title names the speakers just as one given at the start does (see [Naming Speakers from the Title](#naming-speakers-from-the-title)): retitling a call to "Pete <> Chad" halfway through names the lines already there and every voice heard from then on. Names you gave by hand are kept.
 
 ### Labeling Speakers
 

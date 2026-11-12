@@ -133,6 +133,27 @@ pub enum MeetingAction {
         #[arg(long, short)]
         force: bool,
     },
+    /// Give a meeting a new title
+    ///
+    /// Works on a meeting that is recording, paused or finished. The new
+    /// title shows in the meeting view at once and is stored everywhere
+    /// the meeting is listed; the meeting's folder keeps its name. A
+    /// two-person title such as "Pete <> Chad" names the speakers, as at
+    /// the start of a meeting, without replacing names you gave by hand.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting title latest \"Pete <> Chad Bi-Weekly\"\n  \
+        voxtype meeting title 3f2a \"Q4 planning\" --json")]
+    Title {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// The new title
+        title: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Label a speaker in a meeting transcript
     ///
     /// Assigns a human-readable name to a speaker the transcript contains:
