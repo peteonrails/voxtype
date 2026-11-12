@@ -27,9 +27,25 @@ QtObject {
   property int snap: 24
   property int minWidth: 280
   property int defaultWidth: 460
-  // The pill a minimized card becomes.
-  property int pillWidth: 300
+  // The pill a minimized card becomes: as wide as what it says (the view
+  // sets pillContentWidth), within these bounds.
+  property int pillMinWidth: 140
+  property int pillMaxWidth: 380
+  property real pillContentWidth: 200
+  readonly property real pillWidth: Math.max(root.pillMinWidth, Math.min(root.pillMaxWidth, Math.round(root.pillContentWidth)))
   property int pillHeight: 40
+  // The pill keeps the card's outer edge: its right edge for a card on the
+  // right half of the screen, its left edge otherwise. Decided when it
+  // minimizes, so the pill does not jump as its text grows.
+  property bool pillRight: true
+  onMinimizedChanged: {
+    if (root.minimized) {
+      root.pillRight = root.cardLeft + root.cardWidth / 2 > root.screenWidth / 2
+    } else {
+      // Back to a card that fits the screen wherever the pill went.
+      root.x = Math.max(0, Math.min(root.screenWidth - root.cardWidth, root.cardLeft))
+    }
+  }
 
   // -1 until placed: the card starts against the right edge.
   property real x: -1
@@ -44,7 +60,9 @@ QtObject {
   // Full height is the anchors' business; this is only the estimate the
   // math needs (snapping, the pill's place).
   readonly property real cardHeight: root.compact ? root.compactHeight : root.screenHeight - 2 * root.gap
-  readonly property real left: root.x < 0 ? root.screenWidth - root.cardWidth - root.gap : root.x
+  readonly property real cardLeft: root.x < 0 ? root.screenWidth - root.cardWidth - root.gap : root.x
+  readonly property real pillLeft: root.cardLeft + (root.pillRight ? root.cardWidth - root.pillWidth : 0)
+  readonly property real left: root.minimized ? root.pillLeft : root.cardLeft
   readonly property real top: root.compact || root.minimized ? (root.y < 0 ? root.gap : root.y) : root.gap
   // Full height anchors the bottom too; compact and the pill do not.
   readonly property bool fullHeight: !root.compact && !root.minimized
@@ -52,7 +70,7 @@ QtObject {
   readonly property real windowHeight: root.minimized ? root.pillHeight : root.cardHeight
 
   // The edge the resize handle sits on: the one facing the screen's middle.
-  readonly property bool handleOnLeft: root.left + root.cardWidth / 2 > root.screenWidth / 2
+  readonly property bool handleOnLeft: root.cardLeft + root.cardWidth / 2 > root.screenWidth / 2
 
   function clampWidth(w) { return Math.max(root.minWidth, Math.min(root.maxWidth, Math.round(w))) }
 
@@ -74,21 +92,27 @@ QtObject {
   function moveBy(dx, dy) {
     var w = root.windowWidth
     var h = root.windowHeight
-    root.x = Math.max(0, Math.min(root.screenWidth - w, root.left + dx))
+    root.setLeft(Math.max(0, Math.min(root.screenWidth - w, root.left + dx)))
     if (!root.fullHeight) root.y = Math.max(0, Math.min(root.screenHeight - h, root.top + dy))
   }
 
   function endMove() {
-    root.x = root.snapX(root.left, root.windowWidth)
+    root.setLeft(root.snapX(root.left, root.windowWidth))
     if (!root.fullHeight) root.y = root.snapY(root.top, root.windowHeight)
     root.save()
+  }
+
+  // Put the window's left edge here: the card's own, or the pill's, which
+  // sits at a fixed offset from the card's.
+  function setLeft(left) {
+    root.x = root.minimized && root.pillRight ? left + root.pillWidth - root.cardWidth : left
   }
 
   // A drag of the inner edge: on the left edge the card keeps its right side.
   function resizeBy(dx) {
     var before = root.cardWidth
     if (root.handleOnLeft) {
-      var right = root.left + before
+      var right = root.cardLeft + before
       root.width = root.clampWidth(before - dx)
       root.x = right - root.cardWidth
     } else {
@@ -97,7 +121,7 @@ QtObject {
   }
 
   function endResize() {
-    root.x = Math.max(0, Math.min(root.screenWidth - root.cardWidth, root.left))
+    root.x = Math.max(0, Math.min(root.screenWidth - root.cardWidth, root.cardLeft))
     root.save()
   }
 

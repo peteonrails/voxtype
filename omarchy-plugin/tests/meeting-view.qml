@@ -129,6 +129,8 @@ Item {
           else if (s === "old-voxtype") tc.driveOldVoxtype()
           else if (s === "copy") tc.driveCopy()
           else if (s === "minimize") tc.driveMinimize()
+          else if (s === "pill-states") tc.drivePillStates()
+          else if (s === "pill-idle") tc.drivePillIdle()
           else if (s === "minimize-autoopen") tc.driveMinimizeAutoOpen()
           else if (s === "resize") tc.driveResize()
           else if (s === "move") tc.driveMove()
@@ -1446,20 +1448,41 @@ Item {
       placement().screenName = "DP-1"
     }
 
+    function minimizeNow() {
+      click(find(view(), "minimizeButton"), "Minimize")
+      waitFor(function() { return find(view(), "pill").visible && placement().minimized }, "the pill")
+    }
+
+    function pillSays() { return txt("pillState") + (shown(find(view(), "pillElapsed")) ? " | " + txt("pillElapsed") : "") }
+
     function driveMinimize() {
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
-      click(find(view(), "minimizeButton"), "Minimize")
-      var pill = find(view(), "pill")
-      waitFor(function() { return pill.visible && placement().minimized }, "the pill")
+      screen1600()
+      var p = placement()
+      var cardRight = p.left + p.cardWidth
+      minimizeNow()
       var win = host.ctrl().window
-      check(win.implicitWidth === 300 && win.implicitHeight === 40, "pill-sized window: " + win.implicitWidth + "x" + win.implicitHeight)
       check(host.viewOpen(), "the view is still open (the pill is the view)")
-      check(txt("pillState") === "Recording" && /^1:0\d$/.test(txt("pillElapsed")), "state and time: " + txt("pillState") + " " + txt("pillElapsed"))
-      check(txt("pillLine") === "Remote: The build went green overnight.", "last line: " + txt("pillLine"))
+      check(txt("pillState") === "Standup" && /^1:0\d$/.test(txt("pillElapsed")), "title and time: " + pillSays())
+      check(shown(find(view(), "pillDot")) && find(view(), "pillDot").color === view().theme.urgent, "a red dot while recording")
+      check(!shown(find(view(), "pillStart")), "no Start while recording")
+      // Sized to what it says, inside the bounds, and on the card's outer
+      // (right) edge.
+      check(win.implicitHeight === 40 && win.implicitWidth >= p.pillMinWidth && win.implicitWidth < 260,
+            "fits its text: " + win.implicitWidth + "x" + win.implicitHeight)
+      check(Math.abs(win.implicitWidth - p.pillWidth) < 1, "the window is the pill")
+      check(p.left + p.pillWidth === cardRight, "right edge kept: " + (p.left + p.pillWidth) + " vs " + cardRight)
       shot("pill", true)
+      // Dragged, it moves; expanded, the card is back on screen beside it.
+      var drag = find(view(), "pillDrag")
+      mousePress(drag, 20, 20)
+      mouseMove(drag, 20 - 300, 20 + 60)
+      mouseRelease(drag, 20 - 300, 20 + 60)
+      check(Math.abs(p.left + p.pillWidth - (cardRight - 300)) < 2 && p.top > p.gap, "moved with the pointer: " + p.left + "," + p.top)
       click(find(view(), "pillDrag"), "the pill")
       waitFor(function() { return !placement().minimized && shown(find(view(), "transcriptList")) }, "expanded by a click")
+      check(p.left + p.cardWidth === cardRight - 300, "the card's right edge follows the pill: " + (p.left + p.cardWidth))
 
       // `voxtype meeting view --minimize`, then `--expand`.
       request({ window: "minimize" })
@@ -1467,6 +1490,54 @@ Item {
       request({ window: "expand" })
       waitFor(function() { return !placement().minimized }, "expanded by request")
       check(host.opens === 1, "one window throughout: " + host.opens)
+    }
+
+    function drivePillStates() {
+      ctl({ cmd: "autosummary", summary: { summary: "A short standup.", decisions: [], action_items: [], key_points: [] } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // Pause and Stop from the card, then watch the pill.
+      click(find(view(), "pauseButton"), "Pause")
+      waitFor(function() { return feed().status === "paused" }, "paused")
+      minimizeNow()
+      waitFor(function() { return txt("pillState") === "Paused" && /^1:0\d$/.test(txt("pillElapsed")) }, "Paused and the time: " + pillSays())
+      check(find(view(), "pillDot").color !== view().theme.urgent, "no red dot while paused")
+      shot("pill-paused", true)
+      click(find(view(), "pillDrag"), "expand")
+      waitFor(function() { return !placement().minimized }, "expanded")
+      click(find(view(), "pauseButton"), "Resume")
+      waitFor(function() { return feed().status === "recording" }, "recording again")
+      click(find(view(), "stopButton"), "Stop")
+      minimizeNow()
+      waitFor(function() { return txt("pillState") === "Finishing…" && !shown(find(view(), "pillElapsed")) }, "Finishing…: " + pillSays())
+      shot("pill-finishing", true)
+      waitFor(function() { return txt("pillState") === "Summarizing · Claude…" }, "Summarizing with the agent: " + pillSays(), 6000)
+      shot("pill-summarizing", true)
+      waitFor(function() { return txt("pillState") === "Ended" && /^1:0\d · Summary ready$/.test(txt("pillElapsed")) }, "Ended with the summary: " + pillSays(), 8000)
+      shot("pill-ended", true)
+    }
+
+    function drivePillIdle() {
+      waitFor(function() { return feed().connected && feed().status === "idle" }, "feed connected")
+      openView()
+      minimizeNow()
+      check(txt("pillState") === "No meeting" && !shown(find(view(), "pillDot")) && !shown(find(view(), "pillElapsed")), "idle: " + pillSays())
+      check(shown(find(view(), "pillStart")), "Start offered")
+      shot("pill-idle", true)
+      var narrow = placement().pillWidth
+      click(find(view(), "pillStart"), "Start")
+      // A start from the pill expands it (a meeting start does).
+      waitFor(function() { return feed().status === "recording" && !placement().minimized }, "started and expanded", 6000)
+      // A long title is elided; the pill stops at its maximum width.
+      ctl({ cmd: "stop" })
+      waitFor(function() { return feed().ended }, "ended", 6000)
+      ctl({ cmd: "start", title: "Quarterly planning with the platform, mobile and web teams" })
+      waitFor(function() { return feed().title.indexOf("Quarterly") === 0 && feed().status === "recording" }, "long title", 6000)
+      minimizeNow()
+      var p = placement()
+      check(p.pillWidth <= p.pillMaxWidth && p.pillWidth > narrow, "wider, within the maximum: " + p.pillWidth)
+      check(find(view(), "pillState").truncated, "the title elided")
+      shot("pill-long-title", true)
     }
 
     function driveMinimizeAutoOpen() {
