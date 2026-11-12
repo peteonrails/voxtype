@@ -1329,18 +1329,35 @@ Item {
       shot("old-voxtype")
     }
 
+    // Every Copy that worked, as the view noted it. "Copied" shows for 1.5 s,
+    // which a polling wait can miss on a loaded machine; the change can't be.
+    property var copiedKeys: []
+    function copiedSeen(prefix) {
+      for (var i = 0; i < tc.copiedKeys.length; i++) if (tc.copiedKeys[i].indexOf(prefix) === 0) return true
+      return false
+    }
+
     function driveCopy() {
       openView()
       waitFor(function() { return lines().length === 4 }, "hello rendered")
+      // Each entry also says what the button read at that moment.
+      view().copiedKeyChanged.connect(function() {
+        var key = view().copiedKey
+        if (key === "") return
+        var button = key === "summary" ? find(view(), "summaryCopy")
+          : find(find(view(), "askThread").itemAtIndex(1), "answerCopy")
+        tc.copiedKeys = tc.copiedKeys.concat([key + "=" + (button ? String(button.text) : "?")])
+      })
       tab("ask")
       typeAsk("What did we decide?")
       waitFor(function() { return answered(1) }, "answered", 8000)
       var row = find(view(), "askThread").itemAtIndex(1)
       var copy = find(row, "answerCopy")
       check(shown(copy) && String(copy.text) === "Copy", "Copy on the answer")
-      mouseClick(copy, copy.width / 2, copy.height / 2)
-      waitFor(function() { return String(copy.text) === "Copied" }, "Copied")
-      shot("copied")
+      click(copy, "Copy on the answer")
+      waitFor(function() { return tc.copiedSeen("answer:") }, "Copied: " + JSON.stringify(tc.copiedKeys), 8000)
+      check(tc.copiedKeys[0].slice(-7) === "=Copied", "the button said Copied: " + tc.copiedKeys[0])
+      if (String(copy.text) === "Copied") shot("copied")
 
       click(find(view(), "stopButton"), "Stop")
       waitFor(function() { return txt("meetingState") === "Ended" }, "Ended")
@@ -1349,11 +1366,12 @@ Item {
       waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary", 8000)
       var scopy = find(view(), "summaryCopy")
       click(scopy, "Copy summary")
-      waitFor(function() { return String(scopy.text) === "Copied" }, "summary Copied")
+      waitFor(function() { return tc.copiedSeen("summary") }, "summary Copied: " + JSON.stringify(tc.copiedKeys), 8000)
+      check(tc.copiedKeys[tc.copiedKeys.length - 1] === "summary=Copied", "the summary button said Copied: " + JSON.stringify(tc.copiedKeys))
 
       // Without wl-copy, say what is missing.
       host.ctrl().copyCommand = "/nonexistent/wl-copy"
-      waitFor(function() { return String(scopy.text) === "Copy" }, "label back")
+      waitFor(function() { return String(scopy.text) === "Copy" }, "label back", 8000)
       click(scopy, "Copy without wl-copy")
       waitFor(function() { return shown(find(view(), "actionError")) }, "the reason")
       check(view().actionError === "Copying needs /nonexistent/wl-copy (the wl-clipboard package), which is not installed.", "message: " + view().actionError)
