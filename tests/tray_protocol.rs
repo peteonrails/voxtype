@@ -145,6 +145,10 @@ async fn tray_waits_for_late_watcher() {
         .unwrap();
     let idle = menu(&dbusmenu).await;
     assert!(!bool::try_from(&item(&idle, "Cancel").1["enabled"]).unwrap());
+    assert!(
+        !has(&idle, "Meetings..."),
+        "no Meetings... while meeting mode is off"
+    );
     let activation = sni.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).await;
     assert!(activation.unwrap_err().to_string().contains("ItemIsMenu"));
     assert!(
@@ -153,7 +157,7 @@ async fn tray_waits_for_late_watcher() {
             .is_err(),
         "plain activation must not launch settings"
     );
-    click(&dbusmenu, item(&idle, "Settings").0).await;
+    click(&dbusmenu, item(&idle, "Settings...").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::OpenSettings));
     click(&dbusmenu, item(&idle, "Start Recording").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::ToggleRecording));
@@ -389,6 +393,9 @@ async fn meeting_entries_follow_the_daemon_and_send_meeting_actions() {
     let idle = menu_with(&dbusmenu, "Start Meeting").await;
     assert!(label_enabled(&idle, "Start Meeting"));
     assert_eq!(tooltip().await, says("Ready"));
+    // With meetings on, "Meetings..." opens the meeting view.
+    click(&dbusmenu, item(&idle, "Meetings...").0).await;
+    assert_eq!(events.recv().await, Some(TrayAction::OpenMeetings));
     click(&dbusmenu, item(&idle, "Start Meeting").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::StartMeeting));
     let starting = menu_with(&dbusmenu, "Starting Meeting...").await;

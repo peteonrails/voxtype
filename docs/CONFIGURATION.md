@@ -76,7 +76,7 @@ The daemon never installs icons or rewrites configuration at startup.
 link_settings_plugin = true # default
 ```
 
-On Omarchy, lets the daemon link the packaged Voxtype Settings panel into
+On Omarchy, lets the daemon link the packaged Voxtype panel into
 `~/.config/omarchy/plugins` on its first start and ask the shell to rescan it
 after upgrades. It never replaces your own copy of the panel and never re-adds
 a panel you removed. Set `false` to leave `~/.config/omarchy` untouched;
@@ -3812,7 +3812,7 @@ Maximum meeting duration in minutes. Set to `0` for unlimited.
 **Default:** `true`
 **Required:** No
 
-Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view runs in the Voxtype plugin for the Omarchy shell and in voxtype's standalone Quickshell shell (`voxtype setup quickshell`); without either, this does nothing. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype Settings panel is never replaced by the view.
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. The view runs in the Voxtype plugin for the Omarchy shell and in voxtype's standalone Quickshell shell (`voxtype setup quickshell`); without either, this does nothing. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype panel is never replaced by the view.
 
 ```bash
 voxtype config set meeting.show_view_on_start false

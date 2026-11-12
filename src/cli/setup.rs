@@ -113,9 +113,9 @@ pub enum SetupAction {
         qml: bool,
     },
 
-    /// Link the packaged Voxtype Settings panel into Omarchy
+    /// Link the packaged Voxtype panel into Omarchy
     #[command(long_about = "\
-        Link the packaged Voxtype Settings panel into Omarchy\n\n\
+        Link the packaged Voxtype panel into Omarchy\n\n\
         Packages install the panel at \
         /usr/share/voxtype/omarchy-plugin/io.voxtype.settings. This command \
         links it into ~/.config/omarchy/plugins/io.voxtype.settings, asks \
