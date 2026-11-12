@@ -29,14 +29,35 @@ const NOISE: &[&str] = &[
     "1-on-1",
     "one-on-one",
     "o3",
+    "one-to-one",
+    "1-to-1",
+    "1to1",
+    "1x1",
+    "1:1s",
+    "one",
+    "on",
+    "to",
     "weekly",
     "biweekly",
     "bi-weekly",
+    "bi",
+    "semi-weekly",
+    "fortnightly",
     "daily",
     "monthly",
+    "bi-monthly",
+    "bimonthly",
+    "semi-monthly",
+    "quarterly",
+    "annual",
+    "yearly",
+    "recurring",
+    "standing",
     "standup",
     "stand-up",
     "sync",
+    "sync-up",
+    "syncup",
     "check-in",
     "checkin",
     "check",
@@ -48,6 +69,19 @@ const NOISE: &[&str] = &[
     "touch",
     "base",
     "touchbase",
+    "touch-base",
+    "review",
+    "planning",
+    "retro",
+    "kickoff",
+    "prep",
+    "debrief",
+    "session",
+    "update",
+    "updates",
+    "discussion",
+    "brainstorm",
+    "interview",
     "chat",
     "meeting",
     "mtg",
@@ -132,6 +166,7 @@ const NOT_NAMES: &[&str] = &[
 /// The two names in a two-person meeting title, in title order, or `None`
 /// when the title is not clearly that.
 pub fn parse_pair(title: &str) -> Option<(String, String)> {
+    let title = strip_noise_brackets(title)?;
     if title.contains([',', ';', '(', ')', '[', ']', '+', '@', '#']) {
         return None;
     }
@@ -142,8 +177,23 @@ pub fn parse_pair(title: &str) -> Option<(String, String)> {
         .replace('/', " / ")
         .replace('&', " & ")
         .replace('–', " – ")
-        .replace('—', " — ");
-    let tokens: Vec<&str> = spaced.split_whitespace().collect();
+        .replace('—', " — ")
+        // A colon ending a word sets off what follows ("Chad: Weekly"), but
+        // "1:1" keeps its own.
+        .replace(": ", " : ");
+    let mut tokens: Vec<&str> = spaced.split_whitespace().collect();
+
+    // Meeting words and the dashes or bars that set them off, at either end
+    // of the title: "Weekly: Pete / Chad", "Pete <> Chad - Bi-Weekly",
+    // "Pete <> Chad | Weekly Sync". Only then does a dash count as the one
+    // separator between the names.
+    let edge = |t: &str| is_noise(t) || matches!(t, "-" | "–" | "—" | "|" | "·" | "•" | ":");
+    while tokens.last().is_some_and(|t| edge(t)) {
+        tokens.pop();
+    }
+    while tokens.first().is_some_and(|t| edge(t)) {
+        tokens.remove(0);
+    }
 
     let mut separators = tokens
         .iter()
@@ -176,6 +226,37 @@ pub fn parse_pair(title: &str) -> Option<(String, String)> {
         return None;
     }
     Some((a, b))
+}
+
+/// The title with any bracketed meeting words removed ("Pete <> Chad
+/// (Bi-Weekly)"), or `None` when brackets hold anything else or do not
+/// pair up.
+fn strip_noise_brackets(title: &str) -> Option<String> {
+    let mut out = String::with_capacity(title.len());
+    let mut rest = title;
+    while let Some(open) = rest.find(['(', '[']) {
+        let close_char = if rest[open..].starts_with('(') {
+            ')'
+        } else {
+            ']'
+        };
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let close = after.find(close_char)?;
+        let inner = &after[..close];
+        if inner.contains(['(', '[', ')', ']'])
+            || !inner
+                .split(|c: char| c.is_whitespace() || c == '/')
+                .filter(|w| !w.is_empty())
+                .all(is_noise)
+        {
+            return None;
+        }
+        out.push(' ');
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 fn is_separator(token: &str) -> bool {
@@ -433,6 +514,54 @@ mod tests {
         assert_eq!(pair("Zoë & José"), p("Zoë", "José"));
     }
 
+    /// Calendar titles are often title-cased, so meeting words count in any
+    /// case, alone or several, before or after the names, bare or set off
+    /// by brackets, a dash or a bar.
+    #[test]
+    fn meeting_words_never_become_part_of_a_name() {
+        for title in [
+            "Pete <> Chad Bi-Weekly",
+            "Pete <> Chad bi-weekly",
+            "Pete <> Chad BI-WEEKLY",
+            "Pete <> Chad Biweekly",
+            "Pete <> Chad Bi Weekly",
+            "Pete <> Chad Weekly",
+            "Pete <> Chad Fortnightly",
+            "Pete <> Chad Monthly",
+            "Pete <> Chad Quarterly",
+            "Pete <> Chad Quarterly Review",
+            "Pete <> Chad Daily",
+            "Pete <> Chad Weekly Sync",
+            "Pete <> Chad Sync-Up",
+            "Pete <> Chad Sync Up",
+            "Pete <> Chad Catch-Up",
+            "Pete <> Chad Catch Up",
+            "Pete <> Chad Check-In",
+            "Pete <> Chad 1on1",
+            "Pete <> Chad 1-on-1",
+            "Pete <> Chad One-on-One",
+            "Pete <> Chad One on One",
+            "Pete <> Chad 1:1",
+            "Pete <> Chad Standup",
+            "Pete <> Chad Stand-Up",
+            "Pete <> Chad (Bi-Weekly)",
+            "Pete <> Chad [Weekly Sync]",
+            "Pete <> Chad - Bi-Weekly",
+            "Pete <> Chad | Weekly",
+            "Pete <> Chad: Weekly",
+            "1-on-1: Pete <> Chad",
+            "Weekly - Pete / Chad",
+            "Bi-Weekly Pete & Chad Sync",
+            "Pete x Chad Recurring",
+        ] {
+            assert_eq!(pair(title), p("Pete", "Chad"), "{title:?}");
+        }
+        // Pete's own title, end to end.
+        let labels = labels_for("Pete <> Chad Bi-Weekly", &Me::named(&["Pete Jackson"])).unwrap();
+        assert_eq!(labels.other, "Chad");
+        assert_eq!(pair("Chad Lee <> Pete Monthly"), p("Chad Lee", "Pete"));
+    }
+
     #[test]
     fn anything_else_does_not() {
         for title in [
@@ -458,7 +587,10 @@ mod tests {
             "Pete <> Andrew: roadmap",
             "Pete <> Pete",
             "Pete <> Andrew Lee Smith",
-            "Pete <> Andrew (weekly)",
+            "Pete <> Chad (Roadmap)",
+            "Pete <> Chad (weekly",
+            "Pete <> Chad - Roadmap",
+            "Pete <> Chad Bi-Weekly Roadmap",
             "Pete + Andrew",
             "Pete X Andrew",
             "Pete <> Andrew 2",
