@@ -748,6 +748,10 @@ impl MeetingDaemon {
 
         let before = meeting.transcript.segments.clone();
         meeting.transcript.apply_speaker_overrides(&overrides);
+        // Names given with `meeting label` since a line was sent: without
+        // this, lines from before the name keep the bare ID in the saved
+        // transcript and in the hello backlog a reopened view starts from.
+        meeting.transcript.apply_speaker_labels(&labels);
         meeting.transcript.apply_annotations(&annotations);
         meeting.transcript.apply_text_edits(&edits);
         meeting.transcript.apply_deletions(&deletions);
@@ -761,6 +765,7 @@ impl MeetingDaemon {
                 continue;
             }
             let changed = was.deleted
+                || now.speaker_label != was.speaker_label
                 || now.speaker_id != was.speaker_id
                 || now.original_speaker != was.original_speaker
                 || now.annotation != was.annotation
@@ -2343,6 +2348,37 @@ mod tests {
         // --reset after stop gives it back to the renamed diarizer speaker.
         let back = cli.reset_segment_speaker(&id, 1, true).unwrap();
         assert_eq!(back.speaker_key(), "Remote 1");
+    }
+
+    /// `meeting label` mid-meeting: lines sent before the name get it too,
+    /// published as updates so every view (and the hello backlog a reopened
+    /// view starts from) shows it, even for a speaker who never speaks again.
+    #[tokio::test]
+    async fn a_label_given_mid_meeting_names_the_lines_already_sent() {
+        let mut h = harness().await;
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        drain(&mut h.events);
+
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Chris").unwrap();
+        assert_eq!(h.daemon.apply_segment_edits().await, 1);
+        assert_eq!(drain(&mut h.events), vec!["updated 1 Chris (Remote)"]);
+        // Nothing left to name: a second pass publishes nothing.
+        assert_eq!(h.daemon.apply_segment_edits().await, 0);
+
+        // Lines after the name carry it as they are sent.
+        h.pair(&[(1.0, 3.0)], &[(5.0, 7.0)]).await;
+        h.daemon.stop().await.unwrap();
+        let saved = h.saved();
+        let remote: Vec<_> = saved
+            .transcript
+            .segments
+            .iter()
+            .filter(|s| s.speaker_key() == "Remote")
+            .map(|s| s.speaker_label.as_deref())
+            .collect();
+        assert_eq!(remote, vec![Some("Chris"), Some("Chris")]);
     }
 
     /// A client offers "Restore original" from `original_speaker`; after a

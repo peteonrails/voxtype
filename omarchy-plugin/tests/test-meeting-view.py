@@ -71,8 +71,13 @@ Scenarios:
               Open meeting folder
   export-past an SRT export of a past meeting (all five formats offered),
               and its folder
-  minimize    the pill (state, elapsed, last line), click to expand, the
-              --minimize/--expand requests
+  minimize    the pill while recording (red dot, title, elapsed), sized to
+              what it says, on the card's outer edge and dragged with it;
+              click to expand, the --minimize/--expand requests
+  pill-states the pill through a meeting: Paused, Finishing..., Ended with
+              its length, Summarizing with the agent, Summary ready
+  pill-idle   no meeting: "No meeting" and Start, which starts one; a long
+              title is elided within the pill's maximum width
   minimize-autoopen  a meeting start while minimized expands the one window
   resize      the inner-edge handle (clamped 280 px to half the screen) and
               compact height
@@ -137,6 +142,10 @@ Scenarios:
   recovery-real  `meeting recover` answered by a real voxtype (REAL_VOXTYPE,
               run only when set) over a store seeded with two interrupted
               meetings: both cards, Finish and Discard for real
+  live-labels  names given mid-meeting stick: a renamed Remote 1 keeps its
+              name on lines that arrive later, and after the view reconnects
+              (a fresh hello) both a talking and a silent renamed speaker
+              keep theirs
   autoopen    a meeting started elsewhere opens the closed view
   autoopen-off   ... unless [meeting] show_view_on_start is false
   autoopen-oldcli  a CLI without the key reads as on
@@ -164,14 +173,14 @@ import time
 
 import panel_harness as h
 
-SCENARIOS = ("live", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-gtk4", "autoopen-settings", "reconnect",
+SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli", "autoopen-gtk4", "autoopen-settings", "reconnect",
              "idle", "nodaemon", "scroll", "reassign", "reassign-fails", "new-speaker", "restore",
              "external-update", "ended-edit", "notes", "annotate", "ask", "ask-chips", "ask-notify", "consent",
              "consent-choose", "local-only", "summary", "regenerate", "scroll-tabs", "view-request",
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
-             "minimize", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
+             "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real",
@@ -276,6 +285,16 @@ def seed_interrupted(real, data_home):
                    "VALUES (?, ?, ?, 'interrupted', 2, ?, 0)", (mid, title, now - ago, str(folder)))
     db.commit()
     db.close()
+def hybrid_meeting():
+    """Hybrid diarization with two remote voices."""
+    m = running_meeting()
+    m["segments"] = [
+        seg(1, 4, "Morning. Can everyone hear me?", "microphone", "You", 0),
+        seg(2, 9, "Yes, loud and clear.", "loopback", "Remote 1", 0),
+        seg(3, 15, "This meeting is being recorded.", "loopback", "Remote 2", 0),
+        seg(4, 21, "Great, let's start with the release.", "microphone", "You", 0),
+    ]
+    return m
 
 
 def scroll_meeting():
@@ -290,6 +309,7 @@ def scroll_meeting():
 # Built per run, so a meeting's start time is relative to its own scenario.
 INITIAL = {
     "live": lambda: [running_meeting()],
+    "live-labels": lambda: [hybrid_meeting()],
     "reconnect": lambda: [running_meeting()],
     "scroll": lambda: [scroll_meeting()],
     "reassign": lambda: [running_meeting()],
@@ -319,6 +339,7 @@ INITIAL = {
     "line-delete-flag": lambda: [running_meeting()],
     "export": lambda: [running_meeting()],
     "minimize": lambda: [running_meeting()],
+    "pill-states": lambda: [running_meeting()],
     "resize": lambda: [running_meeting()],
     "move": lambda: [running_meeting()],
     "opacity": lambda: [running_meeting()],
@@ -703,6 +724,10 @@ def check_calls(scenario, calls, runtime_notes=""):
                         ["config", "set", "meeting.assistant.agent", "codex"],
                         ["config", "set", "meeting.assistant.local_only", "false"]], "config writes")
         expect(meeting, [], "meeting commands")
+    elif scenario == "pill-states":
+        expect(meeting, [["meeting", "pause"], ["meeting", "resume"], ["meeting", "stop"]], "meeting commands")
+    elif scenario == "pill-idle":
+        expect(meeting, [["meeting", "start"]], "meeting commands")
     elif scenario in ("cli-missing", "daemon-old", "old-voxtype", "minimize", "minimize-autoopen", "resize", "move",
                       "opacity", "view-state"):
         pass
@@ -776,6 +801,9 @@ def check_calls(scenario, calls, runtime_notes=""):
         expect(meeting, [], "meeting commands")
     elif scenario == "soundcheck-error":
         expect(meeting, [["meeting", "soundcheck", "--seconds", "30", "--json"]], "meeting commands")
+    elif scenario == "live-labels":
+        expect(meeting, [["meeting", "label", MEETING_ID, "Remote 1", "Chris"],
+                         ["meeting", "label", MEETING_ID, "Remote 2", "Announcer"]], "meeting commands")
     elif scenario == "agent-missing":
         expect(meeting, [ask_call("What did we decide?")], "meeting commands")
     elif scenario == "copy":

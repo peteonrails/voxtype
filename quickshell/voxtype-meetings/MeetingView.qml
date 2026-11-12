@@ -141,13 +141,6 @@ Item {
   signal minimizeRequested()
   signal expandRequested()
 
-  // The newest line, for the pill: "Primagen: buckle up…".
-  readonly property string lastLine: {
-    if (!root.feed || root.feed.segments.count === 0) return ""
-    var r = root.feed.segments.get(root.feed.segments.count - 1)
-    return root.feed.displayName(r.speaker) + ": " + r.text
-  }
-
   // A press-and-drag that moves the card (or pill). The window follows the
   // margins, so each event's travel from the press point is the step to take.
   component DragArea: MouseArea {
@@ -415,6 +408,34 @@ Item {
 
   // ------------------------------------------------------------- the pill
 
+  // What the pill says, by state. It is the meeting's status at a glance:
+  // recording with title and time, paused, finishing, summarizing (by
+  // whom), ended (with whether the summary is in), or no meeting.
+  readonly property bool summaryReady: root.assistant !== null && root.feed !== null
+    && root.assistant.summaryMarkdown !== "" && root.assistant.summaryMeeting === root.feed.meetingId
+  readonly property string pillText: {
+    if (!root.hasMeeting) return root.connected ? "No meeting" : "Voxtype not running"
+    if (root.busy === "stop" || root.status === "finalizing") return "Finishing…"
+    if (root.ended && root.assistant && root.assistant.summaryState === "summarizing")
+      return "Summarizing" + (root.assistant.summaryWith !== "" ? " · " + root.assistant.summaryWith : "") + "…"
+    if (root.status === "paused") return "Paused"
+    if (root.ended) return "Ended"
+    return root.feed && root.feed.title !== "" ? root.feed.title : "Recording"
+  }
+  readonly property string pillDetail: {
+    if (!root.hasMeeting || root.status === "finalizing" || root.busy === "stop") return ""
+    if (root.ended && root.assistant && root.assistant.summaryState === "summarizing") return ""
+    if (root.ended) return root.elapsedText + (root.summaryReady ? " · Summary ready" : "")
+    return root.elapsedText
+  }
+
+  Binding {
+    target: root.placement
+    property: "pillContentWidth"
+    value: pillRow.implicitWidth + 2 * (root.theme.lg + 4)
+    when: root.placement !== null
+  }
+
   Rectangle {
     id: pill
     objectName: "pill"
@@ -434,25 +455,28 @@ Item {
     }
 
     Row {
+      id: pillRow
       anchors.left: parent.left
-      anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: root.theme.lg + 4
-      anchors.rightMargin: root.theme.lg + 4
       spacing: root.theme.md
 
       Rectangle {
+        objectName: "pillDot"
         anchors.verticalCenter: parent.verticalCenter
         width: 8
         height: 8
         radius: 4
         visible: root.hasMeeting
-        color: root.status === "recording" ? root.theme.urgent : root.theme.dim
+        color: root.status === "recording" && root.busy !== "stop" ? root.theme.urgent : root.theme.dim
       }
       Text {
         objectName: "pillState"
         anchors.verticalCenter: parent.verticalCenter
-        text: root.hasMeeting ? root.stateLabel : "Meetings"
+        // A long title gives way to the time.
+        width: Math.min(implicitWidth, 200)
+        text: root.pillText
+        elide: Text.ElideRight
         color: root.theme.fg
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
@@ -461,21 +485,24 @@ Item {
       Text {
         objectName: "pillElapsed"
         anchors.verticalCenter: parent.verticalCenter
-        visible: root.hasMeeting && text !== ""
-        text: root.elapsedText
+        visible: text !== ""
+        text: root.pillDetail
         color: root.theme.dim
         font.family: root.theme.fontFamily
         font.pixelSize: root.theme.bodySmall
       }
-      Text {
-        objectName: "pillLine"
+      MeetingButton {
+        objectName: "pillStart"
         anchors.verticalCenter: parent.verticalCenter
-        width: Math.max(0, parent.width - x)
-        text: root.lastLine
-        color: root.theme.fg
-        font.family: root.theme.fontFamily
-        font.pixelSize: root.theme.bodySmall
-        elide: Text.ElideRight
+        visible: !root.hasMeeting
+        theme: root.theme
+        // Inside the pill's 40 px, not the card's control height.
+        height: 26
+        radius: 13
+        text: root.busy === "start" ? "Starting…" : "Start"
+        bordered: true
+        enabled: root.connected && root.busy === ""
+        onClicked: root.startRequested("")
       }
     }
   }

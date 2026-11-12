@@ -8,8 +8,9 @@ fake meeting.sock's control file (FAKE_MEETING_CTL; see fake-meeting-sock.py):
   meeting pause | resume        status paused | recording
   meeting stop                  finalizing, then idle
   meeting start [--title T]     a new recording meeting
-  meeting label M KEY NAME      later segments for KEY carry NAME; the socket
-                                announces nothing, as the daemon does not
+  meeting label M KEY NAME      the fake socket names KEY's lines, later and
+                                already sent (segment_updated), as the daemon
+                                does once the label pokes it
   meeting reassign M SEG SPEAKER|--reset [--json]
                                 move one segment, as the real command: SPEAKER
                                 is an existing speaker ID or display name
