@@ -115,6 +115,76 @@ pub enum MeetingAction {
         #[arg(long)]
         metadata: bool,
     },
+    /// Share a meeting's summary and notes, and optionally its transcript
+    ///
+    /// Sends the title, date, length and attendees, the summary's overview,
+    /// key points, decisions, action items and chapters, your notes and
+    /// highlights, and with --transcript the transcript as voxtype shows it
+    /// (names applied, deleted lines left out, edited lines corrected).
+    /// Nothing is shared unless you run this; --preview prints exactly what
+    /// would leave without sending it.
+    ///
+    /// Destinations: clipboard (wl-copy, the default), file (a new file in
+    /// [meeting.share] folder, Documents/Voxtype by default), email (a
+    /// mailto: draft in your mail app, with any transcript saved as a file
+    /// to attach), or command ([meeting.share] command or --command, given
+    /// the share on stdin).
+    ///
+    /// --json prints the result as JSON; with --preview it prints the share
+    /// itself and which destinations work here.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting share latest\n  \
+        voxtype meeting share latest --transcript --to file\n  \
+        voxtype meeting share latest --to email\n  \
+        voxtype meeting share latest --format html --to clipboard\n  \
+        voxtype meeting share latest --to command --command 'pandoc -o notes.pdf'\n  \
+        voxtype meeting share latest --transcript --preview")]
+    Share {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Include the transcript after the notes
+        #[arg(long)]
+        transcript: bool,
+
+        /// How to write it: md (markdown), txt (text) or html. Email always
+        /// sends text.
+        #[arg(
+            long,
+            short,
+            default_value = "md",
+            ignore_case = true,
+            value_parser = clap::builder::PossibleValuesParser::new(["md", "markdown", "txt", "text", "html"])
+        )]
+        format: String,
+
+        /// Where to send it: clipboard, file, email or command
+        #[arg(
+            long,
+            default_value = "clipboard",
+            ignore_case = true,
+            value_parser = clap::builder::PossibleValuesParser::new(["clipboard", "file", "email", "command"])
+        )]
+        to: String,
+
+        /// For --to file: the file to write, or a folder to write a new file
+        /// in (default: [meeting.share] folder)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+
+        /// For --to command: the shell command to pipe the share to,
+        /// instead of [meeting.share] command
+        #[arg(long, value_name = "COMMAND")]
+        command: Option<String>,
+
+        /// Print what would be shared and send nothing
+        #[arg(long)]
+        preview: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show meeting details
     Show {
         /// Meeting ID (or "latest" for most recent)
