@@ -552,17 +552,20 @@ mod tests {
         }
     }
 
-    /// A port nothing listens on, for one test's redirect listener, which `connect` binds
-    /// later itself.
+    /// A port nothing listens on, for one test's redirect listener, which
+    /// `connect` binds later itself. Each is handed out once per run, from
+    /// below Linux's ephemeral range (32768 and up by default), so neither
+    /// another test nor an outgoing connection is given the same one.
     ///
-    /// Not one the kernel picks (`bind(":0")`): that port is released
-    /// before `connect` binds it, and in the meantime any outgoing
-    /// connection, such as another test's HTTP client, could be given it
-    /// as its local port, so the redirect listener found it busy and the
-    /// test failed with `PortsBusy`. These come from below Linux's
-    /// ephemeral range (32768 and up by default), which outgoing
-    /// connections never use, each handed out once per run, so no other
-    /// test in the process can take one either.
+    /// That alone did not make these tests reliable. The flake they had
+    /// (`PortsBusy` about once in five full runs) came from re-binding a
+    /// port a test had just used: when `connect` closed its listener, a test
+    /// elsewhere in the process that was forking a child at that moment
+    /// held a copy of the socket until the child exec'd, so the port still
+    /// read as LISTEN. `ss` showed the socket under the forking test's
+    /// thread. So a test that connects twice either takes a fresh port for
+    /// the second `connect` or waits for the old one with
+    /// [`wait_until_free`].
     fn free_port() -> u16 {
         use std::sync::atomic::{AtomicU16, Ordering};
         static NEXT: AtomicU16 = AtomicU16::new(0);
