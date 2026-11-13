@@ -6124,6 +6124,7 @@ dependencies = [
  "hound",
  "inotify 0.10.2",
  "libc",
+ "libloading 0.8.9",
  "mac-notification-sys",
  "ndarray 0.16.1",
  "nix",

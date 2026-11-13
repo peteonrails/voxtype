@@ -235,6 +235,7 @@ mod tests {
             TranscriptionEngine::Omnilingual,
             TranscriptionEngine::Cohere,
             TranscriptionEngine::Soniox,
+            TranscriptionEngine::Whistle,
         ];
         for e in engines {
             assert!(

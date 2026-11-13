@@ -82,6 +82,9 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 # Whisper speech-to-text
 whisper-rs = "0.16.0"
 
+# Optional dynamic Cactus Needle runtime used by Whistle
+libloading = { version = "0.8", optional = true }
+
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.3.5", optional = true }
 
@@ -194,6 +197,8 @@ gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
 # ML-based speaker diarization (uses ONNX for embedding extraction)
 ml-diarization = ["dep:ort", "dep:ndarray"]
+# Optional Whistle batch transcription backend via the Cactus Needle C API.
+whistle = ["dep:libloading"]
 # Parakeet backend (ONNX-based, alternative to Whisper)
 parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]

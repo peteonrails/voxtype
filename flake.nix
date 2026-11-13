@@ -69,6 +69,7 @@
           "dolphin"
           "omnilingual"
           "cohere"
+          "whistle"
         ];
 
         onnxCudaFeatures = [
@@ -80,6 +81,7 @@
           "dolphin-cuda"
           "omnilingual-cuda"
           "cohere-cuda"
+          "whistle"
         ];
 
         # Only Parakeet has AMD GPU support (via MIGraphX); other engines run on CPU
@@ -91,6 +93,7 @@
           "paraformer"
           "dolphin"
           "omnilingual"
+          "whistle"
         ];
 
         # Wrap a package with runtime dependencies
@@ -117,6 +120,7 @@
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}" \
               --prefix LD_LIBRARY_PATH : "${onnxruntime}/lib" \
+              ${whistleRuntimeWrapper} \
               ${extraWrapperArgs}
           '';
           inherit (pkg) meta;
@@ -130,6 +134,32 @@
             mkdir -p "$ORT_MIGRAPHX_MODEL_CACHE_PATH"
           '
         '';
+
+        # The pinned Cactus Needle 3 native runtime provides Whistle's C API.
+        # Extract only the shared library from upstream's manylinux wheel; no
+        # Python runtime or package is installed. Hashes pin the 3.1.0 wheels.
+        needleRuntimeWheel = if system == "x86_64-linux" then pkgs.fetchurl {
+          url = "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/cactus_needle-3.1.0-py3-none-manylinux2014_x86_64.whl";
+          hash = "sha256-oPwvaC7xhSXU0YWDCBrDHB9vIRq+bAs77kSBHtfgNH4=";
+        } else if system == "aarch64-linux" then pkgs.fetchurl {
+          url = "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/cactus_needle-3.1.0-py3-none-manylinux2014_aarch64.whl";
+          hash = "sha256-8vMKEXiFYCWrS/de914b8ouNBVLN1WFPfQbO3B9xNgY=";
+        } else null;
+        needleRuntime = if needleRuntimeWheel == null then null else pkgs.stdenvNoCC.mkDerivation {
+          pname = "cactus-needle-runtime";
+          version = "3.1.0";
+          src = needleRuntimeWheel;
+          nativeBuildInputs = [ pkgs.unzip ];
+          dontUnpack = true;
+          installPhase = ''
+            mkdir -p "$out/lib"
+            unzip -p "$src" needle/libneedle3.so > "$out/lib/libneedle.so"
+            chmod 0555 "$out/lib/libneedle.so"
+          '';
+          meta.license = pkgs.lib.licenses.asl20;
+        };
+        whistleRuntimeWrapper = if needleRuntime == null then "" else
+          "--set VOXTYPE_WHISTLE_RUNTIME ${needleRuntime}/lib/libneedle.so";
 
         # ONNX Runtime variants for different GPU backends
         onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
@@ -374,8 +404,8 @@
           vulkan = wrapVoxtype vulkanUnwrapped;
           rocm = wrapVoxtype rocmUnwrapped;
 
-          # ONNX variants (all ONNX engines: Parakeet, Moonshine, SenseVoice,
-          # Paraformer, Dolphin, Omnilingual)
+          # ONNX variants (all ONNX engines plus optional Whistle and its
+          # Cactus Needle runtime)
           onnx = wrapOnnx { pkg = onnxUnwrapped; };
           onnx-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
           onnx-migraphx = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
