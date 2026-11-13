@@ -782,9 +782,15 @@ pub(crate) async fn run_meeting_command(
                 .resolve_meeting_id(&meeting_id)
                 .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
 
-            let keys = storage
-                .set_speaker_label(&id, &speaker_id, &label)
+            let labelled = storage
+                .label_speaker(&id, &speaker_id, &label)
                 .map_err(|e| anyhow::anyhow!("Failed to label speaker: {}", e))?;
+            let keys = labelled.keys;
+            // Action items owned by the old name now carry the new one: have
+            // the daemon tell any view showing the summary to read it again.
+            if labelled.owners > 0 {
+                poke_daemon(meeting::SUMMARY_UPDATED_TRIGGER, &id.to_string())?;
+            }
 
             // A running meeting: have the daemon name the lines it already
             // sent, so every view (and one reopened later) shows the name,
@@ -799,6 +805,13 @@ pub(crate) async fn run_meeting_command(
                 label.trim(),
                 meeting_id
             );
+            if labelled.owners > 0 {
+                println!(
+                    "Moved {} action item(s) in the summary to '{}'.",
+                    labelled.owners,
+                    label.trim()
+                );
+            }
         }
 
         MeetingAction::View {

@@ -576,6 +576,8 @@ The speaker can be the ID as the transcript shows it (matched without regard to 
 
 Labels are saved to the database and applied to the transcript, so subsequent exports use the names you assigned. You can label speakers while the meeting is still recording: the name sticks for the rest of the meeting and appears on segments streamed to the meeting socket from then on. Giving two speakers the same name merges them: exports show one speaker, and consecutive lines from either are grouped under one heading.
 
+If the meeting already has a summary, its action items follow the new name: an item owned by `Remote 2` is owned by `Chris` after `meeting label latest "Remote 2" Chris`, in the Summary tab, `meeting actions` (and `--mine`), exports, shares and search. Only owners that are exactly the old name change (ignoring case and surrounding spaces), so naming `Chris` never touches `Christopher`. Labelling a speaker back undoes it, and two speakers merged by the diarizer carry the surviving name. Nothing else in the summary changes and it is not summarized again: ticks and the record of what was sent stay. Items you own (`You`, or your [name](#your-name) on your side) stay yours, so `--mine` keeps finding them. A task already sent to Todoist, or a reminder already set, keeps the owner it was sent with: voxtype does not edit or resend it.
+
 ### Your Name
 
 Rather than labelling `You` in every meeting, set your name once:

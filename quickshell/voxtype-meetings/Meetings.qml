@@ -388,7 +388,11 @@ Item {
   MeetingCli {
     id: meetingCli
     bin: root.bin
-    onLabelApplied: function(key, name) { feed.applyLabel([key], name) }
+    onLabelApplied: function(key, name) {
+      feed.applyLabel([key], name)
+      // Action items owned by the old name now carry this one.
+      assistant.refreshSummary(feed.meetingId)
+    }
     onActionFinished: function(action, ok, message) {
       if (!ok) root.actionError = message
     }

@@ -354,6 +354,10 @@ pub enum MeetingAction {
     /// with ML diarization, "You", "Remote 1", "Remote 2" with hybrid.
     /// Works while the meeting is still recording.
     /// Giving two speakers the same name merges them in exports.
+    ///
+    /// Action items in the summary owned by the speaker's old name (exactly,
+    /// ignoring case) take the new one; nothing is summarized again, and
+    /// items you own stay yours. Tasks already sent to Todoist are not edited.
     #[command(after_help = "Examples:\n  \
         voxtype meeting label latest You Pete\n  \
         voxtype meeting label latest SPEAKER_01 Dana\n  \

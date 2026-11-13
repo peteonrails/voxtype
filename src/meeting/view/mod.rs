@@ -115,6 +115,11 @@ pub enum ViewEvent {
         #[serde(default)]
         meeting_id: Option<String>,
     },
+    /// The stored summary changed without being regenerated (action-item
+    /// owners followed a speaker rename)
+    SummaryUpdated {
+        meeting_id: String,
+    },
     SummaryReady {
         meeting_id: String,
         #[serde(default)]
@@ -720,6 +725,14 @@ impl MeetingView {
                 path,
                 summary,
             } => self.summary_ready(&meeting_id, agent_name, path, summary),
+            // summary.md is read again on the next render.
+            ViewEvent::SummaryUpdated { meeting_id }
+                if self.summary.is_some() && self.is_ours(Some(&meeting_id)) =>
+            {
+                self.revision += 1;
+                Change::Summary
+            }
+            ViewEvent::SummaryUpdated { .. } => Change::Nothing,
             ViewEvent::Error {
                 message,
                 meeting_id,
@@ -843,6 +856,25 @@ impl MeetingView {
         let name = name.trim();
         if name.is_empty() {
             return Change::Nothing;
+        }
+        // The summary's owners follow the name, as storage does for the
+        // saved one. The user's own side is left alone: whether an owner is
+        // the user depends on `my_name`, which only storage knows.
+        let renamed: Vec<String> = self
+            .lines
+            .iter()
+            .filter(|s| {
+                keys.contains(&s.speaker_key())
+                    && s.speaker_key() != crate::meeting::data::MY_SPEAKER_KEY
+            })
+            .map(|s| s.speaker_display())
+            .collect();
+        if let Some(info) = self.summary.as_mut() {
+            for from in &renamed {
+                info.summary.rename_owner(from, name, |owner| {
+                    ["you", "me", "myself"].contains(&owner.trim().to_lowercase().as_str())
+                });
+            }
         }
         for s in &mut self.lines {
             if keys.contains(&s.speaker_key()) {
@@ -1073,6 +1105,48 @@ mod tests {
         );
         // Lines survive the whole way.
         assert_eq!(texts(&v), vec!["You a"]);
+    }
+
+    #[test]
+    fn a_label_moves_the_summary_owners_and_summary_updated_redraws() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello(
+            "recording",
+            "m1",
+            vec![seg(0, 1, "You", "a"), seg(1, 2, "Remote 2", "b")],
+        ));
+        v.apply_line(r#"{"event":"status","status":"idle"}"#);
+        let ready = serde_json::json!({
+            "event": "summary_ready", "meeting_id": "m1", "agent": "claude",
+            "agent_name": "Claude", "path": "/m/summary.md",
+            "summary": {"summary": "Done.", "generated_at": "2026-11-11T15:00:00Z",
+                        "action_items": [
+                            {"description": "x", "assignee": "Remote 2"},
+                            {"description": "y", "assignee": "Remote 20"},
+                            {"description": "z", "assignee": "You"}]}
+        });
+        v.apply_line(&ev(ready));
+        v.apply_label(&["Remote 2".to_string()], "Chris");
+        v.apply_label(&["You".to_string()], "PJ");
+        let owners: Vec<_> = v
+            .summary
+            .as_ref()
+            .unwrap()
+            .summary
+            .action_items
+            .iter()
+            .map(|a| a.assignee.clone().unwrap())
+            .collect();
+        assert_eq!(owners, vec!["Chris", "Remote 20", "You"]);
+
+        assert_eq!(
+            v.apply_line(r#"{"event":"summary_updated","meeting_id":"other"}"#),
+            Change::Nothing
+        );
+        assert_eq!(
+            v.apply_line(r#"{"event":"summary_updated","meeting_id":"m1"}"#),
+            Change::Summary
+        );
     }
 
     #[test]

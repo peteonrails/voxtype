@@ -1010,6 +1010,32 @@ pub struct ActionItem {
     pub source_ms: Option<u64>,
 }
 
+impl MeetingSummary {
+    /// Follow a speaker rename into the action items: every owner that is
+    /// `from` (ignoring case and surrounding space, nothing looser, so
+    /// "Chris" never touches "Christopher") becomes `to`. Owners `keep`
+    /// accepts stay as they are. Nothing else in the summary changes: the
+    /// descriptions, ticks and due dates, and so what was sent to Todoist,
+    /// which is keyed by the description. Returns how many owners changed.
+    pub fn rename_owner(&mut self, from: &str, to: &str, keep: impl Fn(&str) -> bool) -> usize {
+        let (from, to) = (from.trim(), to.trim());
+        if from.is_empty() || to.is_empty() || from == to {
+            return 0;
+        }
+        let mut changed = 0;
+        for item in &mut self.action_items {
+            let Some(owner) = item.assignee.as_deref() else {
+                continue;
+            };
+            if owner.trim().to_lowercase() == from.to_lowercase() && !keep(owner) {
+                item.assignee = Some(to.to_string());
+                changed += 1;
+            }
+        }
+        changed
+    }
+}
+
 /// Complete meeting data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingData {
@@ -1981,5 +2007,104 @@ mod tests {
         blank.segments[1].speaker_label = None;
         blank.apply_my_name("   ");
         assert_eq!(blank.segments[1].speaker_display(), "Remote");
+    }
+
+    fn owned(owners: &[Option<&str>]) -> MeetingSummary {
+        MeetingSummary {
+            summary: "s".into(),
+            key_points: vec![],
+            action_items: owners
+                .iter()
+                .enumerate()
+                .map(|(i, o)| ActionItem {
+                    description: format!("item {i}"),
+                    assignee: o.map(str::to_string),
+                    due_date: Some("Friday".into()),
+                    completed: i == 0,
+                    due_on: None,
+                    source_ms: Some(1000),
+                })
+                .collect(),
+            decisions: vec![],
+            chapters: vec![],
+            generated_at: Utc::now(),
+            model: Some("claude".into()),
+        }
+    }
+
+    fn owners(s: &MeetingSummary) -> Vec<Option<String>> {
+        s.action_items.iter().map(|a| a.assignee.clone()).collect()
+    }
+
+    #[test]
+    fn owners_follow_a_rename_exactly() {
+        let mut s = owned(&[
+            Some("Remote 2"),
+            Some(" remote 2 "),
+            Some("REMOTE 2"),
+            Some("Remote 20"),
+            Some("Remote"),
+            None,
+        ]);
+        assert_eq!(s.rename_owner("Remote 2", "Chris", |_| false), 3);
+        assert_eq!(
+            owners(&s),
+            vec![
+                Some("Chris".into()),
+                Some("Chris".into()),
+                Some("Chris".into()),
+                Some("Remote 20".into()),
+                Some("Remote".into()),
+                None
+            ]
+        );
+        // Everything else stays: ticks, dues, where it was said.
+        assert!(s.action_items[0].completed);
+        assert_eq!(s.action_items[0].due_date.as_deref(), Some("Friday"));
+        assert_eq!(s.action_items[0].source_ms, Some(1000));
+        assert_eq!(s.action_items[0].description, "item 0");
+    }
+
+    #[test]
+    fn a_rename_never_touches_a_longer_name() {
+        let mut s = owned(&[Some("Christopher"), Some("Chris P"), Some("Chris")]);
+        assert_eq!(s.rename_owner("Chris", "Dana", |_| false), 1);
+        assert_eq!(
+            owners(&s),
+            vec![
+                Some("Christopher".into()),
+                Some("Chris P".into()),
+                Some("Dana".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn kept_owners_and_no_op_renames_change_nothing() {
+        let mut s = owned(&[Some("You"), Some("Remote")]);
+        assert_eq!(
+            s.rename_owner("You", "Pete", |o| o.eq_ignore_ascii_case("you")),
+            0
+        );
+        assert_eq!(s.rename_owner("Remote", "Remote", |_| false), 0);
+        assert_eq!(s.rename_owner("", "Dana", |_| false), 0);
+        assert_eq!(s.rename_owner("Remote", "  ", |_| false), 0);
+        assert_eq!(owners(&s), vec![Some("You".into()), Some("Remote".into())]);
+    }
+
+    #[test]
+    fn a_merge_and_its_undo_round_trip() {
+        let mut s = owned(&[Some("Remote 2"), Some("Remote 1")]);
+        // "Remote 2" merged into "Remote 1": both are one speaker now.
+        assert_eq!(s.rename_owner("Remote 2", "Remote 1", |_| false), 1);
+        assert_eq!(
+            owners(&s),
+            vec![Some("Remote 1".into()), Some("Remote 1".into())]
+        );
+        // A rename undone is a rename back.
+        let mut t = owned(&[Some("Remote 2")]);
+        t.rename_owner("Remote 2", "Chris", |_| false);
+        t.rename_owner("Chris", "Remote 2", |_| false);
+        assert_eq!(owners(&t), vec![Some("Remote 2".into())]);
     }
 }

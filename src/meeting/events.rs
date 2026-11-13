@@ -178,6 +178,11 @@ enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         announcement: Option<serde_json::Value>,
     },
+    /// The stored summary changed without being regenerated (action-item
+    /// owners followed a speaker rename): views showing it read it again.
+    SummaryUpdated {
+        meeting_id: String,
+    },
     /// The recording announcement changed: waiting for the call, played
     /// into it, played locally only, or failed.
     Announcement {
@@ -476,6 +481,13 @@ impl MeetingEventHub {
         self.publish(WireEvent::TitleChanged {
             meeting_id: meeting_id.to_string(),
             title: title.to_string(),
+        });
+    }
+
+    /// Broadcast a `summary_updated` event.
+    pub fn publish_summary_updated(&self, meeting_id: &str) {
+        self.publish(WireEvent::SummaryUpdated {
+            meeting_id: meeting_id.to_string(),
         });
     }
 

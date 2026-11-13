@@ -95,6 +95,9 @@ Item {
   // MeetingSummary as `summary` (and summary.md's `path`); `markdown` is ""
   // unless an event carries text.
   signal summaryReady(string meetingId, string markdown, var summary)
+  // The stored summary changed without being regenerated (`summary_updated`):
+  // its action items' owners followed a speaker rename.
+  signal summaryUpdated(string meetingId)
   // After a meeting stops, `{"event":"status","status":"summarizing",
   // "meeting_id"}`. Not a change of the daemon's state, which is already
   // idle by then (and may be a new meeting's): it names the meeting.
@@ -514,6 +517,8 @@ Item {
       root.lastSegmentsAt = Date.now()
     } else if (kind === "notes_updated") {
       root.notesUpdated(String(ev.meeting_id || root.meetingId), ev.notes !== undefined ? ev.notes : null)
+    } else if (kind === "summary_updated") {
+      root.summaryUpdated(String(ev.meeting_id || root.meetingId))
     } else if (kind === "summary_ready") {
       root.summaryReady(String(ev.meeting_id || root.meetingId), ev.markdown ? String(ev.markdown) : "",
                         ev.summary ? ev.summary : null)

@@ -186,6 +186,7 @@ Item {
           else if (s === "notice-acked") tc.driveNotice(false)
           else if (s === "announcement") tc.driveAnnouncement()
           else if (s === "notice-announce") tc.driveNoticeAnnounced()
+          else if (s === "rename-owner") tc.driveRenameOwner()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -399,6 +400,38 @@ Item {
       wait(300)
       check(!shown(card), "stays hidden")
       shot("notice-acked")
+    }
+
+    // Renaming a speaker after the summary: the action item it owned names
+    // the new speaker, from the summary and `meeting actions` read again,
+    // with nothing summarized again.
+    function driveRenameOwner() {
+      sh(["sh", "-c", 'printf "%s" "$2" > "$1"', "_", __STATE__, JSON.stringify({ actions: [
+        { number: 1, key: "77b0e3c9d24f8a10", text: "Update the release notes", owner: "Remote", mine: false,
+          due: null, due_time: null, due_said: null, source_ms: 9000, sent: {} }] })])
+      ctl({ cmd: "autosummary", summary: {
+        summary: "A short standup about the release.", decisions: [], key_points: [],
+        action_items: [{ description: "Update the release notes", assignee: "Remote", completed: false }] } })
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("summaryText").indexOf("## Overview") === 0 }, "summary ready", 8000)
+      var owner = function() {
+        var row = find(view(), "actionRow_0")
+        var chip = row ? find(row, "actionOwner") : null
+        return chip && chip.visible ? String(chip.children[0].text) : ""
+      }
+      waitFor(function() { return owner() === "Remote" }, "owned by Remote: " + owner())
+      tab("transcript")
+      var names = renderedChips()
+      var index = names.indexOf("Remote")
+      check(index >= 0, "a Remote chip: " + names)
+      rename(index, "Dana")
+      waitFor(function() { return chips().indexOf("Dana") >= 0 }, "renamed on screen")
+      tab("summary")
+      waitFor(function() { return owner() === "Dana" }, "the action item follows: " + owner(), 8000)
+      check(txt("summaryText").indexOf("## Overview") === 0, "the summary stays")
+      shot("rename-owner")
     }
 
     // A meeting that announces the recording: the notice must not say

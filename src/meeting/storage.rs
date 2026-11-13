@@ -1078,6 +1078,18 @@ impl MeetingStorage {
         speaker: &str,
         label: &str,
     ) -> Result<Vec<String>, StorageError> {
+        self.label_speaker(meeting_id, speaker, label)
+            .map(|labelled| labelled.keys)
+    }
+
+    /// [`Self::set_speaker_label`], also saying how many action-item owners
+    /// in the summary followed the new name.
+    pub fn label_speaker(
+        &self,
+        meeting_id: &MeetingId,
+        speaker: &str,
+        label: &str,
+    ) -> Result<Labelled, StorageError> {
         let label = label.trim();
         if label.is_empty() {
             return Err(StorageError::EmptyLabel);
@@ -1103,6 +1115,7 @@ impl MeetingStorage {
             });
         }
 
+        let before = self.get_speaker_labels(meeting_id)?;
         for key in &keys {
             self.conn.execute(
                 r#"
@@ -1116,7 +1129,117 @@ impl MeetingStorage {
         // Rewrite the file so readers of transcript.json see the name too.
         self.save_transcript(meeting_id, &transcript)?;
 
-        Ok(keys)
+        let renames: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    self.shown_name(&before, key),
+                    label.to_string(),
+                )
+            })
+            .collect();
+        let owners = self.follow_owner_renames_logged(meeting_id, &renames);
+        Ok(Labelled { keys, owners })
+    }
+
+    /// A speaker as the transcript shows it: its name from `labels`, the
+    /// user's `my_name` for You, else its ID.
+    fn shown_name(&self, labels: &std::collections::HashMap<String, String>, key: &str) -> String {
+        labels
+            .get(key)
+            .cloned()
+            .or_else(|| {
+                (key == crate::meeting::data::MY_SPEAKER_KEY)
+                    .then(|| self.my_name().map(String::from))
+                    .flatten()
+            })
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    /// Carry renamed speakers, as (speaker ID, name before, name after), into
+    /// the owners of the summary's action items, and save the summary
+    /// (database, search index, meeting.json and summary.md) when any
+    /// changed. Nothing is regenerated: only owners that are exactly the old
+    /// name change. Owners that are the user ("You", or `my_name` on the You
+    /// side) stay, so `meeting actions --mine` keeps finding them. Returns
+    /// how many owners changed.
+    pub fn follow_owner_renames(
+        &self,
+        meeting_id: &MeetingId,
+        renames: &[(String, String, String)],
+    ) -> Result<usize, StorageError> {
+        let Some(mut summary) = self.get_summary(meeting_id)? else {
+            return Ok(0);
+        };
+        let my_name = self.my_name();
+        let mut changed = 0;
+        for (key, from, to) in renames {
+            changed += summary.rename_owner(from, to, |owner| {
+                let pronoun =
+                    ["you", "me", "myself"].contains(&owner.trim().to_lowercase().as_str());
+                pronoun
+                    || (key == crate::meeting::data::MY_SPEAKER_KEY
+                        && crate::meeting::actions::is_mine(Some(owner), my_name))
+            });
+        }
+        if changed == 0 {
+            return Ok(0);
+        }
+        self.save_summary(meeting_id, &summary)?;
+        self.rewrite_summary_markdown(meeting_id, &summary)?;
+        tracing::info!(
+            "Renamed {} action item owner(s) in meeting {}",
+            changed,
+            meeting_id
+        );
+        Ok(changed)
+    }
+
+    /// [`Self::follow_owner_renames`] for a rename that has already been
+    /// made: a failure here costs only the owners, so it is logged.
+    fn follow_owner_renames_logged(
+        &self,
+        meeting_id: &MeetingId,
+        renames: &[(String, String, String)],
+    ) -> usize {
+        self.follow_owner_renames(meeting_id, renames)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Could not rename action item owners in meeting {}: {}",
+                    meeting_id,
+                    e
+                );
+                0
+            })
+    }
+
+    /// Rewrite summary.md's body from `summary`, keeping its heading and
+    /// the line saying who summarized it and when. A file in another shape,
+    /// or none, is left alone.
+    fn rewrite_summary_markdown(
+        &self,
+        meeting_id: &MeetingId,
+        summary: &crate::meeting::data::MeetingSummary,
+    ) -> Result<(), StorageError> {
+        let Some(folder) = self.get_meeting(meeting_id)?.and_then(|m| m.storage_path) else {
+            return Ok(());
+        };
+        let path = folder.join(crate::meeting::assistant::summarize::SUMMARY_FILE);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Ok(());
+        };
+        let parts: Vec<&str> = text.splitn(3, "\n\n").collect();
+        if parts.len() < 3 || !parts[0].starts_with("# ") || !parts[1].starts_with('_') {
+            tracing::debug!(
+                "{} is not in the shape voxtype writes; left alone",
+                path.display()
+            );
+            return Ok(());
+        }
+        let body = crate::meeting::summary::summary_to_markdown(summary);
+        std::fs::write(&path, format!("{}\n\n{}\n\n{}", parts[0], parts[1], body))?;
+        Ok(())
     }
 
     /// The settings this storage was opened with.
@@ -1132,23 +1255,34 @@ impl MeetingStorage {
         speaker_key: &str,
         label: &str,
     ) -> Result<bool, StorageError> {
+        let before = self.get_speaker_labels(meeting_id)?;
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO speaker_name_labels (meeting_id, speaker_key, label) \
              VALUES (?1, ?2, ?3)",
             params![meeting_id.to_string(), speaker_key, label],
         )?;
+        if inserted > 0 {
+            let from = self.shown_name(&before, speaker_key);
+            self.follow_owner_renames_logged(
+                meeting_id,
+                &[(speaker_key.to_string(), from, label.to_string())],
+            );
+        }
         Ok(inserted > 0)
     }
 
     /// Move a speaker's label to a new speaker ID, for when the diarizer
-    /// renames a speaker mid-meeting. A label already on `to` wins.
+    /// renames a speaker mid-meeting or merges two into one. A label
+    /// already on `to` wins. Action-item owners follow the name shown;
+    /// returns how many changed.
     pub fn rename_speaker_key(
         &self,
         meeting_id: &MeetingId,
         from: &str,
         to: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<usize, StorageError> {
         let id = meeting_id.to_string();
+        let before = self.get_speaker_labels(meeting_id)?;
         self.conn.execute(
             "UPDATE OR IGNORE speaker_name_labels SET speaker_key = ?3 \
              WHERE meeting_id = ?1 AND speaker_key = ?2",
@@ -1164,7 +1298,13 @@ impl MeetingStorage {
              WHERE meeting_id = ?1 AND speaker_key = ?2",
             params![id, from, to],
         )?;
-        Ok(())
+        let after = self.get_speaker_labels(meeting_id)?;
+        let renames = [(
+            from.to_string(),
+            self.shown_name(&before, from),
+            self.shown_name(&after, to),
+        )];
+        Ok(self.follow_owner_renames_logged(meeting_id, &renames))
     }
 
     /// Move one transcript line to another speaker.
@@ -1757,6 +1897,15 @@ impl MeetingStorage {
 
         Ok(labels)
     }
+}
+
+/// What [`MeetingStorage::label_speaker`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Labelled {
+    /// The speaker IDs that were named
+    pub keys: Vec<String>,
+    /// How many action-item owners in the summary followed the new name
+    pub owners: usize,
 }
 
 /// A meeting as `meeting list --json` lists it.
@@ -3106,5 +3255,214 @@ mod tests {
         // A very old timestamp should still produce a DateTime
         let dt = timestamp_to_datetime(0);
         assert_eq!(dt.timestamp(), 0);
+    }
+
+    /// A stored meeting with You and Remote lines, a summary whose items
+    /// are owned by `owners`, and summary.md written the way the summarizer
+    /// writes it.
+    fn summarized(
+        storage: &MeetingStorage,
+        owners: &[Option<&str>],
+    ) -> (MeetingId, std::path::PathBuf) {
+        use crate::meeting::data::AudioSource::{Loopback, Microphone};
+        use crate::meeting::data::{ActionItem, MeetingSummary};
+        let (id, _) = meeting_with_speakers(
+            storage,
+            &[
+                (Some("You"), Microphone),
+                (Some("Remote 1"), Loopback),
+                (Some("Remote 2"), Loopback),
+            ],
+        );
+        let summary = MeetingSummary {
+            summary: "Release sync.".into(),
+            key_points: vec![],
+            action_items: owners
+                .iter()
+                .enumerate()
+                .map(|(i, o)| ActionItem {
+                    description: format!("Task {i}"),
+                    assignee: o.map(str::to_string),
+                    due_date: None,
+                    completed: i == 0,
+                    due_on: None,
+                    source_ms: None,
+                })
+                .collect(),
+            decisions: vec![],
+            chapters: vec![],
+            generated_at: Utc::now(),
+            model: Some("claude".into()),
+        };
+        storage.save_summary(&id, &summary).unwrap();
+        let folder = storage
+            .get_meeting(&id)
+            .unwrap()
+            .unwrap()
+            .storage_path
+            .unwrap();
+        let md = folder.join(crate::meeting::assistant::summarize::SUMMARY_FILE);
+        std::fs::write(
+            &md,
+            format!(
+                "# Labels\n\n_2026-11-12 10:00 · summarized by Claude on 2026-11-12 10:30_\n\n{}",
+                crate::meeting::summary::summary_to_markdown(&summary)
+            ),
+        )
+        .unwrap();
+        (id, md)
+    }
+
+    fn summary_owners(storage: &MeetingStorage, id: &MeetingId) -> Vec<Option<String>> {
+        storage
+            .get_summary(id)
+            .unwrap()
+            .unwrap()
+            .action_items
+            .into_iter()
+            .map(|a| a.assignee)
+            .collect()
+    }
+
+    #[test]
+    fn labelling_a_stored_speaker_renames_its_action_items() {
+        let (storage, _temp) = create_test_storage();
+        let (id, md) = summarized(
+            &storage,
+            &[
+                Some("Remote 2"),
+                Some("remote 2"),
+                Some("Remote 20"),
+                Some("You"),
+                None,
+            ],
+        );
+        let done = storage.label_speaker(&id, "Remote 2", "Chris").unwrap();
+        assert_eq!(done.keys, vec!["Remote 2".to_string()]);
+        assert_eq!(done.owners, 2);
+        assert_eq!(
+            summary_owners(&storage, &id),
+            vec![
+                Some("Chris".into()),
+                Some("Chris".into()),
+                Some("Remote 20".into()),
+                Some("You".into()),
+                None
+            ]
+        );
+        let saved = storage.get_summary(&id).unwrap().unwrap();
+        assert!(saved.action_items[0].completed, "the tick is kept");
+        assert_eq!(saved.summary, "Release sync.", "nothing regenerated");
+        // meeting.json and the folder's summary.md follow; summary.md keeps
+        // its heading and the line naming who summarized it.
+        let meta = storage.get_meeting(&id).unwrap().unwrap();
+        assert_eq!(
+            meta.summary.unwrap().action_items[0].assignee.as_deref(),
+            Some("Chris")
+        );
+        let text = std::fs::read_to_string(&md).unwrap();
+        assert!(
+            text.starts_with("# Labels\n\n_2026-11-12 10:00 · summarized by Claude"),
+            "{text}"
+        );
+        assert!(text.contains("- [x] Task 0 (Chris)"), "{text}");
+        assert!(!text.contains("(Remote 2)"), "{text}");
+        // The search index has the new owner.
+        let hits = crate::meeting::search::search(
+            &storage.conn,
+            &crate::meeting::search::SearchQuery {
+                text: "Chris".into(),
+                limit: 10,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(!hits.is_empty(), "the new owner is searchable");
+
+        // Undone: labelled back, the owners go back too.
+        let back = storage.label_speaker(&id, "Chris", "Remote 2").unwrap();
+        assert_eq!(back.owners, 2);
+        assert_eq!(
+            summary_owners(&storage, &id)[0].as_deref(),
+            Some("Remote 2")
+        );
+    }
+
+    #[test]
+    fn a_label_without_a_summary_or_matching_owner_changes_nothing() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = meeting_with_speakers(
+            &storage,
+            &[(Some("Remote"), crate::meeting::data::AudioSource::Loopback)],
+        );
+        assert_eq!(
+            storage.label_speaker(&id, "Remote", "Dana").unwrap().owners,
+            0
+        );
+
+        let (id, md) = summarized(&storage, &[Some("Christopher")]);
+        let before = std::fs::read_to_string(&md).unwrap();
+        assert_eq!(
+            storage
+                .label_speaker(&id, "Remote 1", "Chris")
+                .unwrap()
+                .owners,
+            0
+        );
+        assert_eq!(
+            summary_owners(&storage, &id),
+            vec![Some("Christopher".into())]
+        );
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), before);
+    }
+
+    #[test]
+    fn a_merge_moves_owners_to_the_surviving_name() {
+        let (storage, _temp) = create_test_storage();
+        let (id, _) = summarized(&storage, &[Some("Chris"), Some("Dana")]);
+        storage.set_speaker_label(&id, "Remote 2", "Chris").unwrap();
+        storage.set_speaker_label(&id, "Remote 1", "Dana").unwrap();
+        // The diarizer merges Remote 2 into Remote 1, whose name wins.
+        assert_eq!(
+            storage
+                .rename_speaker_key(&id, "Remote 2", "Remote 1")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            summary_owners(&storage, &id),
+            vec![Some("Dana".into()), Some("Dana".into())]
+        );
+    }
+
+    #[test]
+    fn the_users_own_items_stay_theirs() {
+        let temp = TempDir::new().unwrap();
+        let storage = MeetingStorage::open(StorageConfig {
+            storage_path: temp.path().to_path_buf(),
+            retain_audio: false,
+            max_meetings: 0,
+            my_name: Some("Pete Jackson".into()),
+        })
+        .unwrap();
+        let (id, _) = summarized(&storage, &[Some("You"), Some("Pete Jackson"), Some("Pete")]);
+        // You shows as my_name; naming that side something else must not
+        // take the items away from `meeting actions --mine`.
+        assert_eq!(storage.label_speaker(&id, "You", "PJ").unwrap().owners, 0);
+        assert_eq!(
+            summary_owners(&storage, &id),
+            vec![
+                Some("You".into()),
+                Some("Pete Jackson".into()),
+                Some("Pete".into())
+            ]
+        );
+        for owner in summary_owners(&storage, &id) {
+            assert!(crate::meeting::actions::is_mine(
+                owner.as_deref(),
+                storage.my_name()
+            ));
+        }
     }
 }

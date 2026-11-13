@@ -118,6 +118,11 @@ impl Default for MeetingConfig {
     }
 }
 
+/// Dropped in the runtime directory, holding a meeting ID, when a command
+/// changed that meeting's stored summary without regenerating it, so the
+/// daemon tells the views on meeting.sock (`summary_updated`).
+pub const SUMMARY_UPDATED_TRIGGER: &str = "meeting_summary_updated";
+
 /// Events from the meeting daemon
 #[derive(Debug)]
 pub enum MeetingEvent {
@@ -143,6 +148,9 @@ pub enum MeetingEvent {
     SegmentUpdated { segment: TranscriptSegment },
     /// A segment already published was deleted with `meeting delete-line`
     SegmentDeleted { segment_id: u32 },
+    /// The stored summary changed without being regenerated, as when its
+    /// action items' owners followed a speaker rename
+    SummaryUpdated { meeting_id: MeetingId },
     /// Meeting paused
     Paused,
     /// Meeting resumed
@@ -789,17 +797,19 @@ impl MeetingDaemon {
             to,
             renamed
         );
-        if let Err(e) = self
-            .storage
-            .rename_speaker_key(&meeting.metadata.id, from, to)
-        {
-            tracing::warn!(
-                "Failed to carry speaker label from {} to {}: {}",
-                from,
-                to,
-                e
-            );
-        }
+        let meeting_id = meeting.metadata.id;
+        let owners = match self.storage.rename_speaker_key(&meeting_id, from, to) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to carry speaker label from {} to {}: {}",
+                    from,
+                    to,
+                    e
+                );
+                0
+            }
+        };
         let _ = self
             .event_tx
             .send(MeetingEvent::SpeakerRenamed {
@@ -807,6 +817,12 @@ impl MeetingDaemon {
                 to: to.to_string(),
             })
             .await;
+        if owners > 0 {
+            let _ = self
+                .event_tx
+                .send(MeetingEvent::SummaryUpdated { meeting_id })
+                .await;
+        }
     }
 
     /// Re-read what the user changed line by line (`meeting reassign`,

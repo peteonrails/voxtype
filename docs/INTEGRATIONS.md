@@ -377,6 +377,7 @@ ten a second while a meeting records.
 | `announcement` | The recording announcement is waiting for the call, or has played |
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
+| `summary_updated` | A saved summary changed without being regenerated |
 | `playback` | `meeting play` started or stopped |
 | `levels` | About ten times a second while recording or sound-checking: each track's level |
 | `soundcheck` | A sound check started or stopped |
@@ -524,6 +525,18 @@ for the older summarizers; `agent_name` is how to show it. `path` is absent
 for a meeting without a folder. The same summary is in
 `meeting show --json` under `metadata.summary` and in the folder's
 `summary.md`.
+
+#### `summary_updated`
+
+```json
+{"event": "summary_updated", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed"}
+```
+
+The meeting's saved summary changed without being regenerated: a speaker
+was renamed (`meeting label`, or the diarizer merging two speakers), and
+the action items that speaker owned carry the new name. A view showing that
+meeting's summary or action items reads them again (`meeting show --json`,
+`meeting actions --json`). It may name any meeting, not only the running one.
 
 #### `playback`
 

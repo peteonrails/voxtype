@@ -359,9 +359,20 @@ Item {
 
   // The stored summary, for a summary_ready that does not carry its text.
   function loadSummary(meetingId) {
-    if (showProc.running) return
+    if (showProc.running) {
+      showProc.again = meetingId
+      return
+    }
+    showProc.meeting = meetingId
     showProc.out = ""
     showProc.launch([root.bin, "meeting", "show", meetingId, "--json"])
+  }
+
+  // Read the summary on screen again: a speaker rename moved its action
+  // items' owners. Nothing is regenerated.
+  function refreshSummary(meetingId) {
+    if (meetingId === "" || meetingId !== root.summaryMeeting || root.summaryState !== "ready") return
+    root.loadSummary(meetingId)
   }
 
   // MeetingSummary (src/meeting/data.rs) as markdown, with chapters if present.
@@ -466,6 +477,7 @@ Item {
       if (notes !== null && notes !== undefined) root.notes = String(notes)
       else root.loadNotes()
     }
+    function onSummaryUpdated(meetingId) { root.refreshSummary(meetingId) }
     function onSummaryReady(meetingId, markdown, summary) {
       if (meetingId !== root.feed.meetingId) return
       root.summaryMeeting = meetingId
@@ -749,8 +761,18 @@ Item {
   MeetingProcess {
     id: showProc
     property string out: ""
+    property string meeting: ""
+    // A meeting to read again once this read ends: the summary changed
+    // while it ran.
+    property string again: ""
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: showProc.out = String(text || "") }
     onExited: function(code) {
+      if (showProc.again !== "") {
+        var next = showProc.again
+        showProc.again = ""
+        Qt.callLater(function() { root.loadSummary(next) })
+        return
+      }
       var data = null
       try { data = JSON.parse(showProc.out) } catch (e) {}
       var md = data && data.metadata ? root.summaryToMarkdown(data.metadata.summary) : ""

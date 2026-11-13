@@ -775,6 +775,16 @@ struct Soundcheck {
     running: meeting::soundcheck::SoundcheckEvent,
 }
 
+/// The meeting named by a `meeting_summary_updated` trigger, taken.
+fn take_summary_updated() -> Option<String> {
+    let file = Config::runtime_dir().join(meeting::SUMMARY_UPDATED_TRIGGER);
+    let id = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    meeting::MeetingId::parse(id.trim())
+        .ok()
+        .map(|id| id.to_string())
+}
+
 fn take_trigger(name: &str) -> bool {
     let file = Config::runtime_dir().join(name);
     if file.exists() {
@@ -799,6 +809,7 @@ fn cleanup_meeting_files() {
         "meeting_notes",
         meeting::retitle::TRIGGER,
         meeting::notice::ACK_TRIGGER,
+        meeting::SUMMARY_UPDATED_TRIGGER,
     ] {
         let file = runtime_dir.join(name);
         if file.exists() {
@@ -3628,6 +3639,11 @@ impl Daemon {
                     MeetingEvent::SegmentDeleted { segment_id } => {
                         self.publish_segment_deleted(segment_id);
                     }
+                    MeetingEvent::SummaryUpdated { meeting_id } => {
+                        if let Some(ref hub) = self.meeting_event_hub {
+                            hub.publish_summary_updated(&meeting_id.to_string());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -3946,6 +3962,14 @@ impl Daemon {
 
         if let Some(retitle) = meeting::retitle::take_trigger(&Config::runtime_dir()) {
             self.apply_retitle(retitle).await;
+        }
+
+        // A summary changed in storage (`meeting label` moved its action
+        // items' owners): tell the views showing that meeting.
+        if let Some(id) = take_summary_updated() {
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.publish_summary_updated(&id);
+            }
         }
 
         if check_meeting_notes() {
@@ -6416,6 +6440,11 @@ impl Daemon {
                         }
                         Some(MeetingEvent::SegmentDeleted { segment_id }) => {
                             self.publish_segment_deleted(segment_id);
+                        }
+                        Some(MeetingEvent::SummaryUpdated { meeting_id }) => {
+                            if let Some(ref hub) = self.meeting_event_hub {
+                                hub.publish_summary_updated(&meeting_id.to_string());
+                            }
                         }
                         Some(MeetingEvent::Paused) => {
                             // `pause_meeting` already published this via

@@ -289,6 +289,31 @@ DEFAULT_SUMMARY = {
 }
 
 
+def relabel_owners(state, meeting, old, new):
+    """As storage does on `meeting label`: action items owned by exactly the
+    old name (case and surrounding space aside) now carry the new one, in the
+    saved summary and in `meeting actions`; nothing else changes."""
+    same = lambda owner: (owner or "").strip().lower() == old.strip().lower()
+    path = os.path.join(os.environ["FAKE_MEETING_DATA"], "summary-%s.json" % meeting)
+    summary = None
+    if os.path.exists(path):
+        with open(path) as f:
+            summary = json.load(f)
+    elif os.environ.get("FAKE_MEETING_SNAPSHOT") and os.path.exists(os.environ["FAKE_MEETING_SNAPSHOT"]):
+        summary = snapshot().get("summary")
+    if summary and any(same(a.get("assignee")) for a in summary.get("action_items", [])):
+        for a in summary["action_items"]:
+            if same(a.get("assignee")):
+                a["assignee"] = new
+        with open(path, "w") as f:
+            json.dump(summary, f)
+    if any(same(a.get("owner")) for a in state.get("actions", [])):
+        for a in state["actions"]:
+            if same(a.get("owner")):
+                a["owner"] = new
+        save(state)
+
+
 def save(state):
     with open(os.environ["FAKE_VOXTYPE_STATE"], "w") as f:
         json.dump(state, f)
@@ -1219,6 +1244,7 @@ def main():
     elif action == "label" and len(args) == 5:
         control({"cmd": "label", "key": args[3], "name": args[4]})
         print("Labeled %s as '%s' in meeting %s" % (args[3], args[4], args[2]))
+        relabel_owners(state, resolve(state, args[2]), args[3], args[4])
     else:
         return 2
     return 0
