@@ -216,14 +216,17 @@ where
 /// of `debounce`. Returns `None` when none of `current_dirs` exist or no
 /// watch could be established; errors never panic.
 ///
-/// notify's inotify event loop panics on any `epoll_wait` error but EINTR,
-/// and the kernel has been seen to return an undocumented EAGAIN under load
-/// (the Nix build sandbox). Every later call on that watcher then panics,
+/// notify's inotify event loop panics on any `epoll_wait` error but EINTR.
+/// A signal handler that clobbered errno once turned EINTR into EAGAIN (fixed
+/// in signal-hook-registry 1.4.8), and other errors remain possible. Every
+/// later call on that watcher then panics,
 /// and dropping it panics again, which used to abort the whole process. So
 /// the watcher is treated as disposable: its death is noticed (the event
 /// handler it owns reports when it is dropped), every call into it is
-/// guarded, and a fresh watcher replaces it. `on_change` fires after the
-/// replacement, since events may have been missed while it was dead.
+/// guarded, and a fresh watcher replaces it. After a replacement,
+/// `on_change` fires only if the theme changed while the watcher was dead,
+/// judged against a fingerprint of the theme files as of the last callback;
+/// a dead watcher that missed nothing produces no spurious reload.
 pub fn watch_omarchy_dirs<F>(
     current_dirs: Vec<PathBuf>,
     debounce: Duration,
@@ -241,20 +244,21 @@ where
     let mut generation = 0u64;
     let mut armed = Some(arm(&tx, generation, &parents)?);
     let thread_tx = tx.clone();
+    let mut delivered = theme_fingerprint(&parents);
 
     let thread = thread::spawn(move || loop {
-        let mut died = match rx.recv() {
+        let (mut saw_fs, mut died) = match rx.recv() {
             Ok(WatchMsg::Stop) | Err(_) => {
                 discard(armed.take());
                 break;
             }
-            Ok(WatchMsg::Fs) => false,
-            Ok(WatchMsg::Died(g)) if g == generation => true,
+            Ok(WatchMsg::Fs) => (true, false),
+            Ok(WatchMsg::Died(g)) if g == generation => (false, true),
             Ok(WatchMsg::Died(_)) => continue,
         };
         loop {
             match rx.recv_timeout(debounce) {
-                Ok(WatchMsg::Fs) => continue,
+                Ok(WatchMsg::Fs) => saw_fs = true,
                 Ok(WatchMsg::Died(g)) => died |= g == generation,
                 Ok(WatchMsg::Stop) => {
                     discard(armed.take());
@@ -291,13 +295,54 @@ where
                 );
             }
         }
-        on_change();
+        // Events always report. A replacement reports only what the dead
+        // watcher may have missed.
+        let now = theme_fingerprint(&parents);
+        if saw_fs || now != delivered {
+            on_change();
+        }
+        delivered = now;
     });
 
     Some(ThemeWatchHandle {
         tx,
         thread: Some(thread),
     })
+}
+
+/// What the theme looks like on disk: the directory each "current" parent
+/// resolves to, `theme.name` beside it, and every entry in the resolved
+/// directory with its modification time, size and, for small files, a hash
+/// of the contents (so an edit within one timestamp tick still counts).
+/// Cheap: a theme is a few dozen small files.
+fn theme_fingerprint(
+    parents: &[PathBuf],
+) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    let stamp = |path: PathBuf| {
+        let meta = fs::metadata(&path).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        let len = meta.as_ref().map_or(0, |m| m.len());
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if meta.is_some_and(|m| m.is_file() && m.len() <= 64 * 1024) {
+            fs::read(&path).unwrap_or_default().hash(&mut hasher);
+        }
+        (path, modified, len, hasher.finish())
+    };
+    let mut out = Vec::new();
+    for parent in parents {
+        out.push(stamp(parent.join("theme.name")));
+        let Ok(dir) = fs::canonicalize(parent.join("theme")) else {
+            continue;
+        };
+        out.push((dir.clone(), None, 0, 0));
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .map(|it| it.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        entries.sort();
+        out.extend(entries.into_iter().map(stamp));
+    }
+    out
 }
 
 /// A watcher and the theme directories it is pinned to.
@@ -642,11 +687,14 @@ mod tests {
         .unwrap();
 
         // What the first watcher's event handler reports when notify's
-        // event loop thread dies.
+        // event loop thread dies. Nothing changed meanwhile, so the
+        // replacement reports nothing: a dead loop must not look like a
+        // theme switch.
         handle.tx.send(WatchMsg::Died(0)).unwrap();
-        rx.recv_timeout(Duration::from_secs(10))
-            .expect("re-arming should report a possible change");
-        while rx.recv_timeout(DEBOUNCE * 4).is_ok() {}
+        assert!(
+            rx.recv_timeout(DEBOUNCE * 4).is_err(),
+            "re-arming over an unchanged theme must not call back"
+        );
 
         // The first watcher is gone; only the replacement can see this.
         fs::write(theme_a.join("colors.toml"), "accent = \"#555555\"\n").unwrap();
@@ -660,6 +708,25 @@ mod tests {
             rx.recv_timeout(DEBOUNCE * 4).is_err(),
             "a stale death notice must be ignored"
         );
+    }
+
+    #[test]
+    fn the_fingerprint_moves_with_every_kind_of_theme_change() {
+        let (_tmp, current, theme_a, theme_b) = fake_omarchy();
+        let parents = vec![current.clone()];
+        let before = theme_fingerprint(&parents);
+        assert_eq!(theme_fingerprint(&parents), before, "stable when idle");
+
+        fs::write(theme_a.join("colors.toml"), "accent = \"#999999\"\n").unwrap();
+        let edited = theme_fingerprint(&parents);
+        assert_ne!(edited, before, "an in-place edit");
+
+        flip_theme(&current, &theme_b);
+        let flipped = theme_fingerprint(&parents);
+        assert_ne!(flipped, edited, "a symlink flip");
+
+        fs::write(current.join("theme.name"), "b\n").unwrap();
+        assert_ne!(theme_fingerprint(&parents), flipped, "a theme.name rewrite");
     }
 
     #[test]
