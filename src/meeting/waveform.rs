@@ -326,14 +326,26 @@ mod tests {
     fn fake_ffmpeg(dir: &Path) -> (PathBuf, PathBuf) {
         let runs = dir.join("runs");
         let ffmpeg = dir.join("ffmpeg");
-        crate::test_support::write_script(
-            &ffmpeg,
-            &format!(
-                "#!/usr/bin/env python3\nimport sys, struct\nopen({runs:?}, 'a').write('run\\n')\n\
+        // The Python runs through a /bin/sh launcher that finds python3 on
+        // PATH: a `#!/usr/bin/env` shebang fails in the Nix build sandbox,
+        // which has /bin/sh and nothing else outside the store.
+        let program = dir.join("fake_ffmpeg.py");
+        std::fs::write(
+            &program,
+            format!(
+                "import sys, struct\nopen({runs:?}, 'a').write('run\\n')\n\
                  path = sys.argv[sys.argv.index('-i') + 1]\ndata = open(path, 'rb').read()[44:]\n\
                  n = len(data) // 2\nvals = struct.unpack('<%dh' % n, data[:n * 2])\n\
                  sys.stdout.buffer.write(struct.pack('<%df' % n, *[v / 32768 for v in vals]))\n",
                 runs = runs.display().to_string()
+            ),
+        )
+        .unwrap();
+        crate::test_support::write_script(
+            &ffmpeg,
+            &format!(
+                "#!/bin/sh\nexec python3 {:?} \"$@\"\n",
+                program.display().to_string()
             ),
         );
         (ffmpeg, runs)
