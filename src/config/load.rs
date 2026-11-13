@@ -265,6 +265,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_MEETING_ANNOUNCE_RECORDING") {
         config.meeting.announce_recording = parse_bool_env(&val);
     }
+    if let Ok(voice) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_VOICE") {
+        config.meeting.announcement_voice = voice.trim().to_lowercase();
+    }
     if let Ok(path) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_FILE") {
         config.meeting.announcement_file = Some(path).filter(|p| !p.trim().is_empty());
     }

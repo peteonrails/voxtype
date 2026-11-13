@@ -29,11 +29,12 @@
 //! keeps it out of the transcript with a [`Window`]: lines in the time the
 //! clip played that say the announcement's words lose them.
 //!
-//! Voxtype never calls a speech service for this: the clip ships in the
-//! binary ([`BUILTIN_CLIP`]). `scripts/render-meeting-announcement.sh`
-//! renders it again from [`ANNOUNCEMENT_TEXT`]. Default builds embed an
-//! ElevenLabs voice; the `announcement-kokoro` feature (the Nix flake) embeds
-//! a Kokoro-82M one instead.
+//! The default clip ships in the binary ([`BUILTIN_CLIP`]), a Kokoro-82M
+//! voice that is MIT like the rest of voxtype, so the announcement plays
+//! offline. `scripts/render-meeting-announcement.sh` renders it again from
+//! [`ANNOUNCEMENT_TEXT`]. The ElevenLabs voice "Jessica" is not in the
+//! repository or the binary: it is downloaded once, on request, under its own
+//! terms ([`jessica`]), and voxtype never calls a speech service.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -49,24 +50,18 @@ use crate::meeting::echo::{normalize_word, word_distance};
 /// with `scripts/render-meeting-announcement.sh` after changing it.
 pub const ANNOUNCEMENT_TEXT: &str = "This meeting is being recorded and transcribed with Voxtype.";
 
-/// The built-in clip: [`ANNOUNCEMENT_TEXT`] in the ElevenLabs voice
-/// "Jessica", 24 kHz mono 16-bit WAV. Not MIT: see assets/sounds/README.md.
-#[cfg(not(feature = "announcement-kokoro"))]
-pub const BUILTIN_CLIP: &[u8] = include_bytes!("../../assets/sounds/meeting-announcement.wav");
-
-/// The built-in clip with the `announcement-kokoro` feature:
-/// [`ANNOUNCEMENT_TEXT`] in the Kokoro-82M voice `af_heart`, 24 kHz mono
-/// 16-bit WAV, MIT like the rest of voxtype. Only one clip is compiled in, so
-/// a build with this feature carries none of the Jessica clip's bytes.
-#[cfg(feature = "announcement-kokoro")]
+/// The built-in clip: [`ANNOUNCEMENT_TEXT`] in the Kokoro-82M voice
+/// `af_heart`, 24 kHz mono 16-bit WAV, MIT like the rest of voxtype.
 pub const BUILTIN_CLIP: &[u8] =
     include_bytes!("../../assets/sounds/meeting-announcement-kokoro.wav");
 
 /// The file under `assets/sounds/` that [`BUILTIN_CLIP`] embeds.
-#[cfg(not(feature = "announcement-kokoro"))]
-pub const BUILTIN_CLIP_FILE: &str = "meeting-announcement.wav";
-#[cfg(feature = "announcement-kokoro")]
 pub const BUILTIN_CLIP_FILE: &str = "meeting-announcement-kokoro.wav";
+
+pub mod jessica;
+
+/// The built-in announcement's voices (`[meeting] announcement_voice`).
+pub const VOICES: &[&str] = crate::cli::ANNOUNCEMENT_VOICES;
 
 /// How long a meeting waits for a call app to open the mic before it plays
 /// the announcement on the speakers only.
@@ -85,8 +80,11 @@ pub const STATUS_FILE: &str = "meeting_announcement.json";
 /// Which audio the announcement plays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Clip {
-    /// [`BUILTIN_CLIP`]
+    /// [`BUILTIN_CLIP`], the Kokoro voice
     Builtin,
+    /// The Jessica voice, downloaded to this path ([`jessica`]). Played
+    /// only once [`Clip::ready`] has it, else the built-in voice plays.
+    Jessica(PathBuf),
     /// The user's own recording (`announcement_file`)
     File(PathBuf),
 }
@@ -105,16 +103,63 @@ impl Clip {
             .or(config.announcement_file.as_deref())
             .map(str::trim)
             .filter(|f| !f.is_empty());
-        Some(match file {
-            Some(f) => Clip::File(expand_home(f)),
-            None => Clip::Builtin,
+        if let Some(f) = file {
+            return Some(Clip::File(expand_home(f)));
+        }
+        let voice = options
+            .announcement_voice
+            .as_deref()
+            .unwrap_or(&config.announcement_voice);
+        Some(match voice.trim().to_lowercase().as_str() {
+            "jessica" => Clip::Jessica(jessica::cache_path()),
+            "kokoro" => Clip::Builtin,
+            other => {
+                tracing::warn!(
+                    "Unknown announcement voice {:?}; using the built-in one",
+                    other
+                );
+                Clip::Builtin
+            }
         })
     }
 
-    /// What the clip says, when voxtype knows: only for the built-in one.
+    /// The clip ready to play, and why it is not the one asked for, when it
+    /// isn't: the user's file and the built-in voice are always ready; the
+    /// Jessica voice is the cached copy when it checks out, else a download
+    /// through `download`, else the built-in voice.
+    pub fn ready(
+        self,
+        download: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> (Clip, Option<String>) {
+        self.ready_checked(jessica::SHA256, download)
+    }
+
+    /// [`Clip::ready`], checking the Jessica voice against `sha256`.
+    pub(crate) fn ready_checked(
+        self,
+        sha256: &str,
+        download: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> (Clip, Option<String>) {
+        match self {
+            Clip::Jessica(path) => match jessica::ensure_sha(&path, sha256, download) {
+                Ok(()) => (Clip::Jessica(path), None),
+                Err(why) => (
+                    Clip::Builtin,
+                    Some(format!(
+                        "the Jessica voice could not be downloaded ({}), so the built-in voice played",
+                        why
+                    )),
+                ),
+            },
+            other => (other, None),
+        }
+    }
+
+    /// What the clip says, when voxtype knows: both voxtype voices say
+    /// [`ANNOUNCEMENT_TEXT`]; a user's file is unknown.
     pub fn phrase(&self) -> Option<&'static str> {
         match self {
-            Clip::Builtin => Some(ANNOUNCEMENT_TEXT),
+            Clip::Builtin | Clip::Jessica(_) => Some(ANNOUNCEMENT_TEXT),
             Clip::File(_) => None,
         }
     }
@@ -123,7 +168,7 @@ impl Clip {
     /// one written to `runtime_dir`.
     pub fn materialize(&self, runtime_dir: &Path) -> std::io::Result<PathBuf> {
         match self {
-            Clip::File(path) => {
+            Clip::File(path) | Clip::Jessica(path) => {
                 if path.is_file() {
                     Ok(path.clone())
                 } else {
@@ -151,7 +196,7 @@ impl Clip {
             Clip::Builtin => hound::WavReader::new(std::io::Cursor::new(BUILTIN_CLIP))
                 .ok()
                 .map(|r| (r.duration(), r.spec().sample_rate)),
-            Clip::File(path) => hound::WavReader::open(path)
+            Clip::File(path) | Clip::Jessica(path) => hound::WavReader::open(path)
                 .ok()
                 .map(|r| (r.duration(), r.spec().sample_rate)),
         };
@@ -175,8 +220,9 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 /// `voxtype meeting start`'s announcement choices, resolved against the
-/// config it read: `--no-announce` beats `--announce` beats the config, and
-/// `--announcement-file` beats `announcement_file`. The file is made
+/// config it read: `--no-announce` beats `--announce` beats the config,
+/// `--announcement-file` beats `announcement_file`, and
+/// `--announcement-voice` beats `announcement_voice`. The file is made
 /// absolute, since the daemon does not share this command's directory, and
 /// a missing one refuses the start rather than announcing nothing.
 pub fn resolve_start_options(
@@ -185,6 +231,7 @@ pub fn resolve_start_options(
     announce: bool,
     no_announce: bool,
     file: Option<&Path>,
+    voice: Option<&str>,
 ) -> Result<MeetingStartOptions, String> {
     let on = if no_announce {
         false
@@ -195,6 +242,12 @@ pub fn resolve_start_options(
     if !on {
         return Ok(options);
     }
+    options.announcement_voice = Some(
+        voice
+            .unwrap_or(&config.announcement_voice)
+            .trim()
+            .to_lowercase(),
+    );
     let file = match file {
         Some(f) => Some(f.to_path_buf()),
         None => config
@@ -241,6 +294,9 @@ pub struct Status {
     /// Why it only played locally or not at all; empty otherwise
     #[serde(default)]
     pub detail: String,
+    /// Why the voice that played is not the one asked for, when it isn't
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl Status {
@@ -249,6 +305,7 @@ impl Status {
             state: State::Waiting,
             app: None,
             detail: String::new(),
+            note: None,
         }
     }
 
@@ -257,6 +314,7 @@ impl Status {
             state: State::Call,
             app: Some(app.to_string()),
             detail: String::new(),
+            note: None,
         }
     }
 
@@ -265,6 +323,7 @@ impl Status {
             state: State::Local,
             app: None,
             detail: why.into(),
+            note: None,
         }
     }
 
@@ -273,11 +332,27 @@ impl Status {
             state: State::Failed,
             app: None,
             detail: why.into(),
+            note: None,
         }
+    }
+
+    /// The same status, noting why the voice that played isn't the one
+    /// asked for.
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
     }
 
     /// One line for `meeting status` and the views.
     pub fn describe(&self) -> String {
+        let line = self.describe_state();
+        match &self.note {
+            Some(note) => format!("{line}. Note: {note}"),
+            None => line,
+        }
+    }
+
+    fn describe_state(&self) -> String {
         match self.state {
             State::Waiting => {
                 "waiting for a call app to open the microphone (up to 2 minutes)".to_string()
@@ -539,6 +614,10 @@ mod live {
         /// Where the local copy plays: `None` for the default output, as
         /// PipeWire routes it. Tests send it to a null sink.
         pub local_target: Option<String>,
+        /// Where the Jessica voice is downloaded from ([`jessica::url`])
+        pub jessica_url: String,
+        /// How long that download may take ([`jessica::MEETING_TIMEOUT`])
+        pub jessica_timeout: Duration,
     }
 
     /// The call's capture streams, found in one look at the graph.
@@ -555,6 +634,8 @@ mod live {
                 runtime_dir,
                 wait: WAIT_FOR_CALL,
                 local_target: None,
+                jessica_url: jessica::url(),
+                jessica_timeout: jessica::MEETING_TIMEOUT,
             }
         }
 
@@ -576,7 +657,42 @@ mod live {
         }
 
         async fn announce(&self, tx: &mpsc::Sender<Update>) -> Status {
-            let path = match self.clip.materialize(&self.runtime_dir) {
+            let (clip, note) = self.prepared_clip().await;
+            self.announce_clip(&clip, tx).await.with_note(note)
+        }
+
+        /// The clip to play, after fetching the Jessica voice when it is
+        /// wanted and not cached yet. A failed fetch leaves the built-in
+        /// voice, with the reason.
+        async fn prepared_clip(&self) -> (Clip, Option<String>) {
+            let clip = self.clip.clone();
+            if !matches!(clip, Clip::Jessica(_)) {
+                return (clip, None);
+            }
+            let url = self.jessica_url.clone();
+            let timeout = self.jessica_timeout;
+            let fallback = (
+                Clip::Builtin,
+                Some(
+                    "the Jessica voice could not be prepared, so the built-in voice played".into(),
+                ),
+            );
+            tokio::task::spawn_blocking(move || {
+                clip.ready(|dest| {
+                    tracing::info!(
+                        "Recording announcement: downloading the Jessica voice from {}",
+                        url
+                    );
+                    tracing::info!("{}", jessica::TERMS);
+                    jessica::fetch(&url, dest, timeout)
+                })
+            })
+            .await
+            .unwrap_or(fallback)
+        }
+
+        async fn announce_clip(&self, clip: &Clip, tx: &mpsc::Sender<Update>) -> Status {
+            let path = match clip.materialize(&self.runtime_dir) {
                 Ok(p) => p,
                 Err(e) => return Status::failed(format!("cannot read the clip: {}", e)),
             };
@@ -623,11 +739,11 @@ mod live {
             let _ = tx
                 .send(Update::Started {
                     at: Instant::now(),
-                    expected: self.clip.expected_duration(),
-                    phrase: self.clip.phrase().map(str::to_string),
+                    expected: clip.expected_duration(),
+                    phrase: clip.phrase().map(str::to_string),
                 })
                 .await;
-            let limit = self.clip.expected_duration() + Duration::from_secs(10);
+            let limit = clip.expected_duration() + Duration::from_secs(10);
             let local_ok = match local {
                 Ok(child) => finish(child, limit).await,
                 Err(e) => {

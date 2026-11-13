@@ -2324,6 +2324,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Keep the meeting's mic, loopback and mixed audio as Opus in its folder.",
     ),
     spec(
+        "meeting.announcement_voice",
+        "meeting",
+        "announcement_voice",
+        closed(crate::meeting::announce::VOICES),
+        "Meeting",
+        "Announcement voice",
+        "kokoro is built in and MIT. jessica is an ElevenLabs voice downloaded once on first use, under its own terms: not MIT, redistributable unmodified, no AI training. An announcement audio file overrides both.",
+    )
+    .live(),
+    spec(
         "meeting.announcement_file",
         "meeting",
         "announcement_file",
@@ -3335,6 +3345,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.auto_label_from_title" => json!(cfg.meeting.auto_label_from_title),
         "meeting.announce_recording" => json!(cfg.meeting.announce_recording),
         "meeting.announcement_file" => opt_str(cfg.meeting.announcement_file.as_ref()),
+        "meeting.announcement_voice" => json!(cfg.meeting.announcement_voice),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),

@@ -31,6 +31,10 @@ pub struct MeetingStartOptions {
     /// `[meeting] announcement_file`, or the built-in clip
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announcement_file: Option<String>,
+    /// The announcement's voice for this meeting (`--announcement-voice`);
+    /// unset keeps `[meeting] announcement_voice`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcement_voice: Option<String>,
 }
 
 /// Meeting transcription configuration
@@ -120,6 +124,13 @@ pub struct MeetingConfig {
     #[serde(default)]
     pub announcement_file: Option<String>,
 
+    /// The built-in announcement's voice: "kokoro" (default), shipped in the
+    /// binary and MIT, or "jessica", an ElevenLabs voice downloaded once on
+    /// first use under its own terms (not MIT, no AI training).
+    /// `announcement_file` overrides both.
+    #[serde(default = "default_announcement_voice")]
+    pub announcement_voice: String,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -200,6 +211,10 @@ pub struct MeetingAudioConfig {
     /// check looks at.
     #[serde(default = "default_echo_fuzzy_max_words")]
     pub echo_fuzzy_max_words: u32,
+}
+
+fn default_announcement_voice() -> String {
+    "kokoro".to_string()
 }
 
 fn default_echo_fuzzy_max_words() -> u32 {
@@ -601,6 +616,7 @@ impl Default for MeetingConfig {
             auto_label_from_title: true,
             announce_recording: false,
             announcement_file: None,
+            announcement_voice: default_announcement_voice(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
@@ -662,6 +678,20 @@ mod tests {
             config.meeting.announcement_file.as_deref(),
             Some("~/announce-de.wav")
         );
+    }
+
+    #[test]
+    fn test_announcement_voice_defaults_to_kokoro_for_old_configs() {
+        assert_eq!(MeetingConfig::default().announcement_voice, "kokoro");
+        // A config written before the key existed, even one that announces,
+        // gets the voice shipped in the binary.
+        let config: Config = toml::from_str("[meeting]\nannounce_recording = true\n").unwrap();
+        assert_eq!(config.meeting.announcement_voice, "kokoro");
+        let config: Config =
+            toml::from_str("[meeting]\nannouncement_voice = \"jessica\"\n").unwrap();
+        assert_eq!(config.meeting.announcement_voice, "jessica");
+        let options: MeetingStartOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(options.announcement_voice, None);
     }
 
     #[test]

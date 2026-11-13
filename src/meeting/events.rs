@@ -192,6 +192,8 @@ enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         app: Option<String>,
         detail: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
         text: String,
     },
     Segments {
@@ -502,6 +504,7 @@ impl MeetingEventHub {
             state: status.state,
             app: status.app.clone(),
             detail: status.detail.clone(),
+            note: status.note.clone(),
             text: status.describe(),
         });
     }

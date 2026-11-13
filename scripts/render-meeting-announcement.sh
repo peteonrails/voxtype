@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# Re-render a built-in recording announcement.
+# Re-render a recording announcement clip.
 #
 # The words come from ANNOUNCEMENT_TEXT in src/meeting/announce.rs, the one
 # place they live, so change them there first. Two clips exist:
 #
-#   default    assets/sounds/meeting-announcement.wav, ElevenLabs' "Jessica"
-#              on eleven_multilingual_v2. Embedded by default builds.
 #   --kokoro   assets/sounds/meeting-announcement-kokoro.wav, Kokoro-82M's
-#              af_heart voice from a local Kokoro server. Embedded by builds
-#              with the announcement-kokoro feature (the Nix flake).
+#              af_heart voice from a local Kokoro server. Every build embeds
+#              it; it is MIT like the rest of voxtype.
+#   default    The ElevenLabs "Jessica" voice on eleven_multilingual_v2. Not
+#              part of this repository: give an output path outside it. It is
+#              published on the models CDN as a versioned object, and its
+#              sha256 is pinned in src/meeting/announce/jessica.rs (see
+#              assets/sounds/README.md and the vault's R2 upload note).
 #
 # Both are written as 24 kHz mono 16-bit WAV. Nothing is played.
 #
 # This runs only when a maintainer changes a clip. Voxtype itself never calls
-# a speech service: the WAV ships in the binary and plays offline.
+# a speech service.
 #
-# Afterwards, update the size and sha256 in assets/sounds/README.md, which
-# also holds the credit and licensing notes for each clip. Commit the WAV as
-# rendered: never strip provenance metadata or watermarks from it.
+# Afterwards, update the size and sha256 in assets/sounds/README.md (and, for
+# Jessica, OBJECT, SHA256 and SIZE in jessica.rs). Keep a clip as rendered:
+# never strip provenance metadata or watermarks from it.
 #
 # Usage:
-#   ELEVENLABS_API_KEY=... scripts/render-meeting-announcement.sh [out.wav]
 #   scripts/render-meeting-announcement.sh --kokoro [out.wav]
+#   ELEVENLABS_API_KEY=... scripts/render-meeting-announcement.sh out.wav
 #
 # Overrides, ElevenLabs: VOICE_ID (default Jessica, cgSgspJ2msm6clMCkdW9) and
 # MODEL_ID (default eleven_multilingual_v2).
@@ -63,7 +66,11 @@ with wave.open(sys.argv[1]) as w:
     print(f"Wrote {sys.argv[1]}: {w.getnframes() / 24000:.1f} s")
 EOF
 else
-    out=${1:-$repo/assets/sounds/meeting-announcement.wav}
+    if [[ -z ${1:-} ]]; then
+        echo "Give an output path outside the repository: the Jessica clip is not part of voxtype." >&2
+        exit 1
+    fi
+    out=$1
     voice=${VOICE_ID:-cgSgspJ2msm6clMCkdW9}
     model=${MODEL_ID:-eleven_multilingual_v2}
 
@@ -96,4 +103,4 @@ EOF
 fi
 
 sha256sum "$out"
-echo "Update the size and sha256 in assets/sounds/README.md."
+echo "Update the size and sha256 in assets/sounds/README.md (and jessica.rs for the Jessica clip)."

@@ -2868,6 +2868,7 @@ show_view_on_start = true        # Omarchy: open the live meeting view when a me
 auto_label_from_title = true     # Name both sides of "Pete <> Andrew standup" from the title
 announce_recording = false       # Play "This meeting is being recorded..." into the call at start
 # announcement_file = "~/announce.wav"  # Your own clip instead of the built-in one
+announcement_voice = "kokoro"    # Built in; "jessica" downloads an ElevenLabs voice once
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)

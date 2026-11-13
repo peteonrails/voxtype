@@ -608,8 +608,6 @@ cp config/default.toml "$STAGING/etc/voxtype/config.toml"
 cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
 cp README.md "$STAGING/usr/share/doc/voxtype/"
 cp LICENSE "$STAGING/usr/share/doc/voxtype/"
-# The recording announcement clip in the binary has its own licence.
-cp assets/sounds/README.md "$STAGING/usr/share/doc/voxtype/ANNOUNCEMENT-LICENSE.md"
 cp THIRD_PARTY.md "$STAGING/usr/share/doc/voxtype/"
 
 # Quickshell QML tree. The voxtype-osd-quickshell launcher probes this
@@ -851,7 +849,7 @@ FPM_OPTS=(
     --architecture "$TARGET_ARCH"
     --maintainer "Peter Jackson <pete@peteonrails.com>"
     --url "https://voxtype.io"
-    --license "MIT AND LicenseRef-voxtype-announcement"
+    --license "MIT"
     --description "$DESCRIPTION"
     --after-install "$STAGING/postinstall.sh"
     --after-remove "$STAGING/postuninstall.sh"

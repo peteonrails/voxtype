@@ -82,13 +82,6 @@
         # client code only; transcribe.cpp itself lives in voxtype-gguf-worker.
         ggufClientFeatures = [ "gguf" "cohere-gguf" "parakeet-gguf" ];
 
-        # Embed the Kokoro-82M recording announcement (MIT) instead of the
-        # default ElevenLabs clip, whose licence forbids AI training use. Only
-        # the selected clip is compiled in, so the built package carries no
-        # restricted asset and can be labelled plain MIT. The source tree
-        # still contains the ElevenLabs WAV; it never reaches the output.
-        announcementFeatures = [ "announcement-kokoro" ];
-
         # ONNX engine feature sets
         # All ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual
         onnxCpuFeatures = [
@@ -250,7 +243,7 @@
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
             # Build with specified features
-            buildFeatures = ggufClientFeatures ++ announcementFeatures ++ features;
+            buildFeatures = ggufClientFeatures ++ features;
 
             # Ensure reproducible builds targeting AVX2-capable CPUs (x86-64-v3)
             # This matches the portable AVX2 binaries we ship for other distros
@@ -453,7 +446,7 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-          buildFeatures = [ "osd-native" ] ++ announcementFeatures;
+          buildFeatures = [ "osd-native" ];
           cargoBuildFlags = [ "--bin" "voxtype-osd-native" ];
 
           # Skip running the full lib test suite, this package only ships the OSD bin.
@@ -490,7 +483,7 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-          buildFeatures = [ "osd-gtk4" ] ++ announcementFeatures;
+          buildFeatures = [ "osd-gtk4" ];
           cargoBuildFlags = [ "--bin" "voxtype-osd-gtk4" ];
 
           # Skip running the full lib test suite, this package only ships the OSD bin.
