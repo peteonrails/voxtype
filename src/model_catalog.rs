@@ -417,6 +417,20 @@ pub(crate) fn override_route_in(
     if config.engine == TranscriptionEngine::Whisper
         && resolved.as_ref().is_none_or(|r| r.engine == "whisper")
     {
+        if config.whisper.effective_mode() == crate::config::WhisperMode::Local {
+            if resolved.is_none() && crate::transcribe::whisper::model_filename(name).is_none() {
+                return Err(format!(
+                    "Unknown model '{name}'. Run `voxtype info models` to list available models."
+                ));
+            }
+            crate::transcribe::whisper::resolve_model_path_in(models_dir, name).map_err(|e| {
+                if model::is_valid_model(name) {
+                    format!("{e}\nRun: voxtype setup --download --model {name}")
+                } else {
+                    format!("{e}\nCheck the model file path or run `voxtype info models` to list available models.")
+                }
+            })?;
+        }
         return Ok(OverrideRoute::WhisperManager);
     }
     if let Some(problem) = override_problem_in(models_dir, config, name) {
@@ -887,12 +901,21 @@ mod tests {
     }
 
     #[test]
-    fn whisper_engine_keeps_its_model_manager_route() {
+    fn local_whisper_rejects_unknown_override_before_recording() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let problem = override_route_in(tmp.path(), &Config::default(), "nonexistent")
+            .expect_err("unknown local models must not reach recording");
+        assert!(problem.contains("nonexistent"), "{problem}");
+        assert!(problem.contains("voxtype info models"), "{problem}");
+    }
+
+    #[test]
+    fn remote_whisper_engine_keeps_its_model_manager_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.whisper.mode = Some(crate::config::WhisperMode::Remote);
         assert_eq!(config.engine, crate::config::TranscriptionEngine::Whisper);
-        // Not downloaded, and a name only a remote backend knows: both stay on
-        // the model manager path, exactly as before.
+        // Remote model names do not require local files.
         for name in ["large-v3", "gpt-4o-transcribe"] {
             assert_eq!(
                 override_route_in(tmp.path(), &config, name),

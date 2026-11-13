@@ -1,5 +1,10 @@
 voxtype (1.2.2-1) unstable; urgency=medium
 
+  * Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes
+  * Handle failed output pipes, paste fallback and unresponsive audio-device lookups
+  * Include the opt-in coding-agent setup skill and text cleanup fixes
+  * Retain the source packaging, worker, icon and build repairs from the release candidates
+
   * Ship the OSD: voxtype-osd launcher, Quickshell frontend, audio bridge,
     QML tree, OSD styles and recipes; GTK4 frontend in voxtype-osd-gtk4
   * Ship the Vulkan build, the GGUF client in every build, and the CPU and
@@ -9,7 +14,7 @@ voxtype (1.2.2-1) unstable; urgency=medium
   * Build whisper.cpp with -fPIC, which CMAKE_*_FLAGS otherwise drops
   * Require rustc and cargo 1.92 or newer (gtk4-rs 0.11)
 
- -- Peter Jackson <pete@peteonrails.com>  Wed, 11 Nov 2026 12:00:00 +0000
+ -- Peter Jackson <pete@peteonrails.com>  Thu, 12 Nov 2026 21:00:00 +0000
 
 voxtype (0.4.2-1) unstable; urgency=high
 

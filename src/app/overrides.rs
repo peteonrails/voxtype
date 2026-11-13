@@ -73,6 +73,21 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(delay) = cli.restore_clipboard_delay_ms {
         config.output.restore_clipboard_delay_ms = delay;
     }
+    // Model admission must see the mode selected for this invocation.
+    if let Some(ref mode) = cli.whisper_mode {
+        match mode.to_lowercase().as_str() {
+            "local" => config.whisper.mode = Some(config::WhisperMode::Local),
+            "remote" => config.whisper.mode = Some(config::WhisperMode::Remote),
+            "cli" => config.whisper.mode = Some(config::WhisperMode::Cli),
+            _ => {
+                eprintln!(
+                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli",
+                    mode
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     if let (Some(model), Some(voxtype::Commands::Transcribe { .. })) = (&cli.model, &cli.command) {
         // `transcribe` runs this one file with the named model, so the name
         // picks its engine exactly as a per-recording override does in the
@@ -223,20 +238,6 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
                 .on_demand_loading = true;
         } else {
             config.whisper.on_demand_loading = true;
-        }
-    }
-    if let Some(ref mode) = cli.whisper_mode {
-        match mode.to_lowercase().as_str() {
-            "local" => config.whisper.mode = Some(config::WhisperMode::Local),
-            "remote" => config.whisper.mode = Some(config::WhisperMode::Remote),
-            "cli" => config.whisper.mode = Some(config::WhisperMode::Cli),
-            _ => {
-                eprintln!(
-                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli",
-                    mode
-                );
-                std::process::exit(1);
-            }
         }
     }
     if let Some(ref model) = cli.secondary_model {

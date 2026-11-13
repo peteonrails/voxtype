@@ -327,7 +327,11 @@ fi
 %{vt_libdir}/voxtype-osd-gtk4
 
 %changelog
-* Wed Nov 11 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
+* Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
+- Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes
+- Handle failed output pipes, paste fallback and unresponsive audio-device lookups
+- Include the opt-in coding-agent setup skill and text cleanup fixes
+- Retain the source packaging, worker, icon and build repairs from the release candidates
 - Ship the OSD: voxtype-osd launcher, Quickshell frontend, audio bridge,
   QML tree, OSD styles and recipes; GTK4 frontend in voxtype-osd-gtk4
 - Ship the Omarchy Settings plugin and man pages, as the release RPM does
