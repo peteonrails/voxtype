@@ -462,10 +462,33 @@ sets the window class to `voxtype` so compositors can float it.
 | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
 | Text Cleanup | Independent deterministic stages, opt-in LARD cleanup/model path, learned punctuation/casing, smart auto-submit, replacements editor |
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
-| Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
+| Meeting | Every `[meeting]` setting, grouped as in the Settings panel: general, audio, speakers, calendar, summary, action items, sharing, call detection, assistant |
 | Notifications | Desktop notifications for recording start/stop and transcription |
 | Waybar | Status integration: icon theme + per-state icon overrides |
 | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
+
+#### The Meeting page
+
+The Meeting page lists every meeting setting in the config schema, the same
+list the Omarchy and Quickshell Settings panel shows, with the same labels and
+help, grouped under General, Audio, Speakers, Calendar, Summary, Action items,
+Sharing, Call detection and Assistant. A setting added to voxtype appears here
+without a TUI change.
+
+- A yes/no setting toggles with ←→ or Space; a setting with fixed choices
+  cycles through them; a number steps within its range (←→), or type it
+  with Enter.
+- Enter types any value. An empty value, or Delete on the row, removes the
+  setting from `config.toml` so its default applies. Values marked
+  `(default)` are not in your file.
+- The About pane gives the setting's help, its choices or range, its default,
+  its config key, and whether it takes effect at once or after a daemon
+  restart. After `s`, the page names the saved settings that need a restart;
+  quitting the TUI restarts a running daemon.
+- The calendar link is shown only as **set** or **not set**, and the remote
+  summary API key the same way: set the link with
+  `voxtype meeting calendar set-ics`, and type a new API key with Enter.
+- While **Meeting mode** is off, the other rows are dimmed.
 
 #### Keyboard
 
@@ -474,6 +497,7 @@ Global         Tab / Esc focus toggle    ?  help overlay   q quit
 Sidebar        ↑↓ / jk navigate          Enter / → / l open section
 Section form   ↑↓ navigate fields        ←→ / hl cycle value
                Space toggle              Enter / i edit text field
+               Delete back to default    (Meeting page)
                s save                    r revert
 Text editor    type insert               ←→ / Home / End / Ctrl-A/E
                Backspace / Delete        Ctrl-W delete word
