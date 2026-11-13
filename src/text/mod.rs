@@ -734,7 +734,8 @@ fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
     let pattern = format!(r"(?i)\b{}\b", escaped);
 
     match Regex::new(&pattern) {
-        Ok(re) => re.replace_all(text, to).into_owned(),
+        // the replacement is plain text, so don't let regex expand $name or $1 in it
+        Ok(re) => re.replace_all(text, regex::NoExpand(to)).into_owned(),
         Err(_) => text.to_string(),
     }
 }
@@ -1059,6 +1060,23 @@ mod tests {
 
         assert_eq!(processor.process("I love RUST"), "I love Rust");
         assert_eq!(processor.process("rust is great"), "Rust is great");
+    }
+
+    #[test]
+    fn test_word_replacements_keep_dollar_sign() {
+        let config = make_config(
+            false,
+            &[
+                ("my home", "$HOME"),
+                ("five bucks", "$5"),
+                ("one dollar", "$1"),
+            ],
+        );
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("echo my home"), "echo $HOME");
+        assert_eq!(processor.process("it costs five bucks"), "it costs $5");
+        assert_eq!(processor.process("it costs one dollar"), "it costs $1");
     }
 
     #[test]
