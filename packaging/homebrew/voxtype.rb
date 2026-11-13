@@ -3,6 +3,11 @@ class Voxtype < Formula
   homepage "https://voxtype.io"
   url "https://github.com/peteonrails/voxtype/archive/refs/tags/v0.6.0-rc.1.tar.gz"
   sha256 "PLACEHOLDER_SHA256"
+  # The binary also embeds the recording announcement clip, which is not
+  # MIT: it may be redistributed unmodified with voxtype and may not be used
+  # to train AI models (assets/sounds/README.md, installed below as
+  # ANNOUNCEMENT-LICENSE.md). Homebrew's license DSL takes SPDX IDs only, and
+  # `brew audit` rejects a LicenseRef, so the declaration stays MIT.
   license "MIT"
   head "https://github.com/peteonrails/voxtype.git", branch: "feature/macos-release"
 
@@ -28,6 +33,7 @@ class Voxtype < Formula
     else
       system "cargo", "install", *std_cargo_args
     end
+    doc.install "assets/sounds/README.md" => "ANNOUNCEMENT-LICENSE.md"
   end
 
   def post_install
