@@ -34,11 +34,17 @@ use crate::osd::visual::{Color, Palette};
 /// Candidate Omarchy "current theme" directories, ordered newest to oldest.
 pub fn omarchy_theme_dirs() -> Option<Vec<PathBuf>> {
     let home = std::env::var_os("HOME")?;
-    let home = PathBuf::from(home);
-    Some(vec![
+    Some(theme_dirs_under(Path::new(&home)))
+}
+
+/// [`omarchy_theme_dirs`] for a given home directory. Tests use this rather
+/// than setting `HOME`, which is process-wide and races with every other
+/// test that reads it.
+fn theme_dirs_under(home: &Path) -> Vec<PathBuf> {
+    vec![
         home.join(".local/state/omarchy/current/theme"),
         home.join(".config/omarchy/current/theme"),
-    ])
+    ]
 }
 
 /// Omarchy "current" directories (the parents holding the `theme` symlink)
@@ -86,11 +92,15 @@ fn parse_hex(s: &str) -> Option<Color> {
 /// fallbacks apply too: a theme that only defines `accent` keeps the
 /// fallback values for everything else.
 pub fn load_palette() -> Palette {
-    let Some(dirs) = omarchy_theme_dirs() else {
-        return Palette::fallback();
-    };
+    match omarchy_theme_dirs() {
+        Some(dirs) => palette_from_dirs(&dirs),
+        None => Palette::fallback(),
+    }
+}
 
-    for path in dirs.into_iter().map(|dir| dir.join("colors.toml")) {
+/// [`load_palette`] from the given candidate theme directories.
+fn palette_from_dirs(dirs: &[PathBuf]) -> Palette {
+    for path in dirs.iter().map(|dir| dir.join("colors.toml")) {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -454,25 +464,44 @@ fn watch_theme_targets(
 mod tests {
     use super::*;
 
+    // These never set HOME: it is process-wide, and a test that changed it
+    // raced with every other test reading it (watcher_uses_loaded_palette
+    // compared the real theme against the fallback when HOME moved between
+    // its two reads).
+
     #[test]
     fn theme_dir_resolves_under_home() {
-        std::env::set_var("HOME", "/tmp/fakehome");
-        let p = omarchy_theme_dir().unwrap();
-        assert!(p.ends_with(".local/state/omarchy/current/theme"));
+        let dirs = theme_dirs_under(Path::new("/tmp/fakehome"));
+        assert_eq!(
+            dirs[0],
+            Path::new("/tmp/fakehome/.local/state/omarchy/current/theme")
+        );
     }
 
     #[test]
     fn theme_dirs_include_legacy_config_fallback() {
-        std::env::set_var("HOME", "/tmp/fakehome");
-        let dirs = omarchy_theme_dirs().unwrap();
+        let dirs = theme_dirs_under(Path::new("/tmp/fakehome"));
         assert!(dirs[0].ends_with(".local/state/omarchy/current/theme"));
         assert!(dirs[1].ends_with(".config/omarchy/current/theme"));
     }
 
     #[test]
     fn missing_theme_dir_yields_fallback() {
-        std::env::set_var("HOME", "/tmp/this-dir-should-not-exist-voxtype-test");
-        assert_eq!(load_palette(), Palette::fallback());
+        let home = tempfile::tempdir().unwrap();
+        let dirs = theme_dirs_under(&home.path().join("does-not-exist"));
+        assert_eq!(palette_from_dirs(&dirs), Palette::fallback());
+    }
+
+    #[test]
+    fn a_theme_under_the_given_home_is_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = theme_dirs_under(home.path());
+        // Only the legacy location exists: the newer one is skipped.
+        fs::create_dir_all(&dirs[1]).unwrap();
+        fs::write(dirs[1].join("colors.toml"), "accent = \"#6E89C2\"\n").unwrap();
+        let p = palette_from_dirs(&dirs);
+        assert!((p.accent.r - 0x6E as f32 / 255.0).abs() < 1e-6);
+        assert_eq!(p.background, Palette::fallback().background);
     }
 
     #[test]
@@ -532,11 +561,14 @@ mod tests {
     }
 
     #[test]
-    fn watcher_uses_loaded_palette() {
-        // We can't predict the user's theme here, but at minimum the watcher
-        // should hold whatever load_palette() returned at construction.
-        let w = ThemeWatcher::new();
-        assert_eq!(w.palette(), load_palette());
+    fn watcher_returns_the_palette_it_holds() {
+        // ThemeWatcher::new() reads the live HOME; comparing that against a
+        // second read raced with tests elsewhere that set HOME. What matters
+        // is that the watcher hands back what it was given.
+        let mut palette = Palette::fallback();
+        palette.accent = Color::rgb(0.1, 0.2, 0.3);
+        let w = ThemeWatcher { palette };
+        assert_eq!(w.palette(), palette);
     }
 
     /// Test debounce window. Generous relative to inotify latency so a burst
