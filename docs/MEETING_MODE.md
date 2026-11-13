@@ -103,6 +103,8 @@ voxtype meeting notice --json   # {"notice", "announce_recording", "acknowledged
 
 Voxtype can say it for you, once, when a meeting starts: "This meeting is being recorded and transcribed with Voxtype." It is off by default.
 
+The built-in clip is an AI voice. Nix builds use a Kokoro-82M voice (`af_heart`); other builds use an ElevenLabs voice. See `assets/sounds/README.md` for both clips' credits and licences.
+
 ```toml
 [meeting]
 announce_recording = true

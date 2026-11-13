@@ -3886,6 +3886,8 @@ When a meeting starts, play "This meeting is being recorded and transcribed with
 
 This is a courtesy, not legal compliance: you remain responsible for the laws on recording calls. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
 
+Nix builds use a Kokoro voice for the built-in clip (the `announcement-kokoro` cargo feature); other builds use an ElevenLabs voice.
+
 `meeting start` reads it each time, so a change applies to the next meeting without a restart.
 
 **CLI:** `voxtype meeting start --announce` or `--no-announce`, for one meeting

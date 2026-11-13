@@ -31,7 +31,9 @@
 //!
 //! Voxtype never calls a speech service for this: the clip ships in the
 //! binary ([`BUILTIN_CLIP`]). `scripts/render-meeting-announcement.sh`
-//! renders it again from [`ANNOUNCEMENT_TEXT`].
+//! renders it again from [`ANNOUNCEMENT_TEXT`]. Default builds embed an
+//! ElevenLabs voice; the `announcement-kokoro` feature (the Nix flake) embeds
+//! a Kokoro-82M one instead.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,8 +50,23 @@ use crate::meeting::echo::{normalize_word, word_distance};
 pub const ANNOUNCEMENT_TEXT: &str = "This meeting is being recorded and transcribed with Voxtype.";
 
 /// The built-in clip: [`ANNOUNCEMENT_TEXT`] in the ElevenLabs voice
-/// "Jessica", 24 kHz mono 16-bit WAV.
+/// "Jessica", 24 kHz mono 16-bit WAV. Not MIT: see assets/sounds/README.md.
+#[cfg(not(feature = "announcement-kokoro"))]
 pub const BUILTIN_CLIP: &[u8] = include_bytes!("../../assets/sounds/meeting-announcement.wav");
+
+/// The built-in clip with the `announcement-kokoro` feature:
+/// [`ANNOUNCEMENT_TEXT`] in the Kokoro-82M voice `af_heart`, 24 kHz mono
+/// 16-bit WAV, MIT like the rest of voxtype. Only one clip is compiled in, so
+/// a build with this feature carries none of the Jessica clip's bytes.
+#[cfg(feature = "announcement-kokoro")]
+pub const BUILTIN_CLIP: &[u8] =
+    include_bytes!("../../assets/sounds/meeting-announcement-kokoro.wav");
+
+/// The file under `assets/sounds/` that [`BUILTIN_CLIP`] embeds.
+#[cfg(not(feature = "announcement-kokoro"))]
+pub const BUILTIN_CLIP_FILE: &str = "meeting-announcement.wav";
+#[cfg(feature = "announcement-kokoro")]
+pub const BUILTIN_CLIP_FILE: &str = "meeting-announcement-kokoro.wav";
 
 /// How long a meeting waits for a call app to open the mic before it plays
 /// the announcement on the speakers only.

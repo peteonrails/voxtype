@@ -295,6 +295,10 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers", "cohere-gguf"]
 # GGUF models run in-process through transcribe.cpp's Rust binding.
 cohere-gguf = []
+# Embed the Kokoro-82M recording announcement (MIT) instead of the default
+# ElevenLabs one, whose licence restricts AI training use. Only the selected
+# clip is compiled in. The Nix flake turns this on.
+announcement-kokoro = []
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)

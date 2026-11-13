@@ -29,6 +29,25 @@ fn the_builtin_clip_is_a_short_wav() {
 }
 
 #[test]
+fn the_builtin_clip_is_the_one_the_feature_selects() {
+    let sounds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/sounds");
+    let jessica = std::fs::read(sounds.join("meeting-announcement.wav")).unwrap();
+    let kokoro = std::fs::read(sounds.join("meeting-announcement-kokoro.wav")).unwrap();
+    assert_ne!(jessica, kokoro);
+    let (expected, other) = if cfg!(feature = "announcement-kokoro") {
+        (&kokoro, &jessica)
+    } else {
+        (&jessica, &kokoro)
+    };
+    assert_eq!(BUILTIN_CLIP, expected.as_slice());
+    assert_ne!(BUILTIN_CLIP, other.as_slice());
+    assert_eq!(
+        std::fs::read(sounds.join(BUILTIN_CLIP_FILE)).unwrap(),
+        BUILTIN_CLIP
+    );
+}
+
+#[test]
 fn off_unless_asked_for() {
     let config = MeetingConfig::default();
     assert_eq!(
