@@ -552,13 +552,30 @@ mod tests {
         }
     }
 
-    /// A port nothing listens on, for the browser to come back to.
+    /// A port nothing listens on, for one test's redirect listener, which `connect` binds
+    /// later itself.
+    ///
+    /// Not one the kernel picks (`bind(":0")`): that port is released
+    /// before `connect` binds it, and in the meantime any outgoing
+    /// connection, such as another test's HTTP client, could be given it
+    /// as its local port, so the redirect listener found it busy and the
+    /// test failed with `PortsBusy`. These come from below Linux's
+    /// ephemeral range (32768 and up by default), which outgoing
+    /// connections never use, each handed out once per run, so no other
+    /// test in the process can take one either.
     fn free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        // Spread runs out a little, for two test processes side by side;
+        // every port stays below 32768.
+        let base = 20000 + (std::process::id() % 64) as u16 * 100;
+        for _ in 0..6000 {
+            let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 6000;
+            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("no free test port below the ephemeral range");
     }
 
     /// Act as the browser: follow the consent page straight back to the
