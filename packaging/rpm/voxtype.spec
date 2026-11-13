@@ -3,9 +3,7 @@ Version:        0.4.2
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
-# The binary embeds the recording announcement clip, which has its own
-# licence: assets/sounds/README.md.
-License:        MIT AND LicenseRef-voxtype-announcement
+License:        MIT
 URL:            https://github.com/peteonrails/voxtype
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 
@@ -95,9 +93,8 @@ install -D -m 644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 install -D -m 644 docs/INSTALL.md %{buildroot}%{_docdir}/%{name}/INSTALL.md
 install -D -m 644 THIRD_PARTY.md %{buildroot}%{_docdir}/%{name}/THIRD_PARTY.md
 
-# Install license, and the announcement clip's (assets/sounds/README.md)
+# Install license
 install -D -m 644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
-install -D -m 644 assets/sounds/README.md %{buildroot}%{_licensedir}/%{name}/ANNOUNCEMENT-LICENSE.md
 
 # Install shell completions
 install -D -m 644 packaging/completions/voxtype.bash \
@@ -205,7 +202,6 @@ rm -f %{_bindir}/voxtype
 
 %files
 %{_licensedir}/%{name}/LICENSE
-%{_licensedir}/%{name}/ANNOUNCEMENT-LICENSE.md
 %{_docdir}/%{name}/README.md
 %{_docdir}/%{name}/INSTALL.md
 %{_docdir}/%{name}/THIRD_PARTY.md

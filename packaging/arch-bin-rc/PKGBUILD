@@ -21,9 +21,7 @@ pkgrel=1
 pkgdesc="Push-to-talk voice-to-text for Linux (pre-built binaries, release candidate channel)"
 arch=('x86_64')
 url="https://voxtype.io"
-# The binary embeds the recording announcement clip, which has its own
-# licence (assets/sounds/README.md, installed beside LICENSE).
-license=('MIT' 'LicenseRef-voxtype-announcement')
+license=('MIT')
 depends=(
     'alsa-lib'
     'curl'
@@ -121,7 +119,6 @@ source=(
     "voxtype-${pkgname}-${pkgver}.zsh::${_raw}/packaging/completions/voxtype.zsh"
     "voxtype-${pkgname}-${pkgver}.fish::${_raw}/packaging/completions/voxtype.fish"
     "LICENSE-${pkgname}-${pkgver}::${_raw}/LICENSE"
-    "ANNOUNCEMENT-LICENSE-${pkgname}-${pkgver}.md::${_raw}/assets/sounds/README.md"
     "README-${pkgname}-${pkgver}.md::${_raw}/README.md"
     # Desktop entry + terminal launcher for `voxtype configure`
     "voxtype-configure-${pkgname}-${pkgver}.desktop::${_raw}/packaging/voxtype-configure.desktop"
@@ -185,7 +182,6 @@ sha256sums=('1a87224d07601821792f96ba9751a8e46af9830ef74e802c35620acc02522d0e'
             'e5e63b3c7f48238cf719e4f2ef90c1f9c5c7e8cd25eaebc9f78bdd34b24b6605'
             'f720ddd24ee97c105b448323899c36bca7c63d00c2d42c4a3da70c3d157dccbb'
             '31123c45b4ff9cb5fd9e01083350fea6ccaf14969013fd48e4c95fdf89e6eb4b'
-            'SKIP'  # ANNOUNCEMENT-LICENSE (assets/sounds/README.md); fill at release
             '11bf83d8cb2bfab0e978707fa80475d97be79723a6dc71adc3c357829ba9f347'
             '32144a4a5210092b0aa909f6de7a43ebe8bbf82fa3dfb1f3519787512fdf8e4b'
             '044b1f7b52cc610ce57ba624111d882029b0ce4bc3e2c2c360f96d07f69e0e85'
@@ -292,8 +288,6 @@ package() {
 
     # Install license
     install -Dm644 "$srcdir/LICENSE-${pkgname}-${pkgver}" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    install -Dm644 "$srcdir/ANNOUNCEMENT-LICENSE-${pkgname}-${pkgver}.md" \
-        "$pkgdir/usr/share/licenses/$pkgname/ANNOUNCEMENT-LICENSE.md"
 
     # Install shell completions
     install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.bash" "$pkgdir/usr/share/bash-completion/completions/voxtype"

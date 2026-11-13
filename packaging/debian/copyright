@@ -7,15 +7,6 @@ Files: *
 Copyright: 2025 Peter Jackson
 License: MIT
 
-Files: assets/sounds/meeting-announcement.wav
-Copyright: 2026 Peter Jackson
-Comment: AI-generated speech, rendered with ElevenLabs text-to-speech (voice:
- Jessica). Embedded in the voxtype binary. See assets/sounds/README.md.
-License: LicenseRef-voxtype-announcement
- This file is not covered by the MIT licence. It may be redistributed,
- unmodified, as part of voxtype and of packages of voxtype. It may not be
- used to train or improve AI models.
-
 License: MIT
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal

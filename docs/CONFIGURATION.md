@@ -3886,6 +3886,8 @@ When a meeting starts, play "This meeting is being recorded and transcribed with
 
 This is a courtesy, not legal compliance: you remain responsible for the laws on recording calls. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
 
+The built-in clip is a Kokoro-82M voice in every build; `announcement_voice` picks another.
+
 `meeting start` reads it each time, so a change applies to the next meeting without a restart.
 
 **CLI:** `voxtype meeting start --announce` or `--no-announce`, for one meeting
@@ -3908,6 +3910,24 @@ An audio file (WAV, FLAC or Ogg) to announce with instead of the built-in clip, 
 
 ```bash
 voxtype config set meeting.announcement_file ~/.config/voxtype/announcement-de.wav
+```
+
+### announcement_voice
+
+**Type:** String (`"kokoro"`, `"jessica"`)
+**Default:** `"kokoro"`
+**Required:** No
+
+The built-in announcement's voice. `kokoro` is the Kokoro-82M voice `af_heart`, in the binary and MIT. `jessica` is an ElevenLabs voice that is not part of voxtype: it is downloaded once from `models.voxtype.io`, checked against its published sha256, and kept in `~/.local/share/voxtype/sounds/`. Its terms are not MIT: it may be redistributed only unmodified, as part of voxtype, and may not be used to train or improve AI models. A meeting downloads it itself when it isn't there yet, waiting up to 15 seconds, and plays `kokoro` if that fails; `voxtype meeting announcement --voice jessica` downloads it beforehand. `announcement_file` overrides both. Unknown values play `kokoro`.
+
+`meeting start` reads it each time, so a change applies to the next meeting without a restart.
+
+**CLI:** `voxtype meeting start --announcement-voice <kokoro|jessica>`, for one meeting
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE`
+
+```bash
+voxtype config set meeting.announcement_voice jessica
+voxtype meeting announcement --voice jessica
 ```
 
 ---
@@ -4682,6 +4702,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_LARD_DISFLUENCY` | bool | `text.lard_disfluency` |
 | `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | bool | `meeting.announce_recording` |
 | `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | path | `meeting.announcement_file` |
+| `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` | string | `meeting.announcement_voice` |
 | `VOXTYPE_LARD_MODEL_PATH` | path | `text.lard_model_path` |
 | `VOXTYPE_PUNCTUATION_CASING` | bool | `text.punctuation_casing` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |

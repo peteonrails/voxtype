@@ -91,6 +91,13 @@ pub enum MeetingAction {
         /// `[meeting] announcement_file` (VOXTYPE_MEETING_ANNOUNCEMENT_FILE).
         #[arg(long, value_name = "FILE")]
         announcement_file: Option<std::path::PathBuf>,
+
+        /// Voice of the built-in announcement for this meeting: kokoro (built
+        /// in) or jessica (an ElevenLabs voice, downloaded once; see `voxtype
+        /// meeting announcement`). Falls back to `[meeting]
+        /// announcement_voice` (VOXTYPE_MEETING_ANNOUNCEMENT_VOICE).
+        #[arg(long, value_name = "VOICE", value_parser = PossibleValuesParser::new(super::ANNOUNCEMENT_VOICES))]
+        announcement_voice: Option<String>,
     },
     /// Stop the current meeting
     Stop,
@@ -482,6 +489,31 @@ pub enum MeetingAction {
         restore: bool,
 
         /// Print the segment as JSON (with "deleted": true when hidden)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the recording announcement's voice, or download the Jessica voice
+    ///
+    /// The announcement (`[meeting] announce_recording`) speaks in the
+    /// built-in Kokoro voice unless `announcement_voice = "jessica"`.
+    /// Jessica is an ElevenLabs voice that is not part of voxtype: it is
+    /// downloaded once, checked against its published sha256, and kept in
+    /// ~/.local/share/voxtype/sounds. Its terms are not MIT: it may be
+    /// redistributed only unmodified with voxtype, and may not be used to
+    /// train or improve AI models. A meeting downloads it itself when it
+    /// isn't there yet, and plays the built-in voice if that fails;
+    /// `--voice jessica` downloads it now instead.
+    #[command(after_help = "Examples:\n  \
+        voxtype meeting announcement\n  \
+        voxtype meeting announcement --voice jessica\n  \
+        voxtype config set meeting.announcement_voice jessica")]
+    Announcement {
+        /// Prepare this voice now: jessica downloads it (once), kokoro is
+        /// built in and needs nothing
+        #[arg(long, value_name = "VOICE", value_parser = PossibleValuesParser::new(super::ANNOUNCEMENT_VOICES))]
+        voice: Option<String>,
+
+        /// Output as JSON instead of human-readable text
         #[arg(long)]
         json: bool,
     },

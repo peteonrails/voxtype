@@ -155,7 +155,9 @@ running:
 `state` is `waiting` (for a call app to open the mic), `call` (played into
 the call app's mic stream and on the speakers), `local` (on the speakers
 only: the call did not hear it, and `detail` says why) or `failed` (not
-played). `text` is the line `meeting status` prints.
+played). `note`, when present, says why the voice that played isn't the
+one asked for (the Jessica voice could not be downloaded, so the built-in
+voice played). `text` is the line `meeting status` prints, note included.
 
 `status` is one of `idle`, `starting`, `recording`, `pausing`, `paused`,
 `resuming`, `stopping` or `finalizing`. `starting`, `pausing`, `resuming` and

@@ -29,6 +29,18 @@ fn the_builtin_clip_is_a_short_wav() {
 }
 
 #[test]
+fn the_builtin_clip_is_the_kokoro_file() {
+    let sounds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/sounds");
+    assert_eq!(BUILTIN_CLIP_FILE, "meeting-announcement-kokoro.wav");
+    assert_eq!(
+        std::fs::read(sounds.join(BUILTIN_CLIP_FILE)).unwrap(),
+        BUILTIN_CLIP
+    );
+    // The ElevenLabs clip is a download, never part of the repository.
+    assert!(!sounds.join("meeting-announcement.wav").exists());
+}
+
+#[test]
 fn off_unless_asked_for() {
     let config = MeetingConfig::default();
     assert_eq!(
@@ -88,6 +100,227 @@ fn a_custom_file_replaces_the_builtin_clip() {
     );
 }
 
+/// The sha256 of `bytes`, as `sha256sum` prints it.
+fn sha(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[test]
+fn the_voice_defaults_to_the_built_in_kokoro_clip() {
+    let on = MeetingConfig {
+        announce_recording: true,
+        ..Default::default()
+    };
+    assert_eq!(on.announcement_voice, "kokoro");
+    assert_eq!(
+        Clip::for_meeting(&on, &MeetingStartOptions::default()),
+        Some(Clip::Builtin)
+    );
+    // An unknown voice is the built-in one, not a failed meeting.
+    let odd = MeetingConfig {
+        announcement_voice: "bob".into(),
+        ..on.clone()
+    };
+    assert_eq!(
+        Clip::for_meeting(&odd, &MeetingStartOptions::default()),
+        Some(Clip::Builtin)
+    );
+}
+
+#[test]
+fn voice_order_is_file_then_jessica_then_kokoro() {
+    let jessica = MeetingConfig {
+        announce_recording: true,
+        announcement_voice: "jessica".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        Clip::for_meeting(&jessica, &MeetingStartOptions::default()),
+        Some(Clip::Jessica(jessica::cache_path()))
+    );
+    // The user's own file beats either voice.
+    let with_file = MeetingConfig {
+        announcement_file: Some("/srv/mine.wav".into()),
+        ..jessica.clone()
+    };
+    assert_eq!(
+        Clip::for_meeting(&with_file, &MeetingStartOptions::default()),
+        Some(Clip::File("/srv/mine.wav".into()))
+    );
+    // The start's choice beats the config's.
+    let kokoro_now = MeetingStartOptions {
+        announcement_voice: Some("kokoro".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        Clip::for_meeting(&jessica, &kokoro_now),
+        Some(Clip::Builtin)
+    );
+    // Both voxtype voices say the announcement, so both are scrubbed by text.
+    assert_eq!(Clip::Jessica("/x".into()).phrase(), Some(ANNOUNCEMENT_TEXT));
+}
+
+#[test]
+fn a_cached_jessica_clip_plays_without_a_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(jessica::CACHE_FILE);
+    std::fs::write(&path, b"jessica says hello").unwrap();
+    let (clip, note) = Clip::Jessica(path.clone())
+        .ready_checked(&sha(b"jessica says hello"), |_| {
+            panic!("a verified copy is never downloaded again")
+        });
+    assert_eq!(clip, Clip::Jessica(path));
+    assert_eq!(note, None);
+}
+
+#[test]
+fn a_missing_jessica_clip_is_downloaded_then_played() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sounds").join(jessica::CACHE_FILE);
+    let (clip, note) = Clip::Jessica(path.clone()).ready_checked(&sha(b"fresh"), |dest| {
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(dest, b"fresh").map_err(|e| e.to_string())
+    });
+    assert_eq!(clip, Clip::Jessica(path));
+    assert_eq!(note, None);
+}
+
+#[test]
+fn a_tampered_cache_is_fetched_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(jessica::CACHE_FILE);
+    std::fs::write(&path, b"tampered").unwrap();
+    let mut fetched = false;
+    let (clip, _) = Clip::Jessica(path.clone()).ready_checked(&sha(b"good"), |dest| {
+        fetched = true;
+        std::fs::write(dest, b"good").map_err(|e| e.to_string())
+    });
+    assert!(fetched);
+    assert_eq!(clip, Clip::Jessica(path.clone()));
+    assert_eq!(std::fs::read(&path).unwrap(), b"good");
+}
+
+#[test]
+fn a_failed_download_falls_back_to_kokoro_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(jessica::CACHE_FILE);
+    let (clip, note) =
+        Clip::Jessica(path).ready_checked(&sha(b"x"), |_| Err("timed out after 15 s".into()));
+    assert_eq!(clip, Clip::Builtin);
+    let note = note.unwrap();
+    assert!(
+        note.contains("could not be downloaded (timed out after 15 s)"),
+        "{note}"
+    );
+    assert!(note.contains("built-in voice played"), "{note}");
+    // A download that "succeeds" with the wrong bytes is no better.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(jessica::CACHE_FILE);
+    let (clip, note) = Clip::Jessica(path).ready_checked(&sha(b"expected"), |dest| {
+        std::fs::write(dest, b"something else").map_err(|e| e.to_string())
+    });
+    assert_eq!(clip, Clip::Builtin);
+    assert!(note.unwrap().contains("does not match"));
+}
+
+#[test]
+fn fetch_keeps_only_a_clip_with_the_pinned_sha() {
+    let dir = tempfile::tempdir().unwrap();
+    let served = dir.path().join("served.wav");
+    std::fs::write(&served, b"the real clip").unwrap();
+    let url = format!("file://{}", served.display());
+    let dest = dir.path().join("sounds").join(jessica::CACHE_FILE);
+
+    // The wrong sha: rejected, nothing left behind.
+    let err = jessica::fetch_sha(&url, &dest, Duration::from_secs(10), &sha(b"other")).unwrap_err();
+    assert!(err.starts_with("rejected the download"), "{err}");
+    assert!(!dest.exists());
+    assert!(!dest.with_extension("wav.part").exists());
+
+    // The right one: kept, with the terms beside it.
+    jessica::fetch_sha(&url, &dest, Duration::from_secs(10), &sha(b"the real clip")).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"the real clip");
+    let terms = std::fs::read_to_string(dest.with_file_name(jessica::TERMS_FILE)).unwrap();
+    assert!(
+        terms.contains("not covered by voxtype's MIT licence"),
+        "{terms}"
+    );
+    assert!(
+        terms.contains("may not be used to train or improve AI models"),
+        "{terms}"
+    );
+}
+
+#[test]
+fn offline_the_meeting_still_announces_in_kokoro() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join(jessica::CACHE_FILE);
+    // Nothing listens on port 9 here; the fetch fails fast.
+    let (clip, note) = Clip::Jessica(dest.clone()).ready(|d| {
+        jessica::fetch(
+            "http://127.0.0.1:9/meeting-announcement.wav",
+            d,
+            Duration::from_secs(5),
+        )
+    });
+    assert_eq!(clip, Clip::Builtin);
+    assert!(note
+        .unwrap()
+        .contains("Jessica voice could not be downloaded"));
+    assert!(!dest.exists());
+}
+
+#[test]
+fn the_pinned_jessica_clip_is_the_published_one() {
+    assert_eq!(
+        jessica::SHA256,
+        "40267063245522143aeca0793f5a435e583beade0194efb041bfb2513cea7251"
+    );
+    assert_eq!(jessica::SIZE, 153_852);
+    assert_eq!(
+        jessica::url(),
+        "https://models.voxtype.io/sounds/meeting-announcement-jessica-v1.wav"
+    );
+    assert!(jessica::cache_path().ends_with("voxtype/sounds/meeting-announcement-jessica.wav"));
+}
+
+#[test]
+fn a_voice_fallback_is_in_the_status_line() {
+    let note = "the Jessica voice could not be downloaded (timed out after 15 s), so the built-in voice played";
+    let status = Status::call("Zoom").with_note(Some(note.to_string()));
+    assert_eq!(
+        status.describe(),
+        "played into Zoom's microphone and on your speakers. Note: the Jessica voice could not be downloaded (timed out after 15 s), so the built-in voice played"
+    );
+    let json = status.to_json();
+    assert_eq!(json["note"], note);
+    // No fallback, no note.
+    assert!(Status::call("Zoom").to_json().get("note").is_none());
+}
+
+#[test]
+fn start_options_take_the_voice_flag_over_config() {
+    let config = MeetingConfig {
+        announcement_voice: "jessica".into(),
+        ..Default::default()
+    };
+    let resolved = |voice| {
+        resolve_start_options(
+            &config,
+            MeetingStartOptions::default(),
+            true,
+            false,
+            None,
+            voice,
+        )
+        .unwrap()
+        .announcement_voice
+    };
+    assert_eq!(resolved(None).as_deref(), Some("jessica"));
+    assert_eq!(resolved(Some("kokoro")).as_deref(), Some("kokoro"));
+}
+
 #[test]
 fn start_options_resolve_flags_over_config() {
     let off = MeetingConfig::default();
@@ -96,7 +329,7 @@ fn start_options_resolve_flags_over_config() {
         ..Default::default()
     };
     let resolve = |c: &MeetingConfig, a, n| {
-        resolve_start_options(c, MeetingStartOptions::default(), a, n, None)
+        resolve_start_options(c, MeetingStartOptions::default(), a, n, None, None)
             .unwrap()
             .announce
     };
@@ -116,6 +349,7 @@ fn start_options_refuse_a_missing_file_only_when_announcing() {
         true,
         false,
         Some(&missing),
+        None,
     )
     .unwrap_err();
     assert!(err.contains("nope.wav"), "{err}");
@@ -126,6 +360,7 @@ fn start_options_refuse_a_missing_file_only_when_announcing() {
         false,
         true,
         Some(&missing),
+        None,
     )
     .is_ok());
 
@@ -137,6 +372,7 @@ fn start_options_refuse_a_missing_file_only_when_announcing() {
         true,
         false,
         Some(&present),
+        None,
     )
     .unwrap();
     assert_eq!(

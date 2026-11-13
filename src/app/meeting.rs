@@ -46,6 +46,7 @@ pub(crate) async fn run_meeting_command(
             announce,
             no_announce,
             announcement_file,
+            announcement_voice,
         } => {
             let title_from_window = title.is_none() && window_title.is_some();
             let title = title.or(window_title);
@@ -82,6 +83,7 @@ pub(crate) async fn run_meeting_command(
                 announce,
                 no_announce,
                 announcement_file.as_deref(),
+                announcement_voice.as_deref(),
             ) {
                 Ok(options) => options,
                 Err(e) => {
@@ -190,6 +192,78 @@ pub(crate) async fn run_meeting_command(
                     meeting::notice::text(options.announce == Some(true))
                 );
                 eprintln!("{}", meeting::notice::ACK_HINT);
+            }
+        }
+
+        MeetingAction::Announcement { voice, json } => {
+            use meeting::announce::jessica;
+            let path = jessica::cache_path();
+            let mut downloaded_now = false;
+            if voice.as_deref() == Some("jessica") && jessica::verify(&path).is_err() {
+                if !json {
+                    println!("{}", jessica::TERMS);
+                    println!();
+                    println!("Downloading the Jessica voice from {}...", jessica::url());
+                }
+                if let Err(e) = jessica::fetch(&jessica::url(), &path, jessica::COMMAND_TIMEOUT) {
+                    eprintln!("Error: could not download the Jessica voice: {}", e);
+                    eprintln!("Meetings keep announcing in the built-in voice.");
+                    std::process::exit(1);
+                }
+                downloaded_now = true;
+            }
+            let cached = jessica::verify(&path).is_ok();
+            let configured = config.meeting.announcement_voice.clone();
+            let file = config.meeting.announcement_file.clone();
+            if json {
+                let payload = serde_json::json!({
+                    "announce_recording": config.meeting.announce_recording,
+                    "voice": configured,
+                    "announcement_file": file,
+                    "jessica": {
+                        "downloaded": cached,
+                        "path": path,
+                        "url": jessica::url(),
+                        "sha256": jessica::SHA256,
+                        "terms": jessica::TERMS,
+                    },
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                if downloaded_now {
+                    println!("Saved to {}", path.display());
+                    println!();
+                }
+                println!(
+                    "Announcement: {}",
+                    if config.meeting.announce_recording {
+                        "on"
+                    } else {
+                        "off ([meeting] announce_recording)"
+                    }
+                );
+                match file {
+                    Some(f) if !f.trim().is_empty() => {
+                        println!("Voice: your own file, {} (announcement_file)", f)
+                    }
+                    _ => println!("Voice: {}", configured),
+                }
+                println!(
+                    "Jessica voice: {}",
+                    if cached {
+                        format!("downloaded, {}", path.display())
+                    } else {
+                        "not downloaded (voxtype meeting announcement --voice jessica)".to_string()
+                    }
+                );
+                if voice.as_deref() == Some("jessica") && configured != "jessica" {
+                    println!();
+                    println!("To announce with it: voxtype config set meeting.announcement_voice jessica");
+                }
+                if voice.as_deref() == Some("kokoro") && configured != "kokoro" {
+                    println!();
+                    println!("Kokoro is built in. To announce with it: voxtype config set meeting.announcement_voice kokoro");
+                }
             }
         }
 

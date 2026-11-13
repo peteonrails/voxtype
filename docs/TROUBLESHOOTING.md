@@ -242,6 +242,7 @@ what is wrong instead of showing an empty pane:
 - [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
   - [The recording announcement only played on my speakers](#the-recording-announcement-only-played-on-my-speakers)
+  - [The announcement used the built-in voice instead of Jessica](#the-announcement-used-the-built-in-voice-instead-of-jessica)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [No Meeting Window Appears](#no-meeting-window-appears)
 - [Action Items: Todoist and Reminders](#action-items-todoist-and-reminders)
@@ -1696,6 +1697,15 @@ With `announce_recording` on, `voxtype meeting status` says where the announceme
 - **"could not link into ...'s mic stream"**: PipeWire refused the link. `journalctl --user -u voxtype | grep -i announcement` shows `pw-link`'s error.
 
 When it says "played into ...'s microphone", PipeWire carried it into the call app's mic stream. The others still will not hear it if you are muted in the call app, or if the app's noise suppression removes it; unmute before the meeting starts, or start it with `--no-announce` and tell them yourself.
+
+### The announcement used the built-in voice instead of Jessica
+
+With `announcement_voice = "jessica"`, a status line ending "Note: the Jessica voice could not be downloaded (...), so the built-in voice played" means the one-time download failed and the meeting announced in the built-in Kokoro voice instead. The reason is in the brackets:
+
+- **"timed out after 15 s"** or a curl error: voxtype could not reach `models.voxtype.io`. Download it beforehand, when you are online, with `voxtype meeting announcement --voice jessica` (it waits up to two minutes).
+- **"rejected the download"** or **"does not match the published clip"**: what arrived was not the published file, and voxtype never plays a clip that fails its sha256 check. Run `voxtype meeting announcement --voice jessica` again. A proxy that rewrites downloads can cause this.
+
+`voxtype meeting announcement` shows the voice in use and whether Jessica has been downloaded.
 
 ### Meeting audio is saved as WAV instead of Opus
 

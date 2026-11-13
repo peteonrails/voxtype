@@ -578,6 +578,18 @@ mod tests {
         panic!("no free test port below the ephemeral range");
     }
 
+    /// Wait for a port a test's last `connect` listened on to be free again.
+    /// The listener is closed when `connect` returns, but a test elsewhere
+    /// in this process that forks a child at that moment holds a copy of it
+    /// until the child execs, and the port reads as busy for that long.
+    fn wait_until_free(port: u16) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while TcpListener::bind(("127.0.0.1", port)).is_err() {
+            assert!(Instant::now() < deadline, "port {port} stayed busy");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Act as the browser: follow the consent page straight back to the
     /// redirect with `answer` (a query string, `{state}` filled in).
     fn browser(answer: &'static str) -> impl Fn(&str) {
@@ -673,7 +685,8 @@ mod tests {
             challenge
         );
 
-        // Connecting again reuses the registration.
+        // Connecting again reuses the registration, so on the same port.
+        wait_until_free(ports[0]);
         let open = browser("code=again&state={state}");
         connect(
             &Connect {
@@ -761,11 +774,14 @@ mod tests {
         assert!(saved.access_token.is_empty(), "registered, not connected");
         assert_eq!(saved.client_id.as_deref(), Some("tdd_x"));
 
+        // A port of its own, not the one the denial just used: while that
+        // listener closes, any test forking a process at that moment holds
+        // a copy of it until the child execs, and the port reads as busy.
         let err = connect(
             &Connect {
                 endpoints: endpoints.clone(),
                 store: &store,
-                ports: &ports,
+                ports: &[free_port()],
                 timeout: Duration::from_millis(200),
                 open: &|_| {},
             },

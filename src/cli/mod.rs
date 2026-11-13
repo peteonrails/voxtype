@@ -63,6 +63,11 @@ pub const ENGINE_NAMES_CSV: &str =
 /// this list against those arms.
 pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml", "hybrid"];
 
+/// Voices of the built-in recording announcement, for `meeting start
+/// --announcement-voice`. `crate::meeting::announce::VOICES` is this list;
+/// it lives here because `build.rs` includes this module standalone.
+pub(crate) const ANNOUNCEMENT_VOICES: &[&str] = &["kokoro", "jessica"];
+
 /// Formats `voxtype meeting export --format` accepts, each with its short
 /// alias. Kept here rather than derived from
 /// `crate::meeting::export::ExportFormat` because `build.rs` includes this

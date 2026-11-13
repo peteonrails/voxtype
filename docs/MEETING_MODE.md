@@ -150,7 +150,29 @@ announcement_file = "~/.config/voxtype/announcement-de.wav"
 
 `--announcement-file` and `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` do the same. A file that does not exist refuses the start, with the fix. Voxtype does not know what your clip says, so it keeps out of the transcript any line that falls mostly within the time the clip played.
 
-The built-in clip is in the voxtype binary and plays offline; voxtype never calls a speech service for it. It is AI-generated speech: the announcement voice was rendered with ElevenLabs text-to-speech (voice: Jessica). See `assets/sounds/README.md`.
+#### The voice
+
+The built-in clip is AI-generated speech in the Kokoro-82M voice `af_heart`. It is in the voxtype binary, plays offline, and is MIT like the rest of voxtype. Voxtype never calls a speech service for it.
+
+You can switch to an ElevenLabs voice, Jessica, instead:
+
+```toml
+[meeting]
+announcement_voice = "jessica"   # "kokoro" (default) or "jessica"
+```
+
+Jessica is not part of voxtype, so it is downloaded once, from voxtype's models server, the first time a meeting wants it. Voxtype checks it against its published sha256 and keeps it in `~/.local/share/voxtype/sounds/`. Its terms are not MIT: it may be redistributed only unmodified, as part of voxtype, and it may not be used to train or improve AI models. Voxtype shows them when it downloads, and writes them beside the clip.
+
+To download it before your first meeting, and see what's in use:
+
+```bash
+voxtype meeting announcement --voice jessica
+voxtype meeting announcement
+```
+
+A meeting that needs Jessica and doesn't have it yet waits up to 15 seconds for the download. If that fails (offline, a firewall, a damaged file), the built-in voice plays instead and the meeting goes on. `meeting status` says so: `Announcement: played into Zoom's microphone and on your speakers. Note: the Jessica voice could not be downloaded (...), so the built-in voice played`.
+
+`--announcement-voice` on `meeting start` and `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` choose the voice too. Your own `announcement_file` beats both voices.
 
 ---
 
@@ -227,6 +249,7 @@ voxtype meeting start --title "Planning" --url https://meet.example.com/abc-defg
 | `--url` | | Link to the call. Stored with the meeting; `meeting show` and exports with `--metadata` print it. |
 | `--announce` / `--no-announce` | `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | Play the [recording announcement](#announcing-the-recording) for this meeting, or not. |
 | `--announcement-file` | `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | Your own announcement clip for this meeting. |
+| `--announcement-voice` | `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` | The built-in announcement's voice for this meeting: `kokoro` or `jessica`. |
 
 A choice the meeting could not use is refused before anything starts, with the fix: an engine this binary was built without (with how to get a build that has it), a model that is not downloaded (with the download command), a model that belongs to a different engine than `--engine`, or a language the checkpoint does not take.
 
@@ -1178,6 +1201,10 @@ announce_recording = false
 # Your own announcement clip (WAV, FLAC or Ogg) instead of the built-in one
 # (default: unset)
 # announcement_file = "~/.config/voxtype/announcement-de.wav"
+
+# The built-in announcement's voice: "kokoro" (built in, MIT) or "jessica"
+# (ElevenLabs, downloaded once, not MIT) (default: "kokoro")
+announcement_voice = "kokoro"
 ```
 
 ### Audio Settings

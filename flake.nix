@@ -320,27 +320,7 @@
                 SenseVoice, Moonshine, Paraformer, Dolphin, and Omnilingual engines.
               '';
               homepage = "https://voxtype.io";
-              # The binary embeds the recording announcement clip, which is
-              # not MIT: it may be redistributed unmodified with voxtype and
-              # may not be used to train AI models (assets/sounds/README.md).
-              # `free = true` keeps the package building without allowUnfree:
-              # nixpkgs refuses any license with `free = false`, which would
-              # break `nix build .#default` for everyone. The restriction is on
-              # using the clip as training data, not on running or passing on
-              # voxtype. Strictly, a field-of-use restriction is not free by
-              # the FSF/DFSG definitions, which `licenses.unfreeRedistributable`
-              # would say, at the cost of requiring allowUnfree.
-              license = [
-                licenses.mit
-                {
-                  shortName = "voxtype-announcement";
-                  fullName = "Voxtype recording announcement clip licence";
-                  spdxId = "LicenseRef-voxtype-announcement";
-                  url = "https://github.com/peteonrails/voxtype/blob/main/assets/sounds/README.md#licence";
-                  free = true;
-                  redistributable = true;
-                }
-              ];
+              license = licenses.mit;
               maintainers = []; # Add NixOS maintainers when upstreaming
               platforms = [ "x86_64-linux" "aarch64-linux" ];
               mainProgram = "voxtype";
