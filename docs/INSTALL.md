@@ -219,14 +219,14 @@ A flake ships every variant:
 nix profile install github:peteonrails/voxtype/v1.0.1#vulkan
 
 # Available outputs: default, vulkan, rocm, onnx, onnx-cuda, onnx-migraphx,
-# osd-gtk4, osd-native
+# osd-gtk4, osd-native, meetings-gtk4
 nix build github:peteonrails/voxtype/v1.0.1#osd-gtk4
 
 # Or pin in your flake inputs
 inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";
 ```
 
-Each voxtype package includes the GGUF worker, the Quickshell QML tree (the OSD and the Voxtype Meetings view), the Voxtype Configuration and Voxtype Meetings desktop entries, and the `voxtype` icon. The wrapper puts the typing and clipboard tools on `PATH`, and appends ffmpeg, the PulseAudio client tools (`parec`, `pactl`, `paplay`), xdg-utils and bubblewrap for the meeting features, so the system's own copies take precedence when present.
+Each voxtype package includes the GGUF worker, the Quickshell QML tree (the OSD and the Voxtype Meetings view), the Voxtype Configuration and Voxtype Meetings desktop entries, and the `voxtype` icon. The GTK4 meetings window, which `voxtype meeting view` opens on desktops without Quickshell, is its own output, `meetings-gtk4`; install it beside the voxtype package so the daemon finds it on `PATH`. The wrapper puts the typing and clipboard tools on `PATH`, and appends ffmpeg, the PulseAudio client tools (`parec`, `pactl`, `paplay`), xdg-utils and bubblewrap for the meeting features, so the system's own copies take precedence when present.
 
 Two things the meeting features use are not included:
 
@@ -315,6 +315,7 @@ sudo install -Dm755 target/release/voxtype /usr/local/bin/voxtype
 | `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere` | Additional ONNX engines |
 | `osd-gtk4` | GTK4 on-screen visualizer |
 | `osd-native` | wgpu + egui on-screen visualizer |
+| `meetings-gtk4` | GTK4 meetings window (`voxtype-meetings-gtk4`) |
 
 Example: full ONNX engine set with MIGraphX:
 

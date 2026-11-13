@@ -519,6 +519,38 @@
           };
         };
 
+        # The meetings window (`voxtype meeting view` on desktops without
+        # Quickshell). Plain GTK4 in a normal window, so no layer-shell.
+        # The daemon finds it on PATH, so install it beside any voxtype
+        # package (home.packages, environment.systemPackages).
+        meetingsGtk4 = pkgs.rustPlatform.buildRustPackage {
+          pname = "voxtype-meetings-gtk4";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+
+          src = ./.;
+          cargoLock = commonCargoLock;
+
+          nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.wrapGAppsHook4 ];
+          buildInputs = commonBuildInputs ++ [ pkgs.gtk4 ];
+
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+          buildFeatures = [ "meetings-gtk4" ];
+          cargoBuildFlags = [ "--bin" "voxtype-meetings-gtk4" ];
+
+          # Skip running the full lib test suite, this package only ships the window.
+          doCheck = false;
+
+          meta = with pkgs.lib; {
+            description = "GTK4 meetings window for voxtype";
+            homepage = "https://voxtype.io";
+            license = licenses.mit;
+            maintainers = [];
+            platforms = [ "x86_64-linux" "aarch64-linux" ];
+            mainProgram = "voxtype-meetings-gtk4";
+          };
+        };
+
       in {
         packages = {
           # Wrapped packages (ready to use, runtime deps in PATH)
@@ -544,6 +576,9 @@
           # OSD frontends (installable alongside any voxtype package)
           osd-native = osdNative;
           osd-gtk4 = osdGtk4;
+
+          # The GTK4 meetings window (installable alongside any voxtype package)
+          meetings-gtk4 = meetingsGtk4;
 
           # GGUF workers. Every voxtype package already links the matching
           # one into its bin/; these are for custom wrapping.

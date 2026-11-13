@@ -32,6 +32,10 @@ jobs:
             package: default
           - label: onnx
             package: onnx
+          # The GTK4 meetings window: no maintainer runs NixOS, so CI is
+          # the only place this derivation is ever built.
+          - label: meetings-gtk4
+            package: meetings-gtk4
     steps:
       - uses: actions/checkout@v6
 
