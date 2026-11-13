@@ -170,6 +170,8 @@ pub const THEME_DEBOUNCE: Duration = Duration::from_millis(300);
 
 enum WatchMsg {
     Fs,
+    /// The watcher of this generation lost its event loop.
+    Died(u64),
     Stop,
 }
 
@@ -213,6 +215,15 @@ where
 /// Bursts of events are debounced: `on_change` fires once per quiet period
 /// of `debounce`. Returns `None` when none of `current_dirs` exist or no
 /// watch could be established; errors never panic.
+///
+/// notify's inotify event loop panics on any `epoll_wait` error but EINTR,
+/// and the kernel has been seen to return an undocumented EAGAIN under load
+/// (the Nix build sandbox). Every later call on that watcher then panics,
+/// and dropping it panics again, which used to abort the whole process. So
+/// the watcher is treated as disposable: its death is noticed (the event
+/// handler it owns reports when it is dropped), every call into it is
+/// guarded, and a fresh watcher replaces it. `on_change` fires after the
+/// replacement, since events may have been missed while it was dead.
 pub fn watch_omarchy_dirs<F>(
     current_dirs: Vec<PathBuf>,
     debounce: Duration,
@@ -227,11 +238,99 @@ where
     }
 
     let (tx, rx) = mpsc::channel::<WatchMsg>();
-    let event_tx = tx.clone();
+    let mut generation = 0u64;
+    let mut armed = Some(arm(&tx, generation, &parents)?);
+    let thread_tx = tx.clone();
+
+    let thread = thread::spawn(move || loop {
+        let mut died = match rx.recv() {
+            Ok(WatchMsg::Stop) | Err(_) => {
+                discard(armed.take());
+                break;
+            }
+            Ok(WatchMsg::Fs) => false,
+            Ok(WatchMsg::Died(g)) if g == generation => true,
+            Ok(WatchMsg::Died(_)) => continue,
+        };
+        loop {
+            match rx.recv_timeout(debounce) {
+                Ok(WatchMsg::Fs) => continue,
+                Ok(WatchMsg::Died(g)) => died |= g == generation,
+                Ok(WatchMsg::Stop) => {
+                    discard(armed.take());
+                    return;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    discard(armed.take());
+                    return;
+                }
+            }
+        }
+        if !died {
+            if let Some(a) = armed.as_mut() {
+                match watch_theme_targets(&mut a.watcher, &parents, &a.resolved) {
+                    Some(resolved) => a.resolved = resolved,
+                    None => died = true,
+                }
+            }
+        }
+        if died || armed.is_none() {
+            discard(armed.take());
+            generation += 1;
+            armed = arm(&thread_tx, generation, &parents);
+            if armed.is_some() {
+                tracing::warn!("Omarchy theme watcher lost its event loop; re-armed");
+            } else {
+                // The failed attempt's own watcher reports Died for this
+                // generation when it is dropped; move past it so that does
+                // not start another attempt every debounce period.
+                generation += 1;
+                tracing::warn!(
+                    "Omarchy theme watcher lost its event loop and could not be re-armed"
+                );
+            }
+        }
+        on_change();
+    });
+
+    Some(ThemeWatchHandle {
+        tx,
+        thread: Some(thread),
+    })
+}
+
+/// A watcher and the theme directories it is pinned to.
+struct Armed {
+    watcher: RecommendedWatcher,
+    resolved: Vec<PathBuf>,
+}
+
+/// Owned by the watcher's event handler, which notify drops when its event
+/// loop thread ends, including when that thread panics.
+struct DeathNotice {
+    tx: mpsc::Sender<WatchMsg>,
+    generation: u64,
+}
+
+impl Drop for DeathNotice {
+    fn drop(&mut self) {
+        let _ = self.tx.send(WatchMsg::Died(self.generation));
+    }
+}
+
+/// Create a watcher on `parents` and pin it to their resolved theme dirs.
+/// `None` when it cannot be created, watches none of `parents`, or dies on
+/// the way.
+fn arm(tx: &mpsc::Sender<WatchMsg>, generation: u64, parents: &[PathBuf]) -> Option<Armed> {
+    let notice = DeathNotice {
+        tx: tx.clone(),
+        generation,
+    };
     let mut watcher =
         match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             if res.is_ok() {
-                let _ = event_tx.send(WatchMsg::Fs);
+                let _ = notice.tx.send(WatchMsg::Fs);
             }
         }) {
             Ok(w) => w,
@@ -242,41 +341,41 @@ where
         };
 
     let mut watching = 0usize;
-    for parent in &parents {
-        match watcher.watch(parent, RecursiveMode::NonRecursive) {
-            Ok(()) => watching += 1,
-            Err(e) => {
+    for parent in parents {
+        match guarded(|| watcher.watch(parent, RecursiveMode::NonRecursive)) {
+            Some(Ok(())) => watching += 1,
+            Some(Err(e)) => {
                 tracing::warn!(dir = %parent.display(), error = %e, "failed to watch Omarchy dir")
+            }
+            None => {
+                discard(Some(watcher));
+                return None;
             }
         }
     }
     if watching == 0 {
+        discard(Some(watcher));
         return None;
     }
-    let mut resolved = watch_theme_targets(&mut watcher, &parents, &[]);
-
-    let thread = thread::spawn(move || loop {
-        match rx.recv() {
-            Ok(WatchMsg::Stop) | Err(_) => break,
-            Ok(WatchMsg::Fs) => {
-                loop {
-                    match rx.recv_timeout(debounce) {
-                        Ok(WatchMsg::Fs) => continue,
-                        Ok(WatchMsg::Stop) => return,
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    }
-                }
-                resolved = watch_theme_targets(&mut watcher, &parents, &resolved);
-                on_change();
-            }
+    match watch_theme_targets(&mut watcher, parents, &[]) {
+        Some(resolved) => Some(Armed { watcher, resolved }),
+        None => {
+            discard(Some(watcher));
+            None
         }
-    });
+    }
+}
 
-    Some(ThemeWatchHandle {
-        tx,
-        thread: Some(thread),
-    })
+/// Run a call into the watcher, `None` when it panics because the watcher's
+/// event loop has died.
+fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+/// Drop a watcher. A watcher whose event loop has died panics in `Drop`;
+/// contained here, that panic cannot abort the process.
+fn discard(armed: Option<impl Sized>) {
+    let _ = guarded(move || drop(armed));
 }
 
 /// (Re-)pin the watcher to the currently resolved theme directories.
@@ -284,25 +383,26 @@ where
 /// Old watches are dropped and fresh ones established unconditionally: an
 /// unchanged path proves nothing, because a theme switch that removes and
 /// recreates the directory takes the inotify watch with it. Unwatch errors
-/// (e.g. a watch already dead) are expected and ignored.
+/// (e.g. a watch already dead) are expected and ignored. `None` when the
+/// watcher's event loop has died.
 fn watch_theme_targets(
     watcher: &mut RecommendedWatcher,
     parents: &[PathBuf],
     old: &[PathBuf],
-) -> Vec<PathBuf> {
+) -> Option<Vec<PathBuf>> {
     for stale in old {
-        let _ = watcher.unwatch(stale);
+        let _ = guarded(|| watcher.unwatch(stale))?;
     }
     let resolved: Vec<PathBuf> = parents
         .iter()
         .filter_map(|p| fs::canonicalize(p.join("theme")).ok())
         .collect();
     for dir in &resolved {
-        if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
+        if let Err(e) = guarded(|| watcher.watch(dir, RecursiveMode::NonRecursive))? {
             tracing::debug!(dir = %dir.display(), error = %e, "failed to watch theme dir");
         }
     }
-    resolved
+    Some(resolved)
 }
 
 #[cfg(test)]
@@ -530,6 +630,51 @@ mod tests {
         fs::write(current.join("theme.name"), "blue\n").unwrap();
         rx.recv_timeout(Duration::from_secs(10))
             .expect("rewriting theme.name beside the theme dir should trigger the callback");
+    }
+
+    #[test]
+    fn a_watcher_that_loses_its_event_loop_is_replaced() {
+        let (_tmp, current, theme_a, _b) = fake_omarchy();
+        let (tx, rx) = mpsc::channel();
+        let handle = watch_omarchy_dirs(vec![current], DEBOUNCE, move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+
+        // What the first watcher's event handler reports when notify's
+        // event loop thread dies.
+        handle.tx.send(WatchMsg::Died(0)).unwrap();
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("re-arming should report a possible change");
+        while rx.recv_timeout(DEBOUNCE * 4).is_ok() {}
+
+        // The first watcher is gone; only the replacement can see this.
+        fs::write(theme_a.join("colors.toml"), "accent = \"#555555\"\n").unwrap();
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the replacement watcher should see edits");
+        while rx.recv_timeout(DEBOUNCE * 4).is_ok() {}
+
+        // A late notice from the replaced watcher must not re-arm again.
+        handle.tx.send(WatchMsg::Died(0)).unwrap();
+        assert!(
+            rx.recv_timeout(DEBOUNCE * 4).is_err(),
+            "a stale death notice must be ignored"
+        );
+    }
+
+    #[test]
+    fn discarding_a_dead_watcher_contains_its_drop_panic() {
+        // notify's INotifyWatcher panics in Drop once its event loop is
+        // gone. Dropped while the thread unwinds, that aborted the process.
+        struct PanicsOnDrop;
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("event loop is gone");
+            }
+        }
+        discard(Some(PanicsOnDrop));
+        assert_eq!(guarded(|| -> u8 { panic!("event loop is gone") }), None);
+        assert_eq!(guarded(|| 7), Some(7));
     }
 
     #[test]
