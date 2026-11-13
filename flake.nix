@@ -325,7 +325,7 @@
               # may not be used to train AI models (assets/sounds/README.md).
               # `free = true` keeps the package building without allowUnfree:
               # nixpkgs refuses any license with `free = false`, which would
-              # break `nix build .#voxtype` for everyone. The restriction is on
+              # break `nix build .#default` for everyone. The restriction is on
               # using the clip as training data, not on running or passing on
               # voxtype. Strictly, a field-of-use restriction is not free by
               # the FSF/DFSG definitions, which `licenses.unfreeRedistributable`
