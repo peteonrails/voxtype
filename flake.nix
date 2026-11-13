@@ -82,6 +82,13 @@
         # client code only; transcribe.cpp itself lives in voxtype-gguf-worker.
         ggufClientFeatures = [ "gguf" "cohere-gguf" "parakeet-gguf" ];
 
+        # Embed the Kokoro-82M recording announcement (MIT) instead of the
+        # default ElevenLabs clip, whose licence forbids AI training use. Only
+        # the selected clip is compiled in, so the built package carries no
+        # restricted asset and can be labelled plain MIT. The source tree
+        # still contains the ElevenLabs WAV; it never reaches the output.
+        announcementFeatures = [ "announcement-kokoro" ];
+
         # ONNX engine feature sets
         # All ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual
         onnxCpuFeatures = [
@@ -243,7 +250,7 @@
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
             # Build with specified features
-            buildFeatures = ggufClientFeatures ++ features;
+            buildFeatures = ggufClientFeatures ++ announcementFeatures ++ features;
 
             # Ensure reproducible builds targeting AVX2-capable CPUs (x86-64-v3)
             # This matches the portable AVX2 binaries we ship for other distros
@@ -320,27 +327,7 @@
                 SenseVoice, Moonshine, Paraformer, Dolphin, and Omnilingual engines.
               '';
               homepage = "https://voxtype.io";
-              # The binary embeds the recording announcement clip, which is
-              # not MIT: it may be redistributed unmodified with voxtype and
-              # may not be used to train AI models (assets/sounds/README.md).
-              # `free = true` keeps the package building without allowUnfree:
-              # nixpkgs refuses any license with `free = false`, which would
-              # break `nix build .#default` for everyone. The restriction is on
-              # using the clip as training data, not on running or passing on
-              # voxtype. Strictly, a field-of-use restriction is not free by
-              # the FSF/DFSG definitions, which `licenses.unfreeRedistributable`
-              # would say, at the cost of requiring allowUnfree.
-              license = [
-                licenses.mit
-                {
-                  shortName = "voxtype-announcement";
-                  fullName = "Voxtype recording announcement clip licence";
-                  spdxId = "LicenseRef-voxtype-announcement";
-                  url = "https://github.com/peteonrails/voxtype/blob/main/assets/sounds/README.md#licence";
-                  free = true;
-                  redistributable = true;
-                }
-              ];
+              license = licenses.mit;
               maintainers = []; # Add NixOS maintainers when upstreaming
               platforms = [ "x86_64-linux" "aarch64-linux" ];
               mainProgram = "voxtype";
@@ -466,7 +453,7 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-          buildFeatures = [ "osd-native" ];
+          buildFeatures = [ "osd-native" ] ++ announcementFeatures;
           cargoBuildFlags = [ "--bin" "voxtype-osd-native" ];
 
           # Skip running the full lib test suite, this package only ships the OSD bin.
@@ -503,7 +490,7 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-          buildFeatures = [ "osd-gtk4" ];
+          buildFeatures = [ "osd-gtk4" ] ++ announcementFeatures;
           cargoBuildFlags = [ "--bin" "voxtype-osd-gtk4" ];
 
           # Skip running the full lib test suite, this package only ships the OSD bin.
