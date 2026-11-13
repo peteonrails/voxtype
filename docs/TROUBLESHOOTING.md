@@ -241,6 +241,7 @@ what is wrong instead of showing an empty pane:
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
+  - [The recording announcement only played on my speakers](#the-recording-announcement-only-played-on-my-speakers)
 - [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
 - [No Meeting Window Appears](#no-meeting-window-appears)
 - [Action Items: Todoist and Reminders](#action-items-todoist-and-reminders)
@@ -1685,6 +1686,16 @@ The log line gives the reason when it is not `webrtc`:
 With a filter as your default microphone (Camera Effects, a noise-suppression chain), the log also says "The default source … is a filter over …": the canceller records the real microphone under the filter, so the filter's effects are not in the meeting's mic track. That is expected.
 
 The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
+
+### The recording announcement only played on my speakers
+
+With `announce_recording` on, `voxtype meeting status` says where the announcement went. "played on your speakers only; the call did not hear it" comes with the reason:
+
+- **"no call app opened the microphone within 120 s"**: voxtype found no call. It recognizes calls the way meeting detection does, so run `voxtype meeting suggest --dry-run` during the call to see what it sees. A browser call (Meet, Teams on the web) needs Hyprland for its window title; on other compositors only Zoom and the Teams app are found. Add another app under `[meeting.detect]`, as in [Meeting Detection](MEETING_MODE.md#meeting-detection).
+- **"pw-play is not installed"** or **"cannot run pw-dump"**: the announcement needs PipeWire's command-line tools (`pw-play`, `pw-link`, `pw-dump`; the `pipewire` package on Arch, `pipewire-bin` on Debian and Ubuntu).
+- **"could not link into ...'s mic stream"**: PipeWire refused the link. `journalctl --user -u voxtype | grep -i announcement` shows `pw-link`'s error.
+
+When it says "played into ...'s microphone", PipeWire carried it into the call app's mic stream. The others still will not hear it if you are muted in the call app, or if the app's noise suppression removes it; unmute before the meeting starts, or start it with `--no-announce` and tell them yourself.
 
 ### Meeting audio is saved as WAV instead of Opus
 

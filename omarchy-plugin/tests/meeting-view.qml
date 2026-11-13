@@ -184,6 +184,8 @@ Item {
           else if (s === "summary-stale") tc.driveSummaryStale()
           else if (s === "notice") tc.driveNotice(true)
           else if (s === "notice-acked") tc.driveNotice(false)
+          else if (s === "announcement") tc.driveAnnouncement()
+          else if (s === "notice-announce") tc.driveNoticeAnnounced()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -397,6 +399,69 @@ Item {
       wait(300)
       check(!shown(card), "stays hidden")
       shot("notice-acked")
+    }
+
+    // A meeting that announces the recording: the notice must not say
+    // voxtype tells nobody.
+    function driveNoticeAnnounced() {
+      var wording = "Voxtype will announce the recording to the call. You're still responsible for "
+          + "getting consent where the law requires it."
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var card = find(view(), "recordingNotice")
+      waitFor(function() { return shown(card) }, "notice shown on a running meeting")
+      waitFor(function() { return txt("recordingNoticeText") === wording }, "announced wording: " + txt("recordingNoticeText"))
+      check(txt("recordingNoticeText").indexOf("doesn't tell") < 0, "never says voxtype tells nobody")
+      shot("notice-announce")
+
+      // The announcement playing only locally keeps this wording; the
+      // warning line says the call did not hear it.
+      ctl({ cmd: "announcement", state: "local", detail: "no call app opened the microphone within 120 s",
+            text: "played on your speakers only; the call did not hear it (no call app opened the microphone within 120 s)" })
+      waitFor(function() { return view().announcementMissedCall }, "local-only warning")
+      check(txt("recordingNoticeText") === wording, "wording kept: " + txt("recordingNoticeText"))
+
+      click(find(view(), "recordingNoticeAck"), "Got it")
+      waitFor(function() { return feed().recordingNotice === false }, "daemon confirmed the acknowledgement")
+    }
+
+    // The recording announcement's line under the header. It never says the
+    // call heard what only played on the speakers.
+    function driveAnnouncement() {
+      openView()
+      waitFor(function() { return lines().length === 4 }, "hello rendered")
+      var line = find(view(), "announcementStatus")
+      check(line !== null, "announcement line exists")
+      check(!shown(line), "hidden while the meeting has no announcement")
+
+      ctl({ cmd: "announcement", state: "waiting",
+            text: "waiting for a call app to open the microphone (up to 2 minutes)" })
+      waitFor(function() { return shown(line) }, "shown while waiting")
+      check(txt("announcementStatus").indexOf("Announcement: waiting") === 0, "waiting: " + txt("announcementStatus"))
+      check(!view().announcementMissedCall, "waiting is no warning")
+
+      ctl({ cmd: "announcement", state: "call", app: "Zoom", detail: "",
+            text: "played into Zoom's microphone and on your speakers" })
+      waitFor(function() { return txt("announcementStatus").indexOf("Zoom") > 0 }, "reached the call")
+      check(!view().announcementMissedCall, "reaching the call is no warning")
+
+      ctl({ cmd: "announcement", state: "local", detail: "no call app opened the microphone within 120 s",
+            text: "played on your speakers only; the call did not hear it (no call app opened the microphone within 120 s)" })
+      waitFor(function() { return view().announcementMissedCall }, "local only is a warning")
+      check(txt("announcementStatus").indexOf("the call did not hear it") > 0, "says so: " + txt("announcementStatus"))
+      check(line.color === view().theme.urgent, "in the warning colour")
+      shot("announcement-local")
+
+      // A view connecting afterwards gets it from hello.
+      ctl({ cmd: "drop" })
+      waitFor(function() { return feed().connected === false }, "dropped")
+      waitFor(function() { return feed().connected === true }, "reconnected")
+      waitFor(function() { return shown(line) && view().announcementMissedCall }, "kept from hello")
+
+      // Ended: the line goes with the meeting.
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended: " + txt("meetingState"))
+      check(!shown(line), "no announcement line on an ended meeting")
     }
 
     function driveLive() {

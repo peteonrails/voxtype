@@ -257,10 +257,19 @@ Item {
   property bool speakerHintDismissed: false
   signal speakerHintDismissRequested()
   // The recording-consent notice: shown on a live meeting until acknowledged.
-  readonly property string recordingNoticeText: "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant."
+  // Worded as src/meeting/notice.rs words it: with the recording
+  // announcement on, saying voxtype tells nobody would be untrue.
+  readonly property string recordingNoticeQuiet: "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant."
+  readonly property string recordingNoticeAnnounced: "Voxtype will announce the recording to the call. You're still responsible for getting consent where the law requires it."
+  readonly property string recordingNoticeText: root.feed !== null && root.feed.announces ? root.recordingNoticeAnnounced : root.recordingNoticeQuiet
   property bool noticeDismissed: false
   readonly property bool showRecordingNotice: root.live && !root.noticeDismissed && root.feed !== null && root.feed.recordingNotice
   signal noticeAcknowledged()
+  // The recording announcement, while the meeting runs. Played only on the
+  // speakers (or not at all) reads as a warning: the call did not hear it.
+  readonly property var announcement: root.live && root.feed !== null ? root.feed.announcement : null
+  readonly property bool announcementMissedCall: root.announcement !== null
+      && (root.announcement.state === "local" || root.announcement.state === "failed")
 
   readonly property string status: feed ? feed.status : ""
   readonly property bool connected: feed ? feed.connected : false
@@ -1029,6 +1038,17 @@ Item {
           text: "Got it"
           onClicked: root.noticeAcknowledged()
         }
+      }
+
+      Text {
+        objectName: "announcementStatus"
+        Layout.fillWidth: true
+        visible: root.announcement !== null
+        text: root.announcement ? "Announcement: " + String(root.announcement.text || root.announcement.state) : ""
+        color: root.announcementMissedCall ? root.theme.urgent : root.theme.dim
+        font.family: root.theme.fontFamily
+        font.pixelSize: root.theme.bodySmall
+        wrapMode: Text.WordWrap
       }
 
       Rectangle {

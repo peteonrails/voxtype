@@ -749,6 +749,7 @@ Continuous meeting transcription with chunked processing and speaker diarization
 voxtype meeting start                  # Start a meeting
 voxtype meeting start --title "Title"  # Start with a title
 voxtype meeting start --model large-v3-turbo --language de --url https://meet.example.com/x
+voxtype meeting start --announce       # Tell the call it is being recorded
 voxtype meeting stop                   # Stop the meeting
 voxtype meeting pause                  # Pause recording
 voxtype meeting resume                 # Resume recording
@@ -2765,6 +2766,8 @@ Meeting mode provides continuous transcription for meetings, with chunked proces
 
 **Recording consent.** Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant. Until you run `voxtype meeting notice --ack` (or press **Got it** in the meeting view), `meeting start` prints this on stderr and the meeting view shows it. See [Recording Consent](MEETING_MODE.md#recording-consent).
 
+With `[meeting] announce_recording = true` (or `meeting start --announce`), the notice says "Voxtype will announce the recording to the call. You're still responsible for getting consent where the law requires it." instead, and voxtype plays "This meeting is being recorded and transcribed with Voxtype" into the call app's microphone when the meeting starts, so the others hear it, and keeps it out of the transcript. That is a courtesy, not consent: you remain responsible for the recording laws that apply. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
+
 ### Commands
 
 ```bash
@@ -2863,6 +2866,8 @@ retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the 
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
 show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
 auto_label_from_title = true     # Name both sides of "Pete <> Andrew standup" from the title
+announce_recording = false       # Play "This meeting is being recorded..." into the call at start
+# announcement_file = "~/announce.wav"  # Your own clip instead of the built-in one
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)

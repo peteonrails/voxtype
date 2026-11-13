@@ -210,6 +210,11 @@ Scenarios:
               with the view open; "Got it" hides it and runs
               `meeting notice --ack`
   notice-acked  acknowledged already: never shown, at open or at a start
+  notice-announce  a meeting that announces the recording: the notice says
+              voxtype will announce it, never that it tells nobody
+  announcement  the recording announcement's line: waiting, then played into
+              the call (quiet), or only on the speakers (a warning); from
+              hello on reconnect, and gone once the meeting ends
 
 Run inside a desktop-isolated sandbox (no WAYLAND_DISPLAY/DISPLAY, private
 XDG_RUNTIME_DIR); it refuses to run with a display in the environment.
@@ -235,7 +240,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
              "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
-             "play-errors", "notice", "notice-acked", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
+             "play-errors", "notice", "notice-acked", "notice-announce", "announcement", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
@@ -518,6 +523,8 @@ INITIAL = {
     "summary-stale": lambda: [running_meeting()],
     "notice": lambda: [running_meeting(), {"cmd": "notice", "pending": True}],
     "notice-acked": lambda: [running_meeting()],
+    "notice-announce": lambda: [dict(running_meeting(), announces=True), {"cmd": "notice", "pending": True}],
+    "announcement": lambda: [running_meeting()],
 }
 
 STALE = ["c3000000-0000-4000-8000-000000000003", "c3000000-0000-4000-8000-000000000004"]
@@ -1048,6 +1055,10 @@ def check_calls(scenario, calls, runtime_notes=""):
                          ["meeting", "notice", "--ack"]], "meeting commands")
     elif scenario == "notice-acked":
         expect(meeting, [["meeting", "stop"], ["meeting", "start", "--title", "Second"]], "meeting commands")
+    elif scenario == "announcement":
+        expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "notice-announce":
+        expect(meeting, [["meeting", "notice", "--ack"]], "meeting commands")
     elif scenario in ("cli-missing", "daemon-old", "old-voxtype", "minimize", "minimize-autoopen", "resize", "move",
                       "opacity", "view-state"):
         pass

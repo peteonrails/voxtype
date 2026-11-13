@@ -1389,6 +1389,18 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting status notifications",
         "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
     ),
+    // `meeting start` reads these itself and hands them to the daemon, so
+    // the next meeting follows a change without a restart.
+    spec(
+        "meeting.announce_recording",
+        "meeting",
+        "announce_recording",
+        KeyType::Bool,
+        "Meeting",
+        "Announce recording",
+        "When a meeting starts, play \"This meeting is being recorded and transcribed with Voxtype\" into the call app's microphone so the others hear it, and on your speakers. A courtesy, not consent: recording laws still apply.",
+    )
+    .live(),
     spec(
         "meeting.my_name",
         "meeting",
@@ -2311,6 +2323,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Keep audio",
         "Keep the meeting's mic, loopback and mixed audio as Opus in its folder.",
     ),
+    spec(
+        "meeting.announcement_file",
+        "meeting",
+        "announcement_file",
+        KeyType::String,
+        "Meeting",
+        "Announcement audio",
+        "Audio file (WAV, FLAC or Ogg) played instead of the built-in announcement, for your own wording or language. Empty uses the built-in clip.",
+    )
+    .live(),
     spec(
         "meeting.post_meeting_command",
         "meeting",
@@ -3311,6 +3333,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.calendar.window_mins" => json!(cfg.meeting.calendar.window_mins),
         "meeting.calendar.timeout_secs" => json!(cfg.meeting.calendar.timeout_secs),
         "meeting.auto_label_from_title" => json!(cfg.meeting.auto_label_from_title),
+        "meeting.announce_recording" => json!(cfg.meeting.announce_recording),
+        "meeting.announcement_file" => opt_str(cfg.meeting.announcement_file.as_ref()),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),

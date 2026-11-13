@@ -1,8 +1,9 @@
 //! The recording-consent notice.
 //!
 //! Recording or transcribing a conversation can need the other people's
-//! agreement, and voxtype never tells them anything on the user's behalf. So
-//! the user is told, until they say they have read it: `voxtype meeting
+//! agreement. Unless the recording announcement is on (`[meeting]
+//! announce_recording`), voxtype tells them nothing on the user's behalf,
+//! and even then it asks nobody for consent. So the user is told, until they say they have read it: `voxtype meeting
 //! start` prints the notice on stderr, `meeting.sock` carries
 //! `recording_notice: true` for the meeting views, and `voxtype meeting
 //! notice --ack` records the acknowledgement in
@@ -14,10 +15,25 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// The notice, word for word, wherever it is shown.
+/// The notice, word for word, wherever it is shown, while the meeting does
+/// not announce itself.
 pub const NOTICE: &str = "Laws on recording and transcribing conversations differ by place, and \
 some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let \
 them know you're using a meeting assistant.";
+
+/// The notice while the recording announcement is on: [`NOTICE`] would
+/// then be untrue.
+pub const NOTICE_ANNOUNCED: &str = "Voxtype will announce the recording to the call. You're \
+still responsible for getting consent where the law requires it.";
+
+/// The notice to show, given whether the meeting announces the recording.
+pub fn text(announce: bool) -> &'static str {
+    if announce {
+        NOTICE_ANNOUNCED
+    } else {
+        NOTICE
+    }
+}
 
 /// How to stop seeing it, for the terminal.
 pub const ACK_HINT: &str = "Run `voxtype meeting notice --ack` to stop showing this.";
@@ -75,10 +91,11 @@ pub fn pending() -> bool {
     !load(&path()).acknowledged()
 }
 
-/// `voxtype meeting notice --json`.
-pub fn to_json(state: &NoticeState) -> serde_json::Value {
+/// `voxtype meeting notice --json`, worded for whether meetings announce.
+pub fn to_json(state: &NoticeState, announce: bool) -> serde_json::Value {
     serde_json::json!({
-        "notice": NOTICE,
+        "notice": text(announce),
+        "announce_recording": announce,
         "acknowledged": state.acknowledged(),
         "acknowledged_at": state.acknowledged_at,
     })
@@ -118,8 +135,9 @@ mod tests {
 
     #[test]
     fn json_carries_the_wording_and_the_state() {
-        let v = to_json(&NoticeState::default());
+        let v = to_json(&NoticeState::default(), false);
         assert_eq!(v["notice"], NOTICE);
+        assert_eq!(v["announce_recording"], false);
         assert_eq!(v["acknowledged"], false);
         assert!(v["acknowledged_at"].is_null());
     }
@@ -132,5 +150,20 @@ mod tests {
              everyone on the call to agree. Voxtype doesn't tell the other people for you, so let \
              them know you're using a meeting assistant."
         );
+        assert_eq!(
+            NOTICE_ANNOUNCED,
+            "Voxtype will announce the recording to the call. You're still responsible for \
+             getting consent where the law requires it."
+        );
+    }
+
+    #[test]
+    fn announcing_never_claims_voxtype_stays_quiet() {
+        assert_eq!(text(false), NOTICE);
+        assert_eq!(text(true), NOTICE_ANNOUNCED);
+        assert!(!text(true).contains("doesn't tell"));
+        let v = to_json(&NoticeState::default(), true);
+        assert_eq!(v["notice"], NOTICE_ANNOUNCED);
+        assert_eq!(v["announce_recording"], true);
     }
 }

@@ -1220,6 +1220,11 @@ pub struct Daemon {
     meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
     meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // The recording announcement's progress, while it runs
+    meeting_announce_rx: Option<tokio::sync::mpsc::Receiver<meeting::announce::Update>>,
+    meeting_announce_task: Option<tokio::task::JoinHandle<meeting::announce::Status>>,
+    // When the meeting's capture started: zero on its transcript timeline
+    meeting_capture_started: Option<std::time::Instant>,
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
@@ -1407,6 +1412,9 @@ impl Daemon {
             meeting_mic_buffer: Vec::new(),
             meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
+            meeting_announce_rx: None,
+            meeting_announce_task: None,
+            meeting_capture_started: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
             meeting_gtcrn: false,
@@ -3172,6 +3180,8 @@ impl Daemon {
                 tracing::error!("Refusing to start the meeting: {}", e);
                 crate::error::VoxtypeError::Config(e)
             })?;
+        let announce_clip = meeting::announce::Clip::for_meeting(&self.config.meeting, &options);
+        let announces = announce_clip.is_some();
 
         // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
         let backend = diarization_override
@@ -3251,6 +3261,8 @@ impl Daemon {
         let echo_path = opened.echo_path;
         let mut echo_canceller = opened.canceller;
         let liveness = opened.liveness;
+        // Zero on the transcript's timeline: the first sample captured.
+        let capture_started = std::time::Instant::now();
         if capture.has_loopback() {
             tracing::info!("Dual audio capture: mic + loopback");
         } else {
@@ -3284,6 +3296,8 @@ impl Daemon {
                             segments: Vec::new(),
                             // Set from the notice's state in update_meeting_state.
                             recording_notice: false,
+                            announcement: None,
+                            announces,
                         };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
@@ -3314,6 +3328,13 @@ impl Daemon {
 
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
+
+                        // After the start cue, with capture up: the
+                        // announcement goes into the call once there is one.
+                        self.meeting_capture_started = Some(capture_started);
+                        if let Some(clip) = announce_clip {
+                            self.start_announcement(clip);
+                        }
 
                         let title = meeting::status_notice::display_title(
                             self.meeting_hud.title.as_deref(),
@@ -3476,10 +3497,83 @@ impl Daemon {
         }
     }
 
+    /// Run the recording announcement beside the meeting that just started.
+    fn start_announcement(&mut self, clip: meeting::announce::Clip) {
+        let runtime_dir = Config::runtime_dir();
+        let _ = std::fs::remove_file(runtime_dir.join(meeting::announce::STATUS_FILE));
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let runner =
+            meeting::announce::Runner::new(clip, self.config.meeting.detect.clone(), runtime_dir);
+        self.meeting_announce_rx = Some(rx);
+        self.meeting_announce_task = Some(tokio::spawn(runner.run(tx)));
+    }
+
+    /// Stop an announcement still waiting for the call or playing.
+    fn end_announcement(&mut self) {
+        if let Some(task) = self.meeting_announce_task.take() {
+            // Dropping its players kills them, links and all.
+            task.abort();
+        }
+        self.meeting_announce_rx = None;
+        self.meeting_capture_started = None;
+        let _ = std::fs::remove_file(Config::runtime_dir().join(meeting::announce::STATUS_FILE));
+    }
+
+    /// The announcement's progress: keep it out of the transcript once it
+    /// plays, and tell `meeting status` and the views where it got to.
+    fn on_announcement_update(&mut self, update: meeting::announce::Update) {
+        use meeting::announce::{Update, Window};
+        let on_timeline = |at: std::time::Instant, started: Option<std::time::Instant>| {
+            started
+                .map(|s| at.saturating_duration_since(s).as_millis() as u64)
+                .unwrap_or(0)
+        };
+        let status = match update {
+            Update::Waiting => meeting::announce::Status::waiting(),
+            Update::Started {
+                at,
+                expected,
+                phrase,
+            } => {
+                let start_ms = on_timeline(at, self.meeting_capture_started);
+                if let Some(ref mut daemon) = self.meeting_daemon {
+                    daemon.set_announcement(Window {
+                        start_ms,
+                        end_ms: start_ms + expected.as_millis() as u64,
+                        phrase,
+                    });
+                }
+                return;
+            }
+            Update::Finished { status, ended_at } => {
+                let end_ms = on_timeline(ended_at, self.meeting_capture_started);
+                if let Some(ref mut daemon) = self.meeting_daemon {
+                    if let Some(mut window) = daemon.announcement().cloned() {
+                        window.end_ms = window.end_ms.max(end_ms);
+                        daemon.set_announcement(window);
+                    }
+                }
+                self.meeting_announce_rx = None;
+                self.meeting_announce_task = None;
+                status
+            }
+        };
+        let path = Config::runtime_dir().join(meeting::announce::STATUS_FILE);
+        if let Err(e) = std::fs::write(&path, status.to_json().to_string()) {
+            tracing::warn!("Cannot write {}: {}", path.display(), e);
+        }
+        self.meeting_hud.announcement = Some(status.clone());
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+            hub.publish_announcement(self.meeting_hud.meeting_id.as_deref(), &status);
+        }
+    }
+
     /// Stop the current meeting
     async fn stop_meeting(&mut self) -> Result<()> {
         self.stop_meeting_levels();
         if self.meeting_daemon.is_some() {
+            self.end_announcement();
             // Stop audio capture and keep any samples that arrived since the last poll.
             if let Some(mut capture) = self.meeting_audio_capture.take() {
                 match capture.stop().await {
@@ -6349,6 +6443,19 @@ impl Daemon {
                             tracing::debug!("Meeting event channel closed");
                             self.meeting_event_rx = None;
                         }
+                    }
+                }
+
+                // The recording announcement's progress
+                update = async {
+                    match self.meeting_announce_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.meeting_announce_rx.is_some() => {
+                    match update {
+                        Some(update) => self.on_announcement_update(update),
+                        None => self.meeting_announce_rx = None,
                     }
                 }
 

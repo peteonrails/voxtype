@@ -6,6 +6,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 
 - [When to Use Meeting Mode](#when-to-use-meeting-mode)
 - [Recording Consent](#recording-consent)
+  - [Announcing the Recording](#announcing-the-recording)
 - [Quick Start](#quick-start)
 - [Recording a Meeting](#recording-a-meeting)
   - [Starting a Meeting](#starting-a-meeting)
@@ -80,6 +81,8 @@ For short dictation (a sentence or two at a time), stick with the normal push-to
 
 Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.
 
+With the [recording announcement](#announcing-the-recording) on, the notice reads instead: "Voxtype will announce the recording to the call. You're still responsible for getting consent where the law requires it." If the announcement then plays only on your speakers, the meeting view and `meeting status` say the call did not hear it.
+
 You are responsible for following the rules that apply to you.
 
 Until you acknowledge this, voxtype reminds you:
@@ -91,10 +94,63 @@ Until you acknowledge this, voxtype reminds you:
 ```bash
 voxtype meeting notice          # show it, and whether you acknowledged it
 voxtype meeting notice --ack    # acknowledge it; the reminders stop
-voxtype meeting notice --json   # {"notice", "acknowledged", "acknowledged_at"}
+voxtype meeting notice --json   # {"notice", "announce_recording", "acknowledged", "acknowledged_at"}
 ```
 
 **Got it** in the view does the same as `--ack`. The acknowledgement is kept in `~/.local/state/voxtype/recording-notice.json`.
+
+### Announcing the Recording
+
+Voxtype can say it for you, once, when a meeting starts: "This meeting is being recorded and transcribed with Voxtype." It is off by default.
+
+```toml
+[meeting]
+announce_recording = true
+```
+
+Or for one meeting, whatever the config says:
+
+```bash
+voxtype meeting start --announce
+voxtype meeting start --no-announce
+```
+
+`VOXTYPE_MEETING_ANNOUNCE_RECORDING=true` turns it on too, and Settings > Meeting has an **Announce recording** switch. `meeting start` reads the setting each time, so a change applies to the next meeting without restarting the daemon.
+
+**The announcement is a courtesy, not legal compliance.** It does not ask anyone for consent, record that they gave it, or wait for them to agree, and a muted mic in the call app silences it like any other sound. You remain responsible for the laws on recording calls where you and the other people are.
+
+#### How the others hear it
+
+Playing it on your speakers would not reach the call: headphones keep it in, and the call app's echo cancellation removes speaker sound from your mic. So voxtype plays it into the call app's own microphone stream. PipeWire mixes it with your real mic for that app only, and nothing else that records the mic hears it. It also plays on your speakers so you hear it.
+
+The call app is found the way [Meeting Detection](#meeting-detection) finds it: Zoom or Teams by their mic stream, Meet or Teams in a browser by the mic stream plus a call window title (Hyprland only). When a meeting starts before the call does, voxtype waits up to two minutes for a call app to open the mic, then announces. A meeting that call detection starts already has the call, so it announces at once.
+
+When it cannot reach the call (no call app opened the mic in time, a browser call off Hyprland, PipeWire's tools missing, or the link failed), it plays on your speakers only, logs why, and says so:
+
+```
+$ voxtype meeting status
+Meeting Status: recording
+Meeting ID: ...
+Announcement: played on your speakers only; the call did not hear it (no call app opened the microphone within 120 s)
+```
+
+When it reached the call, the line reads `Announcement: played into Zoom's microphone and on your speakers`. `meeting status --json` has the same as `announcement` (`state` is `waiting`, `call`, `local` or `failed`), and meeting.sock sends it as an `announcement` event and in `hello`.
+
+The announcement comes back through the loopback, and maybe the mic, so the meeting keeps it out of the transcript and the summary: lines in the seconds it played that say its words lose them.
+
+#### Your own wording or language
+
+Record your own clip (WAV, FLAC or Ogg) and point voxtype at it:
+
+```toml
+[meeting]
+announce_recording = true
+announcement_file = "~/.config/voxtype/announcement-de.wav"
+```
+
+`--announcement-file` and `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` do the same. A file that does not exist refuses the start, with the fix. Voxtype does not know what your clip says, so it keeps out of the transcript any line that falls mostly within the time the clip played.
+
+The built-in clip is in the voxtype binary and plays offline; voxtype never calls a speech service for it. It is AI-generated speech: the announcement voice was rendered with ElevenLabs text-to-speech (voice: Jessica). See `assets/sounds/README.md`.
 
 ---
 
@@ -169,6 +225,8 @@ voxtype meeting start --title "Planning" --url https://meet.example.com/abc-defg
 | `--model` | `VOXTYPE_MEETING_MODEL` | Model for this meeting, as `voxtype info models` names it. Its engine is implied. |
 | `--language` | `VOXTYPE_MEETING_LANGUAGE` | Language hint, for checkpoints that take one (multilingual Whisper, Cohere). |
 | `--url` | | Link to the call. Stored with the meeting; `meeting show` and exports with `--metadata` print it. |
+| `--announce` / `--no-announce` | `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | Play the [recording announcement](#announcing-the-recording) for this meeting, or not. |
+| `--announcement-file` | `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | Your own announcement clip for this meeting. |
 
 A choice the meeting could not use is refused before anything starts, with the fix: an engine this binary was built without (with how to get a build that has it), a model that is not downloaded (with the download command), a model that belongs to a different engine than `--engine`, or a language the checkpoint does not take.
 
@@ -204,7 +262,7 @@ voxtype meeting status
 voxtype meeting status --json
 ```
 
-Shows whether a meeting is recording, paused, finalizing, or idle, along with the meeting ID if one is in progress. The transcript keeps updating while a meeting is in progress, so `voxtype meeting show latest` is accurate mid-meeting too, not just after `stop`.
+Shows whether a meeting is recording, paused, finalizing, or idle, along with the meeting ID if one is in progress, and where the [recording announcement](#announcing-the-recording) got to when the meeting announces. The transcript keeps updating while a meeting is in progress, so `voxtype meeting show latest` is accurate mid-meeting too, not just after `stop`.
 
 The daemon acts on meeting commands between audio chunks, so while it is transcribing a chunk a request can take a few seconds to land. Until it does, status reports the request itself: `starting`, `pausing`, `resuming` or `stopping`. A second `voxtype meeting start` is refused as soon as the first one is issued, not only once that meeting is recording.
 
@@ -1109,6 +1167,15 @@ status_notifications = "auto"
 # While meeting mode is off, offer to turn it on from the tray and a
 # notification at most once a day (default: true)
 offer_enable = true
+
+# Say "This meeting is being recorded and transcribed with Voxtype" into
+# the call app's mic, and on your speakers, when a meeting starts
+# (default: false). A courtesy, not consent. See "Announcing the Recording".
+announce_recording = false
+
+# Your own announcement clip (WAV, FLAC or Ogg) instead of the built-in one
+# (default: unset)
+# announcement_file = "~/.config/voxtype/announcement-de.wav"
 ```
 
 ### Audio Settings

@@ -184,6 +184,29 @@ pub fn find_calls(snapshot: &Snapshot, config: &MeetingDetectConfig) -> (Vec<Cal
     (calls, notes)
 }
 
+/// The microphone streams of the calls in a snapshot, each with its call:
+/// every stream not set aside by [`MicStream::ignore_reason`] whose app is a
+/// call [`find_calls`] confirms. The recording announcement plays into these.
+pub fn call_streams(snapshot: &Snapshot, config: &MeetingDetectConfig) -> Vec<(Call, MicStream)> {
+    let (calls, _) = find_calls(snapshot, config);
+    let mut out = Vec::new();
+    for stream in &snapshot.streams {
+        if stream.ignore_reason().is_some() {
+            continue;
+        }
+        let call = calls.iter().find(|call| {
+            config
+                .apps
+                .iter()
+                .any(|a| a.name == call.app && stream.matches_any(&a.streams))
+        });
+        if let Some(call) = call {
+            out.push((call.clone(), stream.clone()));
+        }
+    }
+    out
+}
+
 /// Turn a stream matched to `app` into a call, if the app's window evidence
 /// (when it needs any) is present.
 fn confirm(

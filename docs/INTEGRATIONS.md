@@ -144,6 +144,19 @@ voxtype meeting status --json
 It is `null` when no meeting is running. The meeting socket's `hello` carries
 the same `echo_cancel` once the meeting has started.
 
+`announcement` is the [recording announcement](MEETING_MODE.md#announcing-the-recording)'s
+outcome, `null` when the meeting does not announce (the default) or none is
+running:
+
+```json
+"announcement": {"state": "call", "app": "Zoom", "detail": "", "text": "played into Zoom's microphone and on your speakers"}
+```
+
+`state` is `waiting` (for a call app to open the mic), `call` (played into
+the call app's mic stream and on the speakers), `local` (on the speakers
+only: the call did not hear it, and `detail` says why) or `failed` (not
+played). `text` is the line `meeting status` prints.
+
 `status` is one of `idle`, `starting`, `recording`, `pausing`, `paused`,
 `resuming`, `stopping` or `finalizing`. `starting`, `pausing`, `resuming` and
 `stopping` mean the command was issued and the daemon has not acted on it
@@ -361,6 +374,7 @@ ten a second while a meeting records.
 | `segment_deleted` | One line was hidden |
 | `notes_updated` | The meeting's notes changed |
 | `title_changed` | The meeting was retitled, by hand or from the calendar |
+| `announcement` | The recording announcement is waiting for the call, or has played |
 | `status` | The meeting's state changed, or a summary started |
 | `summary_ready` | The summary at stop is saved |
 | `playback` | `meeting play` started or stopped |
@@ -379,6 +393,12 @@ ten a second while a meeting records.
 `status` is `idle`, `recording`, `paused` or `finalizing`. With no meeting it
 is `idle`, `meeting_id`, `title` and `started_at` are absent, and
 `segments` is empty.
+
+A meeting with the recording announcement on carries `announces: true` from
+the start (absent otherwise); show the notice with the announced wording
+above while it is set, never one saying voxtype tells nobody. It also carries
+`announcement`, as in `meeting status --json`, once the announcement has
+started; it is absent otherwise.
 
 `recording_notice` is `true` while the user has not acknowledged the
 recording-consent notice ([Meeting Mode](MEETING_MODE.md#recording-consent)).
@@ -456,6 +476,16 @@ The notes changed. The event carries no text: read them with
 ```
 
 Show the new title. It follows `voxtype meeting title`, or a title taken from the calendar just after the meeting started. The `hello` snapshot carries the new title from then on. Lines whose speakers the new title names follow as `segment_updated`.
+
+#### `announcement`
+
+```json
+{"event": "announcement", "meeting_id": "a32baa9b-b9df-4051-8830-b422d21495ed", "state": "local", "detail": "no call app opened the microphone within 120 s", "text": "played on your speakers only; the call did not hear it (no call app opened the microphone within 120 s)"}
+```
+
+The recording announcement moved on: fields as `announcement` in
+`meeting status --json` above, plus the meeting. A view should never show
+`local` or `failed` as if the call heard it.
 
 #### `status`
 
@@ -667,10 +697,13 @@ voxtype meeting notice --ack [--json]
 ```
 
 ```json
-{"notice": "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.", "acknowledged": false, "acknowledged_at": null}
+{"notice": "Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant.", "announce_recording": false, "acknowledged": false, "acknowledged_at": null}
 ```
 
-`notice` is the text to show, word for word. `--ack` records the
+`notice` is the text to show, word for word. With `[meeting]
+announce_recording` on (`announce_recording: true`) it is "Voxtype will
+announce the recording to the call. You're still responsible for getting
+consent where the law requires it." instead. `--ack` records the
 acknowledgement (the first time is kept in `acknowledged_at`, RFC 3339 UTC)
 in `$XDG_STATE_HOME/voxtype/recording-notice.json` and tells a running
 daemon, which repeats its current `status` with `recording_notice: false`.
