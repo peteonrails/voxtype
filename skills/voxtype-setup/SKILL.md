@@ -117,7 +117,7 @@ the output settings in step 6, which come after the basics work.
 | English only, CPU only, and responsiveness matters most | Whisper `base.en` or `small.en` |
 | Chinese, Japanese, Korean, Cantonese | Whisper `large-v3-turbo`. SenseVoice is smaller and faster, but it runs on ONNX Runtime (see below) |
 | A language nothing else covers | Whisper, or Omnilingual (ONNX Runtime, see below) |
-| Long recordings (meetings, files over a few minutes) | Parakeet. It splits long audio into windows. Whisper on very long files can get stuck repeating a sentence |
+| Long recordings (meetings, files over a few minutes) | Parakeet. It splits long audio into windows. Whisper on very long files can get stuck repeating a sentence. Meetings use the dictation engine and model unless `voxtype meeting start --engine` or `--model` picks another for that meeting |
 
 Voxtype 2.0 removes ONNX Runtime. Prefer Whisper and GGUF models (the `.gguf`
 names in `voxtype info models`) over the ONNX model directories for anything you
@@ -152,6 +152,10 @@ memory between dictations:
 ```bash
 voxtype config set whisper.on_demand_loading true   # or <engine>.on_demand_loading
 ```
+
+This also applies to meetings. With the model kept loaded, a meeting starts on
+dictation's loaded model at once. With on-demand loading, each meeting loads
+its own copy when it starts, so its first lines arrive a little later.
 
 On a laptop with a discrete GPU using Whisper, also run
 `voxtype config set whisper.gpu_isolation true`. Transcription then runs in a
