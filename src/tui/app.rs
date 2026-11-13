@@ -283,6 +283,10 @@ impl App {
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Osd => self.osd.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Meeting => self
+                .meeting
+                .as_ref()
+                .is_some_and(|s| s.form.editing.is_some()),
             _ => false,
         }
     }

@@ -60,7 +60,7 @@ impl Section {
             Section::Output => "Mode, driver order, post-processing, profiles",
             Section::Text => "Deterministic cleanup, optional LARD model, replacements",
             Section::Vad => "Silero VAD, energy thresholds, eager processing",
-            Section::Meeting => "Meeting mode: audio source, diarization, summary",
+            Section::Meeting => "Meeting mode, call detection, audio, speakers, summary",
             Section::Notifications => "Desktop notifications and expire times",
             Section::Osd => "Floating waveform OSD: frontend, position, size, opacity",
             Section::Waybar => "Native Linux tray, Waybar icon theme and overrides",

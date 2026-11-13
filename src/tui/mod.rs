@@ -19,6 +19,7 @@ pub mod meeting_watch;
 mod notifications_section;
 mod osd_section;
 mod output_section;
+mod schema_form;
 mod section;
 mod sidebar;
 mod text_section;
