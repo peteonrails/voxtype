@@ -1,9 +1,9 @@
 [workspace]
-members = ["xtask"]
+members = ["xtask", "crates/gguf-worker"]
 
 [package]
 name = "voxtype"
-version = "1.1.1"
+version = "1.2.1"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -41,6 +41,8 @@ strum = { version = "0.26", default-features = false, features = ["derive"] }
 
 # Text processing
 regex = "1"
+rphonetic = "4.0"
+strsim = "0.11"
 
 # Async traits
 async-trait = "0.1"
@@ -93,6 +95,10 @@ ort = { version = "2.0.0-rc.12", optional = true, default-features = false, feat
 ndarray = { version = "0.16", optional = true }
 half = { version = "2", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+# Inverse text normalization: spoken-form numbers/dates/currency to written
+# form ("twenty five dollars" -> "$25"). Pure Rust port of NeMo text
+# processing; grammars are compiled in, so no runtime data files.
+text-processing-rs = { version = "0.2", optional = true }
 rustfft = { version = "6", optional = true }
 
 # OpenVINO GenAI backend (Intel NPU/CPU/GPU via OpenVINO GenAI WhisperPipeline)
@@ -112,7 +118,7 @@ notify = "6"
 pidlock = "0.1"
 
 # TUI for `voxtype configure`
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
 toml_edit = "0.22"
 
@@ -161,6 +167,8 @@ rdev = "0.5.3"
 tray-icon = "0.21.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+png = "0.17"
+ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
 # Input handling (evdev for kernel-level key events)
 evdev = "0.13.2"
 inotify = "0.10"  # Watch /dev/input for device hotplug
@@ -171,7 +179,7 @@ nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [features]
-default = []
+default = ["itn"]
 # OSD frontends. Each binary is gated on its own feature so users can
 # build only the rendering stack they need. Real GUI deps land in
 # Commits 4a/4b; the lists below grow then.
@@ -191,7 +199,12 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
-gpu-vulkan = ["whisper-rs/vulkan"]
+gpu-vulkan = [
+    "whisper-rs/vulkan",
+    "cohere-gguf",
+    "parakeet-gguf",
+    "gguf",
+]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
@@ -205,10 +218,31 @@ parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
 parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
+# Parakeet GGUF models run through transcribe.cpp in voxtype-gguf-worker, like
+# Cohere's. Not implied by `parakeet`: transcribe.cpp is only faster than ONNX
+# Runtime on a GPU. `gpu-vulkan` enables it, and every release Dockerfile
+# passes gguf,cohere-gguf,parakeet-gguf explicitly (see
+# scripts/verify-gguf-companion.sh).
+#
+# Both GGUF features only enable the client that drives the worker. voxtype
+# itself must never depend on transcribe-cpp: its ggml collides with
+# whisper-rs's. See crates/gguf-worker/Cargo.toml.
+parakeet-gguf = []
+gguf = []
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
+# Inverse text normalization for dictated numbers, dates, currency and URLs.
+# On by default: pure Rust, no native deps, so every release build ships it
+# and `[text] format_numbers` works without a custom build.
+itn = ["dep:text-processing-rs"]
+
 # Shared ONNX dependencies for engines using fbank/CTC preprocessing
 onnx-common = ["dep:ort", "dep:ndarray", "dep:rustfft"]
+# Multilingual punctuation restoration and true-casing for plain CTC output.
+# Kept separate from onnx-common because Whisper-only release binaries do not
+# ship ONNX Runtime and engines that already punctuate must not pay the model
+# or tokenizer cost.
+punctuation-casing = ["onnx-common", "dep:tokenizers"]
 # Marker features that aggregate per-engine GPU EP flags. Each engine's
 # session builder calls a shared helper (src/transcribe/onnx_ep.rs) that
 # checks these markers to decide which EPs to register at runtime.
@@ -227,32 +261,34 @@ moonshine-tensorrt = ["moonshine", "onnx-tensorrt-enabled"]
 # SenseVoice backend (ONNX-based, CTC encoder-only ASR).
 # No migraphx feature — MIGraphX rejects the encoder's Where-op
 # broadcast pattern (axis mismatch). AMD users run SenseVoice on CPU.
-sensevoice = ["onnx-common"]
+sensevoice = ["onnx-common", "punctuation-casing"]
 sensevoice-cuda = ["sensevoice", "onnx-cuda-enabled"]
 sensevoice-tensorrt = ["sensevoice", "onnx-tensorrt-enabled"]
 # Paraformer backend (FunASR ONNX-based CTC encoder).
 # No migraphx feature — MIGraphX EP segfaults during model load.
 # AMD users run Paraformer on CPU.
-paraformer = ["onnx-common"]
+paraformer = ["onnx-common", "punctuation-casing"]
 paraformer-cuda = ["paraformer", "onnx-cuda-enabled"]
 paraformer-tensorrt = ["paraformer", "onnx-tensorrt-enabled"]
 # Dolphin backend (ONNX-based CTC encoder, dictation-optimized).
 # No migraphx feature — MIGraphX rejects the encoder's Slice op shape.
 # AMD users run Dolphin on CPU.
-dolphin = ["onnx-common"]
+dolphin = ["onnx-common", "punctuation-casing"]
 dolphin-cuda = ["dolphin", "onnx-cuda-enabled"]
 dolphin-tensorrt = ["dolphin", "onnx-tensorrt-enabled"]
 # Omnilingual backend (FunASR ONNX-based, 50+ languages).
 # No migraphx feature — graph compiles but produces garbled output and
 # pays a 65s+ compile penalty per first inference. AMD users run on CPU.
-omnilingual = ["onnx-common"]
+omnilingual = ["onnx-common", "punctuation-casing"]
 omnilingual-cuda = ["omnilingual", "onnx-cuda-enabled"]
 omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 # Cohere Transcribe backend (ONNX-based encoder-decoder, Whisper-style task tokens).
 # Top of the Open ASR Leaderboard. Wired into CLI/config/factory; users opt in
 # via `cargo build --features cohere` and the model files are downloaded into
 # the standard models directory like other ONNX engines.
-cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
+cohere = ["onnx-common", "dep:half", "dep:tokenizers", "cohere-gguf"]
+# GGUF models run in-process through transcribe.cpp's Rust binding.
+cohere-gguf = []
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)

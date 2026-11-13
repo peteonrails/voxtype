@@ -17,14 +17,17 @@ use crate::model_catalog;
 use crate::model_catalog::override_config;
 use crate::model_manager::ModelManager;
 use crate::notification::{self, Lifetime};
+use crate::osd;
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
+use crate::text::vocabulary::Vocabulary;
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -131,8 +134,19 @@ fn write_state_file(path: &PathBuf, state: &str) {
         }
     }
 
-    if let Err(e) = std::fs::write(path, state) {
+    // Write to a sibling and rename, rather than writing in place.
+    // std::fs::write truncates before it writes, so a reader polling this
+    // file - waybar runs `voxtype status --follow` against it - can catch the
+    // empty window and read "" as the state. rename(2) is atomic within a
+    // filesystem, so a reader sees either the old contents or the new.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, state) {
         tracing::warn!("Failed to write state file: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        tracing::warn!("Failed to replace state file: {}", e);
+        let _ = std::fs::remove_file(&tmp);
     } else {
         tracing::trace!("State file updated: {}", state);
     }
@@ -1031,6 +1045,7 @@ type TranscriberLoadTask = tokio::task::JoinHandle<
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
+    pending_language: Option<Config>,
     /// When the `record start` being handled was issued, while that start
     /// runs. Lets a cancel racing the start signal survive the #606
     /// stale-cancel sweep.
@@ -1040,6 +1055,8 @@ pub struct Daemon {
     pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
+    /// Vocabulary matchers prepared once at startup, keyed by profile name.
+    profile_vocabularies: HashMap<String, Vocabulary>,
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
@@ -1065,6 +1082,8 @@ pub struct Daemon {
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(target_os = "linux")]
+    tray: Option<crate::tray::TrayRuntime>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -1126,6 +1145,19 @@ pub struct Daemon {
     // so the next duck/restore can serialize against it; see
     // `duck_media_streams` for why capturing originals mid-fade is unsafe.
     media_fade_task: Option<tokio::task::JoinHandle<()>>,
+    // Set when `max_duration_secs` ends the session in flight, so the
+    // outcome published for the OSD can say the limit stopped it.
+    osd_limit_reached: bool,
+    osd_session_started_at_ms: u64,
+    osd_session_suppressed: std::sync::atomic::AtomicBool,
+    // Whether this session's outcome has been published. The first one
+    // wins: some paths report a specific outcome (no speech) and then
+    // fall through a generic one (empty result) on the way to idle.
+    osd_outcome_sent: std::sync::atomic::AtomicBool,
+    // An accepted model upgrade still waiting for its first successful
+    // transcription, after which `setup migrate --cleanup` may delete the
+    // previous model. Read once at startup so the hot path does no I/O.
+    model_upgrade_pending: bool,
 }
 
 impl Daemon {
@@ -1158,7 +1190,23 @@ impl Daemon {
         // words that are ordinary vocabulary there rather than disfluencies
         // (#566).
         let text_processor =
-            TextProcessor::new_for_language(&config.text, config.active_language());
+            TextProcessor::new_for_config(&config.text, config.active_language(), &config);
+        let profile_vocabularies = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| {
+                !profile.vocabulary.terms.is_empty() || profile.vocabulary.terms_file.is_some()
+            })
+            .filter_map(
+                |(name, profile)| match Vocabulary::load(&profile.vocabulary) {
+                    Ok(vocabulary) => Some((name.clone(), vocabulary)),
+                    Err(error) => {
+                        tracing::warn!(profile = %name, %error, "Profile vocabulary disabled");
+                        None
+                    }
+                },
+            )
+            .collect();
         if config.text.spoken_punctuation {
             tracing::info!("Spoken punctuation enabled");
         }
@@ -1166,6 +1214,21 @@ impl Daemon {
             tracing::info!(
                 "Word replacements configured: {} rules",
                 config.text.replacements.len()
+            );
+        }
+
+        if config.streaming_enabled() && config.output.post_process.is_some() {
+            // [text] rules no longer belong in this warning: since the #669
+            // fix they are applied when a streaming segment is committed, and
+            // warning that a working setting is ignored is worse than not
+            // warning at all. The LLM post_process hook is the one completed-
+            // transcript stage streaming still skips (see the note in
+            // output::streaming): incremental output would re-run it per
+            // segment and let it rewrite already-typed text.
+            tracing::warn!(
+                "Streaming is enabled, so output.post_process will NOT run. \
+                 The post-process command needs a completed transcript, which \
+                 streaming never produces. Disable streaming to use it."
             );
         }
 
@@ -1204,6 +1267,11 @@ impl Daemon {
             None
         };
 
+        let model_upgrade_pending = crate::model_upgrade::pending_first_success(
+            &crate::model_upgrade::state_path(),
+            config.model_name(),
+        );
+
         Self {
             start_request: None,
             config,
@@ -1212,6 +1280,7 @@ impl Daemon {
             pid_file_path: None,
             audio_feedback,
             text_processor,
+            profile_vocabularies,
             post_processor,
             last_dictation: None,
             level_hub: None,
@@ -1220,6 +1289,9 @@ impl Daemon {
             is_external_trigger: false,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
+            #[cfg(target_os = "linux")]
+            tray: None,
+            pending_language: None,
             model_manager: None,
             model_load_task: None,
             override_cache: None,
@@ -1241,6 +1313,11 @@ impl Daemon {
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
+            osd_limit_reached: false,
+            osd_session_started_at_ms: 0,
+            osd_session_suppressed: std::sync::atomic::AtomicBool::new(false),
+            osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
+            model_upgrade_pending,
         }
     }
 
@@ -1324,8 +1401,67 @@ impl Daemon {
         self.resume_media_players();
     }
 
+    /// Leave the failure visible until the next recording/state change, without
+    /// changing the public state-file protocol or requiring audio feedback.
+    fn queue_language(&mut self, language: &str) -> std::result::Result<(), String> {
+        let path = self
+            .config_path
+            .clone()
+            .or_else(Config::resolve_existing_path)
+            .ok_or("No configuration file is available")?;
+        self.pending_language = Some(crate::language_selection::persist(
+            &self.config,
+            &path,
+            language,
+        )?);
+        Ok(())
+    }
+
+    fn apply_pending_language(&mut self, idle: bool) -> bool {
+        if !idle {
+            return false;
+        }
+        let Some(next) = self.pending_language.take() else {
+            return false;
+        };
+        // No active capture/transcription is touched. All future construction,
+        // including resident workers and per-record overrides, uses this snapshot.
+        if let Some(task) = self.model_load_task.take() {
+            task.abort();
+        }
+        if let Some((_, task)) = self.override_load_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.whisper_prepare_task.take() {
+            task.abort();
+        }
+        self.transcriber_preloaded = None;
+        self.override_cache = None;
+        self.config = next;
+        self.model_manager = (self.config.engine == crate::config::TranscriptionEngine::Whisper)
+            .then(|| ModelManager::new(&self.config.whisper, self.config_path.clone()));
+        self.text_processor = TextProcessor::new_for_config(
+            &self.config.text,
+            self.config.active_language(),
+            &self.config,
+        );
+        tracing::info!(language = ?self.config.active_language(), "Tray language applied for next dictation");
+        true
+    }
+
+    fn show_tray_error(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update(crate::tray::TrayState::Error);
+        }
+    }
+
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update(crate::tray::TrayState::from_state_name(state_name));
+        }
         if let Some(ref path) = self.state_file_path {
             write_state_file(path, state_name);
         }
@@ -1337,13 +1473,102 @@ impl Daemon {
         // back to idle.
         match state_name {
             "recording" | "streaming" => {
-                if read_bool_override("no_osd").unwrap_or(false) {
-                    set_osd_suppressed(true);
+                let suppressed = read_bool_override("no_osd").unwrap_or(false);
+                self.osd_session_suppressed
+                    .store(suppressed, std::sync::atomic::Ordering::Relaxed);
+                set_osd_suppressed(suppressed);
+            }
+            "idle" | "stopped" => {
+                set_osd_suppressed(false);
+                if self.state_file_path.is_some() {
+                    osd::session::clear_session(&Config::runtime_dir());
                 }
             }
-            "idle" | "stopped" => set_osd_suppressed(false),
             _ => {}
         }
+    }
+
+    /// Publish `recording.json` for the session `state` just started, so OSD
+    /// frontends can show elapsed time, the remaining time before
+    /// `max_duration_secs`, and which engine and model this recording uses.
+    /// Skipped when the state file is disabled, like every runtime file the
+    /// OSD reads.
+    fn begin_osd_session(&mut self, state: &State) {
+        self.osd_limit_reached = false;
+        self.osd_outcome_sent
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if self.state_file_path.is_none() {
+            return;
+        }
+        let (mode, model_override) = match state {
+            State::Recording { model_override, .. }
+            | State::EagerRecording { model_override, .. } => ("recording", model_override),
+            State::Streaming { model_override, .. } => ("streaming", model_override),
+            _ => return,
+        };
+        let (engine, model) = self.recording_engine_and_model(model_override.as_deref());
+        self.osd_session_started_at_ms = osd::session::now_unix_ms();
+        osd::session::write_session(
+            &Config::runtime_dir(),
+            &osd::session::OsdSession {
+                mode: mode.to_string(),
+                started_at_ms: self.osd_session_started_at_ms,
+                max_duration_secs: u64::from(self.config.audio.max_duration_secs),
+                engine,
+                model,
+            },
+        );
+    }
+
+    /// The engine and model that will serve a recording, after any
+    /// per-recording `--model` override.
+    fn recording_engine_and_model(&self, model_override: Option<&str>) -> (String, String) {
+        let engine = self.config.engine.to_string();
+        let Some(name) = model_override else {
+            return (engine, self.config.model_name().to_string());
+        };
+        match crate::model_catalog::override_route(&self.config, name) {
+            Ok(crate::model_catalog::OverrideRoute::Separate { engine, model }) => {
+                (engine.to_string(), model)
+            }
+            _ => (engine, name.to_string()),
+        }
+    }
+
+    /// Publish the outcome of a session that delivered `text`.
+    fn publish_osd_text_outcome(&self, text: &str) {
+        let chars = text.chars().count();
+        let kind = if chars == 0 {
+            osd::session::OutcomeKind::Empty
+        } else {
+            osd::session::OutcomeKind::Ok
+        };
+        self.publish_osd_outcome(kind, chars);
+    }
+
+    /// Publish `outcome.json` saying how the session just ended, for OSD
+    /// frontends to confirm the result.
+    fn publish_osd_outcome(&self, outcome: osd::session::OutcomeKind, chars: usize) {
+        if self.state_file_path.is_none()
+            || self
+                .osd_outcome_sent
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        osd::session::write_outcome(
+            &Config::runtime_dir(),
+            &osd::session::OsdOutcome {
+                outcome,
+                session_started_at_ms: self.osd_session_started_at_ms,
+                suppressed: self
+                    .osd_session_suppressed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                chars,
+                limit_reached: self.osd_limit_reached,
+                at_ms: osd::session::now_unix_ms(),
+            },
+        );
     }
 
     /// Build a `SpeechTracker` for silence-based auto-stop, if `armed` and
@@ -1421,12 +1646,14 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.show_tray_error();
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.show_tray_error();
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
@@ -1599,6 +1826,7 @@ impl Daemon {
             file_output_path,
         };
         self.update_state("streaming");
+        self.begin_osd_session(state);
         self.play_feedback(SoundEvent::RecordingStart);
 
         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -1757,6 +1985,7 @@ impl Daemon {
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
+                self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                 self.reset_to_idle(state).await;
             }
             *eager_transcriber = None;
@@ -1866,7 +2095,12 @@ impl Daemon {
             // processing), so this is where the transcript becomes final:
             // apply replacements and spoken punctuation over the whole
             // text, same as the batch path does before writing (#669).
-            let final_text = self.text_processor.process(&final_text);
+            let vocabulary = read_profile_override()
+                .as_ref()
+                .and_then(|name| self.profile_vocabularies.get(name));
+            let final_text = self
+                .text_processor
+                .process_with_vocabulary(&final_text, vocabulary);
 
             match self.deliver_file_output(&output_path, &final_text).await {
                 FileDelivery::Written => {
@@ -1875,17 +2109,30 @@ impl Daemon {
                         FileMode::Append => "appended",
                     };
                     tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
+                    self.publish_osd_text_outcome(&final_text);
                     self.play_feedback(SoundEvent::TranscriptionComplete);
                 }
-                FileDelivery::FellBack(_) => self.play_feedback(SoundEvent::TranscriptionComplete),
-                FileDelivery::Lost(_) => self.play_feedback(SoundEvent::Error),
+                FileDelivery::FellBack(_) => {
+                    self.publish_osd_text_outcome(&final_text);
+                    self.play_feedback(SoundEvent::TranscriptionComplete);
+                }
+                FileDelivery::Lost(_) => {
+                    self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
+                    self.play_feedback(SoundEvent::Error);
+                }
             }
 
             *state = State::Idle;
             self.update_state("idle");
+            discard_recording_overrides();
             return;
         }
 
+        let streamed = streaming_session
+            .as_ref()
+            .map(|s| s.finalized_text().to_string())
+            .unwrap_or_default();
+        self.publish_osd_text_outcome(&streamed);
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1899,6 +2146,7 @@ impl Daemon {
 
         *state = State::Idle;
         self.update_state("idle");
+        discard_recording_overrides();
     }
 
     /// Carry out a `voxtype record cancel` trigger against whatever session is
@@ -1968,6 +2216,7 @@ impl Daemon {
             self.end_external_session(true).await;
             *state = State::Idle;
             *eager_transcriber = None;
+            self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
             self.update_state("idle");
             self.play_feedback(SoundEvent::Cancelled);
 
@@ -2001,6 +2250,7 @@ impl Daemon {
 
             discard_recording_overrides();
             *state = State::Idle;
+            self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
             self.update_state("idle");
             self.play_feedback(SoundEvent::Cancelled);
 
@@ -2057,6 +2307,7 @@ impl Daemon {
 
         discard_recording_overrides();
         *state = State::Idle;
+        self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
@@ -2139,12 +2390,14 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.show_tray_error();
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.show_tray_error();
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
@@ -2154,12 +2407,21 @@ impl Daemon {
     /// Get the model ready while the user speaks: start an on-demand load,
     /// or warm the preloaded transcriber (spawning the gpu_isolation worker).
     /// An override the active transcriber can't serve loads its own instead.
+    fn active_profile_vocabulary_terms(&self) -> Vec<String> {
+        read_profile_override()
+            .as_ref()
+            .and_then(|name| self.profile_vocabularies.get(name))
+            .map(|vocabulary| vocabulary.terms().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
     fn prepare_for_recording(&mut self, model_override: Option<&str>) {
+        let vocabulary = self.active_profile_vocabulary_terms();
         if let Some(name) = model_override {
             if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
                 model_catalog::override_route(&self.config, name)
             {
-                self.start_override_load(name, engine, &model);
+                self.start_override_load(name, engine, &model, vocabulary);
                 return;
             }
         }
@@ -2171,9 +2433,12 @@ impl Daemon {
                     let config = self.config.whisper.clone();
                     let config_path = self.config_path.clone();
                     let model_to_load = model_override.map(str::to_string);
+                    let vocabulary = vocabulary.clone();
                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                         let mut temp_manager = ModelManager::new(&config, config_path);
-                        temp_manager.get_transcriber(model_to_load.as_deref())
+                        let transcriber = temp_manager.get_transcriber(model_to_load.as_deref())?;
+                        transcriber.set_vocabulary(&vocabulary);
+                        Ok(transcriber)
                     }));
                 }
                 crate::config::TranscriptionEngine::Parakeet
@@ -2183,12 +2448,17 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox
                 | crate::config::TranscriptionEngine::Whistle => {
                     let config = self.config.clone();
+                    let vocabulary = vocabulary.clone();
                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                        crate::transcribe::create_transcriber(&config).map(Arc::from)
+                        let transcriber: Arc<dyn Transcriber> =
+                            Arc::from(crate::transcribe::create_transcriber(&config)?);
+                        transcriber.set_vocabulary(&vocabulary);
+                        Ok(transcriber)
                     }));
                 }
             }
@@ -2198,7 +2468,7 @@ impl Daemon {
             match self.config.engine {
                 crate::config::TranscriptionEngine::Whisper => {
                     if let Some(ref mut mm) = self.model_manager {
-                        match mm.prepare_model(model_override) {
+                        match mm.prepare_model(model_override, &vocabulary) {
                             Ok(handle) => {
                                 self.whisper_prepare_task = handle;
                             }
@@ -2215,11 +2485,13 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox
                 | crate::config::TranscriptionEngine::Whistle => {
                     if let Some(ref t) = self.transcriber_preloaded {
                         let transcriber = t.clone();
+                        transcriber.set_vocabulary(&vocabulary);
                         tokio::task::spawn_blocking(move || {
                             transcriber.prepare();
                         });
@@ -2266,6 +2538,7 @@ impl Daemon {
             )
             .await;
         }
+        self.publish_osd_outcome(osd::session::OutcomeKind::NoSpeech, 0);
     }
 
     async fn report_override_problem(&self, problem: &str) {
@@ -2288,10 +2561,12 @@ impl Daemon {
         name: &str,
         engine: crate::config::TranscriptionEngine,
         model: &str,
+        vocabulary: Vec<String>,
     ) {
         if let Some((cached, transcriber)) = &self.override_cache {
             if cached == name {
                 let transcriber = transcriber.clone();
+                transcriber.set_vocabulary(&vocabulary);
                 tokio::task::spawn_blocking(move || transcriber.prepare());
                 return;
             }
@@ -2306,6 +2581,7 @@ impl Daemon {
             tokio::task::spawn_blocking(move || {
                 let transcriber: Arc<dyn Transcriber> =
                     Arc::from(crate::transcribe::create_transcriber(&config)?);
+                transcriber.set_vocabulary(&vocabulary);
                 transcriber.prepare();
                 Ok(transcriber)
             }),
@@ -2398,10 +2674,26 @@ impl Daemon {
     /// A `--model` override the active transcriber can't serve gets its own.
     ///
     /// Returns Ok(transcriber) on success, Err(()) if an error occurred and caller should skip to next iteration
+    /// `get_transcriber_for_recording_inner`, publishing an error outcome
+    /// for the OSD when no transcriber can serve the recording.
     async fn get_transcriber_for_recording(
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let result = self
+            .get_transcriber_for_recording_inner(model_override)
+            .await;
+        if result.is_err() {
+            self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+        }
+        result
+    }
+
+    async fn get_transcriber_for_recording_inner(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let vocabulary = self.active_profile_vocabulary_terms();
         if let Some(name) = model_override {
             match model_catalog::override_route(&self.config, name) {
                 Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
@@ -2411,6 +2703,7 @@ impl Daemon {
                         name,
                         engine
                     );
+                    transcriber.set_vocabulary(&vocabulary);
                     return Ok(transcriber);
                 }
                 Ok(_) => {}
@@ -2426,6 +2719,7 @@ impl Daemon {
                 match task.await {
                     Ok(Ok(transcriber)) => {
                         tracing::info!("Model loaded successfully");
+                        transcriber.set_vocabulary(&vocabulary);
                         Ok(transcriber)
                     }
                     Ok(Err(e)) => {
@@ -2454,10 +2748,12 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox
                 | crate::config::TranscriptionEngine::Whistle => {
                     if let Some(t) = self.transcriber_preloaded.clone() {
+                        t.set_vocabulary(&vocabulary);
                         Ok(t)
                     } else {
                         // Empty on the non-on-demand path means the panic
@@ -2473,6 +2769,7 @@ impl Daemon {
                         match created {
                             Ok(Ok(t)) => {
                                 let t: Arc<dyn Transcriber> = Arc::from(t);
+                                t.set_vocabulary(&vocabulary);
                                 self.transcriber_preloaded = Some(t.clone());
                                 Ok(t)
                             }
@@ -2501,7 +2798,10 @@ impl Daemon {
                     }
                     if let Some(ref mut mm) = self.model_manager {
                         match mm.get_prepared_transcriber(model_override) {
-                            Ok(t) => Ok(t),
+                            Ok(t) => {
+                                t.set_vocabulary(&vocabulary);
+                                Ok(t)
+                            }
                             Err(e) => {
                                 tracing::error!("Failed to get transcriber: {}", e);
                                 self.play_feedback(SoundEvent::Error);
@@ -3264,6 +3564,7 @@ impl Daemon {
                     if audio_duration < 0.3 {
                         tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.publish_empty_outcome();
+                        self.publish_osd_outcome(osd::session::OutcomeKind::TooShort, 0);
                         self.reset_to_idle(state).await;
                         return false;
                     }
@@ -3321,6 +3622,7 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                     self.reset_to_idle(state).await;
                     false
                 }
@@ -3332,13 +3634,59 @@ impl Daemon {
         }
     }
 
+    /// Mark an accepted model upgrade as proven by a successful transcription.
+    fn record_model_upgrade_success(&mut self) {
+        if !self.model_upgrade_pending {
+            return;
+        }
+        self.model_upgrade_pending = false;
+        match crate::model_upgrade::record_first_success(
+            &crate::model_upgrade::state_path(),
+            self.config.model_name(),
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    "First transcription with the upgraded model succeeded; the previous model can be removed with `voxtype setup migrate --cleanup`"
+                );
+                // The tray reads offers once at startup; push the cleanup
+                // offer now so "Remove old model files" appears without a
+                // daemon restart.
+                self.refresh_tray_upgrade();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "Could not record the model upgrade success"),
+        }
+    }
+
+    fn refresh_tray_upgrade(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            match serde_json::to_value(crate::model_upgrade::status_for_config(&self.config)) {
+                Ok(value) => {
+                    tray.update_upgrade(crate::tray::UpgradeMenu::from_status_value(&value))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Could not refresh the tray's model upgrade menu")
+                }
+            }
+        }
+    }
+
     /// Handle transcription completion (called when transcription_task completes)
     async fn handle_transcription_result(
         &mut self,
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
+        let failed = match &result {
+            Ok(Err(_)) => true,
+            Err(error) => !error.is_cancelled(),
+            _ => false,
+        };
         self.handle_transcription_result_inner(state, result).await;
+        if failed {
+            self.show_tray_error();
+        }
         // The inner handler owns the last reference to an on-demand
         // transcriber, so by here the model has been dropped.
         if self.config.on_demand_loading() {
@@ -3360,12 +3708,35 @@ impl Daemon {
             Ok(Ok(text)) => {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
+                    self.record_model_upgrade_success();
+
+                    // Resolve the profile before cleanup because vocabulary is
+                    // the first profile-aware stage in the cleanup pipeline.
+                    let profile_override = read_profile_override();
+                    let active_profile = profile_override
+                        .as_ref()
+                        .and_then(|name| self.config.get_profile(name));
+
+                    if let Some(profile_name) = &profile_override {
+                        if active_profile.is_none() {
+                            tracing::warn!(
+                                "Profile '{}' not found in config, using default settings",
+                                profile_name
+                            );
+                        }
+                    }
 
                     // Apply text processing (replacements, punctuation)
-                    let processed_text = self.text_processor.process(&text);
+                    let vocabulary = profile_override
+                        .as_ref()
+                        .and_then(|name| self.profile_vocabularies.get(name));
+                    let processed_text = self
+                        .text_processor
+                        .process_with_vocabulary(&text, vocabulary);
                     if processed_text != text {
                         tracing::debug!("After text processing: {:?}", processed_text);
                     }
@@ -3381,21 +3752,6 @@ impl Daemon {
                             "Smart auto-submit triggered, stripped text: {:?}",
                             processed_text
                         );
-                    }
-
-                    // Check for profile override from CLI flags
-                    let profile_override = read_profile_override();
-                    let active_profile = profile_override
-                        .as_ref()
-                        .and_then(|name| self.config.get_profile(name));
-
-                    if let Some(profile_name) = &profile_override {
-                        if active_profile.is_none() {
-                            tracing::warn!(
-                                "Profile '{}' not found in config, using default settings",
-                                profile_name
-                            );
-                        }
                     }
 
                     // Get context from last dictation if within 60 seconds
@@ -3415,6 +3771,12 @@ impl Daemon {
                                 timeout_ms,
                                 trim: true,
                                 fallback_on_empty: true,
+                                edit_list: self
+                                    .config
+                                    .output
+                                    .post_process
+                                    .as_ref()
+                                    .is_some_and(|config| config.edit_list),
                             };
                             let profile_processor = PostProcessor::new(&profile_config);
                             tracing::info!(
@@ -3524,6 +3886,7 @@ impl Daemon {
                                     TranscriptOutcome::ok(final_text.chars().count())
                                 };
                                 write_result_sidecar(&output_path, &outcome);
+                                self.publish_osd_text_outcome(&final_text);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             FileDelivery::FellBack(err) => {
@@ -3533,10 +3896,15 @@ impl Daemon {
                                         "{err}; copied to the clipboard instead"
                                     )),
                                 );
+                                self.publish_osd_text_outcome(&final_text);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             FileDelivery::Lost(err) => {
                                 write_result_sidecar(&output_path, &TranscriptOutcome::error(&err));
+                                self.publish_osd_outcome(
+                                    osd::session::OutcomeKind::OutputFailed,
+                                    0,
+                                );
                                 self.play_feedback(SoundEvent::Error);
                             }
                         }
@@ -3654,13 +4022,20 @@ impl Daemon {
                             .await
                     {
                         tracing::error!("Output failed: {}", e);
+                        self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
                     } else {
+                        self.publish_osd_text_outcome(&final_text);
                         self.play_feedback(SoundEvent::TranscriptionComplete);
 
                         if self.config.output.notification.on_transcription {
                             // Send notification on successful output
                             output::send_transcription_notification(
                                 &final_text,
+                                self.config
+                                    .output
+                                    .notification
+                                    .show_edits
+                                    .then_some(text.as_str()),
                                 self.config.output.notification.show_engine_icon,
                                 self.config.engine,
                                 &self.config.output.notification.urgency,
@@ -3675,6 +4050,7 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                 self.reset_to_idle(state).await;
             }
             Err(e) => {
@@ -3683,6 +4059,7 @@ impl Daemon {
                     tracing::debug!("Transcription task was cancelled");
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
 
                     // spawn_blocking already kept the panic from reaching the
                     // daemon, so this is not about survival. It is about not
@@ -3735,19 +4112,31 @@ impl Daemon {
             .as_deref()
             .unwrap_or("the running binary");
         let title = format!("Voxtype: {} unavailable", mismatch.configured_engine);
-        let body = match &mismatch.remediation {
-            crate::setup::variant_check::Remediation::SwitchToVariant { target } => format!(
+        let hint = crate::setup::install_hint::hint(crate::setup::install_hint::Need::Feature(
+            mismatch.required_feature,
+        ));
+        let body = match (&mismatch.remediation, &hint) {
+            (
+                crate::setup::variant_check::Remediation::SwitchToVariant { target },
+                crate::setup::install_hint::Hint::Switch { command },
+            ) => format!(
                 "{} was built without --features {}. \
-                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+                 Run `{}` (or open `voxtype configure` and press F2) \
                  to switch to {}.",
                 active,
                 mismatch.required_feature,
+                command,
                 target.binary_name(),
             ),
-            crate::setup::variant_check::Remediation::Rebuild { feature } => format!(
+            (crate::setup::variant_check::Remediation::SwitchToVariant { .. }, hint) => format!(
+                "{} was built without --features {}, and no installed variant has it. \
+                 To enable the {} engine, {}.",
+                active, mismatch.required_feature, mismatch.configured_engine, hint,
+            ),
+            (crate::setup::variant_check::Remediation::Rebuild { feature }, hint) => format!(
                 "This source build was compiled without --features {}. \
-                 Rebuild voxtype with that feature to enable the {} engine.",
-                feature, mismatch.configured_engine,
+                 To enable the {} engine, {}.",
+                feature, mismatch.configured_engine, hint,
             ),
         };
 
@@ -3779,6 +4168,11 @@ impl Daemon {
         // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
         self.warn_on_variant_mismatch();
 
+        // On Omarchy, link the packaged Settings panel on first start and
+        // rescan it after a package upgrade. Runs on its own thread; it never
+        // blocks startup or fails the daemon.
+        crate::setup::omarchy::spawn_auto_link(&self.config);
+
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
         // (Hyprland, Sway, River) those synthetic key events clobber the held-
@@ -3802,6 +4196,10 @@ impl Daemon {
 
         // Clean up any stale cancel and profile override files from previous runs
         cleanup_cancel_file();
+        // The GGUF worker rewrites this once it has bound a backend; a report
+        // from a previous daemon must not describe this one.
+        let _ =
+            std::fs::remove_file(Config::runtime_dir().join(crate::status_json::GGUF_STATUS_FILE));
         let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
         cleanup_profile_override();
 
@@ -3853,6 +4251,12 @@ impl Daemon {
         // rather than burning a slot in the launcher's restart logic.
         if self.config.osd.enabled && self.level_hub.is_some() {
             self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
+        }
+
+        // The single-instance lock is already held. Never register a duplicate tray.
+        #[cfg(target_os = "linux")]
+        if self.tray.is_none() {
+            self.tray = crate::tray::TrayRuntime::start_for_config(&self.config);
         }
 
         crate::daemon_status::publish_version();
@@ -3977,6 +4381,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox
                 | crate::config::TranscriptionEngine::Whistle => {
@@ -4065,7 +4470,37 @@ impl Daemon {
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            self.apply_pending_language(state.is_idle());
             tokio::select! {
+                Some(language) = async {
+                    #[cfg(target_os = "linux")]
+                    if let Some(tray) = &mut self.tray { return tray.next_language().await; }
+                    std::future::pending::<Option<&'static str>>().await
+                } => {
+                    match self.queue_language(language) {
+                        Ok(()) => {
+                            #[cfg(target_os = "linux")]
+                            if let (Some(tray), Some(next)) = (&self.tray, &self.pending_language) {
+                                let mut menu = crate::language_selection::LanguageMenu::for_config(next);
+                                menu.explanation = "Saved: applies to the next dictation, not the current utterance".into();
+                                tray.update_language(menu);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "Tray language selection failed");
+                            #[cfg(target_os = "linux")]
+                            if let Some(tray) = &self.tray {
+                                let mut menu = crate::language_selection::LanguageMenu::for_config(
+                                    self.pending_language.as_ref().unwrap_or(&self.config));
+                                menu.explanation = format!("Language change failed: {error}");
+                                tray.update_language(menu);
+                            }
+                            send_notification("VoxType: Language change failed", &error,
+                                self.config.output.notification.show_engine_icon, self.config.engine,
+                                &self.config.output.notification.urgency).await;
+                        }
+                    }
+                }
                 // Handle hotkey events (only if hotkey listener is enabled)
                 Some(hotkey_event) = async {
                     match &mut hotkey_rx {
@@ -4139,6 +4574,7 @@ impl Daemon {
                                                 };
                                             }
                                             self.update_state("recording");
+                                            self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -4221,6 +4657,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
+                                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                     self.reset_to_idle(&mut state).await;
                                 }
                                 eager_transcriber = None;
@@ -4286,6 +4723,7 @@ impl Daemon {
                                                 };
                                             }
                                             self.update_state("recording");
+                                            self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -4356,6 +4794,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
+                                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                     self.reset_to_idle(&mut state).await;
                                 }
                                 eager_transcriber = None;
@@ -4407,6 +4846,7 @@ impl Daemon {
 
                                 discard_recording_overrides();
                                 state = State::Idle;
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
 
@@ -4431,6 +4871,7 @@ impl Daemon {
 
                                 discard_recording_overrides();
                                 state = State::Idle;
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
 
@@ -4578,6 +5019,7 @@ impl Daemon {
                     let timeout_fired = audio_capture.is_some()
                         && state.recording_duration().is_some_and(|d| d > max_duration);
                     if timeout_fired {
+                        self.osd_limit_reached = true;
                         // A hard-capped session is ending on voxtype's own
                         // initiative (not the caller's `record stop`) — end
                         // it as an external-trigger session so the caller is
@@ -4636,6 +5078,7 @@ impl Daemon {
                                 self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                             } else {
                                 tracing::debug!("Eager recording timeout produced empty result");
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                 self.reset_to_idle(&mut state).await;
                             }
                             eager_transcriber = None;
@@ -4729,6 +5172,7 @@ impl Daemon {
                                         };
                                     }
                                     self.update_state("recording");
+                                    self.begin_osd_session(&state);
                                     self.play_feedback(SoundEvent::RecordingStart);
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -4830,10 +5274,13 @@ impl Daemon {
                                     // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
+                                    let vocabulary = read_profile_override()
+                                        .as_ref()
+                                        .and_then(|name| self.profile_vocabularies.get(name));
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
-                                        Some(&self.text_processor),
+                                        Some((&self.text_processor, vocabulary)),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {
@@ -4854,11 +5301,14 @@ impl Daemon {
                                     // Raw on purpose — see the Final arm.
                                     s.replace_and_commit_silent(backspace, &text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
+                                    let vocabulary = read_profile_override()
+                                        .as_ref()
+                                        .and_then(|name| self.profile_vocabularies.get(name));
                                     if let Err(e) = s.replace_and_commit(
                                         chain,
                                         backspace,
                                         &text,
-                                        Some(&self.text_processor),
+                                        Some((&self.text_processor, vocabulary)),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {
@@ -5107,6 +5557,11 @@ impl Daemon {
             hub.cleanup();
         }
 
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = self.tray.take() {
+            tray.shutdown().await;
+        }
+
         tracing::info!("Daemon stopped");
 
         // Exit without unwinding. Everything this daemon owns is already
@@ -5140,6 +5595,93 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "linux", feature = "cohere-gguf"))]
+    #[tokio::test]
+    async fn tray_language_next_backend_receives_hint_resident_and_on_demand() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("VOXTYPE_LANGUAGE_BACKEND_CHILD").is_none() {
+            let fixture = tempfile::tempdir().unwrap();
+            let worker = fixture.path().join("worker.py");
+            let python = std::process::Command::new("python3")
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output()
+                .expect("python3 is required for the isolated protocol fixture");
+            assert!(python.status.success());
+            std::fs::write(
+                &worker,
+                format!(
+                    "#!{}\n{}",
+                    String::from_utf8(python.stdout).unwrap().trim(),
+                    r#"import sys,json,struct
+config=json.loads(sys.argv[sys.argv.index('--config-json')+1])
+print('READY',flush=True)
+while True:
+    count=sys.stdin.buffer.read(4)
+    if not count: break
+    size=struct.unpack('<I',count)[0]*4
+    data=b''
+    while len(data)<size: data+=sys.stdin.buffer.read(size-len(data))
+    print(json.dumps({'ok':True,'text':'CONFIG_HINT:'+config['language']}),flush=True)
+"#
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "daemon::tests::tray_language_next_backend_receives_hint_resident_and_on_demand", "--nocapture"])
+                .env("VOXTYPE_LANGUAGE_BACKEND_CHILD", "1")
+                .env("VOXTYPE_GGUF_WORKER", &worker).status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        for on_demand in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let model = dir.path().join("cohere-transcribe-03-2026-Q4_K_M.gguf");
+            std::fs::write(&model, b"protocol fixture, not a model").unwrap();
+            let mut cfg = crate::config::Config::default();
+            cfg.set_model_for(
+                crate::config::TranscriptionEngine::Cohere,
+                model.to_str().unwrap(),
+            );
+            cfg.cohere.as_mut().unwrap().on_demand_loading = on_demand;
+            cfg.audio.feedback.enabled = false;
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+            let mut daemon = super::Daemon::new(cfg, Some(path));
+            daemon.prepare_for_recording(None);
+            let old = daemon.get_transcriber_for_recording(None).await.unwrap();
+            assert_eq!(old.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:en");
+            daemon.queue_language("fr").unwrap();
+            assert!(!daemon.apply_pending_language(false));
+            assert_eq!(old.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:en");
+            assert!(daemon.apply_pending_language(true));
+            daemon.prepare_for_recording(None);
+            let next = daemon.get_transcriber_for_recording(None).await.unwrap();
+            assert_eq!(next.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:fr");
+            assert_eq!(old.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:en");
+        }
+        println!("BACKEND_HINT_PASS: real daemon construction + GGUF client/protocol, resident/on-demand, in-flight immutable; fixture worker, not inference");
+    }
+
+    #[test]
+    fn tray_language_is_deferred_and_rebuilds_cached_runtime_only_at_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[whisper]\nmodel = \"base\"\nlanguage = \"en\"\n").unwrap();
+        let config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut daemon = super::Daemon::new(config, Some(path));
+        daemon.queue_language("fr").unwrap();
+        assert_eq!(daemon.config.active_language(), Some("en"));
+        assert!(!daemon.apply_pending_language(false));
+        assert_eq!(daemon.config.active_language(), Some("en"));
+        assert!(daemon.apply_pending_language(true));
+        assert_eq!(daemon.config.active_language(), Some("fr"));
+        assert!(daemon.transcriber_preloaded.is_none());
+        assert!(daemon.override_cache.is_none());
+        assert!(daemon.model_manager.is_some());
+        assert!(!daemon.apply_pending_language(true));
+    }
+
     use super::*;
     use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
@@ -5375,7 +5917,7 @@ mod tests {
         );
 
         // Starting another recording with the same override doesn't reload.
-        daemon.start_override_load("base.en", TranscriptionEngine::Whisper, "base.en");
+        daemon.start_override_load("base.en", TranscriptionEngine::Whisper, "base.en", vec![]);
         assert!(daemon.override_load_task.is_none());
     }
 

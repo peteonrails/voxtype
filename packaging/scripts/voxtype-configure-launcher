@@ -1,15 +1,59 @@
 #!/bin/sh
 # voxtype-configure-launcher
 #
-# Launch `voxtype configure` in a terminal window, discovering whichever
-# terminal emulator the user has installed. Window class is set to
+# Open the available graphical settings frontend, or `voxtype configure`
+# in a terminal when no GUI is integrated. The terminal class is set to
 # `voxtype` so compositor rules (Hyprland windowrulev2,
 # Sway for_window, …) can float and size the window.
 #
 # Picked up by /usr/share/applications/voxtype-configure.desktop, which is
 # in turn surfaced in Walker, fuzzel, rofi, dmenu, KRunner, GNOME Activities.
 
+# Prefer an installed graphical settings frontend. The tray and desktop entry
+# deliberately share this resolver. Do not confuse the GTK OSD with settings.
 set -eu
+
+if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+    printf '%s\n' 'voxtype-configure-launcher: no graphical session; run voxtype configure in your terminal' >&2
+    exit 1
+fi
+
+# Hold the lock across the terminal's lifetime. Quickshell's open IPC is itself
+# idempotent. Repeated concurrent requests must not spawn several terminals.
+if [ "${1:-}" != --locked ] && [ -n "${XDG_RUNTIME_DIR:-}" ] && command -v flock >/dev/null 2>&1; then
+    exec flock -n -E 0 "$XDG_RUNTIME_DIR/voxtype-settings.lock" /bin/sh "$0" --locked
+fi
+
+# The integrated plugin is only available if its real IPC target responds.
+# `open`, not `toggle`, focuses/presents without closing an existing app.
+if command -v omarchy-shell >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    reply=$(timeout 3 omarchy-shell io.voxtype.settings open 2>/dev/null) || reply=
+    if [ "$reply" = ok ]; then exit 0; fi
+fi
+
+# A separately packaged graphical settings frontend (including GTK) advertises
+# itself through a real XDG desktop entry. gio implements desktop Exec quoting
+# and field-code expansion; never eval an Exec line. There is no built-in GTK
+# settings app today, and voxtype-osd-gtk4 must never be launched as one.
+if command -v gio >/dev/null 2>&1; then
+    data_dirs="${XDG_DATA_HOME:-$HOME/.local/share}:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    old_ifs=$IFS
+    IFS=:
+    for base in $data_dirs; do
+        IFS=$old_ifs
+        for desktop in "$base"/applications/*voxtype*.desktop "$base"/applications/*Voxtype*.desktop; do
+            [ -f "$desktop" ] || continue
+            grep -q '^Type=Application' "$desktop" || continue
+            grep -q '^Categories=.*Settings' "$desktop" || continue
+            if grep -Eq '^(Hidden|Terminal)=true|^Exec=.*(voxtype-configure-launcher|voxtype-osd)' "$desktop"; then continue; fi
+            # Categories=Settings is the installed frontend's declaration;
+            # do not guess its toolkit or impose an invented binary name.
+            if gio launch "$desktop"; then exit 0; fi
+        done
+        IFS=:
+    done
+    IFS=$old_ifs
+fi
 
 # Order of preference. $TERMINAL wins if it's set and resolvable.
 candidates="${TERMINAL:-} ghostty alacritty kitty foot wezterm konsole gnome-terminal xterm xfce4-terminal"

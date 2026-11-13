@@ -22,9 +22,14 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Make VERSION available at runtime (ARG only works during build)
 ENV VERSION=${VERSION}
 
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
 # Install build dependencies (no Vulkan - see header comment)
 # X11 and GTK deps required for rdev (hotkeys) and tray-icon crates
-RUN apt-get update && apt-get install -y \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -39,7 +44,11 @@ RUN apt-get update && apt-get install -y \
     libappindicator3-dev \
     git \
     binutils \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -61,14 +70,23 @@ ENV CMAKE_C_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-a
 ENV CMAKE_CXX_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-gfni -mno-avxvnni"
 
 # Build AVX2 binary
-RUN cargo build --release \
-    && cp target/release/voxtype /tmp/voxtype-avx2
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker; GPU GGUF on Whisper builds comes from the vulkan variant.
+RUN cargo build --release --features gguf,cohere-gguf,parakeet-gguf \
+    && cp target/release/voxtype /tmp/voxtype-avx2 \
+    && cargo build --release -p voxtype-gguf-worker \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --haswell-floor --run \
+        /tmp/voxtype-avx2 /tmp/voxtype-gguf-worker
 
 # Verify no AVX-512 or GFNI instructions
 RUN echo "=== Verifying AVX2 binary ===" \
-    && zmm_count=$(objdump -d /tmp/voxtype-avx2 | grep -c zmm || echo 0) \
-    && avx512_count=$(objdump -d /tmp/voxtype-avx2 | grep -cE 'vpternlog|vpermt2|vpblendm|\{1to[0-9]+\}' || echo 0) \
-    && gfni_count=$(objdump -d /tmp/voxtype-avx2 | grep -cE 'vgf2p8|gf2p8' || echo 0) \
+    && DUMP=$(objdump -d /tmp/voxtype-avx2; objdump -d /tmp/voxtype-gguf-worker) \
+    && zmm_count=$(echo "$DUMP" | grep -c zmm || true) \
+    && avx512_count=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpblendm|\{1to[0-9]+\}' || true) \
+    && gfni_count=$(echo "$DUMP" | grep -cE 'vgf2p8|gf2p8' || true) \
     && echo "  zmm registers: $zmm_count" \
     && echo "  AVX-512 EVEX: $avx512_count" \
     && echo "  GFNI: $gfni_count" \
@@ -80,6 +98,8 @@ RUN echo "=== Verifying AVX2 binary ===" \
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx2 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker \
     && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

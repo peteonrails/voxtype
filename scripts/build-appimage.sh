@@ -96,6 +96,7 @@ populate_shared_files() {
     mkdir -p "$appdir/usr/share/doc/voxtype"
     cp "$PROJECT_DIR/README.md" "$appdir/usr/share/doc/voxtype/"
     cp "$PROJECT_DIR/LICENSE" "$appdir/usr/share/doc/voxtype/"
+    cp "$PROJECT_DIR/THIRD_PARTY.md" "$appdir/usr/share/doc/voxtype/"
 
     # Default config
     mkdir -p "$appdir/etc/voxtype"

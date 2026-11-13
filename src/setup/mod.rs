@@ -9,6 +9,7 @@
 //! - NPU backend management (Intel NPU via OpenVINO)
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
+//! - Omarchy Settings panel linking
 
 pub mod accel;
 #[cfg(target_os = "macos")]
@@ -19,14 +20,20 @@ pub mod dms;
 pub mod gpu;
 #[cfg(target_os = "macos")]
 pub mod hammerspoon;
+#[cfg(target_os = "linux")]
+pub mod icons;
+pub mod install_hint;
+pub mod lard;
 pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod manifest;
 pub mod model;
 pub mod npu;
+pub mod omarchy;
 pub mod parakeet;
 pub mod progress;
+pub mod punctuation;
 pub mod quickshell;
 pub mod systemd;
 pub mod vad;
@@ -73,6 +80,8 @@ pub struct OutputChainStatus {
     pub display_server: DisplayServer,
     pub wtype: OutputToolStatus,
     pub eitype: OutputToolStatus,
+    /// dotool sits third in the runtime fallback chain but was absent here,
+    /// so `setup check` described a chain the daemon does not use (#507).
     pub dotool: OutputToolStatus,
     pub ydotool: OutputToolStatus,
     pub ydotool_daemon: bool,
@@ -149,7 +158,7 @@ pub fn detect_display_server() -> DisplayServer {
     // Check for macOS first
     #[cfg(target_os = "macos")]
     {
-        return DisplayServer::MacOS;
+        DisplayServer::MacOS
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -202,16 +211,51 @@ pub async fn is_ydotool_daemon_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the running compositor implements `zwp_virtual_keyboard_manager_v1`,
+/// which wtype requires.
+///
+/// KWin and Mutter do not, so wtype fails at runtime on KDE and GNOME however
+/// cleanly it installed. wlroots-based compositors (Sway, Hyprland, River,
+/// Niri) do. An unrecognised compositor is assumed to support it, because
+/// wlroots derivatives are numerous and a wrong "unavailable" is worse than a
+/// wrong "available" that still falls through the chain.
+pub fn compositor_supports_virtual_keyboard() -> bool {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let lower = desktop.to_lowercase();
+    !(lower.contains("kde") || lower.contains("plasma") || lower.contains("gnome"))
+}
+
 /// Detect the full output chain status
 pub async fn detect_output_chain() -> OutputChainStatus {
     let display_server = detect_display_server();
 
-    // Check wtype
+    // Check wtype. Being on Wayland is not sufficient: wtype needs
+    // zwp_virtual_keyboard_manager_v1, which neither KWin nor Mutter
+    // implements, so on KDE and GNOME it installs cleanly and then silently
+    // fails at runtime. Reporting it as available there sent users chasing a
+    // driver that cannot work (#507, #650).
     let wtype_path = get_command_path("wtype").await;
     let wtype_installed = wtype_path.is_some();
-    let wtype_available = wtype_installed && display_server == DisplayServer::Wayland;
+    let compositor_supports_wtype = compositor_supports_virtual_keyboard();
+    let wtype_available =
+        wtype_installed && display_server == DisplayServer::Wayland && compositor_supports_wtype;
     let wtype_note = if wtype_installed && display_server != DisplayServer::Wayland {
         Some("Wayland only".to_string())
+    } else if wtype_installed && !compositor_supports_wtype {
+        Some("compositor lacks zwp_virtual_keyboard_v1".to_string())
+    } else {
+        None
+    };
+
+    // Check dotool
+    let dotool_path = get_command_path("dotool").await;
+    let dotool_installed = dotool_path.is_some();
+    // dotool drives uinput, so it is independent of the display server and
+    // works where wtype cannot. It does need write access to /dev/uinput.
+    let dotool_uinput = std::path::Path::new("/dev/uinput").exists();
+    let dotool_available = dotool_installed && dotool_uinput;
+    let dotool_note = if dotool_installed && !dotool_uinput {
+        Some("/dev/uinput not present".to_string())
     } else {
         None
     };
@@ -295,7 +339,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         Some("wtype".to_string())
     } else if eitype_available {
         Some("eitype".to_string())
-    } else if dotool_installed {
+    } else if dotool_available {
         Some("dotool".to_string())
     } else if ydotool_available {
         Some("ydotool".to_string())
@@ -326,9 +370,9 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         dotool: OutputToolStatus {
             name: "dotool",
             installed: dotool_installed,
-            available: dotool_installed,
+            available: dotool_available,
             path: dotool_path,
-            note: None,
+            note: dotool_note,
         },
         ydotool: OutputToolStatus {
             name: "ydotool",
@@ -459,7 +503,8 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             status.display_server == DisplayServer::Wayland,
         );
 
-        // dotool
+        // dotool: third in the runtime chain, and the working answer on
+        // KDE and GNOME where wtype cannot be.
         print_tool_status(&status.dotool, true);
 
         // ydotool
@@ -588,6 +633,9 @@ pub(crate) enum ModelKind {
     Dolphin,
     Omnilingual,
     Cohere,
+    CohereGguf,
+    ParakeetGguf,
+    Gguf,
     OpenVino,
     Whistle,
 }
@@ -620,10 +668,27 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Omnilingual)
     } else if model::is_cohere_model(name) {
         Ok(ModelKind::Cohere)
+    } else if let Some(gguf) = model::find_gguf_model(name) {
+        Ok(match gguf.engine {
+            "parakeet" => ModelKind::ParakeetGguf,
+            "cohere" => ModelKind::CohereGguf,
+            "gguf" => ModelKind::Gguf,
+            _ => unreachable!(),
+        })
     } else if model::is_openvino_model(name) {
         Ok(ModelKind::OpenVino)
     } else if model::is_valid_whistle_model(name) {
         Ok(ModelKind::Whistle)
+    } else if let Some(pending) = model::find_pending_gguf_model(name) {
+        anyhow::bail!(
+            "GGUF model '{}' is pinned but pending publication{}; it is not downloadable or selectable yet.",
+            pending.name,
+            if pending.license_gated {
+                " and license clearance"
+            } else {
+                ""
+            }
+        )
     } else {
         anyhow::bail!(
             "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  \
@@ -631,7 +696,7 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
              Cohere: {}\n  OpenVINO: {}\n  Whistle: {}",
             name,
             model::valid_model_names().join(", "),
-            model::valid_parakeet_model_names().join(", "),
+            model::parakeet_setup_model_names().join(", "),
             model::sensevoice_setup_model_names().join(", "),
             model::moonshine_setup_model_names().join(", "),
             model::paraformer_setup_model_names().join(", "),
@@ -761,6 +826,18 @@ pub async fn run_setup(
     no_post_install: bool,
     activate: bool,
 ) -> anyhow::Result<()> {
+    if let Some(name) = model_override {
+        if let Some(resolved) = crate::model_catalog::resolve_model(name) {
+            if matches!(resolved.engine, "parakeet" | "cohere") {
+                crate::model_selection::validate_backend(resolved.engine, name)
+                    .map_err(anyhow::Error::msg)?;
+                if !download {
+                    crate::model_selection::validate_ready(resolved.engine, name)
+                        .map_err(anyhow::Error::msg)?;
+                }
+            }
+        }
+    }
     if !quiet {
         println!("Voxtype Setup\n");
         println!("=============\n");
@@ -777,8 +854,9 @@ pub async fn run_setup(
         print_success(&format!("Models directory: {:?}", Config::models_dir()));
     }
 
-    // Create default config file if it doesn't exist
-    if let Some(config_path) = Config::default_path() {
+    // Provisioning weights is not selection, including on a fresh installation.
+    // --activate writes its selection only after a successful download below.
+    if let Some(config_path) = Config::default_path().filter(|_| !download) {
         if !config_path.exists() {
             if !quiet {
                 println!("\nCreating default config file...");
@@ -806,6 +884,10 @@ pub async fn run_setup(
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
     let is_openvino = kind == Some(ModelKind::OpenVino);
+    let is_gguf = matches!(
+        kind,
+        Some(ModelKind::CohereGguf | ModelKind::ParakeetGguf | ModelKind::Gguf)
+    );
 
     if let Some(route) = kind.and_then(onnx_setup_route) {
         // Engines whose downloads were picker-only until #687: routed
@@ -873,6 +955,52 @@ pub async fn run_setup(
                 "       Run: voxtype setup --download --model {}",
                 model_name
             );
+        }
+    } else if is_gguf {
+        let name = model_override.unwrap(); // Safe: classifier matched GGUF
+        let model = model::find_gguf_model(name).unwrap();
+        let path = models_dir.join(model.name);
+        if !model.compiled() {
+            anyhow::bail!(
+                "GGUF model '{}' requires the '{}' feature",
+                name,
+                model.feature()
+            );
+        }
+        let verification = model::verify_gguf_model(&path, model);
+        match &verification {
+            Ok(()) => {
+                if !quiet {
+                    print_success(&format!(
+                        "Model ready: {} ({:.2} GB)",
+                        name,
+                        model.size as f64 / 1e9
+                    ));
+                }
+            }
+            Err(_) if download => model::download_gguf_model(name)?,
+            Err(e) if path.exists() => {
+                left_damaged = true;
+                if !quiet {
+                    print_failure(&format!("Model '{}' failed verification: {}", name, e));
+                    println!("       Run: voxtype setup --download --model {}", name);
+                }
+            }
+            Err(_) => {
+                if !quiet {
+                    print_info(&format!("Model '{}' not downloaded yet", name));
+                    println!("       Run: voxtype setup --download --model {}", name);
+                }
+            }
+        }
+        if activate && (verification.is_ok() || download) {
+            model::set_engine_model_config(model.engine, model.name)?;
+            if !quiet {
+                print_success(&format!(
+                    "Config updated: engine = \"{}\", model = \"{}\"",
+                    model.engine, model.name
+                ));
+            }
         }
     } else if is_openvino {
         // Handle OpenVINO model
@@ -1461,6 +1589,45 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #507/#650: wtype needs zwp_virtual_keyboard_manager_v1, which KWin and
+    /// Mutter do not implement, so being on Wayland is not enough.
+    #[test]
+    fn wtype_support_depends_on_the_compositor() {
+        let cases = [
+            ("Hyprland", true),
+            ("sway", true),
+            ("river", true),
+            ("niri", true),
+            ("KDE", false),
+            ("plasma", false),
+            ("GNOME", false),
+            ("ubuntu:GNOME", false),
+        ];
+        for (desktop, expected) in cases {
+            std::env::set_var("XDG_CURRENT_DESKTOP", desktop);
+            assert_eq!(
+                compositor_supports_virtual_keyboard(),
+                expected,
+                "wrong answer for XDG_CURRENT_DESKTOP={desktop}"
+            );
+        }
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+    }
+
+    /// An unrecognised compositor is assumed to work: wlroots derivatives are
+    /// numerous, and a wrong "unavailable" hides a driver that would have
+    /// worked, while a wrong "available" still falls through the chain.
+    #[test]
+    fn unknown_compositor_is_assumed_capable() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "some-new-wlroots-thing");
+        assert!(compositor_supports_virtual_keyboard());
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        assert!(
+            compositor_supports_virtual_keyboard(),
+            "unset must not disable"
+        );
+    }
     use super::*;
     use crate::config::{OutputConfig, OutputDriver, OutputMode};
 
@@ -1579,6 +1746,12 @@ mod tests {
             ("cohere-transcribe-q4f16", ModelKind::Cohere),
             ("cohere-transcribe-fp16", ModelKind::Cohere),
             ("whistle.cact", ModelKind::Whistle),
+            (
+                "cohere-transcribe-03-2026-Q4_K_M.gguf",
+                ModelKind::CohereGguf,
+            ),
+            ("parakeet-tdt-0.6b-v3-F16.gguf", ModelKind::ParakeetGguf),
+            ("parakeet-tdt-0.6b-v3-Q8_0.gguf", ModelKind::ParakeetGguf),
         ] {
             assert_eq!(classify_model_override(name).unwrap(), expected, "{}", name);
         }
@@ -1598,6 +1771,9 @@ mod tests {
             "whistle",
         ] {
             for model in crate::model_catalog::model_catalog(engine) {
+                if engine == "cohere" && model.ends_with(".gguf") {
+                    continue; // GGUF uses the single-file setup branch below.
+                }
                 let arg = crate::model_catalog::download_arg(engine, model).unwrap();
                 let kind = classify_model_override(&arg).unwrap();
                 let route = onnx_setup_route(kind)
@@ -1667,15 +1843,18 @@ mod tests {
                 };
                 let expected = match *engine {
                     "whisper" => ModelKind::Whisper,
+                    "parakeet" if model.ends_with(".gguf") => ModelKind::ParakeetGguf,
                     "parakeet" => ModelKind::Parakeet,
                     "sensevoice" => ModelKind::SenseVoice,
                     "moonshine" => ModelKind::Moonshine,
                     "paraformer" => ModelKind::Paraformer,
                     "dolphin" => ModelKind::Dolphin,
                     "omnilingual" => ModelKind::Omnilingual,
+                    "cohere" if model.ends_with(".gguf") => ModelKind::CohereGguf,
                     "cohere" => ModelKind::Cohere,
                     "openvino" => ModelKind::OpenVino,
                     "whistle" => ModelKind::Whistle,
+                    "gguf" => ModelKind::Gguf,
                     other => panic!(
                         "'{}' advertises a download argument but run_setup has no branch for it",
                         other

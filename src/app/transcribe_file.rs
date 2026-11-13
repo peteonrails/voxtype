@@ -96,7 +96,7 @@ pub(crate) fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow
 /// shipped without this, so a config that worked for dictation silently
 /// did nothing here (#581).
 fn process_transcript(config: &config::Config, text: &str) -> String {
-    voxtype::text::TextProcessor::new_for_language(&config.text, config.active_language())
+    voxtype::text::TextProcessor::new_for_config(&config.text, config.active_language(), config)
         .process(text)
 }
 

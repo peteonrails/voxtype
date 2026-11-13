@@ -82,11 +82,31 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
                     home
                 );
             }
+            if config.text.format_numbers && !cfg!(feature = "itn") {
+                tracing::warn!(
+                    "[text] format_numbers is set, but this build was compiled \
+                     without the `itn` feature, so numbers are left as spoken. \
+                     Rebuild with `--features itn` to use it."
+                );
+            }
+            if config.text.punctuation_casing && !cfg!(feature = "punctuation-casing") {
+                tracing::warn!(
+                    "[text] punctuation_casing is set, but this build does not include the \
+                     punctuation-casing feature. Engine output will be left unchanged."
+                );
+            }
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
     } else {
         tracing::debug!("No config file found at user or system path, using built-in defaults");
+    }
+
+    if let Ok(value) = std::env::var("VOXTYPE_TRAY_ENABLED") {
+        config.tray.enabled = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN") {
+        config.omarchy.link_settings_plugin = parse_bool_env(&value);
     }
 
     // Override from environment variables
@@ -110,6 +130,38 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             Ok(e) => config.engine = e,
             Err(_) => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
+    }
+    if let Ok(model) = std::env::var("VOXTYPE_GGUF_MODEL") {
+        config.gguf.get_or_insert_with(Default::default).model = model;
+    }
+    if let Ok(architecture) = std::env::var("VOXTYPE_GGUF_ARCHITECTURE") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .architecture = architecture;
+    }
+    if let Ok(language) = std::env::var("VOXTYPE_GGUF_LANGUAGE") {
+        config.gguf.get_or_insert_with(Default::default).language = language;
+    }
+    if let Ok(backend) = std::env::var("VOXTYPE_GGUF_BACKEND") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .gguf_backend = backend;
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_THREADS") {
+        if let Ok(threads) = value.parse::<usize>() {
+            config.gguf.get_or_insert_with(Default::default).threads = Some(threads);
+        }
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_ON_DEMAND_LOADING") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .on_demand_loading = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_STREAMING") {
+        config.gguf.get_or_insert_with(Default::default).streaming = parse_bool_env(&value);
     }
     if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
         config.whisper.language = LanguageConfig::from_comma_separated(&lang);
@@ -212,6 +264,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_SPOKEN_PUNCTUATION") {
         config.text.spoken_punctuation = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_LARD_DISFLUENCY") {
+        config.text.lard_disfluency = parse_bool_env(&val);
+    }
+    if let Some(path) = std::env::var_os("VOXTYPE_LARD_MODEL_PATH") {
+        config.text.lard_model_path = Some(path.into());
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_PUNCTUATION_CASING") {
+        config.text.punctuation_casing = parse_bool_env(&val);
+    }
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
     }
@@ -256,6 +317,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_FILTER_FILLERS") {
         config.text.filter_filler_words = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_COLLAPSE_RESTARTS") {
+        config.text.collapse_restarts = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_REPAIR_SENTENCE_BREAKS") {
+        config.text.repair_sentence_breaks = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_FORMAT_NUMBERS") {
+        config.text.format_numbers = parse_bool_env(&val);
     }
 
     Ok(config)

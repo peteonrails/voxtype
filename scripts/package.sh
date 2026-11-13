@@ -44,6 +44,7 @@
 #   - fpm: gem install fpm
 #   - rpmbuild (for rpm): sudo dnf install rpm-build
 #   - ar, tar (for deb validation)
+#   - cargo (renders the man pages via `cargo xtask man`; no voxtype build)
 #
 # Usage:
 #   ./scripts/package.sh [options] [version]
@@ -228,6 +229,10 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
             cargo clean
             cargo build --release
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
+            TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON" \
+                cargo build --release -p voxtype-gguf-worker
+            cp target/release/voxtype-gguf-worker \
+                "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker"
         fi
 
         # Build Vulkan GPU release via Docker (clean toolchain, no AVX-512/GFNI)
@@ -244,6 +249,9 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
             echo "Building aarch64 release..."
             cargo build --release --target aarch64-unknown-linux-gnu
             cp target/aarch64-unknown-linux-gnu/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64"
+            cargo build --release --target aarch64-unknown-linux-gnu -p voxtype-gguf-worker
+            cp target/aarch64-unknown-linux-gnu/release/voxtype-gguf-worker \
+                "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker"
         fi
     fi
 else
@@ -254,6 +262,13 @@ else
             echo "  The baseline (pre-AVX2, #612) binary is required from 1.1.0 on."
             exit 1
         fi
+        for variant in baseline avx2 avx512 vulkan onnx-avx2 onnx-avx512 onnx-cuda-12 onnx-cuda-13 onnx-migraphx; do
+            worker="${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker"
+            if [[ ! -f "$worker" ]]; then
+                echo "Error: GGUF worker not found: $worker"
+                exit 1
+            fi
+        done
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
             echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
             exit 1
@@ -265,6 +280,10 @@ else
     else
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" ]]; then
             echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64"
+            exit 1
+        fi
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker" ]]; then
+            echo "Error: GGUF worker not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker"
             exit 1
         fi
     fi
@@ -343,9 +362,15 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     # the Dockerfile.baseline notes, ymm/FMA counts cannot be gated statically
     # (runtime-dispatched kernels); only execution on a pre-AVX2 CPU proves it.
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline" "voxtype-baseline"; then
-        VALIDATION_FAILED=1
+        VERIFY_FAILED=true
+    fi
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker" "voxtype-baseline GGUF worker"; then
+        VERIFY_FAILED=true
     fi
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
+        VERIFY_FAILED=true
+    fi
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker" "voxtype-avx2 GGUF worker"; then
         VERIFY_FAILED=true
     fi
 
@@ -355,11 +380,43 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan"; then
         VERIFY_FAILED=true
     fi
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker" "voxtype-vulkan GGUF worker"; then
+        VERIFY_FAILED=true
+    fi
+
+    for variant in onnx-avx2 onnx-cuda-12 onnx-cuda-13 onnx-migraphx; do
+        if ! verify_no_forbidden_instructions \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker" \
+            "voxtype-${variant} GGUF worker"; then
+            VERIFY_FAILED=true
+        fi
+    done
 
     # AVX512 binary SHOULD have AVX-512 instructions
     if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "voxtype-avx512"; then
         VERIFY_FAILED=true
     fi
+    if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker" "voxtype-avx512 GGUF worker"; then
+        VERIFY_FAILED=true
+    fi
+    if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512.gguf-worker" "voxtype-onnx-avx512 GGUF worker"; then
+        VERIFY_FAILED=true
+    fi
+
+    # Vulkan linkage must match what each package location promises: CPU
+    # workers for the Whisper CPU tiers, Vulkan-capable ones for the rest.
+    echo ""
+    for variant in baseline avx2 avx512 vulkan onnx-avx2 onnx-avx512 onnx-cuda-12 onnx-cuda-13 onnx-migraphx; do
+        case "$variant" in
+            baseline|avx2|avx512) linkage=--cpu-only ;;
+            *) linkage=--vulkan ;;
+        esac
+        if ! "${SCRIPT_DIR}/verify-gguf-companion.sh" "$linkage" \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}" \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker"; then
+            VERIFY_FAILED=true
+        fi
+    done
 
     if [[ "$VERIFY_FAILED" == "true" ]]; then
         echo ""
@@ -400,14 +457,39 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-vulkan"
 
+    # GGUF worker companions. The application looks beside its resolved
+    # executable (/proc/self/exe) for voxtype-gguf-worker-<variant>, where
+    # <variant> is the executable name minus "voxtype-", then for the generic
+    # voxtype-gguf-worker. Install the v2-floor CPU worker under the generic
+    # name so every packaged x86_64 system can start it, and each variant's own
+    # worker under its variant name: the CPU-tier workers for avx2/avx512, and
+    # Vulkan-capable workers for vulkan and every ONNX variant. setup gpu
+    # --enable's symlinks resolve to the real binary, so they select the same
+    # worker. The baseline binary uses the generic worker (it is the same file).
+    install_gguf_worker() {
+        local variant="$1"      # release-asset variant, e.g. onnx-avx2
+        local dest="$2"         # directory under $STAGING/usr/lib/voxtype
+        install -Dm755 \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker" \
+            "${dest}/voxtype-gguf-worker-${variant}"
+    }
+    install -Dm755 \
+        "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker" \
+        "$STAGING/usr/lib/voxtype/voxtype-gguf-worker"
+    install_gguf_worker avx2 "$STAGING/usr/lib/voxtype"
+    install_gguf_worker avx512 "$STAGING/usr/lib/voxtype"
+    install_gguf_worker vulkan "$STAGING/usr/lib/voxtype"
+
     # x86_64: ONNX binaries (Parakeet + Moonshine engines via ONNX Runtime)
     if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" ]]; then
         cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" "$STAGING/usr/lib/voxtype/voxtype-onnx-avx2"
         chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-avx2"
+        install_gguf_worker onnx-avx2 "$STAGING/usr/lib/voxtype"
     fi
     if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512" ]]; then
         cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512" "$STAGING/usr/lib/voxtype/voxtype-onnx-avx512"
         chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-avx512"
+        install_gguf_worker onnx-avx512 "$STAGING/usr/lib/voxtype"
     fi
     # GPU-accelerated ONNX binaries each live in their own subdirectory
     # alongside the companion shared libs they dlopen at runtime.
@@ -437,6 +519,11 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
         mkdir -p "$subdir"
         cp "$src" "$subdir/voxtype-onnx-${variant}"
         chmod 755 "$subdir/voxtype-onnx-${variant}"
+        # current_exe() resolves into this provider directory, so the
+        # variant's Vulkan-capable worker sits beside the binary. Keep the
+        # generic CPU worker reachable there too, without duplicating it.
+        install_gguf_worker "onnx-${variant}" "$subdir"
+        ln -sf ../voxtype-gguf-worker "$subdir/voxtype-gguf-worker"
         cp "${src}.libonnxruntime_providers_${ep_lib}.so" \
             "$subdir/libonnxruntime_providers_${ep_lib}.so"
         cp "${src}.libonnxruntime_providers_shared.so" \
@@ -472,6 +559,10 @@ else
     # aarch64: Single binary
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" "$STAGING/usr/lib/voxtype/voxtype"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype"
+
+    install -Dm755 \
+        "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker" \
+        "$STAGING/usr/lib/voxtype/voxtype-gguf-worker"
 
     # Install wrapper script as /usr/bin/voxtype
     cp "${SCRIPT_DIR}/voxtype-wrapper.sh" "$STAGING/usr/bin/voxtype"
@@ -513,6 +604,7 @@ cp config/default.toml "$STAGING/etc/voxtype/config.toml"
 cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
 cp README.md "$STAGING/usr/share/doc/voxtype/"
 cp LICENSE "$STAGING/usr/share/doc/voxtype/"
+cp THIRD_PARTY.md "$STAGING/usr/share/doc/voxtype/"
 
 # Quickshell QML tree. The voxtype-osd-quickshell launcher probes this
 # location after the user/runtime paths, so users can opt in via
@@ -534,6 +626,20 @@ if [[ -d quickshell ]]; then
     # Ensure world-readable; QML files don't need execute bits.
     find "$STAGING/usr/share/voxtype/quickshell" -type f -exec chmod 644 {} \;
     find "$STAGING/usr/share/voxtype/quickshell" -type d -exec chmod 755 {} \;
+fi
+
+# Omarchy Settings plugin, in the versioned layout that `voxtype setup
+# omarchy` links into ~/.config/omarchy/plugins. The AUR PKGBUILD calls the
+# same script, so every package ships the same tree. The manifest version
+# names the QML directory, so it has to match the release: a stale one would
+# ship the new QML under an old path and Omarchy would keep its cached copy.
+"$SCRIPT_DIR/stage-omarchy-plugin.sh" "$PROJECT_DIR/omarchy-plugin" "$STAGING/usr/share/voxtype/omarchy-plugin"
+PLUGIN_VERSION=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$STAGING/usr/share/voxtype/omarchy-plugin/io.voxtype.settings/manifest.json")
+if [[ "$PLUGIN_VERSION" != "$VERSION" ]]; then
+    echo "Error: omarchy-plugin/manifest.json version is '$PLUGIN_VERSION', expected '$VERSION'."
+    echo "Bump it together with Cargo.toml."
+    exit 1
 fi
 
 # OSD style packages and recipes. The style resolver searches
@@ -573,16 +679,34 @@ chmod 644 "$STAGING/usr/share/bash-completion/completions/voxtype"
 chmod 644 "$STAGING/usr/share/zsh/site-functions/_voxtype"
 chmod 644 "$STAGING/usr/share/fish/vendor_completions.d/voxtype.fish"
 
-# Man pages (generated by build.rs during cargo build --release)
-MAN_DIR=$(find target/release/build -name "man" -type d -path "*/voxtype-*/out/man" 2>/dev/null | head -1)
-if [[ -n "$MAN_DIR" && -d "$MAN_DIR" ]]; then
-    mkdir -p "$STAGING/usr/share/man/man1"
-    cp "$MAN_DIR"/*.1 "$STAGING/usr/share/man/man1/"
-    chmod 644 "$STAGING/usr/share/man/man1/"*.1
-    echo "  Included $(ls "$MAN_DIR"/*.1 | wc -l) man pages"
-else
-    echo "  Warning: Man pages not found. Run 'cargo build --release' first."
+# Desktop entry for `voxtype configure`, plus the launcher it runs, which
+# finds a terminal emulator to host the TUI. The AUR packages and the
+# debian/rpm source specs already install both; the fpm packages did not.
+install -Dm755 packaging/scripts/voxtype-configure-launcher \
+    "$STAGING/usr/bin/voxtype-configure-launcher"
+install -Dm644 packaging/voxtype-configure.desktop \
+    "$STAGING/usr/share/applications/voxtype-configure.desktop"
+
+# Man pages. Rendered from src/cli by `cargo xtask man`, which compiles
+# only clap and clap_mangen, not voxtype. This used to copy them out of
+# target/release/build/*/out/man, which only exists after a local release
+# build; the CI packaging job has none, so v1.1.1's deb and rpm shipped
+# without man pages after a warning nobody saw. Missing man pages now fail.
+if ! command -v cargo &> /dev/null; then
+    echo "Error: cargo is required to render the man pages (cargo xtask man)."
+    exit 1
 fi
+if ! cargo xtask man "$STAGING/usr/share/man/man1"; then
+    echo "Error: failed to render man pages (cargo xtask man)."
+    exit 1
+fi
+MAN_COUNT=$(find "$STAGING/usr/share/man/man1" -name '*.1' | wc -l)
+if [[ ! -s "$STAGING/usr/share/man/man1/voxtype.1" ]]; then
+    echo "Error: man page voxtype.1 was not rendered."
+    exit 1
+fi
+chmod 644 "$STAGING/usr/share/man/man1/"*.1
+echo "  Included ${MAN_COUNT} man pages"
 
 # Post-install script - provides setup instructions
 # Generate architecture-specific post-install script
@@ -719,6 +843,16 @@ FPM_OPTS=(
     -C "$STAGING"
 )
 
+# x86_64 ships Vulkan-capable GGUF workers beside the vulkan binary and every
+# ONNX binary. They link the Vulkan loader even when gguf_backend = "auto"
+# falls back to the CPU, so the loader is a hard dependency there.
+DEB_VULKAN_DEPENDS=()
+RPM_VULKAN_DEPENDS=()
+if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+    DEB_VULKAN_DEPENDS=(--depends libvulkan1)
+    RPM_VULKAN_DEPENDS=(--depends vulkan-loader)
+fi
+
 # Build deb
 DEB_FILE="${RELEASE_DIR}/voxtype_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 if [[ "$BUILD_DEB" == "true" ]]; then
@@ -730,12 +864,12 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --depends "libasound2 | libasound2t64" \
         --depends libc6 \
         --depends curl \
+        "${DEB_VULKAN_DEPENDS[@]}" \
         --deb-recommends pipewire-alsa \
         --deb-recommends wtype \
         --deb-recommends wl-clipboard \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
-        --deb-suggests libvulkan1 \
         --package "$DEB_FILE" \
         usr etc
 
@@ -765,6 +899,7 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         --depends "glibc" \
         --depends "curl" \
         --depends "pipewire-alsa" \
+        "${RPM_VULKAN_DEPENDS[@]}" \
         --rpm-summary "$DESCRIPTION" \
         --package "$RPM_FILE" \
         usr etc

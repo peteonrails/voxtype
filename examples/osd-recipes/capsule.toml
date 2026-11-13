@@ -1,0 +1,37 @@
+# Capsule: a small dark pill with one flowing voice line.
+#
+# Design intent:
+# - the least you need to see: state icon, a live voice line, the clock
+# - the line shows the current level instead of scrolling history, so it
+#   answers "is it hearing me" at a glance and goes calm in silence
+# - three thin strands in the theme's accent and foreground colors drift
+#   at different speeds, so speech reads as motion without clutter
+# - no glow; a faint hairline edge keeps the pill readable on dark wallpapers
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "pill"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "rgba(255, 255, 255, 0.08)"
+glow = false
+halo = false
+
+[[osd.visual.layers]]
+type = "line"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0
+radius = 2.2

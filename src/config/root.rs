@@ -1,8 +1,8 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig, WhistleConfig,
+    AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
+    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
+    ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
+    StreamingConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig, WhistleConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -60,6 +60,10 @@ pub struct Config {
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
 
+    /// Shared native GGUF configuration (optional, only used for engine = "gguf").
+    #[serde(default)]
+    pub gguf: Option<GgufConfig>,
+
     /// OpenVINO Whisper configuration (optional, only used when engine = "openvino")
     #[serde(default)]
     pub openvino: Option<OpenVinoConfig>,
@@ -99,6 +103,14 @@ pub struct Config {
     #[serde(default)]
     pub osd: crate::osd::config::OsdConfig,
 
+    /// Native Linux StatusNotifierItem tray, enabled unless explicitly disabled.
+    #[serde(default)]
+    pub tray: TrayConfig,
+
+    /// Omarchy desktop integration (the packaged Settings panel).
+    #[serde(default)]
+    pub omarchy: OmarchyConfig,
+
     /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
@@ -117,6 +129,47 @@ pub struct Config {
     pub profiles: HashMap<String, Profile>,
 }
 
+/// Tray preferences are retained on all platforms; runtime support is Linux-only.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrayConfig {
+    #[serde(default = "default_tray_enabled")]
+    pub enabled: bool,
+}
+
+fn default_tray_enabled() -> bool {
+    true
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tray_enabled(),
+        }
+    }
+}
+
+/// Omarchy integration preferences. Ignored on desktops without Omarchy.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OmarchyConfig {
+    /// Let the daemon link the packaged Settings panel into
+    /// `~/.config/omarchy/plugins` on its first start, and refresh it after a
+    /// package upgrade. `voxtype setup omarchy` works either way.
+    #[serde(default = "default_link_settings_plugin")]
+    pub link_settings_plugin: bool,
+}
+
+fn default_link_settings_plugin() -> bool {
+    true
+}
+
+impl Default for OmarchyConfig {
+    fn default() -> Self {
+        Self {
+            link_settings_plugin: default_link_settings_plugin(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -132,6 +185,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            gguf: None,
             openvino: None,
             soniox: None,
             whistle: None,
@@ -140,6 +194,8 @@ impl Default for Config {
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
+            tray: TrayConfig::default(),
+            omarchy: OmarchyConfig::default(),
             meeting: MeetingConfig::default(),
             state_file: default_state_file(),
             profiles: HashMap::new(),
@@ -306,6 +362,15 @@ impl Config {
         .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// Voxtype's user state directory, honoring `$XDG_STATE_HOME` (default
+    /// `~/.local/state`). Holds durable records voxtype writes about itself,
+    /// such as declined model upgrade offers, which never belong in the
+    /// user-edited config file.
+    pub fn state_dir() -> PathBuf {
+        Self::xdg_dir("XDG_STATE_HOME", ".local/state", None)
+            .unwrap_or_else(|| Self::data_dir().join("state"))
+    }
+
     /// Resolve a `voxtype` user dir. An explicit absolute `$xdg_var` wins;
     /// otherwise `$HOME/<default_rel>/voxtype`. Falls back to an existing
     /// `legacy` platform-native dir so an upgrade never orphans a prior install.
@@ -389,6 +454,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::Gguf => self
+                .gguf
+                .as_ref()
+                .map(|g| g.on_demand_loading)
+                .unwrap_or(false),
             TranscriptionEngine::OpenVino => self
                 .openvino
                 .as_ref()
@@ -418,6 +488,7 @@ impl Config {
             },
             TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str())?,
             TranscriptionEngine::Whistle => self.whistle.as_ref()?.language.as_deref()?,
+            TranscriptionEngine::Gguf => self.gguf.as_ref().map(|g| g.language.as_str())?,
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
@@ -429,6 +500,46 @@ impl Config {
         match code {
             "" | "auto" => None,
             other => Some(other),
+        }
+    }
+
+    /// Whether the active backend configuration emits plain text that needs
+    /// punctuation restoration and true-casing. This is an allow-list so a
+    /// new engine keeps its native output until its behavior is tested.
+    pub fn needs_punctuation_casing(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Parakeet => self
+                .parakeet
+                .as_ref()
+                .is_some_and(|config| config.model_type == Some(ParakeetModelType::Ctc)),
+            // SenseVoice's built-in ITN supplies punctuation. Preserve it
+            // when enabled instead of lowercasing and reclassifying it.
+            TranscriptionEngine::SenseVoice => self
+                .sensevoice
+                .as_ref()
+                .is_some_and(|config| !config.use_itn),
+            TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual => true,
+            _ => false,
+        }
+    }
+
+    /// Whether the active engine will run its streaming pipeline.
+    ///
+    /// Streaming types text at the cursor as it is decoded, which means the
+    /// end-of-utterance hooks that reshape a finished transcript never get a
+    /// finished transcript to work on. Callers use this to tell the user which
+    /// of their settings will not apply (#581) rather than letting them
+    /// silently do nothing.
+    pub fn streaming_enabled(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Parakeet => self.parakeet.as_ref().is_some_and(|p| p.streaming),
+            TranscriptionEngine::Soniox => self
+                .soniox
+                .as_ref()
+                .is_some_and(|s| s.streaming && !s.async_api),
+            _ => false,
         }
     }
 
@@ -476,6 +587,11 @@ impl Config {
                 .as_ref()
                 .map(|w| w.model.as_str())
                 .unwrap_or("whistle (not configured)"),
+            TranscriptionEngine::Gguf => self
+                .gguf
+                .as_ref()
+                .map(|g| g.model.as_str())
+                .unwrap_or("gguf (not configured)"),
             TranscriptionEngine::OpenVino => self
                 .openvino
                 .as_ref()
@@ -523,6 +639,18 @@ impl Config {
             TranscriptionEngine::Cohere => {
                 self.cohere.get_or_insert_with(Default::default).model = model
             }
+            TranscriptionEngine::Gguf => {
+                let gguf = self.gguf.get_or_insert_with(Default::default);
+                if gguf.model != model || gguf.architecture.is_empty() {
+                    if let Some(entry) = crate::setup::model::find_pending_gguf_model(&model)
+                        .filter(|entry| entry.runnable)
+                    {
+                        gguf.architecture = entry.arch.to_string();
+                        gguf.language = entry.languages.first().copied().unwrap_or("auto").into();
+                    }
+                }
+                gguf.model = model;
+            }
             TranscriptionEngine::OpenVino => {
                 self.openvino.get_or_insert_with(Default::default).model = model
             }
@@ -549,6 +677,53 @@ mod tests {
     use super::super::hotkey::default_hotkey_key;
     use super::super::{ActivationMode, OutputMode};
     use super::*;
+
+    #[test]
+    fn omarchy_panel_linking_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().omarchy.link_settings_plugin);
+        let old: Config = toml::from_str("[tray]\nenabled = true\n").unwrap();
+        assert!(
+            old.omarchy.link_settings_plugin,
+            "configs without [omarchy] keep it on"
+        );
+        let off: Config = toml::from_str("[omarchy]\nlink_settings_plugin = false\n").unwrap();
+        assert!(!off.omarchy.link_settings_plugin);
+    }
+
+    #[test]
+    fn punctuation_casing_tracks_exact_engine_output_capability() {
+        let mut config = Config::default();
+        assert!(!config.needs_punctuation_casing());
+
+        config.engine = TranscriptionEngine::Paraformer;
+        assert!(config.needs_punctuation_casing());
+        config.engine = TranscriptionEngine::Dolphin;
+        assert!(config.needs_punctuation_casing());
+        config.engine = TranscriptionEngine::Omnilingual;
+        assert!(config.needs_punctuation_casing());
+
+        config.engine = TranscriptionEngine::SenseVoice;
+        config.sensevoice = Some(SenseVoiceConfig::default());
+        assert!(!config.needs_punctuation_casing());
+        config.sensevoice.as_mut().unwrap().use_itn = false;
+        assert!(config.needs_punctuation_casing());
+
+        config.engine = TranscriptionEngine::Parakeet;
+        config.parakeet = Some(ParakeetConfig::default());
+        assert!(!config.needs_punctuation_casing());
+        config.parakeet.as_mut().unwrap().model_type = Some(ParakeetModelType::Ctc);
+        assert!(config.needs_punctuation_casing());
+
+        for engine in [
+            TranscriptionEngine::Moonshine,
+            TranscriptionEngine::Cohere,
+            TranscriptionEngine::OpenVino,
+            TranscriptionEngine::Soniox,
+        ] {
+            config.engine = engine;
+            assert!(!config.needs_punctuation_casing(), "{engine}");
+        }
+    }
 
     #[test]
     fn meeting_mode_forces_soniox_async_when_user_had_realtime() {
@@ -588,6 +763,40 @@ mod tests {
         let meeting_cfg = cfg.with_meeting_mode_overrides();
         assert_eq!(meeting_cfg.engine, cfg.engine);
         assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
+    }
+
+    /// #581: the daemon has to know whether the streaming path is active so
+    /// it can tell the user which of their `[text]` settings will be ignored.
+    /// Getting this predicate wrong is worse than not warning at all: a false
+    /// positive tells someone their working config is broken.
+    #[test]
+    fn streaming_enabled_tracks_the_engine_that_will_actually_run() {
+        // Whisper has no streaming pipeline.
+        assert!(!Config::default().streaming_enabled());
+
+        // Soniox streams by default, but the async API is batch: it uploads a
+        // finished recording and polls, so the completed-transcript hooks do
+        // run and must not be reported as ignored.
+        let soniox = |async_api: bool| Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                streaming: true,
+                async_api,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert!(soniox(false).streaming_enabled());
+        assert!(!soniox(true).streaming_enabled());
+
+        // An engine selected without its config section cannot stream.
+        let orphaned = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: None,
+            ..Config::default()
+        };
+        assert!(!orphaned.streaming_enabled());
     }
 
     #[test]

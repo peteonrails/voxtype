@@ -1,6 +1,195 @@
 # Voxtype Troubleshooting Guide
 
+## Browsing GGUF models without installed weights
+
+The graphical engine picker should stay on GGUF and show Download buttons while
+the configured engine remains unchanged. Download failures and cancellation do
+not activate a model. Retry Download, then choose Use after completion. A failed
+Use shows a short error with optional details and preserves the working config.
+Check the selected checkpoint, language and matching executable worker. No
+download, config-key workaround or service restart is required merely to browse.
+
 Solutions to common issues when using Voxtype.
+
+## Ultra is missing, cannot download, or is not the current model
+
+Use `voxtype info models --json` to distinguish catalogued, supported and locally
+installed weights. Ultra F16/Q8_0/Q4_K_M need a GGUF-capable Parakeet build and its
+matching worker. ONNX-only packages cannot load these files and keep their ONNX
+default. Install a compatible build deliberately rather than renaming a file.
+An existing explicit v3 selection is intentionally preserved, even when Ultra
+weights are installed. Select Ultra explicitly to change it.
+
+Ultra's pinned upstream Hugging Face downloads need network access to that host;
+they do not use an unpublished R2 object. Size/hash rejection does not replace an
+existing good model. Retry a failed explicit download, not a settings save.
+The automatic, read-only Ultra language display is expected: this runtime has
+no selectable language hint for Parakeet. No translation or streaming is added.
+
+## Model upgrade offer fails, is missing, or keeps showing
+
+`voxtype setup migrate` prints the offers for the configured model, and
+`voxtype setup migrate --json` prints the object the tray and Settings read.
+
+- **No offer appears.** Offers need a build with the GGUF runtime for the engine
+  (`voxtype info engines`) and a model in the offer table. Streaming Parakeet
+  setups and models already on Parakeet Ultra get none.
+- **Accept failed.** Download, checksum, activation and restart failures all
+  leave `config.toml` byte-identical and keep the offer. The error names the
+  step. A failed download needs network access to the model host; a busy daemon
+  needs the current dictation or meeting to finish first. If the restarted
+  daemon did not come up, voxtype puts the previous config back and restarts it;
+  `journalctl --user -u voxtype -n 50` shows why the new model failed.
+- **Without a terminal**, accepting needs `--yes`.
+- **The offer still shows after declining.** That is intended: declined offers
+  stay listed, marked declined, so you can accept later. The tooltip line goes
+  away. Declines are stored in `~/.local/state/voxtype/model_upgrade.json`;
+  deleting that file brings the offer back as new.
+- **`--cleanup` refuses.** It only runs after the daemon has transcribed
+  successfully with the accepted model, and it only deletes the previous model
+  when it sits directly in the models directory. Symbolic links and files
+  elsewhere are never removed.
+- **No Parakeet Ultra or GGUF format offer, only the ONNX notice.** Voxtype
+  only offers a GGUF model when it can find the GGUF worker
+  (`voxtype-gguf-worker` beside the voxtype binary, on `PATH`, or set with
+  `VOXTYPE_GGUF_WORKER`). A package built without the worker files shows no
+  offer, because accepting it could not work. The notice that ONNX support ends
+  in 2.0 still shows. Install a voxtype package that includes the GGUF worker.
+
+## "not available" next to an engine in `voxtype setup model`
+
+The binary you are running was built without that engine. Voxtype prints the
+fix for your install:
+
+- **`run sudo voxtype setup onnx --enable`**: the ONNX build is already
+  installed. This switches to it; switch back with `sudo voxtype setup onnx --disable`.
+- **`rebuild voxtype-bin with the <variant> variant`**: your AUR `voxtype-bin`
+  was built for this machine and left that variant out. Run
+  `VOXTYPE_VARIANTS=<variant> yay -S --rebuild voxtype-bin`, or
+  `VOXTYPE_VARIANTS=<variant> makepkg -si` from a clone of the AUR repo.
+- **`reinstall the voxtype package`**: the package is missing a file it should
+  have. Reinstall it with your package manager.
+- **`rebuild with --features <name>`**: you built voxtype from source. Rebuild
+  with that Cargo feature.
+
+Whisper builds since 1.2.0 run Parakeet and Cohere as GGUF models with no ONNX
+build at all. `voxtype setup model` lists them under "Parakeet GGUF" and
+"Cohere Transcribe GGUF".
+
+## Backend changed after upgrading voxtype-bin
+
+The upgrade prints "Your previous backend (voxtype-X) is not in this build of
+voxtype-bin." This happens when the package was built in a clean chroot or on a
+different machine, so the build could not see the backend you use. Dictation
+keeps working on the CPU build. Get your backend back with
+`VOXTYPE_VARIANTS=X yay -S --rebuild voxtype-bin` (X is the name in the message
+without `voxtype-`), then `sudo voxtype setup onnx --enable` or
+`sudo voxtype setup gpu --enable` if needed.
+
+If `voxtype setup onnx --enable` (or `setup gpu --enable`) says the variant is
+not installed, check `/usr/lib/voxtype/package-variants` and rebuild with the
+one you need, for example `VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin`.
+
+## Status reports an ONNX backend for a GGUF model
+
+Upgrade to a build where `voxtype status --format json --extended` reports
+`GGUF ... (transcribe.cpp)` for `.gguf` models. GGUF models run in
+`voxtype-gguf-worker` regardless of the main binary's ONNX variant. With
+`gguf_backend = "auto"` the label reads `GGUF (transcribe.cpp)` until the worker
+has loaded the model and reported Vulkan or CPU; with `on_demand_loading = true`
+that happens at the first dictation.
+
+## Parakeet is compiled but startup requests an unavailable ONNX feature
+
+Check the exact model with `voxtype config get parakeet.model`. A name such as
+`parakeet-tdt-0.6b-v2` selects legacy ONNX, whereas a `.gguf` file selects the
+GGUF worker. `info engines` reports engine-level compilation, not both formats.
+The same distinction applies to Cohere.
+
+Run `voxtype config validate-selection` for a format-specific diagnosis. Select
+an already installed compatible checkpoint, or explicitly download one using
+the command in the error. Do not merely restart repeatedly or replace a working
+MIGraphX binary with a CPU build. Selection failure leaves the config unchanged;
+an existing impossible config is explained but never silently migrated on load.
+
+## Language menu is read-only or does not change
+
+An English-only checkpoint or an engine without a verified selectable hint is
+read-only. Auto is not offered for Cohere. An unrecognized custom model or
+remote/CLI backend is not assumed to implement the local Whisper language list.
+The submenu names the default checkpoint, not a temporary per-record model.
+
+A language change during recording/transcription is saved for the next dictation;
+it does not change or discard the active utterance. A save failure leaves the
+previous checkmark, logs the cause and displays a menu explanation/notification.
+Check file permissions and whether another UI changed the engine/model since the
+daemon started. Do not restart in the middle of a recording to force a reload.
+
+On the current Omarchy host, a second click reopens the menu instead of closing
+it. That click is handled entirely by the shell for `ItemIsMenu=true`; the native
+daemon never receives an Activate call. A separate isolated host patch is
+provided for review, not applied to the installed shell by the local installer.
+
+## Native tray does not appear
+
+The tray is enabled by default: check `voxtype config get tray.enabled` and restart the daemon
+after changing it. Explicit `false` disables it. A settings panel or recording OSD is not a tray host. Omarchy,
+KDE and Waybar support StatusNotifierItem; GNOME needs its AppIndicator extension.
+
+The tray uses embedded pixmaps even when optional hicolor icons are not installed.
+Left-click opens the native menu; only its Settings row launches the full frontend.
+
+Inspect the session bus with:
+
+```sh
+busctl --user get-property org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
+  org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems
+```
+
+No session bus or host is nonfatal to dictation. A host starting late or restarting
+is handled without restarting Voxtype. Idle is Active (not Passive), but a host
+can still hide an item or put it in its drawer; look for the `voxtype` item ID in
+its settings. Embedded icon pixmaps do not require a writable home directory.
+
+If opening settings fails, run `voxtype-configure-launcher` from a terminal for
+its diagnostic. Quickshell must have the settings plugin integrated and responding.
+There is no bundled GTK settings app, and the GTK OSD is never used as one. If no
+graphical frontend is installed, install a supported terminal or run
+`voxtype configure` directly. Tray action failures are logged, not ignored.
+
+
+## Omarchy Settings panel
+
+`voxtype setup omarchy --status` shows how the panel is installed: `linked`
+(the packaged copy, updated with voxtype), `linked-stale`, `copy`,
+`foreign-link`, `absent`, `no-package` or `not-omarchy`.
+
+- **Still shows the old version after an upgrade** (`linked-stale`). Restart the
+  daemon (`systemctl --user restart voxtype`), which asks Omarchy to rescan. Or
+  run `omarchy-shell shell rescanPlugins` yourself, or as a last resort
+  `omarchy-restart-shell`.
+- **Does not update with voxtype** (`copy`). The panel came from
+  `omarchy plugin add`. Switch with `voxtype setup omarchy --replace`; your copy
+  is backed up. `foreign-link` means the panel is a symlink to somewhere else,
+  such as a development checkout, and voxtype leaves it alone in the same way.
+  If you chose **Not now** on the Switch banner, it stays hidden for that copy;
+  `--status` still shows `copy`, and `--replace` still switches.
+- **Did not appear on first start.** If Omarchy's shell was not running yet, the
+  daemon links the panel and enables it at its next start. To do it now, run
+  `voxtype setup omarchy --restart-shell`.
+- **Removed it and want it back.** Run `voxtype setup omarchy`. The daemon never
+  re-adds it on its own.
+- **"Voxtype Settings could not run ..."** The panel could not start the voxtype
+  binary it names, so it shows nothing rather than stale values. If the message
+  names a `dev.json` (next to the plugin's `manifest.json`), that file points at
+  a build that no longer exists: fix the path, or delete the file to use
+  `voxtype` from `PATH`. Otherwise voxtype is not installed or not on `PATH` for
+  the shell. On Omarchy, run `omarchy-install-dictation-voxtype` (the panel's
+  Install / Update button runs it). Reopen the panel after fixing it.
+- **A red "voxtype info ... failed" strip.** `voxtype info engines`,
+  `info devices` or `info styles` exited with the error shown. That list (engine
+  availability, input devices, OSD styles) is left empty rather than showing old
+  entries. Run the same command with `--json` in a terminal for the full error.
 
 ## Table of Contents
 
@@ -9,11 +198,13 @@ Solutions to common issues when using Voxtype.
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
+  - [GGUF worker selection](#gguf-worker-selection)
 - [Voice Activity Detection (VAD)](#voice-activity-detection-vad)
 - [Output Problems](#output-problems)
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
+  - [Edit-list post-processing keeps the original text](#edit-list-post-processing-keeps-the-original-text)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
@@ -306,6 +497,63 @@ max_duration_secs = 120  # 2 minutes
 
 ## Transcription Issues
 
+### Shared GGUF selection is refused
+
+The `gguf` engine validates the selected checkpoint's architecture, language,
+file size/header, compiled client, and companion worker before saving an engine
+or model change. Download the named model first with
+`voxtype setup --download --model <filename>` and keep the worker shipped with
+the same Voxtype build. `streaming = true` is intentionally unsupported. An
+explicit `vulkan` backend also fails when no hardware Vulkan device is visible;
+use `auto` or `cpu` only when that is the backend you intend.
+
+### GGUF worker selection
+
+Cohere and Parakeet GGUF models run in a companion worker process. Release
+packages install a generic CPU worker named `voxtype-gguf-worker` and may also
+install workers for accelerated binary variants, such as
+`voxtype-gguf-worker-vulkan`.
+
+Voxtype selects the worker that matches the running executable. For example,
+`voxtype-vulkan` first tries `voxtype-gguf-worker-vulkan` in the same directory,
+then falls back to `voxtype-gguf-worker`. This also works when `voxtype` is a
+symlink to a variant binary, as created by `voxtype setup gpu --enable`.
+
+Set `VOXTYPE_GGUF_WORKER` to use a worker at another path or to diagnose a
+packaging problem:
+
+```bash
+VOXTYPE_GGUF_WORKER=/path/to/voxtype-gguf-worker-vulkan voxtype daemon
+```
+
+The override always takes priority. If a worker cannot initialize, the error
+names the selected worker path so you can verify that its variant matches the
+configured `gguf_backend`.
+
+ONNX CUDA and MIGraphX variants keep their ONNX engines and provider libraries.
+Their packaged provider subdirectories also contain a link to the generic CPU
+GGUF worker, so Cohere GGUF can run without replacing the legacy-capable
+application. Those variants' bundled workers are CPU-only: to use hardware
+Vulkan with Cohere GGUF while retaining ONNX support, set `VOXTYPE_GGUF_WORKER`
+to `/usr/lib/voxtype/voxtype-gguf-worker-vulkan` and configure
+`[cohere] gguf_backend = "vulkan"`. The Vulkan application itself does not
+include the legacy ONNX engines. Parakeet GGUF additionally requires an
+application built with `parakeet-gguf` (included in `gpu-vulkan`, not in the
+ONNX-only feature lists).
+
+### Cohere or Parakeet changed defaults, but my existing model is still ONNX
+
+This is intentional. GGUF-capable builds recommend transcribe.cpp/GGUF for a
+first engine selection, but preserve explicit saved model names and paths.
+Check `voxtype config get cohere.model` or `voxtype config get parakeet.model`
+and `voxtype info models --json` to distinguish your saved model from the
+compiled default. Do not delete a working ONNX/MIGraphX configuration to fix a
+missing GGUF worker. Keep the legacy-capable binary and its provider libraries
+for ONNX models. To migrate deliberately, download and select a GGUF model,
+install the matching `voxtype-gguf-worker`, and turn off Parakeet streaming.
+A GGUF-capable main binary alone does not guarantee that worker or GPU support
+is installed.
+
 ### "Model not found"
 
 **Cause:** Whisper model not downloaded or wrong path.
@@ -320,6 +568,19 @@ mkdir -p ~/.local/share/voxtype/models
 curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
+
+### Punctuation/casing stays lowercase or logs a model warning
+
+The optional cleanup classifier is separate from the speech model. Download
+it with `voxtype setup punctuation`, then check it with
+`voxtype setup punctuation --status`. This stage runs only for Paraformer,
+Dolphin, Omnilingual, Parakeet CTC, and SenseVoice with `use_itn = false`;
+engines that already punctuate are intentionally unchanged.
+
+If the log says the feature is unavailable, use an ONNX release binary or
+build with `--features punctuation-casing`. Unsupported languages and any
+inference error fall back to the original transcript, so a cleanup failure
+does not lose dictated text.
 
 ### OpenVINO: transcription fails with "unknown exception" (but the daemon starts fine)
 
@@ -964,6 +1225,28 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 notify-send "Test" "This is a test"
 ```
 
+### Edit-list post-processing keeps the original text
+
+**Symptoms:** `output.post_process.edit_list = true` is enabled, but Voxtype
+types the original transcription. Verbose logs report an invalid edit list.
+
+**Cause:** The command did not return the strict edit-list contract. Common
+causes are a prose preamble, a Markdown code fence, a missing `reason`, a
+`find` string that is absent or occurs more than once, or overlapping edits.
+
+**Solution:** Run the configured command by hand with a sample transcription
+on stdin. Its entire stdout must be one JSON array:
+
+```json
+[
+  {"find":"It are ready","replace":"It is ready","reason":"grammar"}
+]
+```
+
+Use `voxtype -vv` to see why Voxtype rejected the response. Tighten the LLM
+prompt or script so it prints no text outside the JSON array. If the same target
+appears more than once, have the command return a larger, unique `find` string.
+
 ---
 
 ## Performance Issues
@@ -1270,8 +1553,45 @@ or a package manifest, restart the daemon (or the OSD) to re-resolve:
 systemctl --user restart voxtype
 ```
 
-Omarchy theme switches are picked up without a restart only if the style file
-is rewritten; re-launching the OSD refreshes the palette.
+Omarchy theme switches are different: when the palette is `omarchy` (the
+default when no package chooses one), the launcher watches the active theme
+and rewrites the style file, and the OSD applies the new colors without a
+restart. If a theme switch doesn't recolor the OSD, check that `palette`
+isn't set to `fallback`, `package`, or `custom`, and restart the daemon if
+the launcher was started before the theme directory existed.
+
+### Shell Line or Shell Dots doesn't match the shell's corners or border
+
+Both shell presets need a launcher and QML tree that support `layout = "shell"`.
+If the layout is rejected or its shape is unchanged, upgrade both parts as
+described above. The radius comes from `hyprctl -j getoption decoration:rounding`;
+without working Hyprland IPC the design deliberately uses square corners.
+The popup border/text and font/spacing tokens come from the active theme's
+`shell.toml`, with `~/.config/omarchy/shell.toml` overrides. Missing or invalid
+TOML uses shell defaults. Keep `palette = "omarchy"` for live token reloads.
+Other layouts do not inherit these shell-specific settings.
+
+### OSD shows no clock, countdown, or result
+
+The elapsed time, the countdown before `max_duration_secs`, the engine and
+model chip, and the result shown after a session all come from
+`recording.json` and `outcome.json` in `$XDG_RUNTIME_DIR/voxtype/`. They are
+missing when:
+
+- the daemon predates these files (the QML tree was updated but the daemon
+  binary wasn't), or
+- `state_file = "disabled"`, which turns these files off along with the
+  state file.
+
+Check while recording:
+
+```bash
+cat "$XDG_RUNTIME_DIR/voxtype/recording.json"
+cat "$XDG_RUNTIME_DIR/voxtype/outcome.json"   # after a session ends
+```
+
+No result is shown for cancelled recordings, accidental taps, or
+`record start --no-osd` sessions; that is expected.
 
 ---
 
@@ -1368,6 +1688,38 @@ journalctl --user -u pulseaudio -n 20
 ```
 
 ---
+
+### Trained LARD cleanup is not running
+
+- It is off by default. Enable `text.lard_disfluency` and select an explicit
+  English language. `auto`, unknown, and non-English languages skip it.
+- Run `voxtype setup lard --status`. Install the pinned local artifact with
+  `voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`.
+- Model publication still requires approval. Do not expect a default download;
+  an explicit HTTPS URL must return the exact pinned artifact. Checksum failures
+  preserve any existing installed model.
+- Check `text.lard_model_path` and the XDG data directory used by the daemon.
+  Restart after changing configuration. Missing or invalid models produce a
+  warning and skip only this stage; startup never tries a download.
+- Streaming partials stay raw. Cleanup runs only at finalization and can revise
+  already typed partials only when backspace output succeeds. For cross-segment
+  cleanup, use batch or file output. LLM post-processing is still batch-only.
+
+### Profile vocabulary does not correct a term
+
+- Start or toggle the recording with the profile that owns the vocabulary:
+  `voxtype record start --profile code`.
+- Restart the daemon after changing `terms` or `terms_file`; vocabulary files
+  are loaded at startup.
+- Run `voxtype -vv` and look for `Profile vocabulary disabled`. The warning
+  names unreadable files and JSON that is not an array of strings.
+- Use `[text.replacements]` for short terms, distant spellings, or an exact
+  correction. Vocabulary intentionally leaves uncertain matches unchanged.
+- Profile terms are appended to an explicit Whisper prompt or Soniox terms
+  list, not substituted for it. Enable `-vv` logging to inspect which profile
+  is active without logging private term values.
+- Streaming correction applies only to finalized segments. A provisional word
+  can remain misspelled until the backend marks that segment final.
 
 ## Getting Help
 

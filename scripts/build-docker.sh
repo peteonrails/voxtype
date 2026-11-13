@@ -16,6 +16,7 @@
 #
 # Output:
 #   releases/X.Y.Z/voxtype-X.Y.Z-linux-x86_64-avx2
+#   releases/X.Y.Z/voxtype-X.Y.Z-linux-x86_64-avx2.gguf-worker
 #
 # The Dockerfile includes verification that fails if forbidden instructions
 # are detected.
@@ -100,6 +101,7 @@ if [[ -n "$DOCKER_CONTEXT" ]]; then
     # Create container, copy file out, remove container
     CONTAINER_ID=$(docker $CONTEXT_FLAG create voxtype-builder)
     docker $CONTEXT_FLAG cp "$CONTAINER_ID:/tmp/voxtype-avx2" "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
+    docker $CONTEXT_FLAG cp "$CONTAINER_ID:/tmp/voxtype-gguf-worker" "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker"
     docker $CONTEXT_FLAG rm "$CONTAINER_ID" > /dev/null
 else
     docker run --rm -v "$(pwd)/${RELEASE_DIR}:/output" voxtype-builder
@@ -139,11 +141,15 @@ if ! verify_clean "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype
     echo "The Docker build should have caught this - check Dockerfile.build"
     exit 1
 fi
+if ! verify_clean "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker" "voxtype-avx2 GGUF worker"; then
+    echo "ERROR: GGUF worker verification failed!"
+    exit 1
+fi
 
 echo ""
 echo "=== Docker build complete ==="
 echo ""
-ls -lh "${RELEASE_DIR}"/voxtype-${VERSION}-linux-x86_64-avx2
+ls -lh "${RELEASE_DIR}"/voxtype-${VERSION}-linux-x86_64-avx2*
 echo ""
 echo "Next steps:"
 echo "  1. Build AVX-512 binary locally (needs native AVX-512):"

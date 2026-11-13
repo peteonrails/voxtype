@@ -39,7 +39,7 @@ pub const SECTIONS: &[&str] = &[
     "Hotkey",
     "Audio",
     "Output",
-    "Text",
+    "Text Cleanup",
     "VAD",
     "Meeting",
     "Notifications",
@@ -116,6 +116,10 @@ pub struct KeySpec {
     /// Cargo feature that must be compiled in for the key to do anything.
     pub requires_feature: Option<&'static str>,
     pub restart_required: bool,
+    /// Set when the key only applies to an ONNX model of its engine and has no
+    /// effect while that engine's configured model is a `.gguf` file. UIs hide
+    /// such keys for a GGUF model.
+    pub onnx_model_only: bool,
 }
 
 const fn spec(
@@ -138,6 +142,7 @@ const fn spec(
         engine: None,
         requires_feature: None,
         restart_required: true,
+        onnx_model_only: false,
     }
 }
 
@@ -152,6 +157,11 @@ impl KeySpec {
     const fn for_onnx_engine(mut self, engine: &'static str) -> Self {
         self.engine = Some(engine);
         self.requires_feature = Some(engine);
+        self
+    }
+
+    const fn onnx_model_only(mut self) -> Self {
+        self.onnx_model_only = true;
         self
     }
 
@@ -179,15 +189,20 @@ impl KeySpec {
 /// Only features that gate config keys are listed. Pinned against
 /// [`crate::config_set::engine_feature_compiled`] by a test so the two
 /// `cfg!` blocks can't drift.
+// In a build with every listed feature (the ONNX release binaries, which also
+// carry the GGUF client) each arm is `true`, and clippy would rewrite this as
+// `matches!`, hiding the per-feature mapping the other builds depend on.
+#[allow(clippy::match_like_matches_macro)]
 pub fn feature_compiled(feature: &str) -> bool {
     match feature {
-        "parakeet" => cfg!(feature = "parakeet"),
+        "parakeet" => cfg!(any(feature = "parakeet", feature = "parakeet-gguf")),
         "moonshine" => cfg!(feature = "moonshine"),
         "sensevoice" => cfg!(feature = "sensevoice"),
         "paraformer" => cfg!(feature = "paraformer"),
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
-        "cohere" => cfg!(feature = "cohere"),
+        "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
+        "gguf" => cfg!(feature = "gguf"),
         "openvino" => cfg!(feature = "openvino-whisper"),
         "whistle" => cfg!(feature = "whistle"),
         _ => false,
@@ -249,8 +264,10 @@ const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
 /// Canonical hints only — any palette role name or literal color is accepted.
 const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
-const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
-const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
+const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "aura", "none"];
+const OSD_LAYOUT_CHOICES: &[&str] = &[
+    "compact", "wide", "minimal", "pill", "shell", "tile", "orb", "custom",
+];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -427,7 +444,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Parakeet model directory name under the voxtype models dir.",
+        "Parakeet ONNX model directory, or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -438,6 +455,28 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Engine",
         "Decoder type",
         "Force the decoder family instead of auto-detecting it from the model directory.",
+    )
+    .for_onnx_engine("parakeet")
+    // A GGUF file carries its own architecture; the setting is ignored there.
+    .onnx_model_only(),
+    spec(
+        "parakeet.threads",
+        "parakeet",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "ONNX Runtime intra-op threads. Unset uses 4; long CPU dictations are fastest at the physical core count. GGUF models: transcribe.cpp CPU threads.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
+        "parakeet.gguf_backend",
+        "parakeet",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -643,7 +682,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Cohere Transcribe model variant (quantization level).",
+        "Cohere ONNX model variant or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("cohere"),
     spec(
@@ -663,7 +702,37 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 1, max: 256 },
         "Engine",
         "Threads",
-        "ONNX Runtime intra-op threads. Unset lets voxtype pick.",
+        "Inference threads. Unset lets the runtime pick.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.gguf_backend",
+        "cohere",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.max_chunk_secs",
+        "cohere",
+        "max_chunk_secs",
+        KeyType::Int { min: 5, max: 35 },
+        "Engine",
+        "Max chunk duration",
+        "Maximum seconds per Cohere inference; longer recordings split near quiet boundaries.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.boundary_search_secs",
+        "cohere",
+        "boundary_search_secs",
+        KeyType::Float { min: 0.0, max: 5.0 },
+        "Engine",
+        "Boundary search",
+        "Seconds around each balanced split to search for a quiet boundary.",
     )
     .for_onnx_engine("cohere"),
     spec(
@@ -676,6 +745,84 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // shared transcribe.cpp GGUF
+    spec(
+        "gguf.model",
+        "gguf",
+        "model",
+        KeyType::DynamicEnum { source: "models" },
+        "Engine",
+        "Model path",
+        "Path to a curated or custom transcribe.cpp GGUF checkpoint.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.architecture",
+        "gguf",
+        "architecture",
+        KeyType::String,
+        "Engine",
+        "Architecture",
+        "Expected general.architecture value; curated checkpoints validate it automatically.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.language",
+        "gguf",
+        "language",
+        KeyType::String,
+        "Engine",
+        "Language",
+        "Language hint validated against the selected checkpoint metadata.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.gguf_backend",
+        "gguf",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for the isolated transcribe.cpp worker.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.threads",
+        "gguf",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "Inference threads. Unset lets transcribe.cpp choose.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.on_demand_loading",
+        "gguf",
+        "on_demand_loading",
+        KeyType::Bool,
+        "Engine",
+        "Load on demand",
+        "Load the worker model when recording starts and unload at idle.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.streaming",
+        "gguf",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Native streaming",
+        "Reserved for native streaming; true is rejected until implemented.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
     // openvino
     spec(
         "openvino.model",
@@ -1118,13 +1265,49 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Keep text when output is empty",
         "Output the original transcription when the command prints nothing. Turn off to let the command drop a transcription.",
     ),
+    spec(
+        "output.post_process.edit_list",
+        "output.post_process",
+        "edit_list",
+        KeyType::Bool,
+        "Output",
+        "Require an edit list",
+        "Accept only a JSON list of exact, unambiguous edits from the post-process command.",
+    ),
     // -- Text ---------------------------------------------------------------
+    spec(
+        "text.lard_disfluency",
+        "text",
+        "lard_disfluency",
+        KeyType::Bool,
+        "Text Cleanup",
+        "LARD disfluency cleanup",
+        "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+    ),
+    spec(
+        "text.lard_model_path",
+        "text",
+        "lard_model_path",
+        KeyType::String,
+        "Text Cleanup",
+        "LARD model file",
+        "Path to the local VXDF model. By default use the model installed by voxtype setup lard in the XDG data directory.",
+    ),
+    spec(
+        "text.punctuation_casing",
+        "text",
+        "punctuation_casing",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Restore punctuation and casing",
+        "Add punctuation, sentence boundaries, and letter casing to plain CTC output. Engines that already provide them are unchanged.",
+    ),
     spec(
         "text.spoken_punctuation",
         "text",
         "spoken_punctuation",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Spoken punctuation",
         "Convert spoken names like \"period\" and \"new line\" into the characters they describe.",
     ),
@@ -1133,7 +1316,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "smart_auto_submit",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Say \"submit\" to press Enter",
         "Strip a trailing \"submit\" from the transcription and press Return instead.",
     ),
@@ -1142,16 +1325,43 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "filter_filler_words",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Drop filler words",
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
+    ),
+    spec(
+        "text.collapse_restarts",
+        "text",
+        "collapse_restarts",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Collapse restarts and stutters",
+        "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
+    ),
+    spec(
+        "text.repair_sentence_breaks",
+        "text",
+        "repair_sentence_breaks",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Repair sentence breaks",
+        "Join fragments split off by a premature sentence boundary and add question marks to interrogatives.",
+    ),
+    spec(
+        "text.format_numbers",
+        "text",
+        "format_numbers",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Format dictated numbers",
+        "Convert spoken quantities to written form (\"twenty five dollars\" -> \"$25\"). Prose-heavy words like \"one\" and \"first\" are left alone.",
     ),
     spec(
         "text.replacements.<from>",
         REPLACEMENTS_TABLE,
         "<from>",
         KeyType::MapString,
-        "Text",
+        "Text Cleanup",
         "Word replacements",
         "Case-insensitive substitutions applied to the transcription, keyed by the spoken form.",
     ),
@@ -1258,6 +1468,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Post a notification when voice activity detection finds no speech and the recording is discarded.",
     ),
     spec(
+        "output.notification.show_edits",
+        "output.notification",
+        "show_edits",
+        KeyType::Bool,
+        "Notifications",
+        "Show cleanup edits",
+        "When cleanup or post-processing changed the text, show the edits as a word diff in the transcription notification instead of a plain preview.",
+    ),
+    spec(
         "output.notification.show_engine_icon",
         "output.notification",
         "show_engine_icon",
@@ -1265,6 +1484,20 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Notifications",
         "Engine icon in title",
         "Prefix the notification title with the active engine's icon.",
+    ),
+    spec(
+        "tray.enabled", "tray", "enabled", KeyType::Bool, "Status",
+        "Native system tray",
+        "Show the Linux system tray icon and recording controls. Enabled by default; restart the daemon after changing. Requires a StatusNotifierItem host, such as Omarchy, KDE, Waybar or GNOME AppIndicator.",
+    ),
+    spec(
+        "omarchy.link_settings_plugin",
+        "omarchy",
+        "link_settings_plugin",
+        KeyType::Bool,
+        "Status",
+        "Link Omarchy Settings panel",
+        "On Omarchy, let the daemon link the packaged Voxtype Settings panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
     ),
     // -- OSD ----------------------------------------------------------------
     spec(
@@ -1565,6 +1798,31 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
          login and lands on CPU.",
     )
     .for_engine("whisper"),
+    spec(
+        "parakeet.max_window_secs",
+        "parakeet",
+        "max_window_secs",
+        KeyType::Float { min: 0.0, max: 3600.0 },
+        "Advanced",
+        "Max audio per pass",
+        "Longest stretch of audio sent to the model at once. Longer recordings are \
+         split into overlapping windows, because the TDT exports abort rather than \
+         degrade past their fixed attention size. 0 disables windowing.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "parakeet.window_overlap_secs",
+        "parakeet",
+        "window_overlap_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Window overlap",
+        "Audio shared between consecutive windows, used to find where two passes \
+         agree so the join is not duplicated or cut short.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
     spec(
         "parakeet.streaming",
         "parakeet",
@@ -2481,6 +2739,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
     let wh = || cfg.whistle.clone().unwrap_or_default();
+    let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
     let so = || cfg.soniox.clone().unwrap_or_default();
     // Without a table, post-processing is off; report the values a new
@@ -2517,10 +2776,17 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
 
         "parakeet.model" => json!(pk().model),
+        "parakeet.max_window_secs" => json!(pk().max_window_secs),
+        "parakeet.window_overlap_secs" => json!(pk().window_overlap_secs),
         "parakeet.model_type" => match pk().model_type {
             Some(t) => serde_json::to_value(t).ok()?,
             None => Json::Null,
         },
+        "parakeet.threads" => match pk().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "parakeet.gguf_backend" => json!(pk().gguf_backend),
         "parakeet.on_demand_loading" => json!(pk().on_demand_loading),
         "parakeet.streaming" => json!(pk().streaming),
 
@@ -2568,11 +2834,25 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+        "cohere.gguf_backend" => json!(co().gguf_backend),
+        "cohere.max_chunk_secs" => json!(co().max_chunk_secs),
+        "cohere.boundary_search_secs" => json!(co().boundary_search_secs),
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
         "whistle.model" => json!(wh().model),
         "whistle.language" => json!(wh().language),
         "whistle.keywords" => json!(wh().keywords),
         "whistle.runtime" => json!(wh().runtime.map(|p| p.to_string_lossy().into_owned())),
+
+        "gguf.model" => json!(gg().model),
+        "gguf.architecture" => json!(gg().architecture),
+        "gguf.language" => json!(gg().language),
+        "gguf.gguf_backend" => json!(gg().gguf_backend),
+        "gguf.threads" => match gg().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "gguf.on_demand_loading" => json!(gg().on_demand_loading),
+        "gguf.streaming" => json!(gg().streaming),
 
         "openvino.model" => json!(ov().model),
         "openvino.device" => json!(ov().device),
@@ -2632,10 +2912,17 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.post_process.timeout_ms" => json!(pp().timeout_ms),
         "output.post_process.trim" => json!(pp().trim),
         "output.post_process.fallback_on_empty" => json!(pp().fallback_on_empty),
+        "output.post_process.edit_list" => json!(pp().edit_list),
 
+        "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
+        "text.lard_model_path" => json!(cfg.text.lard_model_path),
+        "text.punctuation_casing" => json!(cfg.text.punctuation_casing),
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
+        "text.collapse_restarts" => json!(cfg.text.collapse_restarts),
+        "text.repair_sentence_breaks" => json!(cfg.text.repair_sentence_breaks),
+        "text.format_numbers" => json!(cfg.text.format_numbers),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg
                 .text
@@ -2663,8 +2950,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }
         "output.notification.on_transcription" => json!(cfg.output.notification.on_transcription),
         "output.notification.on_no_speech" => json!(cfg.output.notification.on_no_speech),
+        "output.notification.show_edits" => json!(cfg.output.notification.show_edits),
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
+        "tray.enabled" => json!(cfg.tray.enabled),
+        "omarchy.link_settings_plugin" => json!(cfg.omarchy.link_settings_plugin),
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
@@ -2863,6 +3153,10 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
     o.insert("engine".into(), json!(spec.engine));
     o.insert("compiled".into(), json!(spec.compiled()));
     o.insert("restart_required".into(), json!(spec.restart_required));
+    // Additive and only present when set, like `open`: older consumers ignore it.
+    if spec.onnx_model_only {
+        o.insert("onnx_model_only".into(), json!(true));
+    }
     Json::Object(o)
 }
 
@@ -2875,6 +3169,7 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
+    let profiles = serde_json::to_value(&cfg.profiles).unwrap_or_else(|_| json!({}));
     // `voxtype_version` is this CLI's build. `daemon_version` is what is
     // actually serving dictation, which is routinely a different thing: an
     // upgrade installed but not restarted, an ExecStart override pointing at
@@ -2892,6 +3187,7 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         "engine": cfg.engine.name(),
         "keys": keys,
         "replacements": Json::Object(replacements),
+        "profiles": profiles,
     })
 }
 
@@ -2912,6 +3208,10 @@ pub fn get_all_json(cfg: &Config) -> Json {
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
     o.insert(REPLACEMENTS_TABLE.to_string(), Json::Object(replacements));
+    o.insert(
+        "profiles".to_string(),
+        serde_json::to_value(&cfg.profiles).unwrap_or_else(|_| json!({})),
+    );
     Json::Object(o)
 }
 
@@ -3082,6 +3382,14 @@ mod tests {
                 continue;
             }
             for choice in choices {
+                if s.key == "engine" {
+                    // Enum deserialization is independent of installed weights.
+                    // Activation/persistence has separate transaction tests.
+                    let cfg: crate::config::Config =
+                        toml::from_str(&format!("engine = {choice:?}")).unwrap();
+                    assert_eq!(cfg.engine.name(), *choice);
+                    continue;
+                }
                 let (_dir, path) = temp_config();
                 let typed = validate_value(s, choice).unwrap();
                 let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
@@ -3340,6 +3648,7 @@ mod tests {
         assert_eq!(doc["config_path"], json!(path.display().to_string()));
         assert_eq!(doc["engine"], json!("whisper"));
         assert!(doc["replacements"].is_object());
+        assert!(doc["profiles"].is_object());
 
         let keys = doc["keys"].as_array().unwrap();
         assert_eq!(keys.len(), scalar_keys().count());
@@ -3418,6 +3727,32 @@ mod tests {
             .find(|k| k["key"] == json!("whisper.initial_prompt"))
             .unwrap();
         assert_eq!(prompt["file_value"], Json::Null);
+    }
+
+    #[test]
+    fn decoder_type_is_flagged_onnx_model_only_and_nothing_else_is() {
+        let (_dir, path) = temp_config();
+        let cfg = load_config(Some(&path)).unwrap();
+        let ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let doc = schema_json(&cfg, &path, &ed);
+        let flagged: Vec<&str> = doc["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|k| k.get("onnx_model_only").is_some())
+            .map(|k| {
+                // Only ever emitted as `true`; absence means "applies to any model".
+                assert_eq!(k["onnx_model_only"], json!(true), "{}", k);
+                k["key"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(flagged, ["parakeet.model_type"]);
+
+        let spec = scalar_keys()
+            .find(|s| s.key == "parakeet.model_type")
+            .unwrap();
+        assert!(spec.onnx_model_only);
+        assert_eq!(spec.engine, Some("parakeet"));
     }
 
     #[test]
@@ -3506,6 +3841,7 @@ mod tests {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gguf",
             "openvino",
             "soniox",
         ]

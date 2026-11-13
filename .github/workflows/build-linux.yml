@@ -6,9 +6,9 @@ name: Build Linux
 permissions:
   contents: write
 
-# Builds the full 8-binary x86_64 release matrix using Docker for every variant.
+# Builds 9 x86_64 and 2 experimental aarch64 variants in Docker.
 # Each Dockerfile pins a glibc cap via its base image; the matrix mirrors that
-# with a matching ubuntu host runner as belt-and-suspenders. See CLAUDE.md
+# with a matching ubuntu host runner as belt-and-suspenders. See AGENTS.md
 # "Building Release Binaries" for the policy this enforces.
 #
 # The release job signs every binary, companion .so, SHA256SUMS.txt, .deb,
@@ -142,6 +142,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The CUDA, MIGraphX and ONNX images can exhaust the stock runner's disk.
+      # build-onnx-cuda-13 died on 2026-10-31 with 99 MB free while cargo was
+      # cloning a git dependency's submodules, which surfaced as the misleading
+      # "failed to load source for dependency `openvino-genai`". Drop the
+      # preinstalled toolchains the Docker build never touches.
+      - name: Free runner disk space
+        if: startsWith(matrix.variant, 'onnx-')
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+
       - name: Determine version
         id: version
         run: |
@@ -162,13 +176,11 @@ jobs:
             # --locked` requires Cargo.lock to list the same version. A tag
             # cut without a matching bump produces binaries that report the
             # previous version and a source package that won't build (the
-            # v0.4.6 incident). Strip an optional `-rc.*` / `-rc*` suffix on
-            # both sides so a v0.7.3-rc1 tag matches Cargo.toml's 0.7.3.
-            tag_base="${VERSION%%-rc*}"
-            cargo_base="${CARGO_VERSION%%-rc*}"
-            if [[ "${tag_base}" != "${cargo_base}" ]]; then
+            # v0.4.6 incident). RC artifacts must compile the actual RC
+            # version too, not just receive an RC filename.
+            if [[ "${VERSION}" != "${CARGO_VERSION}" ]]; then
               echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match tag (${VERSION})."
-              echo "::error::Bump Cargo.toml + Cargo.lock to ${tag_base} before tagging."
+              echo "::error::Bump Cargo.toml + Cargo.lock to ${VERSION} before tagging."
               exit 1
             fi
           else
@@ -178,11 +190,17 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved VERSION=${VERSION} (Cargo.toml: ${CARGO_VERSION})"
 
+      - name: Check release transport and desktop assets
+        run: |
+          python3 testing/test-release-transport.py
+          python3 testing/test-release-validation.py
+          python3 testing/test-platform-ci.py
+
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
-          docker build \
+          docker build --no-cache \
             -f '${{ matrix.dockerfile }}' \
             -t 'voxtype-${{ matrix.variant }}' \
             --build-arg "VERSION=${VERSION}" \
@@ -206,43 +224,65 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           test -f "${BIN}" || { echo "Missing binary: ${BIN}"; ls -la "releases/${VERSION}/"; exit 1; }
-          # The Dockerfile already sets the binary to 755; no chmod needed.
-          # GPU variants may not have CUDA/ROCm on the host runner; --version should
-          # still resolve without loading providers.
-          # AVX-512 variants are cross-compiled with target-cpu=x86-64-v4. Skip
-          # the runtime --version check on those because the GitHub-hosted
-          # runner CPU usually lacks AVX-512 and would SIGILL. The Dockerfile's
-          # in-build AVX-512 presence check already proves the binary is valid.
-          if [[ "${{ matrix.variant }}" == *avx512* ]]; then
-            echo "Skipping --version check on cross-compiled AVX-512 binary (runner CPU lacks AVX-512)."
-            file "${BIN}"
-          else
-            "${BIN}" --version
-          fi
+          test -f "${WORKER}" || { echo "Missing GGUF worker: ${WORKER}"; ls -la "releases/${VERSION}/"; exit 1; }
+          # AVX-512 is cross-compiled; its Docker image emits hash-bound
+          # exact compile-version metadata rather than claiming execution.
+          python3 scripts/release-artifacts.py check "${BIN}" "${VERSION}"
 
       - name: Verify glibc cap (max <= ${{ matrix.glibc_cap }})
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           CAP='${{ matrix.glibc_cap }}'
-          MAX=$(objdump -T "${BIN}" 2>/dev/null \
-            | grep -oP 'GLIBC_\d+\.\d+' \
-            | sed 's/GLIBC_//' \
-            | sort -t. -k1,1n -k2,2n -u \
-            | tail -1)
-          echo "Max glibc requirement: GLIBC_${MAX} (cap GLIBC_${CAP})"
-          if [[ -z "${MAX}" ]]; then
-            echo "Could not determine max glibc version"; exit 1
+          for artifact in "${BIN}" "${WORKER}"; do
+            MAX=$(objdump -T "${artifact}" 2>/dev/null \
+              | grep -oP 'GLIBC_\d+\.\d+' \
+              | sed 's/GLIBC_//' \
+              | sort -t. -k1,1n -k2,2n -u \
+              | tail -1)
+            echo "$(basename "${artifact}"): GLIBC_${MAX} (cap GLIBC_${CAP})"
+            if [[ -z "${MAX}" ]]; then
+              echo "Could not determine max glibc version"; exit 1
+            fi
+            # Compare as version: fail if MAX > CAP.
+            higher=$(printf '%s\n%s\n' "${CAP}" "${MAX}" | sort -t. -k1,1n -k2,2n | tail -1)
+            if [[ "${higher}" != "${CAP}" ]]; then
+              echo "FAIL: ${artifact} requires GLIBC_${MAX} which exceeds cap GLIBC_${CAP}"
+              echo "This artifact was likely linked against a newer host glibc than the Docker base image."
+              exit 1
+            fi
+          done
+
+      - name: Verify GGUF client and worker companion
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          VARIANT='${{ matrix.variant }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${VARIANT}"
+          WORKER="${BIN}.gguf-worker"
+          # Every binary compiles the GGUF client. x86_64 vulkan and ONNX
+          # variants ship a Vulkan-capable worker; the Whisper CPU tiers and
+          # aarch64 ship CPU workers. ONNX binaries carry ORT's AVX-512, but
+          # their workers must still hold the Haswell floor.
+          args=()
+          if [[ '${{ matrix.arch }}' == x86_64 && ( "${VARIANT}" == vulkan || "${VARIANT}" == onnx-* ) ]]; then
+            args+=(--vulkan)
+          else
+            args+=(--cpu-only)
           fi
-          # Compare as version: fail if MAX > CAP.
-          higher=$(printf '%s\n%s\n' "${CAP}" "${MAX}" | sort -t. -k1,1n -k2,2n | tail -1)
-          if [[ "${higher}" != "${CAP}" ]]; then
-            echo "FAIL: binary requires GLIBC_${MAX} which exceeds cap GLIBC_${CAP}"
-            echo "This binary was likely linked against a newer host glibc than the Docker base image."
-            exit 1
-          fi
+          case "${VARIANT}" in
+            avx2|vulkan|onnx-avx2|onnx-cuda-12|onnx-cuda-13|onnx-migraphx) args+=(--haswell-floor) ;;
+          esac
+          # AVX-512 variants are cross-compiled and may not run on the runner.
+          case "${VARIANT}" in
+            avx512|onnx-avx512) ;;
+            *) args+=(--run) ;;
+          esac
+          scripts/verify-gguf-companion.sh "${args[@]}" "${BIN}" "${WORKER}"
 
       - name: Verify ISA floor (Haswell / x86_64-v3) on AVX2 and Vulkan variants
         if: matrix.check_no_avx512
@@ -250,6 +290,7 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           # The "no AVX-512" variants must run on every x86_64-v3 CPU: Haswell,
           # Kaby Lake, Zen 2, Zen 3, etc. That floor excludes AVX-512, GFNI,
           # AVX-VNNI, and SSE4a (AMD-only). The previous gate only checked zmm
@@ -258,7 +299,7 @@ jobs:
           # SHA-NI, VAES (ymm), and VPCLMULQDQ (ymm) are NOT checked because
           # the sha2/aes crates emit them behind cpufeatures-dispatched
           # runtime CPUID guards; they show up in every working binary.
-          DUMP=$(objdump -d "${BIN}")
+          DUMP=$(objdump -d "${BIN}" "${WORKER}")
           ZMM=$(echo "$DUMP" | grep -c zmm || true)
           EVEX=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpermi2|vpblendm|valign[dq]|vpcompress|vpexpand' || true)
           BCAST=$(echo "$DUMP" | grep -c '{1to' || true)
@@ -289,6 +330,7 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           # The baseline promises x86-64-v2 (Nehalem 2008+). No static count
           # can gate that promise: a correct build legitimately carries ~370
           # BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800
@@ -296,7 +338,7 @@ jobs:
           # contamination added only ~60 BMI2 on top - inside the noise. The
           # counts below are a drift alarm, not a gate; the decisive check is
           # the QEMU inference step that follows.
-          DUMP=$(objdump -d "${BIN}")
+          DUMP=$(objdump -d "${BIN}" "${WORKER}")
           BMI2=$(echo "$DUMP" | grep -cP '\t(shrx|sarx|shlx|mulx|pdep|pext|bzhi|rorx)[ \t]' || true)
           FMA=$(echo "$DUMP" | grep -cP '\t(vfmadd|vfmsub|vfnmadd|vfnmsub)' || true)
           YMM=$(echo "$DUMP" | grep -c ymm || true)
@@ -319,8 +361,16 @@ jobs:
           # (SSE4.2+POPCNT, no AVX: the v2 floor) is a true behavioral test
           # of the exact artifact being shipped. Slow under TCG, but tiny.en
           # on a two-second clip stays well inside the step timeout.
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static libasound2 || \
-            sudo apt-get install -y -qq qemu-user-static libasound2t64
+          for attempt in 1 2 3 4; do
+            sudo apt-get update -qq -o Acquire::Retries=5 \
+              && { sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2 || \
+                   sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2t64; } \
+              && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep 90
+          done
           chmod +x "${BIN}"
           export XDG_DATA_HOME="${RUNNER_TEMP}/xdg-data"
           export XDG_CONFIG_HOME="${RUNNER_TEMP}/xdg-config"
@@ -382,8 +432,16 @@ jobs:
           # get an OSD too (#740 reported them SIGILLing at --version).
           # They are pure Rust with no ggml, so a startup check under a
           # v2-floor CPU model covers their whole risk surface.
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static libasound2t64 || \
-            sudo apt-get install -y -qq qemu-user-static libasound2
+          for attempt in 1 2 3 4; do
+            sudo apt-get update -qq -o Acquire::Retries=5 \
+              && { sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2t64 || \
+                   sudo apt-get install -y -qq -o Acquire::Retries=5 qemu-user-static libasound2; } \
+              && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep 90
+          done
           for suffix in osd osd-quickshell audio-bridge; do
             BIN="releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-${suffix}"
             chmod +x "${BIN}"
@@ -405,7 +463,7 @@ jobs:
   release:
     name: collect-and-release
     needs: build
-    if: ${{ always() && !cancelled() }}
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -445,8 +503,17 @@ jobs:
           mkdir -p "releases/${VERSION}"
           # Flatten artifact subdirs into releases/${VERSION}/.
           find artifacts -type f -name 'voxtype-*' -exec mv -n {} "releases/${VERSION}/" \;
+          # download-artifact restores 0644. Restore only known binaries/workers,
+          # never archives, provider libraries, signatures or version proofs.
+          python3 scripts/release-artifacts.py restore "releases/${VERSION}" "${VERSION}"
           echo "Collected files:"
           ls -la "releases/${VERSION}/"
+
+      - name: Package matching desktop assets
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          python3 scripts/package-desktop-assets.py --output "releases/${VERSION}/voxtype-${VERSION}-desktop-assets.tar.gz"
 
       - name: Generate SHA256SUMS.txt
         run: |
@@ -538,11 +605,22 @@ jobs:
       # fpm and rpmbuild both run cleanly on ubuntu-latest. The script
       # honors --skip-build so it consumes the binaries already in
       # releases/$VERSION/ from the collect step above; no rebuild.
+      # This job has no target/release, so the script renders the man pages
+      # itself with `cargo xtask man` (the runner image ships cargo). v1.1.1
+      # went out without man pages because the script only looked in
+      # target/release and merely warned when they were absent.
       - name: Install fpm and rpmbuild
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm ruby ruby-dev build-essential
+          for attempt in 1 2 3 4; do
+            sudo apt-get update -o Acquire::Retries=5 \
+              && sudo apt-get install -y -o Acquire::Retries=5 rpm ruby ruby-dev build-essential \
+              && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep 90
+          done
           sudo gem install --no-document fpm
 
       - name: Build .deb and .rpm packages

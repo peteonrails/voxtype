@@ -91,6 +91,7 @@ install -D -m 644 packaging/systemd/voxtype.service \
 # Install documentation
 install -D -m 644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 install -D -m 644 docs/INSTALL.md %{buildroot}%{_docdir}/%{name}/INSTALL.md
+install -D -m 644 THIRD_PARTY.md %{buildroot}%{_docdir}/%{name}/THIRD_PARTY.md
 
 # Install license
 install -D -m 644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
@@ -195,6 +196,7 @@ rm -f %{_bindir}/voxtype
 %{_licensedir}/%{name}/LICENSE
 %{_docdir}/%{name}/README.md
 %{_docdir}/%{name}/INSTALL.md
+%{_docdir}/%{name}/THIRD_PARTY.md
 %{_libdir}/voxtype/voxtype-avx2
 %{_libdir}/voxtype/voxtype-avx512
 %{_libdir}/voxtype/voxtype-vulkan

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod cohere;
 mod dolphin;
+mod gguf;
 mod moonshine;
 mod omnilingual;
 mod openvino;
@@ -15,6 +16,7 @@ mod whistle;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
+pub use gguf::GgufConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
 pub use openvino::OpenVinoConfig;
@@ -45,8 +47,9 @@ pub enum TranscriptionEngine {
     /// Use Whisper (whisper.cpp via whisper-rs)
     #[default]
     Whisper,
-    /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
-    /// Requires: cargo build --features parakeet
+    /// Use Parakeet (NVIDIA's FastConformer) through ONNX Runtime or
+    /// transcribe.cpp GGUF.
+    /// Requires `parakeet` for ONNX or `parakeet-gguf` for GGUF.
     Parakeet,
     /// Use Moonshine (encoder-decoder ASR via ONNX Runtime)
     /// Requires: cargo build --features moonshine
@@ -63,10 +66,11 @@ pub enum TranscriptionEngine {
     /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
     /// Requires: cargo build --features omnilingual
     Omnilingual,
-    /// Use Cohere Transcribe (encoder-decoder via ONNX Runtime, Whisper-style
-    /// task tokens). Top of the Open ASR Leaderboard.
-    /// Requires: cargo build --features cohere
+    /// Use Cohere Transcribe through ONNX Runtime or transcribe.cpp GGUF.
+    /// Requires `cohere` for ONNX or `cohere-gguf` for GGUF.
     Cohere,
+    /// Shared offline transcribe.cpp runtime for curated GGUF families.
+    Gguf,
     /// Use OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO Runtime).
     /// Requires: cargo build --features openvino-whisper
     OpenVino,
@@ -245,5 +249,30 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.engine, TranscriptionEngine::Whisper);
+    }
+
+    #[test]
+    fn explicit_generic_gguf_config_parses_without_changing_legacy_default() {
+        let legacy: Config = toml::from_str("[whisper]\nmodel = \"base.en\"\n").unwrap();
+        assert_eq!(legacy.engine, TranscriptionEngine::Whisper);
+        assert!(legacy.gguf.is_none());
+
+        let config: Config = toml::from_str(
+            r#"
+engine = "gguf"
+[gguf]
+model = "/models/Qwen3-ASR-0.6B-Q8_0.gguf"
+architecture = "qwen3_asr"
+language = "auto"
+gguf_backend = "vulkan"
+streaming = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Gguf);
+        let gguf = config.gguf.unwrap();
+        assert_eq!(gguf.architecture, "qwen3_asr");
+        assert_eq!(gguf.language, "auto");
+        assert!(!gguf.streaming);
     }
 }

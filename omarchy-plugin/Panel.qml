@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 import "components"
 
@@ -43,6 +44,13 @@ Item {
   property string activeSection: ""
   property string searchText: ""
   property string engine: ""
+  property string browsingEngine: ""
+  readonly property string catalogEngine: browsingEngine || engine
+  readonly property string catalogLanguage: {
+    for (var i = 0; i < root.keys.length; i++)
+      if (String(root.keys[i].key) === root.catalogEngine + ".language") return String(root.keys[i].file_value || "")
+    return ""
+  }
   property string voxtypeVersion: ""
   property string daemonVersionLabel: ""
   property bool daemonVersionDiffers: false
@@ -78,8 +86,39 @@ Item {
   // model name → message from the download that failed on it.
   property var downloadErrors: ({})
 
+  // The `setup migrate --json` object, or null. See UpgradeOfferBanner.
+  property var upgradeStatus: null
+  // offer id → message from the accept that failed on it.
+  property var upgradeErrors: ({})
+  property bool upgradeDeclinedHere: false
+  property string upgradeActionError: ""
+  // When the last accept finished. An accept writes the config and restarts
+  // the daemon itself, so the file watcher's "restart needed" for that write
+  // would be a false claim.
+  property real upgradeSettledAt: 0
+
+  // The voxtype binary that could not be started, and the dev.json that named
+  // it if one did. Set by any call that fails to start; cleared by the next
+  // schema read that gets an answer, which only a running binary can give.
+  property string cliMissing: ""
+  property string cliMissingSource: ""
+  // subcommand ("engines", "devices", "styles") → message from its failed run.
+  property var infoErrors: ({})
+
+  // The `setup omarchy --status --json` object, or null.
+  property var pluginLink: null
+  // "Not now" whose recording failed: hidden anyway, for as long as the shell
+  // keeps this panel loaded, rather than asking again on every summon.
+  property bool copyDismissedHere: false
+  // A CLI that predates `copy_dismissed` omits it, which reads as not dismissed.
+  readonly property bool offerReplaceCopy: root.pluginLink !== null
+    && String(root.pluginLink.state || "") === "copy"
+    && String(root.pluginLink.packaged_dir || "") !== ""
+    && root.pluginLink.copy_dismissed !== true
+    && !root.copyDismissedHere
+
   readonly property string replacementsSectionName: "Replacements"
-  readonly property bool degraded: schemaError !== ""
+  readonly property bool degraded: schemaError !== "" || cliMissing !== ""
 
   readonly property var modelOptions: {
     var info = root.engines[root.engine]
@@ -113,7 +152,10 @@ Item {
       var entry = root.styles[i]
       if (!entry) continue
       var name = String(entry.name)
-      out.push({ value: name, label: name })
+      var words = name.split(/[-_]+/)
+      for (var j = 0; j < words.length; j++)
+        words[j] = words[j].toLowerCase() === "hud" ? "HUD" : words[j].charAt(0).toUpperCase() + words[j].slice(1)
+      out.push({ value: name, label: words.join(" "), description: String(entry.description || "") })
     }
     return out
   }
@@ -150,6 +192,7 @@ Item {
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
 
     root.opened = true
+    if (cli.downloading) root.browsingEngine = cli.downloadEngine
     // Re-read on every summon: the config file may have been edited by the
     // TUI, another shell, or an upgrade since the last time we looked.
     root.searchText = ""
@@ -158,16 +201,11 @@ Item {
     root.replacementsError = ""
     root.restartError = ""
     root.schemaError = ""
-    if (payload.section !== undefined) root.activeSection = String(payload.section)
+    root.upgradeDeclinedHere = false
+    root.upgradeActionError = ""
+    if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
-    cli.fetchSchema()
-    cli.fetchStatus()
-    cli.fetchUnit()
-    cli.fetchAccel()
-    cli.fetchModels()
-    cli.fetchEngines()
-    cli.fetchDevices()
-    cli.fetchStyles()
+    root.refreshAll()
 
     // The layer surface is mapped after this returns, so focus has to be taken
     // once the window exists or Escape and typing land nowhere. The card's key
@@ -178,6 +216,66 @@ Item {
       settingsCard.keyCatcher.forceActiveFocus()
       if (!root.degraded) sidebar.focusSearch()
     })
+  }
+
+  // Everything the panel shows comes from one of these. A summon and the
+  // `section` verb on an open panel both re-read all of it: either can follow a
+  // change made behind the panel's back (an upgrade, a new binary, a tray
+  // click after a model update).
+  function refreshAll() {
+    cli.fetchSchema()
+    cli.fetchStatus()
+    cli.fetchUnit()
+    cli.fetchAccel()
+    cli.fetchModels()
+    cli.fetchEngines()
+    cli.fetchDevices()
+    cli.fetchStyles()
+    cli.fetchUpgrade()
+    cli.fetchPluginLink()
+  }
+
+  // A binary that cannot be run cannot vouch for anything shown from its last
+  // answers: the version, the configured model, the daemon state. Showing them
+  // anyway is how a stale dev.json once left the panel presenting an old
+  // release as current, with no error at all.
+  function clearCliState() {
+    root.schema = null
+    root.keys = []
+    root.sections = []
+    root.engine = ""
+    root.voxtypeVersion = ""
+    root.daemonVersionLabel = ""
+    root.daemonVersionDiffers = false
+    root.configPath = ""
+    root.replacements = ({})
+    root.engineChoices = []
+    root.engines = ({})
+    root.engineAvailability = ({})
+    root.devices = []
+    root.styles = []
+    root.daemonState = ""
+    root.daemonRunning = false
+    root.statusKnown = false
+    root.accelState = ""
+    root.accelBackend = ""
+    root.accelEvidence = ""
+    root.upgradeStatus = null
+    root.pluginLink = null
+    root.infoErrors = ({})
+  }
+
+  function noteInfoError(what, message) {
+    var next = ({})
+    for (var k in root.infoErrors) if (k !== what) next[k] = root.infoErrors[k]
+    if (message !== "") next[what] = message
+    root.infoErrors = next
+  }
+
+  readonly property string infoErrorText: {
+    var lines = []
+    for (var k in root.infoErrors) lines.push("voxtype info " + k + " failed: " + root.infoErrors[k])
+    return lines.join("\n")
   }
 
   // The sidebar is hidden in the degraded state, and a hidden item cannot hold
@@ -249,11 +347,45 @@ Item {
     root.engines = next
   }
 
-  function noteDownloadError(model, message) {
+  function noteDownloadError(engine, model, message) {
+    var identity = engine + ":" + model
     var next = ({})
-    for (var k in root.downloadErrors) if (k !== model) next[k] = root.downloadErrors[k]
-    if (message !== "") next[model] = message
+    for (var k in root.downloadErrors) if (k !== identity) next[k] = root.downloadErrors[k]
+    if (message !== "") next[identity] = message
     root.downloadErrors = next
+  }
+
+  function noteUpgradeError(offerId, message) {
+    var next = ({})
+    for (var k in root.upgradeErrors) if (k !== offerId) next[k] = root.upgradeErrors[k]
+    if (message !== "") next[offerId] = message
+    root.upgradeErrors = next
+  }
+
+  function acceptUpgrade(offerId) {
+    if (cli.downloading) return
+    var model = ""
+    var offers = root.upgradeStatus ? root.upgradeStatus.offers : null
+    if (offers && offers.length !== undefined)
+      for (var i = 0; i < offers.length; i++)
+        if (offers[i] && String(offers[i].id) === offerId) model = String(offers[i].model || "")
+    root.noteUpgradeError(offerId, "")
+    root.upgradeActionError = ""
+    cli.startUpgrade(offerId, model)
+  }
+
+  function startModelDownload(name) {
+    var info = root.engines[root.catalogEngine]
+    var argument = name
+    if (info && info.models && info.models.length !== undefined) {
+      for (var i = 0; i < info.models.length; i++) {
+        var entry = info.models[i]
+        if (entry && String(entry.name) === name && entry.download_arg)
+          argument = String(entry.download_arg)
+      }
+    }
+    root.noteDownloadError(root.catalogEngine, name, "")
+    cli.startDownload(name, argument, root.catalogEngine)
   }
 
   // ---------------------------------------------------------------- ipc
@@ -300,9 +432,20 @@ Item {
     // Opens on a named section, or jumps to it if the panel is already up. An
     // unknown name lands on the first section, same as a stale payload does.
     function section(name: string): string {
-      var wanted = String(name || "")
+      var wanted = root.canonicalSection(name || "")
       if (wanted === "") return "usage: section <name>"
       if (root.opened) {
+        // The tray's "Model update available" lands here on an open panel,
+        // and so can a jump made after the binary or config changed. Re-read
+        // everything, as a summon does, not just the upgrade offers.
+        root.refreshAll()
+        // With no schema there are no sections to check against yet. Aim at
+        // the one asked for; the schema read lands on it if it exists, or on
+        // the first section if not, as a summon with a stale payload does.
+        if (root.degraded) {
+          root.activeSection = wanted
+          return "ok"
+        }
         if (root.sections.indexOf(wanted) === -1) return "unknown section: " + wanted
         root.activeSection = wanted
         root.searchText = ""
@@ -330,8 +473,7 @@ Item {
       var name = String(model || "")
       if (name === "") return "usage: download <model>"
       if (cli.downloading) return "busy: already downloading " + cli.downloadModel
-      root.noteDownloadError(name, "")
-      cli.startDownload(name)
+      root.startModelDownload(name)
       return "ok"
     }
 
@@ -344,10 +486,31 @@ Item {
 
   // ---------------------------------------------------------------- schema
 
+  // Keep existing IPC callers and older executable schemas usable without
+  // inventing any settings that the executable did not advertise.
+  function canonicalSection(name) {
+    return String(name) === "Text" ? "Text Cleanup" : String(name)
+  }
+
   function applySchema(next) {
     root.schemaError = ""
+    root.cliMissing = ""
+    root.cliMissingSource = ""
     root.schema = next
-    root.keys = Array.isArray(next.keys) ? next.keys : []
+    // VoxtypeCli validates the parsed JSON array before emitting it. Crossing
+    // its signal(var) can wrap it as a QML sequence: length/indexing survive,
+    // but Array.isArray does not. Rejecting that wrapper hides every section.
+    var normalized = []
+    var incoming = next.keys && next.keys.length !== undefined ? next.keys : []
+    for (var i = 0; i < incoming.length; ++i) {
+      if (!incoming[i]) continue
+      var spec = ({})
+      for (var key in incoming[i]) spec[key] = incoming[i][key]
+      spec.section = canonicalSection(spec.section || "")
+      normalized.push(spec)
+    }
+    root.keys = normalized
+    root.activeSection = canonicalSection(root.activeSection)
     root.engine = next.engine === undefined || next.engine === null ? "" : String(next.engine)
     root.voxtypeVersion = next.voxtype_version ? String(next.voxtype_version) : ""
     root.daemonVersionLabel = next.daemon_version_label ? String(next.daemon_version_label) : ""
@@ -389,7 +552,8 @@ Item {
   function computeEngineChoices(list) {
     for (var i = 0; i < list.length; i++) {
       var spec = list[i]
-      if (spec && String(spec.key) === "engine" && Array.isArray(spec.choices)) return spec.choices
+      if (spec && String(spec.key) === "engine" && spec.choices
+          && spec.choices.length !== undefined) return spec.choices
     }
     return []
   }
@@ -426,15 +590,48 @@ Item {
 
     onSchemaLoaded: function(next) { root.applySchema(next) }
     onSchemaFailed: function(message) {
+      // It ran, so whatever it said is the error now, not a missing binary.
+      root.cliMissing = ""
+      root.cliMissingSource = ""
       root.schemaError = message
       root.keys = []
       root.sections = []
       root.refocusCard()
     }
+    onCliUnavailable: function(bin) {
+      var wasDegraded = root.degraded
+      root.cliMissing = bin
+      root.cliMissingSource = cli.binSource
+      root.clearCliState()
+      if (!wasDegraded) root.refocusCard()
+    }
+    onInfoFailed: function(what, message) {
+      root.noteInfoError(what, message)
+      // An empty list is what the panel already survives when a build lacks
+      // the reader; a stale one is a claim about a binary that just failed.
+      if (what === "engines") root.engineAvailability = ({})
+      else if (what === "devices") root.devices = []
+      else if (what === "styles") root.styles = []
+    }
+    onPluginLinkLoaded: function(status) { root.pluginLink = status }
+    onCopyDismissFinished: function(ok, message) {
+      if (!ok) {
+        console.warn("Voxtype Settings: could not record Not now (" + message + "); hiding the banner for this session")
+        root.copyDismissedHere = true
+      }
+      cli.fetchPluginLink()
+    }
     onModelsLoaded: function(engines) { root.engines = engines }
-    onDevicesLoaded: function(devices) { root.devices = devices }
-    onStylesLoaded: function(styles) { root.styles = styles }
+    onDevicesLoaded: function(devices) {
+      root.noteInfoError("devices", "")
+      root.devices = devices
+    }
+    onStylesLoaded: function(styles) {
+      root.noteInfoError("styles", "")
+      root.styles = styles
+    }
     onEnginesLoaded: function(list) {
+      root.noteInfoError("engines", "")
       var next = ({})
       for (var i = 0; i < list.length; i++) {
         var entry = list[i]
@@ -481,15 +678,45 @@ Item {
     onDownloadFinished: function(model, ok, message) {
       // A cancellation reports ok=false with no message: the user asked for it,
       // so there is nothing to tell them.
-      root.noteDownloadError(model, ok ? "" : message)
-      if (ok) root.markModelInstalled(model)
+      root.noteDownloadError(cli.downloadEngine, model, ok ? "" : message)
+      // Re-read authoritative per-engine status. Short catalog names can be
+      // shared by multiple engines; do not optimistically mark all of them.
       // The catalog is what says whether the file is on disk now, so re-read it
       // either way — a cancelled or failed download may still have left a
       // partial state worth reflecting.
       cli.fetchModels()
     }
+    onUpgradeLoaded: function(status) { root.upgradeStatus = status }
+    onUpgradeFinished: function(offerId, ok, message) {
+      // Cancel reports no message, and a cancel or a failure leaves the
+      // current model and config as they were, so the offer is retried with
+      // the same button.
+      root.noteUpgradeError(offerId, ok ? "" : message)
+      if (ok) {
+        // `--accept` switched the model and restarted the daemon itself.
+        root.upgradeSettledAt = Date.now()
+        root.restartNeeded = false
+        root.restartError = ""
+        cli.fetchSchema()
+        cli.fetchStatus()
+        accelAfterRestart.restart()
+      }
+      cli.fetchModels()
+      cli.fetchUpgrade()
+    }
+    onDeclineFinished: function(ok, message) {
+      if (ok) root.upgradeDeclinedHere = true
+      root.upgradeActionError = message
+      cli.fetchUpgrade()
+    }
+    onCleanupFinished: function(ok, message) {
+      root.upgradeActionError = message
+      cli.fetchModels()
+      cli.fetchUpgrade()
+    }
     onRestarted: function(ok, message) {
       if (ok) {
+        cli.fetchUpgrade()
         root.restartNeeded = false
         root.restartError = ""
         // A restart is the one moment acceleration can change: the daemon has
@@ -566,8 +793,10 @@ Item {
       // The banner's claim is that the file on disk no longer matches what the
       // daemon loaded at startup, which an edit from the CLI or the TUI makes
       // just as true as one made here. Without this the panel would quietly
-      // refresh to show a setting the running daemon is not using.
-      root.restartNeeded = true
+      // refresh to show a setting the running daemon is not using. An accepted
+      // upgrade is the exception: it restarted the daemon after its own write.
+      if (!cli.upgrading && Date.now() - root.upgradeSettledAt > 2000)
+        root.restartNeeded = true
     }
   }
 
@@ -656,7 +885,7 @@ Item {
         Rectangle {
           Layout.fillWidth: true
           implicitHeight: 1
-          color: Util.alpha(Color.foreground, 0.12)
+          color: Util.alpha(ShellTheme.Color.foreground, 0.12)
         }
 
         RestartBanner {
@@ -667,6 +896,20 @@ Item {
             ? root.restartError
             : "Changes take effect after restart."
           onRestartRequested: cli.restartDaemon()
+        }
+
+        PluginCopyBanner {
+          Layout.fillWidth: true
+          active: root.offerReplaceCopy
+          dismissing: cli.dismissingCopy
+          onReplaceRequested: root.dismissThen(function() { cli.replacePluginCopy() })
+          onNotNowRequested: cli.dismissPluginCopy()
+        }
+
+        CliErrorBanner {
+          Layout.fillWidth: true
+          active: !root.degraded && root.infoErrorText !== ""
+          message: root.infoErrorText
         }
 
         // ------------------------------------------------ degraded state
@@ -684,13 +927,14 @@ Item {
             width: Math.min(parent.width, Style.space(460))
             implicitHeight: degradedBody.implicitHeight + contentTopInset + contentBottomInset
             height: implicitHeight
-            color: Util.alpha(Color.foreground, 0.04)
+            color: Util.alpha(ShellTheme.Color.foreground, 0.04)
             radius: Style.cornerRadius
-            borderSpec: Border.flat(Util.alpha(Color.urgent, 0.45), Math.max(1, Style.normalBorderWidth))
+            borderSpec: Border.flat(Util.alpha(ShellTheme.Color.urgent, 0.45), Math.max(1, Style.normalBorderWidth))
             padding: Style.spacing.panelPadding
 
             Column {
               id: degradedBody
+              objectName: "degradedState"
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
@@ -698,28 +942,36 @@ Item {
               spacing: Style.spacing.xxl
 
               Text {
+                objectName: "degradedTitle"
                 width: parent.width
-                text: "This panel requires voxtype 0.8 or newer."
-                color: Color.foreground
+                text: root.cliMissing !== ""
+                  ? "Voxtype Settings could not run " + root.cliMissing + "."
+                  : "This panel requires voxtype 0.8 or newer."
+                color: ShellTheme.Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.title
-                wrapMode: Text.WordWrap
+                wrapMode: Text.WrapAnywhere
               }
 
               Text {
+                objectName: "degradedDetail"
                 width: parent.width
-                text: "It reads every setting from `voxtype config schema --json`, which earlier builds do not provide."
-                color: Qt.darker(Color.foreground, 1.5)
+                text: root.cliMissing === ""
+                  ? "It reads every setting from `voxtype config schema --json`, which earlier builds do not provide."
+                  : root.cliMissingSource !== ""
+                    ? "That path is set in " + root.cliMissingSource + ". Point it at a voxtype binary that exists, or delete the file to use voxtype from PATH."
+                    : "Is voxtype installed? Install it, or make sure voxtype is on PATH."
+                color: Qt.darker(ShellTheme.Color.foreground, 1.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
-                wrapMode: Text.WordWrap
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
               }
 
               Text {
                 width: parent.width
-                visible: root.schemaError !== ""
+                visible: root.cliMissing === "" && root.schemaError !== ""
                 text: root.schemaError
-                color: Color.urgent
+                color: ShellTheme.Color.urgent
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
@@ -729,6 +981,7 @@ Item {
                 spacing: Style.spacing.controlGap
 
                 Button {
+                  objectName: "installButton"
                   text: "Install / Update"
                   iconText: "󰇚"
                   bordered: true
@@ -781,7 +1034,7 @@ Item {
           Rectangle {
             Layout.fillHeight: true
             width: 1
-            color: Util.alpha(Color.foreground, 0.12)
+            color: Util.alpha(ShellTheme.Color.foreground, 0.12)
           }
 
           SchemaForm {
@@ -790,6 +1043,8 @@ Item {
             Layout.fillHeight: true
             keys: root.keys
             engine: root.engine
+            catalogEngine: root.catalogEngine
+            catalogLanguage: root.catalogLanguage
             activeSection: root.activeSection
             searchText: root.searchText
             engines: root.engines
@@ -800,9 +1055,11 @@ Item {
             styleOptions: root.styleOptions
             modelKey: root.modelKey
             modelValue: root.modelValue
-            downloadingModel: cli.downloadModel
+            downloadingModel: cli.downloadEngine === root.catalogEngine ? cli.downloadModel : ""
             downloadPct: cli.downloadPct
+            downloadFile: cli.downloadFile
             downloadCancelling: cli.downloadCancelling
+            downloadBusy: cli.downloading
             downloadErrors: root.downloadErrors
             replacements: root.replacements
             errors: root.errors
@@ -815,12 +1072,25 @@ Item {
 
             onSetRequested: function(key, value) { cli.setKey(key, value) }
             onUnsetRequested: function(key) { cli.unsetKey(key) }
-            onEngineChangeRequested: function(name) { cli.setKey("engine", name) }
+            onEngineChangeRequested: function(name) { if (cli.downloading) return; root.browsingEngine = name; root.engineError = "" }
+            onModelSelectionRequested: function(name, language) {
+              if (root.catalogEngine === "gguf") cli.selectModel("gguf", name, language)
+              else if (root.catalogEngine === root.engine) cli.setKey(root.modelKey, name)
+            }
             onDownloadRequested: function(name) {
-              root.noteDownloadError(name, "")
-              cli.startDownload(name)
+              root.startModelDownload(name)
             }
             onCancelDownloadRequested: cli.cancelDownload()
+            upgradeStatus: root.upgradeStatus
+            upgradeBusyOfferId: cli.upgradeOfferId
+            upgradeErrors: root.upgradeErrors
+            upgradeDeclining: cli.declining
+            upgradeCleaningUp: cli.cleaningUp
+            upgradeDeclinedHere: root.upgradeDeclinedHere
+            upgradeActionError: root.upgradeActionError
+            onUpgradeAcceptRequested: function(offerId) { root.acceptUpgrade(offerId) }
+            onUpgradeDeclineRequested: { root.upgradeActionError = ""; cli.declineUpgrade() }
+            onUpgradeCleanupRequested: { root.upgradeActionError = ""; cli.cleanupUpgrade() }
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }
             onReplacementUnsetRequested: function(from) { cli.unsetReplacement(from) }
           }

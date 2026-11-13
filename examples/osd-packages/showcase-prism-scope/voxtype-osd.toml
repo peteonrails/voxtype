@@ -1,0 +1,90 @@
+name = "showcase-prism-scope"
+version = "0.1.0"
+description = "Prism scope showcase."
+palette = "omarchy"
+layout = "tile"
+
+[frame]
+background = "background"
+border = "none"
+glow = true
+halo = false
+
+[[visual.layers]]
+type = "background"
+source = "state"
+color = "surface"
+order = 0
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 0.45
+radius = 18
+
+[[visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 10
+x = 0.06
+y = 0.06
+width = 0.88
+height = 0.88
+gain = 1.5
+opacity = 0.12
+radius = 16
+
+# Hero ring, centered at (0.50, 0.31).
+[[visual.layers]]
+type = "ring"
+source = "peak"
+color = "accent"
+order = 20
+x = 0.14
+y = 0.05
+width = 0.72
+height = 0.52
+gain = 2.2
+opacity = 0.95
+radius = 3
+speed = 0.8
+
+# State icon in the ring's center: mic, audio lines, or a spinner.
+[[visual.layers]]
+type = "icon"
+source = "vad"
+order = 30
+x = 0.40
+y = 0.21
+width = 0.20
+height = 0.20
+opacity = 0.95
+
+[[visual.layers]]
+type = "bars"
+source = "peak"
+color = "accent"
+order = 50
+x = 0.10
+y = 0.62
+width = 0.80
+height = 0.20
+gain = 0.9
+opacity = 0.92
+radius = 2
+mirror = true
+
+[[visual.layers]]
+type = "meter"
+source = "peak"
+color = "success"
+secondary_color = "foreground"
+order = 60
+x = 0.10
+y = 0.87
+width = 0.80
+height = 0.05
+opacity = 0.95
+radius = 3

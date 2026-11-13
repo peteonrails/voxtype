@@ -10,6 +10,7 @@ use super::Transcriber;
 use crate::config::{LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::io::Cursor;
+use std::sync::Mutex;
 use std::time::Duration;
 use ureq::serde_json;
 
@@ -28,6 +29,8 @@ pub struct RemoteTranscriber {
     api_key: Option<String>,
     /// Optional initial prompt for transcription context
     initial_prompt: Option<String>,
+    /// Profile vocabulary selected for the current recording.
+    active_vocabulary: Mutex<Vec<String>>,
     /// Send an explicit `language=auto` field instead of omitting it
     send_auto_language: bool,
     /// Request timeout
@@ -108,9 +111,35 @@ impl RemoteTranscriber {
             translate: config.translate,
             api_key,
             initial_prompt,
+            active_vocabulary: Mutex::new(Vec::new()),
             send_auto_language: config.remote_send_auto_language,
             timeout,
         })
+    }
+
+    fn request_url(&self) -> String {
+        // Determine the API path based on whether we're doing transcription or translation
+        let path = if self.translate {
+            "/v1/audio/translations"
+        } else {
+            "/v1/audio/transcriptions"
+        };
+
+        // Reuse a final /v1 path component without treating a hostname,
+        // query value or fragment as part of the API path (#603, #722).
+        let mut url = match reqwest::Url::parse(&self.endpoint) {
+            Ok(url) => url,
+            // Preserve the existing HTTP client's error handling for malformed URLs.
+            Err(_) => return format!("{}{}", self.endpoint.trim_end_matches('/'), path),
+        };
+        let trimmed = url.path().trim_end_matches('/');
+        let base = trimmed
+            .strip_suffix("/v1")
+            .unwrap_or(trimmed)
+            .trim_end_matches('/');
+        let request_path = format!("{base}{path}");
+        url.set_path(&request_path);
+        url.to_string()
     }
 
     /// Encode f32 samples to WAV format
@@ -181,8 +210,14 @@ impl RemoteTranscriber {
             body.extend_from_slice(b"\r\n");
         }
 
-        // Add prompt field (if initial_prompt is configured)
-        if let Some(ref prompt) = self.initial_prompt {
+        // Preserve the configured prompt and append active profile terms.
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        let prompt = super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary);
+        if let Some(ref prompt) = prompt {
             body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
             body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\n\r\n");
             body.extend_from_slice(prompt.as_bytes());
@@ -202,6 +237,13 @@ impl RemoteTranscriber {
 }
 
 impl Transcriber for RemoteTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
@@ -223,14 +265,7 @@ impl Transcriber for RemoteTranscriber {
         // Build multipart form
         let (boundary, body) = self.build_multipart_body(&wav_data);
 
-        // Determine the API path based on whether we're doing transcription or translation
-        let path = if self.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
-        };
-
-        let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
+        let url = self.request_url();
 
         // Build request
         let mut request = ureq::post(&url).timeout(self.timeout).set(
@@ -287,6 +322,207 @@ impl Transcriber for RemoteTranscriber {
 mod tests {
     use super::*;
 
+    // The listener is loopback-only; release verification runs these tests in
+    // the private no-egress NAS container, never against a provider or desktop.
+    fn capture_request(endpoint_suffix: &str, translate: bool) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "no fixture request");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 16_384);
+                if request.ends_with(b"\r\n\r\n") {
+                    break request.len();
+                }
+            };
+            let headers = String::from_utf8(request.clone()).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            assert!(length < 16_384);
+            request.resize(header_end + length, 0);
+            stream.read_exact(&mut request[header_end..]).unwrap();
+            let response = r#"{"text":" fixture transcript "}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let config = WhisperConfig {
+            remote_endpoint: Some(format!("http://{address}{endpoint_suffix}")),
+            remote_model: Some("fixture-model".into()),
+            remote_api_key: Some("fixture-not-a-secret".into()),
+            language: LanguageConfig::Single("fr".into()),
+            initial_prompt: Some("Technical discussion.".into()),
+            remote_timeout_secs: Some(5),
+            translate,
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        transcriber.set_vocabulary(&["Voxtype".into(), "PipeWire".into()]);
+        let result = transcriber.transcribe(&[0.0, 0.0]);
+        let request = server.join().unwrap();
+        assert_eq!(result.unwrap(), "fixture transcript");
+        let headers = request
+            .split("\r\n\r\n")
+            .next()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer fixture-not-a-secret\r\n"));
+        assert!(headers.contains("content-type: multipart/form-data; boundary="));
+        for field in [
+            "name=\"model\"\r\n\r\nfixture-model\r\n",
+            "name=\"language\"\r\n\r\nfr\r\n",
+            "Technical discussion.\nVocabulary: Voxtype, PipeWire",
+            "name=\"response_format\"\r\n\r\njson\r\n",
+            "filename=\"audio.wav\"",
+            "RIFF",
+        ] {
+            assert!(request.contains(field), "missing multipart field: {field}");
+        }
+        request.lines().next().unwrap().to_string()
+    }
+
+    #[test]
+    fn endpoint_compatibility_openrouter_transcription() {
+        assert_eq!(
+            capture_request("/api/v1", false),
+            "POST /api/v1/audio/transcriptions HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn endpoint_compatibility_versioned_translation() {
+        assert_eq!(
+            capture_request("/v1/", true),
+            "POST /v1/audio/translations HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn endpoint_compatibility_query_stays_after_request_path() {
+        assert_eq!(
+            capture_request("/api/v1?route=/v1", false),
+            "POST /api/v1/audio/transcriptions?route=/v1 HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn endpoint_compatibility_url_component_boundaries() {
+        for (endpoint, expected) in [
+            ("https://v1", "https://v1/v1/audio/transcriptions"),
+            (
+                "https://example.test/api/v1?route=/v1",
+                "https://example.test/api/v1/audio/transcriptions?route=/v1",
+            ),
+            (
+                "https://example.test/api/v1#section/v1",
+                "https://example.test/api/v1/audio/transcriptions#section/v1",
+            ),
+        ] {
+            let config = WhisperConfig {
+                remote_endpoint: Some(endpoint.into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                RemoteTranscriber::new(&config).unwrap().request_url(),
+                expected,
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_compatibility_http_base_matrix() {
+        for (suffix, prefix) in [
+            ("", ""),
+            ("/", ""),
+            ("/api", "/api"),
+            ("/api/", "/api"),
+            ("/v1", ""),
+            ("/v1/", ""),
+            ("/api/v1", "/api"),
+            ("/api/v1/", "/api"),
+        ] {
+            for translate in [false, true] {
+                let task = if translate {
+                    "translations"
+                } else {
+                    "transcriptions"
+                };
+                assert_eq!(
+                    capture_request(suffix, translate),
+                    format!("POST {prefix}/v1/audio/{task} HTTP/1.1"),
+                    "{suffix}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_compatibility_https_path_matrix() {
+        for (suffix, prefix) in [
+            ("", ""),
+            ("/", ""),
+            ("/api", "/api"),
+            ("/api/", "/api"),
+            ("/v1", ""),
+            ("/v1/", ""),
+            ("/api/v1", "/api"),
+            ("/api/v1/", "/api"),
+            ("/v10", "/v10"),
+            ("/api/v1/resources", "/api/v1/resources"),
+            ("/custom/inference", "/custom/inference"),
+            ("/api/audio/transcriptions", "/api/audio/transcriptions"),
+            ("/api%2Ftenant/v1", "/api%2Ftenant"),
+        ] {
+            for translate in [false, true] {
+                let config = WhisperConfig {
+                    remote_endpoint: Some(format!("https://example.test{suffix}")),
+                    translate,
+                    ..Default::default()
+                };
+                let task = if translate {
+                    "translations"
+                } else {
+                    "transcriptions"
+                };
+                assert_eq!(
+                    RemoteTranscriber::new(&config).unwrap().request_url(),
+                    format!("https://example.test{prefix}/v1/audio/{task}"),
+                    "{suffix}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_encode_wav_basic() {
         let config = WhisperConfig {
@@ -323,6 +559,62 @@ mod tests {
         let result = RemoteTranscriber::new(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("remote_endpoint"));
+    }
+
+    #[test]
+    fn test_endpoint_normalization_bare_host() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://api.openai.com".to_string()),
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            transcriber.request_url(),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_normalization_trailing_slash() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://api.openai.com/".to_string()),
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            transcriber.request_url(),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_normalization_trailing_v1() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://api.openai.com/v1".to_string()),
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            transcriber.request_url(),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_normalization_trailing_v1_with_slash() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://api.openai.com/v1/".to_string()),
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            transcriber.request_url(),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
     }
 
     #[test]
@@ -424,6 +716,22 @@ mod tests {
     }
 
     #[test]
+    fn multipart_prompt_preserves_configured_prompt_and_adds_profile_vocabulary() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            initial_prompt: Some("Technical discussion.".to_string()),
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        transcriber.set_vocabulary(&["Voxtype".into(), "PipeWire".into()]);
+
+        let (_, body) = transcriber.build_multipart_body(&[0u8; 100]);
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Technical discussion.\nVocabulary: Voxtype, PipeWire"));
+    }
+
+    #[test]
     fn test_multipart_body_excludes_empty_prompt() {
         let config = WhisperConfig {
             mode: Some(crate::config::WhisperMode::Remote),
@@ -473,13 +781,10 @@ mod tests {
         // Verify translate flag is stored correctly
         assert!(!transcriber.translate);
 
-        // The endpoint path logic: if !translate, use /v1/audio/transcriptions
-        let path = if transcriber.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
-        };
-        assert_eq!(path, "/v1/audio/transcriptions");
+        assert_eq!(
+            transcriber.request_url(),
+            "http://localhost:8080/v1/audio/transcriptions"
+        );
     }
 
     #[test]
@@ -496,13 +801,10 @@ mod tests {
         // Verify translate flag is stored correctly
         assert!(transcriber.translate);
 
-        // The endpoint path logic: if translate, use /v1/audio/translations
-        let path = if transcriber.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
-        };
-        assert_eq!(path, "/v1/audio/translations");
+        assert_eq!(
+            transcriber.request_url(),
+            "http://localhost:8080/v1/audio/translations"
+        );
     }
 
     #[test]

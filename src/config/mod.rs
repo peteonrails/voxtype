@@ -28,12 +28,12 @@ mod whisper;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
+    CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
     ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
     TranscriptionEngine, WhistleConfig, WHISTLE_LANGUAGES,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
-pub use language::LanguageConfig;
+pub use language::{LanguageConfig, COHERE_LANGUAGES};
 pub use load::{load_config, save_config};
 pub use meeting::{
     MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingSummaryConfig,
@@ -43,8 +43,8 @@ pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,
     OutputMode,
 };
-pub use profile::{PostProcessConfig, Profile};
-pub use root::Config;
+pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
+pub use root::{Config, OmarchyConfig, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;

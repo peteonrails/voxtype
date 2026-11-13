@@ -177,6 +177,7 @@
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
+            nativeCheckInputs = with pkgs; [ dbus python3 ];
 
             # Required for whisper-rs bindgen
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";

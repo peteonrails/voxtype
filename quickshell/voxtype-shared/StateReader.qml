@@ -21,6 +21,12 @@
 // still reported truthfully, because Waybar and every other status consumer
 // depends on it.
 //
+// `session` and `outcome` mirror the daemon's recording.json and
+// outcome.json (see src/osd/session.rs): the recording in flight (wall
+// clock start, max_duration_secs, engine, model), or null when idle; and
+// how the last session ended, or null before the first one. Both stay
+// null against a daemon too old to write them.
+//
 // The component exposes `state` as a bindable property so consumers
 // don't have to listen for the signal:
 //
@@ -71,6 +77,23 @@ QtObject {
     /// True while the in-flight recording asked for the OSD to stay hidden.
     property bool osdSuppressed: false
 
+    readonly property string _runtimeDir: {
+        const cut = root.statePath.lastIndexOf("/");
+        return cut > 0 ? root.statePath.substring(0, cut) : root.statePath;
+    }
+
+    property var session: null
+    property var outcome: null
+
+    function _parse(view) {
+        try {
+            const value = JSON.parse(view.text() || "null");
+            return value && typeof value === "object" ? value : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     // FileView re-reads on file changes when watchChanges is true. We
     // update the `state` property inside onLoaded; QML's property change
     // signal fires automatically for binding-based and imperative
@@ -81,8 +104,12 @@ QtObject {
         printErrors: false
 
         onLoaded: {
-            const next = (text() || "idle").trim();
-            if (next !== root.state) {
+            // The daemon rewrites the file in place (truncate, then
+            // write), so a read can land in between and see nothing.
+            // Keep the current state rather than flashing to idle; a
+            // removed file still resets through onLoadFailed.
+            const next = (text() || "").trim();
+            if (next.length > 0 && next !== root.state) {
                 root.state = next;
             }
         }
@@ -116,6 +143,24 @@ QtObject {
             }
         }
 
+        onFileChanged: reload()
+    }
+
+    property FileView _sessionView: FileView {
+        path: root._runtimeDir + "/recording.json"
+        watchChanges: true
+        printErrors: false
+        onLoaded: root.session = root._parse(this)
+        onLoadFailed: root.session = null
+        onFileChanged: reload()
+    }
+
+    property FileView _outcomeView: FileView {
+        path: root._runtimeDir + "/outcome.json"
+        watchChanges: true
+        printErrors: false
+        onLoaded: root.outcome = root._parse(this)
+        onLoadFailed: root.outcome = null
         onFileChanged: reload()
     }
 }

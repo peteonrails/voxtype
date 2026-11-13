@@ -26,9 +26,14 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 ENV VERSION=${VERSION}
 
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
 # Install build dependencies. Same packages as Dockerfile.onnx; Ubuntu
 # ships them for arm64.
-RUN apt-get update && apt-get install -y \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -49,7 +54,11 @@ RUN apt-get update && apt-get install -y \
     binutils \
     meson \
     ninja-build \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu 24.04 doesn't package gtk4-layer-shell. Build the C library
 # from source so voxtype-osd-gtk4 can pkg-config against it.
@@ -86,10 +95,20 @@ ENV GGML_NATIVE=OFF
 ENV ORT_STRATEGY=download
 
 # Build with all ONNX engines. CPU-only on aarch64 — no GPU EPs.
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker: aarch64 has no Vulkan worker.
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-aarch64-onnx
+    && cp target/release/voxtype /tmp/voxtype-aarch64-onnx \
+    && cargo build --release -p voxtype-gguf-worker \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --run \
+        /tmp/voxtype-aarch64-onnx /tmp/voxtype-gguf-worker
 
 # Build the OSD launcher and frontends in a separate cargo invocation so the
 # daemon binary stays clean of GTK4 / layer-shell baggage. Matches the binary
@@ -115,6 +134,7 @@ RUN echo "=== Verifying aarch64 ONNX binary ===" \
 # Output stage
 CMD mkdir -p /output \
     && cp /tmp/voxtype-aarch64-onnx /output/voxtype-${VERSION}-linux-aarch64-onnx \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-aarch64-onnx.gguf-worker \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-aarch64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-aarch64-osd-gtk4 \
     && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-aarch64-osd-quickshell \
