@@ -20,11 +20,14 @@ no container metadata to preserve. If the clip is ever transcoded (to Opus,
 say), carry any source tags across (`ffmpeg -map_metadata 0`) and do not strip
 provenance metadata or watermarks.
 
-This clip is not licensed for training AI models. Voxtype's MIT license
-covers the code; it does not grant any right to use this audio as AI training
-data.
-
 To render it again after changing the text, run
 `scripts/render-meeting-announcement.sh` with an ElevenLabs API key, then
 update the size and sha256 above. Voxtype itself never calls ElevenLabs: the
 clip ships in the binary and plays offline.
+
+## Licence
+
+`meeting-announcement.wav` is not covered by voxtype's MIT licence. It may
+be redistributed, unmodified, as part of voxtype and of packages of voxtype.
+It may not be used to train or improve AI models. Everything else in this
+repository stays under the MIT licence in `LICENSE`.

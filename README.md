@@ -742,4 +742,4 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 
 ## License
 
-MIT
+MIT, except `assets/sounds/meeting-announcement.wav`, the built-in recording announcement: it may be redistributed unmodified as part of voxtype and its packages, and may not be used to train or improve AI models. See [assets/sounds/README.md](assets/sounds/README.md#licence).
