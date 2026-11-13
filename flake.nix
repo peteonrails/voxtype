@@ -64,7 +64,7 @@
         # user's running sound server, so a system copy matching it wins and
         # these are only the fallback.
         #
-        # pipewire (pw-play, pw-dump) is deliberately left out. Those tools
+        # pipewire (pw-play, pw-dump, pw-link) is deliberately left out. Those tools
         # only work against a running PipeWire, and NixOS's PipeWire module
         # already puts the package in environment.systemPackages whenever the
         # service is on. Bundling it would add ~300 MiB to the closure.
@@ -74,6 +74,14 @@
           pulseaudio       # parec, pactl (loopback capture), paplay
           xdg-utils        # xdg-open from the meeting view
           bubblewrap       # bwrap, the meeting assistant's codex jail
+        ];
+
+        # Basics voxtype shells out to outside the meeting features. NixOS
+        # always has them, but Nix elsewhere and the build sandbox may not,
+        # so they are fallbacks on the same --suffix PATH.
+        baseRuntimeDeps = with pkgs; [
+          curl   # model downloads (voxtype setup) and the announcement clip
+          which  # output driver probes (wtype, dotool, ydotool, ...)
         ];
 
         version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
@@ -118,7 +126,7 @@
 
         runtimePathArgs = ''
           --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
-          --suffix PATH : ${pkgs.lib.makeBinPath meetingRuntimeDeps}'';
+          --suffix PATH : ${pkgs.lib.makeBinPath (meetingRuntimeDeps ++ baseRuntimeDeps)}'';
 
         # Wrap a package with runtime dependencies
         wrapVoxtype = pkg: pkgs.symlinkJoin {
@@ -231,7 +239,8 @@
             buildInputs = commonBuildInputs ++ extraBuildInputs;
             # The meeting assistant tests resolve codex only when bwrap is on
             # PATH, as it is at runtime through meetingRuntimeDeps.
-            nativeCheckInputs = with pkgs; [ dbus python3 bubblewrap ];
+            # curl: the announcement fetch tests run it against file:// URLs.
+            nativeCheckInputs = with pkgs; [ dbus python3 bubblewrap curl ];
 
             # This test runs codex inside the real bwrap jail, which bind-mounts
             # the host's /usr. The Nix build sandbox has no /usr.
