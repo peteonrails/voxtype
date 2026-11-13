@@ -142,6 +142,13 @@ pub struct AllFields {
     pub ov_threads: Option<i64>,
     pub ov_on_demand_loading: bool,
     pub ov_section_existed: bool,
+
+    // Whistle
+    pub wh_model: String,
+    pub wh_language: String,
+    pub wh_keywords: Vec<String>,
+    pub wh_runtime: Option<String>,
+    pub wh_section_existed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +235,11 @@ pub enum FieldId {
     OvLanguage,
     OvThreads,
     OvOnDemandLoading,
+
+    // Whistle
+    WhModel,
+    WhLanguage,
+    WhKeywords,
 }
 
 /// Cohere Transcribe officially supports these 14 languages. Token IDs are
@@ -248,6 +260,7 @@ const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
 /// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
 /// own AUTO arm) — included here so it's reachable from the picker.
 const OV_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
+const WHISTLE_LANG_CHOICES: &[&str] = &["auto", "en", "de", "fr", "es", "it", "nl", "pl"];
 const GGUF_BACKEND_CHOICES: &[&str] = &[
     "auto",
     "cpu",
@@ -337,6 +350,9 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::OvThreads,
             FieldId::OvOnDemandLoading,
         ]),
+        "whistle" => {
+            rows.extend_from_slice(&[FieldId::WhModel, FieldId::WhLanguage, FieldId::WhKeywords])
+        }
         _ => {}
     }
     rows
@@ -479,6 +495,19 @@ impl EngineState {
                 .get_bool("openvino", "on_demand_loading")
                 .unwrap_or(false),
             ov_section_existed: ed.get_string("openvino", "model").is_some(),
+
+            // Whistle
+            wh_model: ed
+                .get_string("whistle", "model")
+                .unwrap_or_else(|| default_model("whistle").to_string()),
+            wh_language: ed
+                .get_string("whistle", "language")
+                .unwrap_or_else(|| "auto".to_string()),
+            wh_keywords: ed
+                .get_string_array("whistle", "keywords")
+                .unwrap_or_default(),
+            wh_runtime: ed.get_string("whistle", "runtime"),
+            wh_section_existed: ed.get_string("whistle", "model").is_some(),
         };
         let mut state = Self {
             engine,
@@ -800,6 +829,21 @@ impl EngineState {
             ed.set_bool("openvino", "on_demand_loading", f.ov_on_demand_loading);
         }
 
+        // Whistle
+        if self.engine == "whistle" || f.wh_section_existed {
+            ed.set_string("whistle", "model", &f.wh_model);
+            if f.wh_language == "auto" {
+                ed.unset("whistle", "language");
+            } else {
+                ed.set_string("whistle", "language", &f.wh_language);
+            }
+            ed.set_string_array("whistle", "keywords", &f.wh_keywords);
+            match &f.wh_runtime {
+                Some(path) if !path.is_empty() => ed.set_string("whistle", "runtime", path),
+                _ => ed.unset("whistle", "runtime"),
+            }
+        }
+
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
@@ -912,6 +956,7 @@ impl EngineState {
                 | FieldId::WRemoteEndpoint
                 | FieldId::WRemoteApiKey
                 | FieldId::WRemoteModel
+                | FieldId::WhKeywords
                 | FieldId::GgModel
                 | FieldId::GgArchitecture
                 | FieldId::GgLanguage
@@ -928,6 +973,7 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint.clone().unwrap_or_default(),
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key.clone().unwrap_or_default(),
             FieldId::WRemoteModel => self.fields.w_remote_model.clone().unwrap_or_default(),
+            FieldId::WhKeywords => self.fields.wh_keywords.join(", "),
             FieldId::GgModel => self.fields.gg_model.clone(),
             FieldId::GgArchitecture => self.fields.gg_architecture.clone(),
             FieldId::GgLanguage => self.fields.gg_language.clone(),
@@ -952,6 +998,14 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint = opt,
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key = opt,
             FieldId::WRemoteModel => self.fields.w_remote_model = opt,
+            FieldId::WhKeywords => {
+                self.fields.wh_keywords = trimmed
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|keyword| !keyword.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
             FieldId::GgModel => self.fields.gg_model = buffer,
             FieldId::GgArchitecture => self.fields.gg_architecture = buffer,
             FieldId::GgLanguage => self.fields.gg_language = buffer,
@@ -1110,6 +1164,15 @@ impl EngineState {
             FieldId::OvLanguage => f.ov_language = cycle_str(LANG_CHOICES, &f.ov_language, delta),
             FieldId::OvThreads => f.ov_threads = cycle_threads(f.ov_threads, delta),
             FieldId::OvOnDemandLoading => f.ov_on_demand_loading = !f.ov_on_demand_loading,
+
+            FieldId::WhModel => f.wh_model = cycle_model("whistle", &f.wh_model, delta),
+            FieldId::WhLanguage => {
+                f.wh_language = cycle_str(WHISTLE_LANG_CHOICES, &f.wh_language, delta)
+            }
+            FieldId::WhKeywords => {
+                self.start_edit_if_text_field();
+                return;
+            }
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -1134,6 +1197,7 @@ fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
         "cohere" => Some(f.co_model.clone()),
         "gguf" => Some(f.gg_model.clone()),
         "openvino" => Some(f.ov_model.clone()),
+        "whistle" => Some(f.wh_model.clone()),
         _ => None,
     }
 }
@@ -1193,6 +1257,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "whistle",
             "gguf",
             // OpenVINO isn't checked against `variant.supports_engine()`
             // above — it has no prebuilt binary variant at all (Intel-only
@@ -1548,6 +1613,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "OpenVINO · on-demand model load",
             yesno(f.ov_on_demand_loading),
         ),
+
+        FieldId::WhModel => ("Whistle · model", f.wh_model.clone()),
+        FieldId::WhLanguage => ("Whistle · language", f.wh_language.clone()),
+        FieldId::WhKeywords => ("Whistle · keywords", f.wh_keywords.join(", ")),
     }
 }
 
@@ -1834,6 +1903,7 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
             )),
         ],
         FieldId::OvModel => model_guidance("openvino", &f.ov_model),
+        FieldId::WhModel => model_guidance("whistle", &f.wh_model),
 
         FieldId::WMode => vec![
             heading("Whisper · execution mode"),
@@ -2147,6 +2217,20 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
             ),
         ],
         FieldId::OvOnDemandLoading => on_demand_guidance("OpenVINO"),
+        FieldId::WhLanguage => vec![
+            heading("Whistle · language"),
+            Line::from(""),
+            Line::from("Select auto to detect language from the recording."),
+            Line::from(""),
+            Line::from("Whistle supports en, de, fr, es, it, nl and pl."),
+        ],
+        FieldId::WhKeywords => vec![
+            heading("Whistle · keyword biasing"),
+            Line::from(""),
+            Line::from("Enter comma-separated words or phrases to bias decoding."),
+            Line::from(""),
+            Line::from("Hints are passed to Whistle, not applied as replacements."),
+        ],
 
         FieldId::WRemoteEndpoint => vec![
             heading("Whisper · remote endpoint"),
@@ -2322,6 +2406,7 @@ fn display_engine(engine: &str) -> &'static str {
         "cohere" => "Cohere",
         "gguf" => "GGUF",
         "openvino" => "OpenVINO",
+        "whistle" => "Whistle",
         _ => "Engine",
     }
 }
@@ -2683,6 +2768,14 @@ mod tests {
         assert!(rows.contains(&FieldId::OvDevice));
         assert!(rows.contains(&FieldId::OvLanguage));
         assert!(rows.contains(&FieldId::OvOnDemandLoading));
+    }
+
+    #[test]
+    fn whistle_engine_exposes_model_language_and_keywords() {
+        let rows = rows_for_engine_with_mode("whistle", "local");
+        assert!(rows.contains(&FieldId::WhModel));
+        assert!(rows.contains(&FieldId::WhLanguage));
+        assert!(rows.contains(&FieldId::WhKeywords));
     }
 
     #[test]

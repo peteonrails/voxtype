@@ -304,7 +304,8 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Cohere
         | TranscriptionEngine::Soniox
         | TranscriptionEngine::OpenVino
-        | TranscriptionEngine::Gguf => None,
+        | TranscriptionEngine::Whistle => None,
+        TranscriptionEngine::Gguf => None,
     });
 
     for notifier in notifier_paths {

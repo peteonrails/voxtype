@@ -88,6 +88,7 @@ fn describe_type(ty: KeyType) -> String {
         KeyType::Int { min, max } => format!("int {}..{}", min, max),
         KeyType::Float { min, max } => format!("float {}..{}", min, max),
         KeyType::String => "string".to_string(),
+        KeyType::StringList => "array of strings (TOML array)".to_string(),
         KeyType::Enum { choices, open } => {
             let list = choices.join(" | ");
             if open {

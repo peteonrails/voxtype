@@ -144,6 +144,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
+- `whistle` - Cactus Whistle local CPU model (7 languages, 16.9 MB, batch clips up to 30 seconds; requires `--features whistle` and the Needle native runtime)
 
 **Example:**
 ```toml
@@ -177,6 +178,7 @@ new engine to take effect.
 **Notes:**
 - First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
 - Whisper, Remote Whisper, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
+- Whistle requires `--features whistle` plus the Cactus Needle native runtime. The Nix flake Linux ONNX outputs include and wrap the runtime; standard GitHub/AUR binaries do not yet enable Whistle.
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
@@ -2076,6 +2078,31 @@ cargo build --release
 ```
 
 The Soniox backend pulls in a small WebSocket client (tokio-tungstenite + rustls) and an async HTTP client (reqwest) for the async API. They ship in every release binary so the engine surface stays uniform across flavors.
+
+---
+
+## [whistle]
+
+Whistle is an optional, local CPU transcription backend. Build with `cargo build --features whistle`. The native Cactus Needle runtime is loaded dynamically; install the runtime library separately or set `runtime` to its full path. Voxtype disables Cactus telemetry before loading the runtime.
+
+```toml
+engine = "whistle"
+
+[whistle]
+model = "whistle.cact"
+# Omit language for automatic detection; supported: en, de, fr, es, it, nl, pl
+language = "fr"
+keywords = ["Voxtype", "NixOS", "Hyprland"]
+# runtime = "/path/to/libneedle.so"  # optional; otherwise use system loader paths
+```
+
+Set keyword hints non-interactively with a TOML string array:
+
+```bash
+voxtype config set whistle.keywords '["Voxtype", "NixOS", "Hyprland"]'
+```
+
+Install the model with `voxtype setup --download --model whistle.cact` after the `whistle/whistle` artifact has been mirrored to the Voxtype model CDN. Whistle processes complete clips, not streams, and accepts at most 30 seconds per pass. `keywords` are passed to the native decoder as biasing hints. Automatic detection is used when `language` is omitted. The current Needle C API exposes process-global model state but no unload function; Voxtype serializes calls and holds the model until process exit.
 
 ---
 

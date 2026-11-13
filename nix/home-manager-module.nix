@@ -28,6 +28,16 @@
 #     };
 #   };
 #
+#   # Whistle example (local CPU engine):
+#   programs.voxtype = {
+#     enable = true;
+#     engine = "whistle";
+#     package = voxtype.packages.${system}.onnx;
+#     model.path = ./whistle.cact;
+#     service.enable = true;
+#     settings.whistle = { language = "fr"; keywords = [ "NixOS" "Voxtype" ]; };
+#   };
+#
 #   # Parakeet example (English, high accuracy):
 #   programs.voxtype = {
 #     enable = true;
@@ -56,9 +66,11 @@ let
     })
     cfg.settings;
 
-  # Engines that use ONNX Runtime (need model.path, not model.name)
-  onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
-  isOnnxEngine = builtins.elem cfg.engine onnxEngines;
+  # Engines with separate assets that must be supplied through model.path.
+  enginesUsingExternalModels = [
+    "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" "whistle"
+  ];
+  usesExternalModel = builtins.elem cfg.engine enginesUsingExternalModels;
 
   # Fetch model from HuggingFace if using declarative model management
   fetchedModel = lib.optionalAttrs (cfg.model.name != null) (
@@ -85,7 +97,9 @@ in {
     enable = lib.mkEnableOption "VoxType push-to-talk voice-to-text";
 
     engine = lib.mkOption {
-      type = lib.types.enum [ "whisper" "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
+      type = lib.types.enum [
+        "whisper" "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" "whistle"
+      ];
       default = "whisper";
       description = ''
         Speech recognition engine to use.
@@ -100,8 +114,9 @@ in {
         - paraformer: Alibaba Paraformer (Chinese, English)
         - dolphin: Dolphin (Chinese-focused)
         - omnilingual: Omnilingual (multilingual)
+        - whistle: Cactus Whistle (CPU, requires the ONNX package for its native runtime)
 
-        When using ONNX engines, use model.path to point to the model directory.
+        Use model.path to point to external model assets for ONNX engines and Whistle.
       '';
     };
 
@@ -145,6 +160,7 @@ in {
           Path to a model file or directory.
           - For Whisper: path to a .bin model file
           - For ONNX engines: path to the model directory containing ONNX files
+          - For Whistle: path to whistle.cact
 
           Overrides model.name when set.
         '';
@@ -201,8 +217,8 @@ in {
         message = "programs.voxtype: cannot set both model.name and model.path";
       }
       {
-        assertion = !(isOnnxEngine && cfg.model.name != null);
-        message = "programs.voxtype: model.name is only for Whisper models. Use model.path for ONNX engines (${cfg.engine}).";
+        assertion = !(usesExternalModel && cfg.model.name != null);
+        message = "programs.voxtype: model.name is only for Whisper models. Use model.path for ${cfg.engine}.";
       }
     ];
 

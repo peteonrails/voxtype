@@ -13,6 +13,7 @@
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
+//! - Optionally Cactus Whistle through its native C API (`whistle` feature)
 
 pub mod cli;
 #[cfg(feature = "parakeet")]
@@ -23,6 +24,8 @@ pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
+#[cfg(feature = "whistle")]
+pub mod whistle;
 /// Long-audio windowing shared by the engines with a bounded input length.
 /// Deliberately not feature-gated: see the module docs.
 pub mod window;
@@ -388,6 +391,16 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
         }
+        #[cfg(feature = "whistle")]
+        TranscriptionEngine::Whistle => {
+            let cfg = config.whistle.as_ref().cloned().unwrap_or_default();
+            Ok(Box::new(whistle::WhistleTranscriber::new(&cfg)?))
+        }
+        #[cfg(not(feature = "whistle"))]
+        TranscriptionEngine::Whistle => Err(TranscribeError::InitFailed(
+            "Whistle engine requested but voxtype was not compiled with --features whistle"
+                .to_string(),
+        )),
         #[cfg(feature = "openvino-whisper")]
         TranscriptionEngine::OpenVino => {
             let default_config = crate::config::OpenVinoConfig::default();
@@ -547,6 +560,31 @@ pub fn create_transcriber_with_config_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "whistle")]
+    #[test]
+    fn whistle_engine_factory_routes_to_the_whistle_backend() {
+        let mut config = Config::default();
+        config.engine = TranscriptionEngine::Whistle;
+        config.whistle = Some(crate::config::WhistleConfig {
+            model: "/tmp/voxtype-missing-whistle-factory-test.cact".to_string(),
+            ..crate::config::WhistleConfig::default()
+        });
+        let result = create_transcriber(&config);
+        assert!(matches!(result, Err(TranscribeError::ModelNotFound(_))));
+    }
+
+    #[cfg(not(feature = "whistle"))]
+    #[test]
+    fn whistle_engine_reports_when_feature_is_disabled() {
+        let mut config = Config::default();
+        config.engine = TranscriptionEngine::Whistle;
+        let error = match create_transcriber(&config) {
+            Ok(_) => panic!("feature-disabled Whistle unexpectedly initialized"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("--features whistle"));
+    }
 
     #[test]
     fn gguf_is_chosen_by_extension_in_any_case() {

@@ -60,6 +60,8 @@ pub enum KeyType {
         max: f64,
     },
     String,
+    /// A TOML array of strings.
+    StringList,
     /// Closed set of values. `open` means the listed choices are the useful
     /// presets but any non-empty string is accepted — used where the config
     /// field is a free-form string that also has canonical values (an evdev
@@ -89,6 +91,7 @@ impl KeyType {
             KeyType::Int { .. } => "int",
             KeyType::Float { .. } => "float",
             KeyType::String => "string",
+            KeyType::StringList => "string_list",
             KeyType::Enum { .. } => "enum",
             KeyType::DynamicEnum { .. } => "dynamic_enum",
             KeyType::MapString => "map_string",
@@ -201,6 +204,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
         "gguf" => cfg!(feature = "gguf"),
         "openvino" => cfg!(feature = "openvino-whisper"),
+        "whistle" => cfg!(feature = "whistle"),
         _ => false,
     }
 }
@@ -224,6 +228,7 @@ const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
 ];
+const WHISTLE_LANG_CHOICES: &[&str] = &["en", "de", "fr", "es", "it", "nl", "pl"];
 const OPENVINO_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
 const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc"];
 
@@ -829,6 +834,47 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OpenVINO Whisper model name or model directory.",
     )
     .for_onnx_engine("openvino"),
+    // whistle
+    spec(
+        "whistle.model",
+        "whistle",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "Whistle .cact model file name or explicit path.",
+    )
+    .gated("whistle"),
+    spec(
+        "whistle.language",
+        "whistle",
+        "language",
+        closed(WHISTLE_LANG_CHOICES),
+        "Engine",
+        "Language",
+        "Whistle language code; unset enables automatic detection.",
+    )
+    .gated("whistle"),
+    spec(
+        "whistle.keywords",
+        "whistle",
+        "keywords",
+        KeyType::StringList,
+        "Engine",
+        "Keywords",
+        "Word and phrase hints passed to Whistle's decoder.",
+    )
+    .gated("whistle"),
+    spec(
+        "whistle.runtime",
+        "whistle",
+        "runtime",
+        KeyType::String,
+        "Engine",
+        "Native runtime",
+        "Optional path to the Cactus Needle shared library.",
+    )
+    .gated("whistle"),
     spec(
         "openvino.device",
         "openvino",
@@ -2478,6 +2524,7 @@ pub enum TypedValue {
     Int(i64),
     Float(f64),
     Str(String),
+    StringList(Vec<String>),
 }
 
 impl TypedValue {
@@ -2487,6 +2534,7 @@ impl TypedValue {
             TypedValue::Int(n) => json!(n),
             TypedValue::Float(f) => json!(f),
             TypedValue::Str(s) => json!(s),
+            TypedValue::StringList(values) => json!(values),
         }
     }
 
@@ -2497,6 +2545,7 @@ impl TypedValue {
             TypedValue::Int(n) => n.to_string(),
             TypedValue::Float(f) => f.to_string(),
             TypedValue::Str(s) => format!("\"{}\"", s),
+            TypedValue::StringList(values) => serde_json::to_string(values).unwrap_or_default(),
         }
     }
 }
@@ -2516,6 +2565,8 @@ pub enum ValueError {
         min: String,
         max: String,
     },
+    #[error("'{value}' is not a TOML array of strings (example: a list of quoted strings in square brackets).")]
+    NotStringList { value: String },
     #[error("'{value}' is not a valid {key}. Valid values: {choices}")]
     NotAChoice {
         key: &'static str,
@@ -2586,6 +2637,14 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
                 choices: choices.join(", "),
             })
         }
+        KeyType::StringList => toml::from_str::<toml::Table>(&format!("value = {raw}"))
+            .ok()
+            .and_then(|mut table| table.remove("value"))
+            .and_then(|value| value.try_into::<Vec<String>>().ok())
+            .map(TypedValue::StringList)
+            .ok_or_else(|| ValueError::NotStringList {
+                value: raw.to_string(),
+            }),
         KeyType::String | KeyType::DynamicEnum { .. } | KeyType::MapString => {
             if raw.is_empty() {
                 return Err(ValueError::Empty { key: spec.key });
@@ -2632,6 +2691,7 @@ pub fn apply(editor: &mut ConfigEditor, found: &Found, value: &TypedValue) {
         TypedValue::Int(n) => editor.set_int(table, field, *n),
         TypedValue::Float(f) => editor.set_float(table, field, *f),
         TypedValue::Str(s) => editor.set_string(table, field, s),
+        TypedValue::StringList(values) => editor.set_string_array(table, field, values),
     }
 }
 
@@ -2678,6 +2738,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let wh = || cfg.whistle.clone().unwrap_or_default();
     let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
     let so = || cfg.soniox.clone().unwrap_or_default();
@@ -2777,6 +2838,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "cohere.max_chunk_secs" => json!(co().max_chunk_secs),
         "cohere.boundary_search_secs" => json!(co().boundary_search_secs),
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+        "whistle.model" => json!(wh().model),
+        "whistle.language" => json!(wh().language),
+        "whistle.keywords" => json!(wh().keywords),
+        "whistle.runtime" => json!(wh().runtime.map(|p| p.to_string_lossy().into_owned())),
 
         "gguf.model" => json!(gg().model),
         "gguf.architecture" => json!(gg().architecture),
@@ -3025,6 +3090,16 @@ fn file_value(editor: &ConfigEditor, spec: &KeySpec) -> Json {
             .or_else(|| v.as_integer().map(|n| n as f64))
             .map(|f| json!(f))
             .unwrap_or(Json::Null),
+        KeyType::StringList => v
+            .as_array()
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .map(|values| json!(values))
+            .unwrap_or(Json::Null),
         _ => match v.as_str() {
             Some(s) => json!(s),
             // `whisper.language` accepts an array form; report it in the
@@ -3201,6 +3276,7 @@ mod tests {
             KeyType::Enum { choices, .. } => choices[choices.len() - 1].to_string(),
             KeyType::DynamicEnum { .. } => "test-value".to_string(),
             KeyType::String => "test-value".to_string(),
+            KeyType::StringList => "[]".to_string(),
             KeyType::MapString => "test-value".to_string(),
         }
     }
@@ -3598,7 +3674,16 @@ mod tests {
             }
             let ty = k["type"].as_str().unwrap();
             assert!(
-                ["bool", "int", "float", "string", "enum", "dynamic_enum"].contains(&ty),
+                [
+                    "bool",
+                    "int",
+                    "float",
+                    "string",
+                    "string_list",
+                    "enum",
+                    "dynamic_enum",
+                ]
+                .contains(&ty),
                 "unexpected type tag '{}' in the schema document",
                 ty
             );

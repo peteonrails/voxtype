@@ -12,6 +12,7 @@ mod paraformer;
 mod parakeet;
 mod sensevoice;
 mod soniox;
+mod whistle;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
@@ -23,6 +24,7 @@ pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
 pub use sensevoice::SenseVoiceConfig;
 pub use soniox::SonioxConfig;
+pub use whistle::{WhistleConfig, WHISTLE_LANGUAGES};
 
 /// Transcription engine selection (which ASR technology to use)
 #[derive(
@@ -74,6 +76,9 @@ pub enum TranscriptionEngine {
     OpenVino,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
+    /// Use Cactus Whistle (local CPU speech model).
+    /// Requires: cargo build --features whistle
+    Whistle,
 }
 
 impl TranscriptionEngine {
@@ -198,6 +203,28 @@ mod tests {
         assert_eq!(
             config.parakeet.as_ref().unwrap().model,
             "parakeet-tdt-0.6b-v3"
+        );
+    }
+
+    #[test]
+    fn test_parse_engine_whistle() {
+        let config: Config = toml::from_str(
+            r#"
+                engine = "whistle"
+                [whistle]
+                language = "fr"
+                keywords = ["Voxtype", "NixOS"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Whistle);
+        assert_eq!(
+            config.whistle.as_ref().unwrap().language.as_deref(),
+            Some("fr")
+        );
+        assert_eq!(
+            config.whistle.as_ref().unwrap().keywords,
+            ["Voxtype", "NixOS"]
         );
     }
 

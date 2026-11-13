@@ -200,7 +200,7 @@ Item {
         assert saved['gguf']['language'] == 'de' and saved['gguf']['architecture'] == 'qwen3_asr'
         assert saved['parakeet'] == tomllib.loads(original)['parakeet'] and '# keep' in config.read_text()
         shutil.copy2(root / 'cli.jsonl', a.out / 'cli.jsonl')
-        assert (root / 'attempts').read_text() == '3' 
+        assert (root / 'attempts').read_text() == '3'
         (a.out / "results.json").write_text(json.dumps({"passed": True, "models": variants, "scope": "actual QML on private labwc: compiled catalogs, fixture download failure/progress/cancel/retry, download-only nonactivation, real candidate CLI atomic Use"}, indent=2))
     finally:
         if compositor.poll() is None:

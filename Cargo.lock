@@ -6249,6 +6249,7 @@ dependencies = [
  "inotify 0.10.2",
  "ksni",
  "libc",
+ "libloading 0.8.9",
  "mac-notification-sys",
  "ndarray 0.16.1",
  "nix",

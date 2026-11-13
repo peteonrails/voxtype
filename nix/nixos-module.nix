@@ -51,6 +51,7 @@ in {
         - packages.onnx-cuda: CUDA acceleration (NVIDIA)
         - packages.onnx-rocm: ROCm acceleration (AMD, Parakeet only)
 
+        The ONNX packages also include the optional Whistle engine and its native runtime.
         These packages include all runtime dependencies (wtype, dotool, ydotool, etc.)
         in their PATH.
       '';
