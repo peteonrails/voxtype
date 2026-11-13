@@ -471,17 +471,61 @@ impl Transcriber for RemoteTranscriber {
 mod tests {
     use super::*;
 
+    /// How long the loopback fixtures and their client wait on each other.
+    /// A passing request is answered in milliseconds, so only a genuine
+    /// hang reaches it; it is generous so a loaded CI machine never turns a
+    /// slow round trip into a failure.
+    const FIXTURE_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Read one HTTP request (headers, then a Content-Length body) from a
+    /// fixture connection. An error means the client went away; the fixture
+    /// drops that connection rather than panicking, and the client's own
+    /// error is what the test reports.
+    fn read_request(stream: &mut std::net::TcpStream, max: usize) -> std::io::Result<Vec<u8>> {
+        use std::io::{Error, ErrorKind, Read};
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(FIXTURE_TIMEOUT))?;
+        stream.set_write_timeout(Some(FIXTURE_TIMEOUT))?;
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut byte = [0];
+            stream.read_exact(&mut byte)?;
+            request.push(byte[0]);
+            if request.len() >= max {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "request headers too long",
+                ));
+            }
+            if request.ends_with(b"\r\n\r\n") {
+                break request.len();
+            }
+        };
+        let headers = String::from_utf8_lossy(&request).into_owned();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().ok())?
+            })
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "no Content-Length"))?;
+        request.resize(header_end + length, 0);
+        stream.read_exact(&mut request[header_end..])?;
+        Ok(request)
+    }
+
     // The listener is loopback-only; release verification runs these tests in
     // the private no-egress NAS container, never against a provider or desktop.
     fn capture_request(endpoint_suffix: &str, translate: bool) -> String {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + FIXTURE_TIMEOUT;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -492,36 +536,11 @@ mod tests {
                     Err(error) => panic!("fixture accept failed: {error}"),
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            let header_end = loop {
-                let mut byte = [0];
-                stream.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-                assert!(request.len() < 16_384);
-                if request.ends_with(b"\r\n\r\n") {
-                    break request.len();
-                }
-            };
-            let headers = String::from_utf8(request.clone()).unwrap();
-            let length: usize = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse().unwrap())
-                })
-                .unwrap();
-            assert!(length < 16_384);
-            request.resize(header_end + length, 0);
-            stream.read_exact(&mut request[header_end..]).unwrap();
+            let request = read_request(&mut stream, 16_384).expect("fixture request");
+            assert!(request.len() < 16_384);
             let response = r#"{"text":" fixture transcript "}"#;
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+            // The client may already have gone; its error is the failure.
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response);
             String::from_utf8_lossy(&request).into_owned()
         });
         let config = WhisperConfig {
@@ -530,7 +549,7 @@ mod tests {
             remote_api_key: Some("fixture-not-a-secret".into()),
             language: LanguageConfig::Single("fr".into()),
             initial_prompt: Some("Technical discussion.".into()),
-            remote_timeout_secs: Some(5),
+            remote_timeout_secs: Some(FIXTURE_TIMEOUT.as_secs()),
             translate,
             ..Default::default()
         };
@@ -565,7 +584,7 @@ mod tests {
     fn scripted(
         replies: Vec<(u16, &'static str)>,
     ) -> (WhisperConfig, std::thread::JoinHandle<Vec<String>>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -574,7 +593,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut formats = Vec::new();
             for (status, body) in replies {
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let deadline = std::time::Instant::now() + FIXTURE_TIMEOUT;
                 let mut stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
@@ -587,48 +606,28 @@ mod tests {
                         Err(e) => panic!("fixture accept failed: {e}"),
                     }
                 };
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let header_end = loop {
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
-                    if request.ends_with(b"\r\n\r\n") {
-                        break request.len();
-                    }
+                // A client that hung up mid-request gets no reply and is not
+                // recorded; the test fails on the client's error instead.
+                let Ok(request) = read_request(&mut stream, 16_384) else {
+                    continue;
                 };
-                let headers = String::from_utf8_lossy(&request).into_owned();
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
-                request.resize(header_end + length, 0);
-                stream.read_exact(&mut request[header_end..]).unwrap();
                 let text = String::from_utf8_lossy(&request);
                 let marker = "name=\"response_format\"\r\n\r\n";
                 let at = text.find(marker).unwrap() + marker.len();
                 formats.push(text[at..].split("\r\n").next().unwrap().to_string());
                 let reason = if status == 200 { "OK" } else { "Error" };
-                write!(
+                let _ = write!(
                     stream,
                     "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
-                )
-                .unwrap();
+                );
             }
             formats
         });
         let config = WhisperConfig {
             remote_endpoint: Some(format!("http://{address}")),
-            remote_timeout_secs: Some(5),
+            remote_timeout_secs: Some(FIXTURE_TIMEOUT.as_secs()),
             ..Default::default()
         };
         (config, server)

@@ -34,11 +34,17 @@ use crate::osd::visual::{Color, Palette};
 /// Candidate Omarchy "current theme" directories, ordered newest to oldest.
 pub fn omarchy_theme_dirs() -> Option<Vec<PathBuf>> {
     let home = std::env::var_os("HOME")?;
-    let home = PathBuf::from(home);
-    Some(vec![
+    Some(theme_dirs_under(Path::new(&home)))
+}
+
+/// [`omarchy_theme_dirs`] for a given home directory. Tests use this rather
+/// than setting `HOME`, which is process-wide and races with every other
+/// test that reads it.
+fn theme_dirs_under(home: &Path) -> Vec<PathBuf> {
+    vec![
         home.join(".local/state/omarchy/current/theme"),
         home.join(".config/omarchy/current/theme"),
-    ])
+    ]
 }
 
 /// Omarchy "current" directories (the parents holding the `theme` symlink)
@@ -86,11 +92,15 @@ fn parse_hex(s: &str) -> Option<Color> {
 /// fallbacks apply too: a theme that only defines `accent` keeps the
 /// fallback values for everything else.
 pub fn load_palette() -> Palette {
-    let Some(dirs) = omarchy_theme_dirs() else {
-        return Palette::fallback();
-    };
+    match omarchy_theme_dirs() {
+        Some(dirs) => palette_from_dirs(&dirs),
+        None => Palette::fallback(),
+    }
+}
 
-    for path in dirs.into_iter().map(|dir| dir.join("colors.toml")) {
+/// [`load_palette`] from the given candidate theme directories.
+fn palette_from_dirs(dirs: &[PathBuf]) -> Palette {
+    for path in dirs.iter().map(|dir| dir.join("colors.toml")) {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -216,14 +226,17 @@ where
 /// of `debounce`. Returns `None` when none of `current_dirs` exist or no
 /// watch could be established; errors never panic.
 ///
-/// notify's inotify event loop panics on any `epoll_wait` error but EINTR,
-/// and the kernel has been seen to return an undocumented EAGAIN under load
-/// (the Nix build sandbox). Every later call on that watcher then panics,
+/// notify's inotify event loop panics on any `epoll_wait` error but EINTR.
+/// A signal handler that clobbered errno once turned EINTR into EAGAIN (fixed
+/// in signal-hook-registry 1.4.8), and other errors remain possible. Every
+/// later call on that watcher then panics,
 /// and dropping it panics again, which used to abort the whole process. So
 /// the watcher is treated as disposable: its death is noticed (the event
 /// handler it owns reports when it is dropped), every call into it is
-/// guarded, and a fresh watcher replaces it. `on_change` fires after the
-/// replacement, since events may have been missed while it was dead.
+/// guarded, and a fresh watcher replaces it. After a replacement,
+/// `on_change` fires only if the theme changed while the watcher was dead,
+/// judged against a fingerprint of the theme files as of the last callback;
+/// a dead watcher that missed nothing produces no spurious reload.
 pub fn watch_omarchy_dirs<F>(
     current_dirs: Vec<PathBuf>,
     debounce: Duration,
@@ -241,20 +254,21 @@ where
     let mut generation = 0u64;
     let mut armed = Some(arm(&tx, generation, &parents)?);
     let thread_tx = tx.clone();
+    let mut delivered = theme_fingerprint(&parents);
 
     let thread = thread::spawn(move || loop {
-        let mut died = match rx.recv() {
+        let (mut saw_fs, mut died) = match rx.recv() {
             Ok(WatchMsg::Stop) | Err(_) => {
                 discard(armed.take());
                 break;
             }
-            Ok(WatchMsg::Fs) => false,
-            Ok(WatchMsg::Died(g)) if g == generation => true,
+            Ok(WatchMsg::Fs) => (true, false),
+            Ok(WatchMsg::Died(g)) if g == generation => (false, true),
             Ok(WatchMsg::Died(_)) => continue,
         };
         loop {
             match rx.recv_timeout(debounce) {
-                Ok(WatchMsg::Fs) => continue,
+                Ok(WatchMsg::Fs) => saw_fs = true,
                 Ok(WatchMsg::Died(g)) => died |= g == generation,
                 Ok(WatchMsg::Stop) => {
                     discard(armed.take());
@@ -291,13 +305,54 @@ where
                 );
             }
         }
-        on_change();
+        // Events always report. A replacement reports only what the dead
+        // watcher may have missed.
+        let now = theme_fingerprint(&parents);
+        if saw_fs || now != delivered {
+            on_change();
+        }
+        delivered = now;
     });
 
     Some(ThemeWatchHandle {
         tx,
         thread: Some(thread),
     })
+}
+
+/// What the theme looks like on disk: the directory each "current" parent
+/// resolves to, `theme.name` beside it, and every entry in the resolved
+/// directory with its modification time, size and, for small files, a hash
+/// of the contents (so an edit within one timestamp tick still counts).
+/// Cheap: a theme is a few dozen small files.
+fn theme_fingerprint(
+    parents: &[PathBuf],
+) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    let stamp = |path: PathBuf| {
+        let meta = fs::metadata(&path).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        let len = meta.as_ref().map_or(0, |m| m.len());
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if meta.is_some_and(|m| m.is_file() && m.len() <= 64 * 1024) {
+            fs::read(&path).unwrap_or_default().hash(&mut hasher);
+        }
+        (path, modified, len, hasher.finish())
+    };
+    let mut out = Vec::new();
+    for parent in parents {
+        out.push(stamp(parent.join("theme.name")));
+        let Ok(dir) = fs::canonicalize(parent.join("theme")) else {
+            continue;
+        };
+        out.push((dir.clone(), None, 0, 0));
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .map(|it| it.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        entries.sort();
+        out.extend(entries.into_iter().map(stamp));
+    }
+    out
 }
 
 /// A watcher and the theme directories it is pinned to.
@@ -409,25 +464,44 @@ fn watch_theme_targets(
 mod tests {
     use super::*;
 
+    // These never set HOME: it is process-wide, and a test that changed it
+    // raced with every other test reading it (watcher_uses_loaded_palette
+    // compared the real theme against the fallback when HOME moved between
+    // its two reads).
+
     #[test]
     fn theme_dir_resolves_under_home() {
-        std::env::set_var("HOME", "/tmp/fakehome");
-        let p = omarchy_theme_dir().unwrap();
-        assert!(p.ends_with(".local/state/omarchy/current/theme"));
+        let dirs = theme_dirs_under(Path::new("/tmp/fakehome"));
+        assert_eq!(
+            dirs[0],
+            Path::new("/tmp/fakehome/.local/state/omarchy/current/theme")
+        );
     }
 
     #[test]
     fn theme_dirs_include_legacy_config_fallback() {
-        std::env::set_var("HOME", "/tmp/fakehome");
-        let dirs = omarchy_theme_dirs().unwrap();
+        let dirs = theme_dirs_under(Path::new("/tmp/fakehome"));
         assert!(dirs[0].ends_with(".local/state/omarchy/current/theme"));
         assert!(dirs[1].ends_with(".config/omarchy/current/theme"));
     }
 
     #[test]
     fn missing_theme_dir_yields_fallback() {
-        std::env::set_var("HOME", "/tmp/this-dir-should-not-exist-voxtype-test");
-        assert_eq!(load_palette(), Palette::fallback());
+        let home = tempfile::tempdir().unwrap();
+        let dirs = theme_dirs_under(&home.path().join("does-not-exist"));
+        assert_eq!(palette_from_dirs(&dirs), Palette::fallback());
+    }
+
+    #[test]
+    fn a_theme_under_the_given_home_is_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = theme_dirs_under(home.path());
+        // Only the legacy location exists: the newer one is skipped.
+        fs::create_dir_all(&dirs[1]).unwrap();
+        fs::write(dirs[1].join("colors.toml"), "accent = \"#6E89C2\"\n").unwrap();
+        let p = palette_from_dirs(&dirs);
+        assert!((p.accent.r - 0x6E as f32 / 255.0).abs() < 1e-6);
+        assert_eq!(p.background, Palette::fallback().background);
     }
 
     #[test]
@@ -487,11 +561,14 @@ mod tests {
     }
 
     #[test]
-    fn watcher_uses_loaded_palette() {
-        // We can't predict the user's theme here, but at minimum the watcher
-        // should hold whatever load_palette() returned at construction.
-        let w = ThemeWatcher::new();
-        assert_eq!(w.palette(), load_palette());
+    fn watcher_returns_the_palette_it_holds() {
+        // ThemeWatcher::new() reads the live HOME; comparing that against a
+        // second read raced with tests elsewhere that set HOME. What matters
+        // is that the watcher hands back what it was given.
+        let mut palette = Palette::fallback();
+        palette.accent = Color::rgb(0.1, 0.2, 0.3);
+        let w = ThemeWatcher { palette };
+        assert_eq!(w.palette(), palette);
     }
 
     /// Test debounce window. Generous relative to inotify latency so a burst
@@ -642,11 +719,14 @@ mod tests {
         .unwrap();
 
         // What the first watcher's event handler reports when notify's
-        // event loop thread dies.
+        // event loop thread dies. Nothing changed meanwhile, so the
+        // replacement reports nothing: a dead loop must not look like a
+        // theme switch.
         handle.tx.send(WatchMsg::Died(0)).unwrap();
-        rx.recv_timeout(Duration::from_secs(10))
-            .expect("re-arming should report a possible change");
-        while rx.recv_timeout(DEBOUNCE * 4).is_ok() {}
+        assert!(
+            rx.recv_timeout(DEBOUNCE * 4).is_err(),
+            "re-arming over an unchanged theme must not call back"
+        );
 
         // The first watcher is gone; only the replacement can see this.
         fs::write(theme_a.join("colors.toml"), "accent = \"#555555\"\n").unwrap();
@@ -660,6 +740,25 @@ mod tests {
             rx.recv_timeout(DEBOUNCE * 4).is_err(),
             "a stale death notice must be ignored"
         );
+    }
+
+    #[test]
+    fn the_fingerprint_moves_with_every_kind_of_theme_change() {
+        let (_tmp, current, theme_a, theme_b) = fake_omarchy();
+        let parents = vec![current.clone()];
+        let before = theme_fingerprint(&parents);
+        assert_eq!(theme_fingerprint(&parents), before, "stable when idle");
+
+        fs::write(theme_a.join("colors.toml"), "accent = \"#999999\"\n").unwrap();
+        let edited = theme_fingerprint(&parents);
+        assert_ne!(edited, before, "an in-place edit");
+
+        flip_theme(&current, &theme_b);
+        let flipped = theme_fingerprint(&parents);
+        assert_ne!(flipped, edited, "a symlink flip");
+
+        fs::write(current.join("theme.name"), "b\n").unwrap();
+        assert_ne!(theme_fingerprint(&parents), flipped, "a theme.name rewrite");
     }
 
     #[test]
