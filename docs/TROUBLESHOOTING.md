@@ -20,8 +20,8 @@ default. Install a compatible build deliberately rather than renaming a file.
 An existing explicit v3 selection is intentionally preserved, even when Ultra
 weights are installed. Select Ultra explicitly to change it.
 
-Ultra's pinned upstream Hugging Face downloads need network access to that host;
-they do not use an unpublished R2 object. Size/hash rejection does not replace an
+Ultra downloads come from Voxtype's model mirror at `models.voxtype.io`, like
+every other model, and need network access to that host. Size/hash rejection does not replace an
 existing good model. Retry a failed explicit download, not a settings save.
 The automatic, read-only Ultra language display is expected: this runtime has
 no selectable language hint for Parakeet. No translation or streaming is added.
@@ -575,10 +575,26 @@ is installed.
 # Download the model
 voxtype setup --download
 
-# Or manually download
+# Or a specific model
+voxtype setup --download --model base.en
+```
+
+Whisper models download from Voxtype's model mirror at `models.voxtype.io`, and
+each file is checked against the SHA-256 in the mirror's manifest before it is
+saved. A download that does not match is deleted and the command fails, so a
+partial or corrupted file never ends up where the daemon looks for it. If the
+download fails, check that the machine can reach `https://models.voxtype.io`
+(for example `curl -sI https://models.voxtype.io/whisper/base.en/manifest.json`).
+
+To download by hand instead, fetch the file and compare its SHA-256 with the
+one listed in the manifest:
+
+```bash
 mkdir -p ~/.local/share/voxtype/models
 curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
-    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+    https://models.voxtype.io/whisper/base.en/ggml-base.en.bin
+curl -s https://models.voxtype.io/whisper/base.en/manifest.json   # lists the sha256
+sha256sum ~/.local/share/voxtype/models/ggml-base.en.bin
 ```
 
 ### Punctuation/casing stays lowercase or logs a model warning
@@ -607,9 +623,9 @@ voxtype setup --download --model <model-name>
 
 # Or fetch just the missing file directly (note: NOT identical across model
 # sizes -- large-v3/large-v3-turbo use 128 mel bins, everything else uses 80,
-# so fetch it from the specific model's own repo, not a different one's)
+# so fetch it from the specific model's own directory, not a different one's)
 curl -Lo ~/.local/share/voxtype/models/<model-dir>/preprocessor_config.json \
-    https://huggingface.co/<org>/<model-repo>/resolve/main/preprocessor_config.json
+    https://models.voxtype.io/openvino/<model-dir>/preprocessor_config.json
 ```
 
 ### OpenVINO: setup prints "Compiling ... for Intel NPU" and takes minutes, or ends with a warning

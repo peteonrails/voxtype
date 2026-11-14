@@ -474,7 +474,7 @@ Use the interactive model selector to browse and download models for any engine:
 voxtype setup model
 ```
 
-This shows all available models across all engines, marks installed models, and handles downloads from HuggingFace.
+This shows all available models across all engines, marks installed models, and handles downloads from Voxtype's model mirror at `models.voxtype.io`, checking each file's SHA-256.
 
 ### On-Demand Loading
 

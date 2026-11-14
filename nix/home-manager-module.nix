@@ -60,7 +60,7 @@ let
   onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
   isOnnxEngine = builtins.elem cfg.engine onnxEngines;
 
-  # Fetch model from HuggingFace if using declarative model management
+  # Fetch model from the Voxtype model mirror if using declarative model management
   fetchedModel = lib.optionalAttrs (cfg.model.name != null) (
     let modelDef = modelDefs.${cfg.model.name}; in
     pkgs.fetchurl {
@@ -130,7 +130,7 @@ in {
         type = lib.types.nullOr (lib.types.enum (builtins.attrNames modelDefs));
         default = null;
         description = ''
-          Whisper model to download from HuggingFace. Only used when engine = "whisper".
+          Whisper model to download from the Voxtype model mirror. Only used when engine = "whisper".
           Set to null when using ONNX engines or managing models manually.
 
           Available: tiny, tiny.en, base, base.en, small, small.en,

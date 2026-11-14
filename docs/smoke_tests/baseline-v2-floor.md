@@ -36,7 +36,7 @@ mkdir -p "$XDG_CONFIG_HOME/voxtype" "$XDG_DATA_HOME/voxtype/models"
 printf 'engine = "whisper"\n\n[whisper]\nmodel = "tiny.en"\n' \
   > "$XDG_CONFIG_HOME/voxtype/config.toml"
 curl -sSL -o "$XDG_DATA_HOME/voxtype/models/ggml-tiny.en.bin" \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+  https://models.voxtype.io/whisper/tiny.en/ggml-tiny.en.bin
 
 # The gate: full inference under a v2-modeled CPU. Slow under TCG
 # (roughly half a minute for a one-second clip); a SIGILL here means the
