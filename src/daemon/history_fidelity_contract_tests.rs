@@ -39,6 +39,13 @@ fn fidelity_daemon(root: &Path) -> Daemon {
     daemon.config.output.notification.on_recording_start = false;
     daemon.config.output.notification.on_recording_stop = false;
     daemon.config.output.notification.on_transcription = false;
+    // These contracts pin what history records when a stream fails. With
+    // recovery on, a failed stream with captured audio hands off to batch
+    // transcription instead; the daemon's recovery tests cover that path.
+    daemon.config.streaming_recovery = Some(crate::config::StreamingRecoveryConfig {
+        enabled: false,
+        ..Default::default()
+    });
     daemon.config.output.notification.on_no_speech = false;
     // Deliberate ordinary postprocessing, not an alteration of ASR/ground truth.
     daemon.config.text.replacements.insert("world".into(), "HISTORYTRANSFORM".into());
@@ -109,7 +116,7 @@ async fn real_batch_or_eager_fidelity(name: &str, fixture: &str, eager: bool) {
     daemon.prepare_for_recording(None);
     let mut capture: Option<Box<dyn AudioCapture>> = Some(Box::new(PrerecordedHistoryAudio { samples }));
     if eager {
-        daemon.stop_active_recording(&mut state, &mut capture, &mut None, &mut None, &mut None).await;
+        daemon.stop_active_recording(&mut state, &mut capture, &mut None, &mut None).await;
     } else {
         assert!(daemon.start_transcription_task(&mut state, &mut capture, None).await);
         let result = tokio::time::timeout(Duration::from_secs(120), daemon.transcription_task.take().unwrap()).await.unwrap();
@@ -181,12 +188,12 @@ async fn real_stream_fidelity(name: &str, partials: bool) {
                 observed.push(serde_json::json!({"partial":text}));
                 assert!(partials, "The real backend must emit the selected event kind");
                 session.as_mut().unwrap().observe_partial_delta(&text);
-                if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut session, &mut chain, &mut None).await; stopped = true; }
+                if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await; stopped = true; }
             }
             StreamingEvent::Final { text, .. } => {
                 observed.push(serde_json::json!({"final":text}));
                 session.as_mut().unwrap().commit_segment_silent(&text);
-                if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut session, &mut chain, &mut None).await; stopped = true; }
+                if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await; stopped = true; }
             }
             StreamingEvent::Replace { backspace, text, .. } => { observed.push(serde_json::json!({"backspace":backspace,"replacement":text})); session.as_mut().unwrap().replace_and_commit_silent(backspace, &text); }
             StreamingEvent::Ended => break,
@@ -198,7 +205,7 @@ async fn real_stream_fidelity(name: &str, partials: bool) {
     let tag = name.rsplit("::").next().unwrap();
     write_evidence(format!("{tag}-events.json"), serde_json::to_vec_pretty(&observed).unwrap());
     assert!(!observed.is_empty());
-    daemon.end_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain).await;
+    daemon.end_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, StreamingEndReason::Completed).await;
     assert_fidelity(root.path(), &daemon, &raw, tag, true).await;
 }
 

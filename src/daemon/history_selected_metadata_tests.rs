@@ -44,11 +44,11 @@ async fn selected_metadata_case(name: &str, eager: bool, fail: bool, cancel: boo
             loop {
                 let event = tokio::time::timeout(Duration::from_secs(10), handle.as_mut().unwrap().events.recv()).await.unwrap().unwrap();
                 match event {
-                    StreamingEvent::Partial { text, .. } => { session.as_mut().unwrap().observe_partial_delta(&text); if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut session, &mut chain, &mut None).await; stopped = true; } }
+                    StreamingEvent::Partial { text, .. } => { session.as_mut().unwrap().observe_partial_delta(&text); if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await; stopped = true; } }
                     StreamingEvent::Final { text, .. } => session.as_mut().unwrap().commit_segment_silent(&text),
                     StreamingEvent::Replace { .. } => panic!("Controlled fixture does not revise"),
                     StreamingEvent::Error(error) => { assert!(fail); daemon.end_streaming_with_error(error, &mut state, &mut capture, &mut handle, &mut session, &mut chain).await; break; }
-                    StreamingEvent::Ended => { daemon.end_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain).await; break; }
+                    StreamingEvent::Ended => { daemon.end_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, StreamingEndReason::Completed).await; break; }
                 }
             }
         }
@@ -99,7 +99,7 @@ async fn eager_chunk_error_contract(name: &str, poll: bool) {
         let completed = daemon.poll_chunk_tasks().await;
         if let State::EagerRecording { chunk_results, .. } = &mut state { chunk_results.extend(completed); }
     }
-    daemon.stop_active_recording(&mut state,&mut None,&mut None,&mut None,&mut Some(selected)).await;
+    daemon.stop_active_recording(&mut state, &mut None, &mut None, &mut Some(selected)).await;
     let entries=wait_for_entries(root.path(),1).await;
     assert_eq!(entries.len(),1);
     assert_eq!(entries[0].outcome,crate::history::Outcome::TranscriptionFailed);
@@ -122,7 +122,7 @@ async fn no_decode_eager_authority(name: &str, samples: usize) {
     assert!(selected.runtime_metadata().backend.is_some());
     let mut state = State::EagerRecording { started_at:std::time::Instant::now(), model_override:None, accumulated_audio:vec![0.2;samples], chunks_sent:0, chunk_results:Vec::new(), tasks_in_flight:0 };
     daemon.begin_osd_session(&state);
-    daemon.stop_active_recording(&mut state,&mut None,&mut None,&mut None,&mut Some(selected)).await;
+    daemon.stop_active_recording(&mut state, &mut None, &mut None, &mut Some(selected)).await;
     let entries=wait_for_entries(root.path(),1).await;
     println!("NO_DECODE_EAGER_PERSISTED {}",serde_json::to_string(&entries).unwrap());
     assert_eq!(entries.len(),1);
@@ -162,16 +162,16 @@ async fn eof_failure_persistence(name: &str, partial: bool) {
         // The wait is on the fixture's own signal; the limit only keeps a
         // broken fixture from hanging the run.
         tokio::time::timeout(Duration::from_secs(60),audio_delivered).await.expect("the fixture audio never reached the streaming session").unwrap();
-        daemon.stop_active_recording(&mut state,&mut capture,&mut session,&mut chain,&mut None).await;
+        daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await;
     }
     let mut saw_partial=false; let mut errors=0;
     loop {
         let event=tokio::time::timeout(Duration::from_secs(10),handle.as_mut().unwrap().events.recv()).await.unwrap().unwrap();
         match event {
-            StreamingEvent::Partial { text,.. } => { saw_partial=true; session.as_mut().unwrap().observe_partial_delta(&text); daemon.stop_active_recording(&mut state,&mut capture,&mut session,&mut chain,&mut None).await; }
+            StreamingEvent::Partial { text,.. } => { saw_partial=true; session.as_mut().unwrap().observe_partial_delta(&text); daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await; }
             StreamingEvent::Final {text,..} => session.as_mut().unwrap().commit_segment_silent(&text),
             StreamingEvent::Error(e) => { errors+=1; daemon.end_streaming_with_error(e,&mut state,&mut capture,&mut handle,&mut session,&mut chain).await; break; }
-            StreamingEvent::Ended => { daemon.end_streaming(&mut state,&mut capture,&mut handle,&mut session,&mut chain).await; break; }
+            StreamingEvent::Ended => { daemon.end_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, StreamingEndReason::Completed).await; break; }
             StreamingEvent::Replace {..} => panic!("fixture does not revise"),
         }
     }
