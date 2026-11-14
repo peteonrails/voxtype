@@ -3,7 +3,6 @@
 //! ```text
 //! Meeting: Weekly sync, 2026-11-11 14:00, 32m. Speakers: Pete (You), Steve (Remote 1).
 //! The user asking is Pete (You).
-//! Write about the user in the second person ("you said", ...), never as a third person named You.
 //! [00:41] Steve: ...
 //! [00:52] Pete: ...
 //! User notes: ...
@@ -284,10 +283,6 @@ pub fn pieces(lines: &[Line], budget: usize) -> Vec<Vec<Line>> {
     out
 }
 
-/// Follows the reader line, so an agent writes "you said" rather than
-/// "You expected their lines", as if the reader were a third person.
-pub const SECOND_PERSON: &str = "Write about the user in the second person (\"you said\", \"your action item\"), never as a third person named You.";
-
 /// Everything the agent is told about the meeting.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
@@ -310,8 +305,6 @@ impl Context {
         p.push('\n');
         if let Some(reader) = &self.reader {
             p.push_str(reader);
-            p.push('\n');
-            p.push_str(SECOND_PERSON);
             p.push('\n');
         }
         if let Some(excerpt) = &self.excerpt {
@@ -355,6 +348,7 @@ impl Context {
     /// The prompt for one question.
     pub fn ask(&self, question: &str) -> String {
         let mut p = self.render();
+        p.push_str(SECOND_PERSON);
         p.push_str(&format!("Question: {}\n", question.trim()));
         p.push_str("Answer briefly. Cite the [mm:ss] of the lines you rely on.\n");
         p
@@ -364,12 +358,17 @@ impl Context {
     pub fn summary(&self) -> String {
         let mut p = self.render();
         p.push_str(SUMMARY_INSTRUCTIONS);
+        p.push_str(SECOND_PERSON);
         p
     }
 }
 
+/// Without this an agent writes "You expected their lines" about the user,
+/// as if You were a third person in the meeting.
+const SECOND_PERSON: &str = "Write about the user asking in the second person (\"you said\", \"your action item\"), never as a third person named You.\n";
+
 const SUMMARY_INSTRUCTIONS: &str = r#"Summarize this meeting. Where the user's notes say what mattered, expand on them from the transcript rather than ignoring them.
-Use speaker names exactly as written above, also for action item owners; in the prose, write about the reader as described above. Reply with only a JSON object, no other text:
+Use speaker names exactly as written above, also for action item owners. Reply with only a JSON object, no other text:
 {
   "overview": "3-5 sentences on what the meeting covered and concluded",
   "key_points": ["..."],
@@ -436,24 +435,6 @@ mod tests {
         let ts: Vec<&str> = c.iter().map(|c| c.ts.as_str()).collect();
         assert_eq!(ts, vec!["00:41", "01:58", "02:10"]);
         assert_eq!(c[1].ms, 118_000);
-    }
-
-    #[test]
-    fn the_reader_line_is_followed_by_the_second_person_rule() {
-        let ctx = Context {
-            header: "Meeting: X".into(),
-            reader: Some("The user asking is the speaker You.".into()),
-            ..Default::default()
-        };
-        let p = ctx.ask("what did I say?");
-        assert!(p.starts_with(&format!(
-            "Meeting: X\nThe user asking is the speaker You.\n{SECOND_PERSON}\n"
-        )));
-        let none = Context {
-            header: "Meeting: X".into(),
-            ..Default::default()
-        };
-        assert!(!none.ask("q").contains(SECOND_PERSON));
     }
 
     #[test]
@@ -593,5 +574,12 @@ mod tests {
         assert!(ctx
             .ask("what did I say?")
             .starts_with("Meeting: X\nThe user asking is Pete (You).\n"));
+    }
+
+    #[test]
+    fn answers_and_summaries_speak_to_the_user() {
+        let ctx = Context::default();
+        assert!(ctx.ask("what did I say?").contains(SECOND_PERSON));
+        assert!(ctx.summary().ends_with(SECOND_PERSON));
     }
 }
