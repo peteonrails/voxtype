@@ -23,8 +23,15 @@ impl Fixture {
             format!("engine = \"whisper\"\nstate_file = \"auto\"\n[whisper]\n{whisper}\n"),
         )
         .unwrap();
-        let mut command = Command::new("/bin/sleep");
-        command.arg("120").env_clear().stdin(Stdio::null());
+        // Reexecute this test binary: Nix sandboxes need not provide /bin/sleep.
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "private_signal_sink"])
+            .env_clear()
+            .env("VOXTYPE_RECORD_MODEL_SIGNAL_SINK", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         // SAFETY: only async-signal-safe libc calls run between fork and exec.
         unsafe {
             command.pre_exec(|| {
@@ -45,7 +52,7 @@ impl Fixture {
     fn run(&self, args: &[&str]) -> Output {
         let output = Command::new(env!("CARGO_BIN_EXE_voxtype"))
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", self.root().join("empty-path"))
             .env("HOME", self.root())
             .env("XDG_RUNTIME_DIR", self.root().join("runtime"))
             .env("XDG_CONFIG_HOME", self.root().join("config"))
@@ -114,6 +121,16 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.sink.kill();
         let _ = self.sink.wait();
+    }
+}
+
+// SIGUSR1/SIGUSR2 are ignored before exec, so the parent can signal immediately
+// after spawn without waiting for this helper to start. Drop kills and reaps it;
+// the finite sleep also bounds its lifetime if fixture construction panics.
+#[test]
+fn private_signal_sink() {
+    if std::env::var_os("VOXTYPE_RECORD_MODEL_SIGNAL_SINK").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(120));
     }
 }
 
