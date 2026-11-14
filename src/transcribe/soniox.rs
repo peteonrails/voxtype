@@ -41,9 +41,8 @@
 //! ## Errors
 //!
 //! Connect timeouts, WS errors, and Soniox server `error_message`
-//! responses surface as `StreamingEvent::Error` followed by `Ended`.
-//! The daemon disowns the session on `Error`/`Ended` so post-stop
-//! emissions are dropped (matches the v0.7.2 disown-on-stop fix).
+//! responses surface as `StreamingEvent::Error` followed by `Ended`. The
+//! daemon recovers retained audio with batch transcription if no text arrived.
 
 use super::streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 use super::Transcriber;
@@ -1066,11 +1065,12 @@ async fn run_streaming_session(
             // Typical clean closes complete in ~200-300 ms, so a 5 s hit
             // usually indicates a degraded uplink or a server-side hang.
             _ = drain_timer, if drain_deadline.is_some() => {
-                tracing::warn!(
-                    "Soniox drain timeout ({}s) reached after end-of-audio; \
-                     trailing finals may be lost",
-                    DRAIN_TIMEOUT.as_secs(),
-                );
+                let _ = events_tx.send(StreamingEvent::Error(
+                    TranscribeError::InferenceFailed(format!(
+                        "Soniox drain timeout ({}s) after end-of-audio",
+                        DRAIN_TIMEOUT.as_secs()
+                    ))
+                )).await;
                 break;
             }
 
