@@ -112,11 +112,6 @@ fn resolve_whisper_vad_model_path(config: &crate::config::VadConfig) -> Result<P
     }
 }
 
-/// Get the download URL for the Whisper VAD model
-pub fn get_whisper_vad_model_url() -> &'static str {
-    "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
-}
-
 /// Get the default VAD model filename
 pub fn get_whisper_vad_model_filename() -> &'static str {
     "ggml-silero-vad.bin"
@@ -166,12 +161,5 @@ mod tests {
         // Auto + Parakeet = Energy (no model needed)
         let vad = create_vad(&config).unwrap();
         assert!(vad.is_some());
-    }
-
-    #[test]
-    fn test_whisper_vad_model_url() {
-        let url = get_whisper_vad_model_url();
-        assert!(url.contains("huggingface"));
-        assert!(url.contains("silero"));
     }
 }

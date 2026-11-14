@@ -4,7 +4,7 @@
 `https://models.voxtype.io/<engine>/<model>/manifest.json` and validates
 each file's sha256 against the manifest. The five legacy per-engine
 download functions collapsed into one `download_artifact<T: ModelArtifact>`.
-HuggingFace remains as a fallback for users behind firewalls that block R2.
+There is no HuggingFace fallback: the runtime downloads only from the mirror.
 
 This is the v0.7.1 roadmap item that finally landed in v0.7.6.
 

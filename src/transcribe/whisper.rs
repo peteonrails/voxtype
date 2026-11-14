@@ -537,11 +537,12 @@ pub(crate) fn resolve_model_path_in(
     }
 
     Err(TranscribeError::ModelNotFound(format!(
-        "Model '{}' not found. Looked in:\n  - {}\n  - {}\n  - {}\n\nDownload from: https://huggingface.co/ggerganov/whisper.cpp/tree/main",
+        "Model '{}' not found. Looked in:\n  - {}\n  - {}\n  - {}\n\nDownload with: voxtype setup --download --model {}",
         model,
         model_path.display(),
         cwd_path.display(),
-        local_models_path.display()
+        local_models_path.display(),
+        model
     )))
 }
 
@@ -586,16 +587,6 @@ pub fn get_model_filename(model: &str) -> String {
         other => other,
     }
     .to_string()
-}
-
-/// Get the download URL for a model
-pub fn get_model_url(model: &str) -> String {
-    let filename = get_model_filename(model);
-
-    format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-        filename
-    )
 }
 
 #[cfg(test)]
@@ -644,10 +635,12 @@ mod tests {
     }
 
     #[test]
-    fn test_model_url() {
-        let url = get_model_url("base.en");
-        assert!(url.contains("ggml-base.en.bin"));
-        assert!(url.contains("huggingface.co"));
+    fn test_model_filename() {
+        assert_eq!(get_model_filename("base.en"), "ggml-base.en.bin");
+        assert_eq!(
+            get_model_filename("/models/custom.bin"),
+            "/models/custom.bin"
+        );
     }
 
     #[test]

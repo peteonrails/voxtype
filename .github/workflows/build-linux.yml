@@ -385,7 +385,7 @@ jobs:
           export XDG_CONFIG_HOME="${RUNNER_TEMP}/xdg-config"
           mkdir -p "${XDG_DATA_HOME}/voxtype/models" "${XDG_CONFIG_HOME}/voxtype"
           curl -sSL --retry 3 -o "${XDG_DATA_HOME}/voxtype/models/ggml-tiny.en.bin" \
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+            https://models.voxtype.io/whisper/tiny.en/ggml-tiny.en.bin
           printf 'engine = "whisper"\n\n[whisper]\nmodel = "tiny.en"\n' \
             > "${XDG_CONFIG_HOME}/voxtype/config.toml"
           qemu-x86_64-static -cpu Nehalem "${BIN}" transcribe tests/fixtures/vad/speech_hello.wav

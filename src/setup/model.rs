@@ -1,10 +1,10 @@
 //! Interactive model selection and download
 
-use super::manifest::{ExpectedFile, ModelArtifact};
+use super::manifest::{ExpectedFile, MirroredFile, ModelArtifact};
 use super::progress::{self, FileProgress};
 use super::{print_failure, print_info, print_success, print_warning};
 use crate::config::{Config, OpenVinoConfig, TranscriptionEngine};
-use crate::transcribe::whisper::{get_model_filename, get_model_url};
+use crate::transcribe::whisper::get_model_filename;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -1582,26 +1582,10 @@ pub fn download_artifact<T: ModelArtifact + ?Sized>(
     artifact: &T,
     models_dir: &Path,
 ) -> anyhow::Result<()> {
-    use super::manifest::{file_url, manifest_url, validate_manifest, Manifest};
-
     let model_dir = models_dir.join(artifact.name());
     std::fs::create_dir_all(&model_dir)?;
 
-    let manifest_url_str = manifest_url(artifact);
-    let manifest_json = curl_fetch_text(&manifest_url_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to fetch manifest from {}: {}.\n  \
-             If this persists, check models.voxtype.io status: \
-             https://www.cloudflarestatus.com/",
-            manifest_url_str,
-            e
-        )
-    })?;
-
-    let manifest: Manifest = serde_json::from_str(&manifest_json).map_err(|e| {
-        anyhow::anyhow!("Manifest at {} is not valid JSON: {}", manifest_url_str, e)
-    })?;
-    validate_manifest(&manifest, artifact)?;
+    let (manifest, manifest_url_str) = fetch_manifest(artifact)?;
 
     let human = !progress::is_json();
     if human {
@@ -1643,30 +1627,11 @@ pub fn download_artifact<T: ModelArtifact + ?Sized>(
             std::fs::create_dir_all(parent)?;
         }
 
-        let url = file_url(artifact, &file.path);
+        let url = super::manifest::file_url(artifact, &file.path);
         if human {
             println!("Downloading {}...", file.path);
         }
-        let part = download_to_part(&url, &dest, artifact.name(), &file.path, Some(file.size))?;
-
-        // Hash the part file, not the destination: a file only reaches its
-        // final name once it has matched the manifest.
-        let observed = sha256_file(&part).map_err(|e| {
-            let _ = std::fs::remove_file(&part);
-            anyhow::anyhow!("Failed to hash {}: {}", file.path, e)
-        })?;
-        let expected = file.sha256.to_lowercase();
-        if observed != expected {
-            let _ = std::fs::remove_file(&part);
-            anyhow::bail!(
-                "sha256 mismatch for {} (downloaded from {}): expected {}, got {}",
-                file.path,
-                url,
-                expected,
-                observed,
-            );
-        }
-        promote_part(&part, &dest)?;
+        fetch_verified(&url, &dest, artifact.name(), &file.path, file)?;
     }
 
     // Leave the manifest behind so later integrity checks have the publisher's
@@ -1681,6 +1646,99 @@ pub fn download_artifact<T: ModelArtifact + ?Sized>(
         ));
     }
     Ok(())
+}
+
+/// Fetch a model's `manifest.json` from the mirror and check it describes the
+/// artifact asking for it. Returns the manifest and the URL it came from.
+fn fetch_manifest<T: ModelArtifact + ?Sized>(
+    artifact: &T,
+) -> anyhow::Result<(super::manifest::Manifest, String)> {
+    use super::manifest::{manifest_url, validate_manifest, Manifest};
+
+    let url = manifest_url(artifact);
+    let json = curl_fetch_text(&url).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to fetch manifest from {}: {}.\n  \
+             If this persists, check models.voxtype.io status: \
+             https://www.cloudflarestatus.com/",
+            url,
+            e
+        )
+    })?;
+    let manifest: Manifest = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("Manifest at {} is not valid JSON: {}", url, e))?;
+    validate_manifest(&manifest, artifact)?;
+    Ok((manifest, url))
+}
+
+/// Download `url` to `dest`, and give it that name only once its size and
+/// sha256 match the manifest entry. A file that fails the check is deleted,
+/// so nothing unverified ever sits where a loader would find it.
+///
+/// `label` and `file_label` are the model and file names reported in
+/// progress events.
+fn fetch_verified(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    file_label: &str,
+    entry: &super::manifest::ManifestFile,
+) -> anyhow::Result<()> {
+    let part = download_to_part(url, dest, label, file_label, Some(entry.size))?;
+    // Check the part file, not the destination: a file only reaches its
+    // final name once it has matched the manifest.
+    if let Err(e) = super::manifest::verify_file(&part, entry) {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("{} (downloaded from {})", e, url);
+    }
+    promote_part(&part, dest)
+}
+
+/// Install one file of a mirrored model at `dest`, verified against the
+/// mirror's manifest.
+///
+/// For the models that live as single flat files in the models directory
+/// (whisper, Silero VAD, ECAPA-TDNN, GTCRN). `dest` keeps the name the
+/// loaders have always looked for, so an existing install is found where it
+/// was. A file already at `dest` that matches the manifest is left alone.
+///
+/// Like [`download_artifact`], there is no fallback to the upstream host: a
+/// model that is not on the mirror fails with the mirror's error.
+pub(crate) fn download_mirrored_file(
+    artifact: &super::manifest::MirroredFile,
+    dest: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
+    let (manifest, _) = fetch_manifest(artifact)?;
+    let entry = super::manifest::manifest_entry(&manifest, &artifact.file)?;
+    let file_label = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| artifact.file.clone());
+    let human = !progress::is_json();
+
+    if dest.exists() {
+        if super::manifest::verify_file(dest, entry).is_ok() {
+            if human {
+                println!("  {} already verified, skipping", file_label);
+            }
+            progress::file_already_complete(label, &file_label, entry.size);
+            return Ok(());
+        }
+        if human {
+            println!("  {} present but unverified, re-downloading", file_label);
+        }
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let url = artifact.url();
+    if human {
+        println!("URL: {}", url);
+    }
+    // The verified part file replaces any damaged copy in one rename.
+    fetch_verified(&url, dest, label, &file_label, entry)
 }
 
 /// Fetch a small text body via curl. Used for `manifest.json`.
@@ -2874,25 +2932,23 @@ async fn restart_daemon_if_running() {
 /// (`0x67676d6c`) written little-endian.
 const GGML_MAGIC: [u8; 4] = *b"lmgg";
 
-/// What a finished download has to look like before it may take its final
-/// name. None of these files are on the R2 mirror, so there is no published
-/// sha256 to compare against and this is the whole of their validation.
+/// Cheap format check for a model already on disk, used by listings and
+/// readiness checks that must not hash multi-gigabyte files. Downloads are
+/// verified against their manifest's sha256 instead (see
+/// [`download_mirrored_file`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContentCheck {
     /// ggml container: whisper models and the Silero VAD model.
     Ggml,
     /// GGUF container used by transcribe.cpp models.
     Gguf,
-    /// No format marker worth checking (ONNX protobufs); completeness only.
-    SizeOnly,
 }
 
-/// Check a freshly downloaded file before it takes the name the loader reads.
+/// Check a model file without hashing it.
 ///
-/// The two signals available without a manifest are the server's
-/// `Content-Length` and the file's own magic, which between them catch the
-/// realistic failures: a truncated transfer, and an HTML error page saved
-/// under a `.bin` name.
+/// The two signals available without a hash are an expected length and the
+/// file's own magic, which between them catch the realistic failures: a
+/// truncated transfer, and an HTML error page saved under a `.bin` name.
 pub(crate) fn validate_download(
     path: &Path,
     expected_len: Option<u64>,
@@ -2912,82 +2968,64 @@ pub(crate) fn validate_download(
         }
     }
 
-    if matches!(check, ContentCheck::Ggml | ContentCheck::Gguf) {
-        let mut magic = [0u8; 4];
-        std::fs::File::open(path)
-            .and_then(|mut f| f.read_exact(&mut magic))
-            .map_err(|e| anyhow::anyhow!("could not read the download: {}", e))?;
-        let expected_magic = if check == ContentCheck::Gguf {
-            *b"GGUF"
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map_err(|e| anyhow::anyhow!("could not read the download: {}", e))?;
+    let expected_magic = if check == ContentCheck::Gguf {
+        *b"GGUF"
+    } else {
+        GGML_MAGIC
+    };
+    if magic != expected_magic {
+        let format = if check == ContentCheck::Gguf {
+            "not a GGUF model"
         } else {
-            GGML_MAGIC
+            "not a ggml model"
         };
-        if magic != expected_magic {
-            let format = if check == ContentCheck::Gguf {
-                "not a GGUF model"
-            } else {
-                "not a ggml model"
-            };
-            anyhow::bail!(
-                "{}: expected magic {:02x?}, got {:02x?}. \
-                 The server likely returned an error page instead of the model.",
-                format,
-                expected_magic,
-                magic
-            );
-        }
+        anyhow::bail!(
+            "{}: expected magic {:02x?}, got {:02x?}. \
+             The server likely returned an error page instead of the model.",
+            format,
+            expected_magic,
+            magic
+        );
     }
     Ok(())
 }
 
-/// Download one file to `dest` without ever exposing a partial one there.
-///
-/// Bytes land on a `.part` sibling, get checked for completeness (and format,
-/// per `check`), and only then take the final name via an atomic rename. Used
-/// by every single-file download that has no R2 manifest behind it: whisper
-/// models, the Silero VAD model, and the auxiliary meeting-mode models.
-///
-/// `label` is the name reported in progress events.
-pub(crate) fn download_atomically(
-    url: &str,
-    dest: &Path,
-    label: &str,
-    check: ContentCheck,
-) -> anyhow::Result<()> {
-    let file = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| label.to_string());
-
-    // Ask the server for the size, since there's no manifest to read it from.
-    // Best effort: a server that refuses HEAD just leaves the size check out.
-    let expected_len = content_length(url);
-
-    let part = download_to_part(url, dest, label, &file, expected_len)?;
-    validate_download(&part, expected_len, check).map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        anyhow::anyhow!("Downloaded file '{}' is not usable: {}", file, e)
-    })?;
-    promote_part(&part, dest)
+/// Where a Whisper model is mirrored. `None` for anything that is not a
+/// catalogue name, such as a path to a custom `.bin`, which has nowhere to
+/// be downloaded from.
+pub fn whisper_mirror_file(model_name: &str) -> Option<MirroredFile> {
+    let model = MODELS.iter().find(|m| m.name == model_name)?;
+    Some(MirroredFile {
+        engine: "whisper",
+        model: model.name.to_string(),
+        file: get_model_filename(model.name),
+        upstream_repo: "ggerganov/whisper.cpp",
+    })
 }
 
-/// Download a specific Whisper model using curl
+/// Download a Whisper model from the Voxtype model mirror, verified against
+/// its manifest, to `ggml-<model>.bin` in the models directory.
 pub fn download_model(model_name: &str) -> anyhow::Result<()> {
+    let artifact = whisper_mirror_file(model_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "'{}' is not a downloadable Whisper model. Available: {}",
+            model_name,
+            valid_model_names().join(", ")
+        )
+    })?;
     let models_dir = Config::models_dir();
-    let filename = get_model_filename(model_name);
-    let model_path = models_dir.join(&filename);
-
-    // Ensure directory exists
+    let model_path = models_dir.join(&artifact.file);
     std::fs::create_dir_all(&models_dir)?;
-
-    let url = get_model_url(model_name);
 
     if !progress::is_json() {
         println!("\nDownloading {}...", model_name);
-        println!("URL: {}", url);
     }
 
-    download_atomically(&url, &model_path, model_name, ContentCheck::Ggml)?;
+    download_mirrored_file(&artifact, &model_path, model_name)?;
 
     if !progress::is_json() {
         print_success(&format!("Saved to {:?}", model_path));
@@ -2995,14 +3033,29 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// GTCRN speech enhancement model URL and filename
-const GTCRN_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx";
+/// GTCRN speech enhancement model, used by meeting-mode echo cancellation.
 const GTCRN_MODEL_FILENAME: &str = "gtcrn_simple.onnx";
 
-/// ECAPA-TDNN speaker embedding model URL and filename
-const ECAPA_MODEL_URL: &str =
-    "https://huggingface.co/pranjal-pravesh/ecapa_tdnn_onnx/resolve/main/ecapa_tdnn.onnx";
+fn gtcrn_mirror_file() -> MirroredFile {
+    MirroredFile {
+        engine: "enhancement",
+        model: "gtcrn-simple".to_string(),
+        file: GTCRN_MODEL_FILENAME.to_string(),
+        upstream_repo: "k2-fsa/sherpa-onnx",
+    }
+}
+
+/// ECAPA-TDNN speaker embedding model, used by ML diarization.
 const ECAPA_MODEL_FILENAME: &str = "ecapa_tdnn.onnx";
+
+fn ecapa_mirror_file() -> MirroredFile {
+    MirroredFile {
+        engine: "diarization",
+        model: "ecapa-tdnn".to_string(),
+        file: ECAPA_MODEL_FILENAME.to_string(),
+        upstream_repo: "pranjal-pravesh/ecapa_tdnn_onnx",
+    }
+}
 
 /// Ensure the GTCRN speech enhancement model is downloaded.
 /// Returns the path to the model file if available, or None if download fails.
@@ -3020,17 +3073,12 @@ pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
         return None;
     }
 
-    println!("Downloading GTCRN speech enhancement model (523 KB)...");
+    println!("Downloading GTCRN speech enhancement model (536 KB)...");
 
     // These `ensure_*` helpers treat "the file exists" as "the model is
     // installed" and never re-download, so a partial file here is permanent.
-    // The atomic path is what keeps that from happening.
-    match download_atomically(
-        GTCRN_MODEL_URL,
-        &model_path,
-        "gtcrn",
-        ContentCheck::SizeOnly,
-    ) {
+    // The verified part-file path is what keeps that from happening.
+    match download_mirrored_file(&gtcrn_mirror_file(), &model_path, "gtcrn") {
         Ok(()) => {
             println!("Speech enhancement model downloaded.");
             Some(model_path)
@@ -3059,14 +3107,9 @@ pub fn ensure_ecapa_model() -> Option<std::path::PathBuf> {
         return None;
     }
 
-    println!("Downloading ECAPA-TDNN speaker embedding model (~26 MB)...");
+    println!("Downloading ECAPA-TDNN speaker embedding model (84 MB)...");
 
-    match download_atomically(
-        ECAPA_MODEL_URL,
-        &model_path,
-        "ecapa-tdnn",
-        ContentCheck::SizeOnly,
-    ) {
+    match download_mirrored_file(&ecapa_mirror_file(), &model_path, "ecapa-tdnn") {
         Ok(()) => {
             println!("Speaker embedding model downloaded.");
             Some(model_path)
@@ -6204,42 +6247,143 @@ mode = "type"
         assert!(!part_path(&dest).exists(), "part file should be cleaned up");
     }
 
-    /// The whisper path end to end against the real host: the `HEAD` that
-    /// sizes the transfer, the ggml magic check, and the rename. Downloads
-    /// into a temp dir, so it never touches the user's models directory.
-    ///
-    /// ```text
-    /// cargo test --lib whisper_download_is_atomic -- --ignored --nocapture
-    /// ```
+    fn manifest_entry_for(bytes: &[u8]) -> crate::setup::manifest::ManifestFile {
+        use sha2::{Digest, Sha256};
+        crate::setup::manifest::ManifestFile {
+            path: "ggml-test.bin".to_string(),
+            size: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    /// A download whose bytes match the manifest takes its final name; the
+    /// part file is gone afterwards.
     #[test]
-    #[ignore = "downloads a model from huggingface.co"]
-    fn whisper_download_is_atomic_end_to_end() {
+    fn fetch_verified_promotes_bytes_that_match_the_manifest() {
         if !curl_available() {
             eprintln!("skipping: curl is not on PATH");
             return;
         }
         let _json = progress::json_mode_for_test();
         let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("ggml-tiny.en.bin");
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"lmggweights").unwrap();
+        let dest = dir.path().join("ggml-test.bin");
+        let url = format!("file://{}", source.display());
 
-        download_atomically(
-            &get_model_url("tiny.en"),
+        fetch_verified(
+            &url,
             &dest,
-            "tiny.en",
-            ContentCheck::Ggml,
+            "test",
+            "ggml-test.bin",
+            &manifest_entry_for(b"lmggweights"),
         )
-        .expect("tiny.en should download");
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"lmggweights");
+        assert!(!part_path(&dest).exists());
+    }
+
+    /// A download that does not match the manifest is deleted and never
+    /// reaches the name a loader reads, and an existing copy is left as is.
+    #[test]
+    fn fetch_verified_rejects_bytes_that_do_not_match_the_manifest() {
+        if !curl_available() {
+            eprintln!("skipping: curl is not on PATH");
+            return;
+        }
+        let _json = progress::json_mode_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"<html>error</html>").unwrap();
+        let dest = dir.path().join("ggml-test.bin");
+        let url = format!("file://{}", source.display());
+
+        // Same length as the source, different bytes: only the hash catches it.
+        let mut entry = manifest_entry_for(b"lmggweights-goodbytes");
+        entry.size = b"<html>error</html>".len() as u64;
+        let err = fetch_verified(&url, &dest, "test", "ggml-test.bin", &entry).unwrap_err();
+        assert!(err.to_string().contains("sha256 mismatch"), "{err}");
+        assert!(!dest.exists(), "an unverified file must not be promoted");
+        assert!(!part_path(&dest).exists(), "the part file must be removed");
+
+        let err = fetch_verified(
+            &url,
+            &dest,
+            "test",
+            "ggml-test.bin",
+            &manifest_entry_for(b"lmggweights"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("size mismatch"), "{err}");
+        assert!(!dest.exists());
+    }
+
+    /// Every flat-file model downloads from the Voxtype mirror, under the
+    /// layout the mirror script published, and keeps its historical local
+    /// file name.
+    #[test]
+    fn flat_file_models_download_from_the_mirror() {
+        for name in valid_model_names() {
+            let artifact = whisper_mirror_file(name).unwrap();
+            assert_eq!(
+                artifact.url(),
+                format!("https://models.voxtype.io/whisper/{name}/ggml-{name}.bin")
+            );
+            assert_eq!(artifact.file, get_model_filename(name));
+            assert_eq!(
+                crate::setup::manifest::manifest_url(&artifact),
+                format!("https://models.voxtype.io/whisper/{name}/manifest.json")
+            );
+        }
+        assert!(whisper_mirror_file("/models/custom.bin").is_none());
+        assert!(whisper_mirror_file("parakeet-tdt-0.6b-v3").is_none());
+
+        assert_eq!(
+            gtcrn_mirror_file().url(),
+            "https://models.voxtype.io/enhancement/gtcrn-simple/gtcrn_simple.onnx"
+        );
+        assert_eq!(
+            ecapa_mirror_file().url(),
+            "https://models.voxtype.io/diarization/ecapa-tdnn/ecapa_tdnn.onnx"
+        );
+    }
+
+    #[test]
+    fn download_model_refuses_names_with_no_mirror_entry() {
+        let err = download_model("/models/custom.bin").unwrap_err();
+        assert!(err.to_string().contains("not a downloadable Whisper model"));
+    }
+
+    /// The whisper path end to end against the real mirror: manifest fetch,
+    /// size and sha256 verification, and the rename. Downloads into a temp
+    /// dir, so it never touches the user's models directory.
+    ///
+    /// ```text
+    /// cargo test --lib whisper_download_from_mirror -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "downloads a model from models.voxtype.io"]
+    fn whisper_download_from_mirror_end_to_end() {
+        if !curl_available() {
+            eprintln!("skipping: curl is not on PATH");
+            return;
+        }
+        let _json = progress::json_mode_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = whisper_mirror_file("tiny.en").unwrap();
+        let dest = dir.path().join(&artifact.file);
+
+        download_mirrored_file(&artifact, &dest, "tiny.en").expect("tiny.en should download");
 
         assert!(dest.exists(), "the model should be in place");
         assert!(!part_path(&dest).exists(), "no part file should survive");
-        // Whatever landed passed the magic check, so re-reading it is a
-        // check that the promote moved the validated bytes.
-        validate_download(
-            &dest,
-            content_length(&get_model_url("tiny.en")),
-            ContentCheck::Ggml,
-        )
-        .unwrap();
+        assert_eq!(
+            sha256_file(&dest).unwrap(),
+            "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f"
+        );
+        // A second call finds the verified file and downloads nothing.
+        download_mirrored_file(&artifact, &dest, "tiny.en").unwrap();
     }
 
     /// Multi-file models must report progress per file, and the `file` field
