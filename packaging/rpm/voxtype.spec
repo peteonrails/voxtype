@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        1.2.2
+Version:        1.3.0
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -344,6 +344,14 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
+* Sat Nov 14 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
+- Meetings: live transcript view, echo cancellation and echo guard, hybrid
+  diarization, notes, annotations, line edits, search, sharing, action
+  items, recovery of interrupted meetings, import and retranscription
+- Ship the GTK4 meetings window in voxtype-meetings-gtk4
+- Built-in Kokoro recording announcement; the ElevenLabs voice is a download
+- Whisper, VAD, speaker and echo models download from models.voxtype.io
+
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
 - Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes
 - Handle failed output pipes, paste fallback and unresponsive audio-device lookups
