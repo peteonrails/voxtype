@@ -809,6 +809,10 @@ echo ""
 echo "  Optional: Switch to Parakeet engine (faster, lower memory):"
 echo "     voxtype setup parakeet --enable"
 echo ""
+echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"
+echo "  voxtype setup skill"
+echo "to teach it to configure voxtype for this machine."
+echo ""
 POSTINST
 else
     # aarch64: Single binary, no CPU detection needed
@@ -836,6 +840,10 @@ echo "     voxtype setup --download"
 echo ""
 echo "  4. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
+echo ""
+echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"
+echo "  voxtype setup skill"
+echo "to teach it to configure voxtype for this machine."
 echo ""
 POSTINST
 fi

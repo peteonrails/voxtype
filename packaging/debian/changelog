@@ -13,6 +13,9 @@ voxtype (1.2.2-1) unstable; urgency=medium
   * Keep the /usr/bin/voxtype link (and a setup gpu choice) across upgrades
   * Build whisper.cpp with -fPIC, which CMAKE_*_FLAGS otherwise drops
   * Require rustc and cargo 1.92 or newer (gtk4-rs 0.11)
+  * Drop the voxtype-avx512 variant: package builds set SOURCE_DATE_EPOCH,
+    which turns off ggml's native tuning, so it carried no AVX-512 code
+  * Point users with a coding agent at voxtype setup skill after install
 
  -- Peter Jackson <pete@peteonrails.com>  Thu, 12 Nov 2026 21:00:00 +0000
 
