@@ -44,6 +44,10 @@
 # directory that is empty, then re-run --gguf-audit --full. Never mirror a
 # model whose weights license is on hold.
 #
+# The single-file models voxtype installs flat in its models directory
+# (Whisper ggml models, Silero VAD, ECAPA-TDNN, GTCRN) are not in this
+# registry. They are mirrored by scripts/mirror-flat-models-to-r2.sh.
+#
 # --dry-run downloads nothing and uploads nothing. It prints each file it
 # would fetch and where it would upload it, and checks with a HEAD request
 # that every upstream file still exists, so stale registry entries show up
