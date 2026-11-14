@@ -9,6 +9,7 @@
 mod audio;
 mod default_config;
 mod engines;
+mod history;
 mod hotkey;
 mod language;
 mod load;
@@ -32,6 +33,10 @@ pub use engines::{
     CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
     ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
     TranscriptionEngine,
+};
+pub use history::{
+    parse_app_list as parse_history_app_list, HistoryConfig, HistoryOverrides,
+    DEFAULT_EXCLUDE_APPS as DEFAULT_HISTORY_EXCLUDE_APPS,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::{LanguageConfig, COHERE_LANGUAGES};

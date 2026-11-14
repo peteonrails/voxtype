@@ -4418,6 +4418,111 @@ Window titles come from Hyprland. On other compositors only apps with empty `tit
 
 ---
 
+## [history]
+
+Dictation history keeps a record of every dictation, including the ones that
+failed or were cancelled, so text that went into the wrong window, or never
+arrived, can be found and sent again. Each day is one plain file,
+`~/.local/share/voxtype/history/YYYY-MM-DD.jsonl`, with one JSON line per
+dictation; you can read it with `cat` or `grep` without voxtype. Days older
+than a week are gzipped (`zgrep` reads them). Browse and search with
+`voxtype history`; see the [user manual](USER_MANUAL.md#dictation-history).
+
+```toml
+[history]
+enabled = true
+# paused = false
+# retention_days = 30
+# exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
+# record_app = true
+# record_window_title = false
+```
+
+**History is on for new installs and off for existing configs.** The config
+template `voxtype setup` writes sets `enabled = true`. A config written before
+1.3.1 has no `[history]` table and stays off, so an upgrade never starts
+writing your dictation to disk without you choosing it. Turn it on with
+`voxtype config set history.enabled true` or the tray's **Enable History**.
+
+None of these settings needs a daemon restart: the daemon re-reads `[history]`
+when the config file changes.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false` (the template written for new installs sets `true`)
+
+Record dictations. Also `VOXTYPE_HISTORY_ENABLED` and the daemon flag
+`--history[=BOOL]`.
+
+### paused
+
+**Type:** Boolean
+**Default:** `false`
+
+Stop recording until resumed, without turning history off. A dictation made
+while paused is never written: not to the day file and not to the search
+index. Pause before dictating something private: `voxtype history pause`,
+then `voxtype history resume`. The tray and `voxtype history` both show when
+history is paused. Also `VOXTYPE_HISTORY_PAUSED` and `--history-paused[=BOOL]`.
+
+### retention_days
+
+**Type:** Integer
+**Default:** `30`
+
+Days of history to keep. Older day files are deleted, along with their search
+index rows, when the daemon starts and once a day after that. `0` keeps
+history forever. There is no size limit; at typical use a year of history is
+a few megabytes. Also `VOXTYPE_HISTORY_RETENTION_DAYS` and
+`--history-retention-days`.
+
+### exclude_apps
+
+**Type:** List of strings (or one comma-separated string)
+**Default:** `["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]`
+
+Apps whose dictations are never recorded. Each name is matched against the
+focused window's app (its class or app ID), ignoring case, spaces, dots and
+dashes, anywhere in the name: `KeePassXC` matches `org.keepassxc.KeePassXC`.
+Setting the list replaces the built-in one, so keep the password managers in
+it when you add your own. Also `VOXTYPE_HISTORY_EXCLUDE_APPS` and
+`--history-exclude-apps` (comma-separated).
+
+> **Limit:** voxtype can only see the focused app on Hyprland, Sway and niri.
+> On other desktops (GNOME, KDE, X11) the app is unknown, so exclusions cannot
+> apply and every dictation is recorded with an empty app. A password manager
+> running in a browser tab is the browser as far as the desktop is concerned.
+> Pause history instead in those cases.
+
+### record_app
+
+**Type:** Boolean
+**Default:** `true`
+
+Save which app each dictation went to (`kitty`, `firefox`). Exclusions still
+work when this is off; the app is just not written. Also
+`VOXTYPE_HISTORY_RECORD_APP` and `--history-record-app[=BOOL]`.
+
+### record_window_title
+
+**Type:** Boolean
+**Default:** `false`
+
+Also save the focused window's title. Off by default because titles carry
+email subjects, document names and URLs. Also
+`VOXTYPE_HISTORY_RECORD_WINDOW_TITLE` and `--history-record-window-title[=BOOL]`.
+
+### Privacy
+
+- The history directory is created `0700` and every file in it `0600`.
+- Dictated text is never written to the log at the default level.
+- Deleting an entry rewrites its day file and removes it from the search
+  index, which runs with SQLite's `secure_delete` so the text does not linger
+  in free pages. The old file blocks on disk are the filesystem's to reuse;
+  full-disk encryption covers them, and there is no separate encryption at
+  rest.
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.
@@ -4605,6 +4710,12 @@ Most configuration options can be overridden via command line:
 | output.mode = "clipboard" | `--clipboard` |
 | output.mode = "paste" | `--paste` |
 | status.icon_theme | `--icon-theme` (status subcommand) |
+| history.enabled | `--history[=BOOL]` |
+| history.paused | `--history-paused[=BOOL]` |
+| history.retention_days | `--history-retention-days` |
+| history.exclude_apps | `--history-exclude-apps` |
+| history.record_app | `--history-record-app[=BOOL]` |
+| history.record_window_title | `--history-record-window-title[=BOOL]` |
 | Verbosity | `-v`, `-vv`, `-q` |
 
 **Example:**
@@ -4710,6 +4821,17 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_COLLAPSE_RESTARTS` | bool | `text.collapse_restarts` |
 | `VOXTYPE_REPAIR_SENTENCE_BREAKS` | bool | `text.repair_sentence_breaks` |
 | `VOXTYPE_FORMAT_NUMBERS` | bool | `text.format_numbers` |
+
+**History:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_HISTORY_ENABLED` | bool | `history.enabled` |
+| `VOXTYPE_HISTORY_PAUSED` | bool | `history.paused` |
+| `VOXTYPE_HISTORY_RETENTION_DAYS` | integer | `history.retention_days` |
+| `VOXTYPE_HISTORY_EXCLUDE_APPS` | comma-separated | `history.exclude_apps` |
+| `VOXTYPE_HISTORY_RECORD_APP` | bool | `history.record_app` |
+| `VOXTYPE_HISTORY_RECORD_WINDOW_TITLE` | bool | `history.record_window_title` |
 
 Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 

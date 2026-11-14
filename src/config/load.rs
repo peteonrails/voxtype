@@ -107,6 +107,32 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.omarchy.link_settings_plugin = parse_bool_env(&value);
     }
 
+    // Dictation history
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_ENABLED") {
+        config.history.enabled = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_PAUSED") {
+        config.history.paused = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_RETENTION_DAYS") {
+        match value.trim().parse() {
+            Ok(days) => config.history.retention_days = days,
+            Err(_) => tracing::warn!(
+                "VOXTYPE_HISTORY_RETENTION_DAYS must be a whole number of days, ignoring {:?}",
+                value
+            ),
+        }
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_EXCLUDE_APPS") {
+        config.history.exclude_apps = super::parse_history_app_list(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_RECORD_APP") {
+        config.history.record_app = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_RECORD_WINDOW_TITLE") {
+        config.history.record_window_title = parse_bool_env(&value);
+    }
+
     // Override from environment variables
     // Hotkey
     if let Ok(key) = std::env::var("VOXTYPE_HOTKEY") {

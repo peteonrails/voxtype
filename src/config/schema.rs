@@ -42,6 +42,7 @@ pub const SECTIONS: &[&str] = &[
     "Text Cleanup",
     "VAD",
     "Meeting",
+    "History",
     "Notifications",
     "OSD",
     "Status",
@@ -2694,6 +2695,69 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Command the Open action of an ask notification runs. Unset opens the meeting view's Ask tab; empty turns Open off.",
     )
     .live(),
+    // -- History --------------------------------------------------------------
+    // The daemon re-reads [history] when the file changes, so none of these
+    // needs a restart.
+    spec(
+        "history.enabled",
+        "history",
+        "enabled",
+        KeyType::Bool,
+        "History",
+        "Dictation history",
+        "Keep a record of every dictation, including failed and cancelled ones, in ~/.local/share/voxtype/history/. Search it with `voxtype history search`.",
+    )
+    .live(),
+    spec(
+        "history.paused",
+        "history",
+        "paused",
+        KeyType::Bool,
+        "History",
+        "Pause history",
+        "Stop recording dictations until resumed. Nothing dictated while paused is written anywhere.",
+    )
+    .live(),
+    spec(
+        "history.retention_days",
+        "history",
+        "retention_days",
+        KeyType::Int { min: 0, max: 36500 },
+        "History",
+        "Keep history for (days)",
+        "Days of history to keep; older days are deleted. 0 keeps history forever.",
+    )
+    .live(),
+    spec(
+        "history.exclude_apps",
+        "history",
+        "exclude_apps",
+        KeyType::String,
+        "History",
+        "Never record in these apps",
+        "Comma-separated apps whose dictations are never recorded, matched against the focused window's class. Ships with KeePassXC, Bitwarden, 1Password and Proton Pass. Needs a desktop voxtype can ask for the focused window (Hyprland, Sway, niri).",
+    )
+    .live(),
+    spec(
+        "history.record_app",
+        "history",
+        "record_app",
+        KeyType::Bool,
+        "History",
+        "Record the app",
+        "Save which app each dictation went to, such as kitty or firefox.",
+    )
+    .live(),
+    spec(
+        "history.record_window_title",
+        "history",
+        "record_window_title",
+        KeyType::Bool,
+        "History",
+        "Record window titles",
+        "Also save the focused window's title. Off by default: titles can hold email subjects, document names and URLs.",
+    )
+    .live(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -3383,6 +3447,15 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             json!(cfg.meeting.assistant.max_transcript_chars)
         }
         "meeting.assistant.open_command" => opt_str(cfg.meeting.assistant.open_command.as_ref()),
+        "history.enabled" => json!(cfg.history.enabled),
+        "history.paused" => json!(cfg.history.paused),
+        "history.retention_days" => json!(cfg.history.retention_days),
+        "history.exclude_apps" => match cfg.history.exclude_apps.as_slice() {
+            [] => Json::Null,
+            apps => json!(apps.join(",")),
+        },
+        "history.record_app" => json!(cfg.history.record_app),
+        "history.record_window_title" => json!(cfg.history.record_window_title),
 
         _ => return None,
     };

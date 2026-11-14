@@ -343,3 +343,15 @@ icon_theme = "emoji"
 # recording = "🎤"
 # transcribing = "⏳"
 # stopped = ""
+
+# Dictation history: a record of every dictation, including failed and
+# cancelled ones, as one plain JSON line per dictation in
+# ~/.local/share/voxtype/history/YYYY-MM-DD.jsonl. Off here because this file
+# is also the system-wide fallback; turn it on with
+# `voxtype config set history.enabled true` or the tray's "Enable History".
+# [history]
+# enabled = false
+# retention_days = 30            # 0 keeps history forever
+# exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
+# record_app = true              # which app the text went to
+# record_window_title = false    # titles can hold subjects, names and URLs

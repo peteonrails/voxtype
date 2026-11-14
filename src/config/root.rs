@@ -111,6 +111,10 @@ pub struct Config {
     #[serde(default)]
     pub meeting: MeetingConfig,
 
+    /// Dictation history. Off unless enabled; new configs enable it.
+    #[serde(default)]
+    pub history: super::HistoryConfig,
+
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
     /// to this file whenever state changes.
@@ -192,6 +196,7 @@ impl Default for Config {
             tray: TrayConfig::default(),
             omarchy: OmarchyConfig::default(),
             meeting: MeetingConfig::default(),
+            history: super::HistoryConfig::default(),
             state_file: default_state_file(),
             profiles: HashMap::new(),
         }

@@ -419,6 +419,21 @@ min_speech_duration_ms = 100  # Minimum speech required
 # `voxtype meeting start`, the tray, or Voxtype Meetings.
 enabled = true
 
+[history]
+# Dictation history: every dictation, including failed and cancelled ones,
+# as one plain JSON line in ~/.local/share/voxtype/history/YYYY-MM-DD.jsonl.
+# Browse it with `voxtype history`, search it with `voxtype history search`,
+# and pause it with `voxtype history pause` before dictating something private.
+enabled = true
+# Days to keep; older days are deleted. 0 keeps history forever.
+# retention_days = 30
+# Apps whose dictations are never recorded, matched against the focused
+# window's class (Hyprland, Sway and niri can report it).
+# exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
+# record_app = true
+# Window titles can hold email subjects, document names and URLs.
+# record_window_title = false
+
 # Native Linux system tray is enabled by default. Set false to opt out.
 # [tray]
 # enabled = true
@@ -517,6 +532,10 @@ mod tests {
         assert!(config.output.notification.show_edits);
 
         assert!(config.meeting.enabled, "new installs get meeting mode");
+        assert!(config.history.enabled, "new installs get dictation history");
+        assert!(!config.history.paused);
+        assert!(!config.history.record_window_title);
+        assert_eq!(config.history.retention_days, 30);
     }
 
     #[test]
@@ -534,6 +553,8 @@ mod tests {
         // without their own config already run on. Turning meetings on here
         // would flip them on upgrade; they get the tray offer instead.
         assert!(!config.meeting.enabled);
+        // Same reason: history must never start on an upgrade.
+        assert!(!config.history.enabled);
     }
 
     #[test]
@@ -552,6 +573,10 @@ mod tests {
         assert!(!config.vad.enabled);
         assert_eq!(config.vad.backend, VadBackend::Auto);
         assert!(!config.meeting.enabled, "upgrades keep meeting mode off");
+        assert!(
+            !config.history.enabled,
+            "upgrades never start writing dictations to disk"
+        );
         assert!(
             config.meeting.offer_enable,
             "and get the tray offer instead"

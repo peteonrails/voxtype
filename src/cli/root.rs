@@ -697,6 +697,80 @@ pub struct Cli {
     #[arg(long, value_name = "MS", help_heading = "VAD", hide_short_help = true)]
     pub vad_min_speech_ms: Option<u32>,
 
+    // -- History --
+    /// Record dictations to history. Use --history=false to turn it off for
+    /// this run.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        long_help = "Record each dictation, including failed and cancelled ones, to\n\
+        ~/.local/share/voxtype/history/ ([history] enabled). --history=false\n\
+        turns it off for this run. Browse it with `voxtype history`."
+    )]
+    pub history: Option<bool>,
+
+    /// Pause history: nothing dictated is written until resumed
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_paused: Option<bool>,
+
+    /// Days of history to keep (0 keeps it forever; default 30)
+    #[arg(
+        long,
+        value_name = "DAYS",
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_retention_days: Option<u32>,
+
+    /// Comma-separated apps never recorded to history
+    #[arg(
+        long,
+        value_name = "APPS",
+        help_heading = "History",
+        hide_short_help = true,
+        long_help = "Comma-separated apps whose dictations are never recorded, matched\n\
+        against the focused window's class (case, spaces and dots ignored).\n\
+        Replaces the built-in list: KeePassXC, Bitwarden, 1Password, Proton Pass.\n\
+        Example: --history-exclude-apps \"KeePassXC,Signal\""
+    )]
+    pub history_exclude_apps: Option<String>,
+
+    /// Record which app each dictation went to (default true)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_record_app: Option<bool>,
+
+    /// Also record the focused window's title (default false)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_record_window_title: Option<bool>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -764,6 +838,34 @@ mod tests {
     fn test_driver_flag_single() {
         let cli = Cli::parse_from(["voxtype", "--driver=ydotool"]);
         assert_eq!(cli.driver, Some("ydotool".to_string()));
+    }
+
+    #[test]
+    fn history_flags_parse() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--history",
+            "--history-paused=false",
+            "--history-retention-days",
+            "0",
+            "--history-exclude-apps",
+            "KeePassXC,Signal",
+            "--history-record-window-title",
+        ]);
+        assert_eq!(cli.history, Some(true));
+        assert_eq!(cli.history_paused, Some(false));
+        assert_eq!(cli.history_retention_days, Some(0));
+        assert_eq!(
+            cli.history_exclude_apps.as_deref(),
+            Some("KeePassXC,Signal")
+        );
+        assert_eq!(cli.history_record_app, None);
+        assert_eq!(cli.history_record_window_title, Some(true));
+
+        let cli = Cli::parse_from(["voxtype", "--history=false"]);
+        assert_eq!(cli.history, Some(false));
+        let cli = Cli::parse_from(["voxtype"]);
+        assert_eq!(cli.history, None);
     }
 
     #[test]

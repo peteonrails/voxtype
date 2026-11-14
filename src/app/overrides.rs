@@ -61,6 +61,22 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.omarchy.link_settings_plugin = enabled;
     }
 
+    let history = config::HistoryOverrides {
+        enabled: cli.history,
+        paused: cli.history_paused,
+        retention_days: cli.history_retention_days,
+        exclude_apps: cli
+            .history_exclude_apps
+            .as_deref()
+            .map(config::parse_history_app_list),
+        record_app: cli.history_record_app,
+        record_window_title: cli.history_record_window_title,
+    };
+    history.apply(&mut config.history);
+    // The daemon re-reads [history] from disk when it changes; these still
+    // win over the file afterwards.
+    history.set_cli();
+
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;
     }

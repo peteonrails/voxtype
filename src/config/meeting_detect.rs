@@ -157,7 +157,7 @@ impl MeetingDetectConfig {
 
 /// A list given either as a TOML array or as one comma-separated string. The
 /// string form is what `voxtype config set` writes.
-fn string_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+pub(super) fn string_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Form {
