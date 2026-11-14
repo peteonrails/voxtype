@@ -131,6 +131,8 @@ toml_edit = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Dictation history: day files older than a week are gzipped
+flate2 = "1"
 
 # OSD native frontend (SCTK + wgpu + egui-wgpu). All optional, gated by the
 # `osd-native` feature so users not opting in don't pay the build cost.
