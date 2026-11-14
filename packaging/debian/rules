@@ -38,11 +38,13 @@ override_dh_auto_build:
 	install -D -m 755 target/release/voxtype variants/voxtype-vulkan
 	$(HASWELL_ENV) cargo build --release --locked -p voxtype-gguf-worker --features vulkan
 	install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker-vulkan
-	# OSD launcher, GTK4 and Quickshell frontends, and the audio bridge, in
-	# their own invocation so the daemon binaries stay free of GTK4
-	$(HASWELL_ENV) cargo build --release --locked --features osd-gtk4 \
+	# OSD launcher, GTK4 and Quickshell frontends, the audio bridge and the
+	# GTK4 meetings window, in their own invocation so the daemon binaries
+	# stay free of GTK4
+	$(HASWELL_ENV) cargo build --release --locked --features osd-gtk4,meetings-gtk4 \
 		--bin voxtype-osd --bin voxtype-osd-gtk4 \
-		--bin voxtype-osd-quickshell --bin voxtype-audio-bridge
+		--bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
+		--bin voxtype-meetings-gtk4
 	# Man pages (compiles only clap and clap_mangen)
 	cargo xtask man target/man
 
@@ -61,6 +63,9 @@ override_dh_auto_install:
 	install -D -m 755 target/release/voxtype-audio-bridge $(PKG)/usr/bin/voxtype-audio-bridge
 	install -D -m 755 target/release/voxtype-osd-gtk4 \
 		debian/voxtype-osd-gtk4/usr/lib/voxtype/voxtype-osd-gtk4
+	# `voxtype meeting view` finds the meetings window beside the daemon
+	install -D -m 755 target/release/voxtype-meetings-gtk4 \
+		debian/voxtype-meetings-gtk4/usr/lib/voxtype/voxtype-meetings-gtk4
 	# Quickshell QML tree, OSD style packages and recipes
 	for tree in quickshell:quickshell examples/osd-packages:osd examples/osd-recipes:osd-recipes; do \
 		src=$${tree%%:*}; dest=$(SHARE)/$${tree##*:}; \

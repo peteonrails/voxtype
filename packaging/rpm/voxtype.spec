@@ -43,7 +43,7 @@ BuildRequires:  vulkan-loader-devel
 BuildRequires:  glslc
 # voxtype-gguf-worker-vulkan (ggml-vulkan's find_package(SPIRV-Headers))
 BuildRequires:  spirv-headers-devel
-# voxtype-osd-gtk4
+# voxtype-osd-gtk4 and voxtype-meetings-gtk4
 BuildRequires:  gtk4-devel
 BuildRequires:  gtk4-layer-shell-devel
 
@@ -52,6 +52,7 @@ Requires:       pipewire-alsa
 Recommends:     wtype
 Recommends:     wl-clipboard
 Recommends:     %{name}-osd-gtk4 = %{version}-%{release}
+Recommends:     %{name}-meetings-gtk4 = %{version}-%{release}
 Suggests:       ydotool
 Suggests:       libnotify
 Suggests:       quickshell
@@ -82,7 +83,8 @@ GPU acceleration can be enabled with: voxtype setup gpu --enable
 
 It also includes the OSD launcher (voxtype-osd), the Quickshell OSD
 frontend and its audio bridge, OSD styles, and the Omarchy Settings
-plugin. The GTK4 OSD frontend is in the voxtype-osd-gtk4 package.
+plugin. The GTK4 OSD frontend is in the voxtype-osd-gtk4 package, and the
+GTK4 meetings window in voxtype-meetings-gtk4.
 
 %package osd-gtk4
 Summary:        GTK4 waveform OSD for Voxtype
@@ -92,6 +94,16 @@ Requires:       %{name}%{?_isa} = %{version}-%{release}
 The GTK4 frontend for voxtype-osd: a layer-shell overlay that shows the
 recording waveform. voxtype-osd uses it automatically when it is
 installed and falls back to the other frontends when it is not.
+
+%package meetings-gtk4
+Summary:        GTK4 meetings window for Voxtype
+Requires:       %{name}%{?_isa} = %{version}-%{release}
+
+%description meetings-gtk4
+The GTK4 meetings window: the live transcript, past meetings, notes and
+the assistant in a normal window. `voxtype meeting view` opens it on
+desktops without Quickshell, and uses the Quickshell view when that is
+installed.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -125,12 +137,14 @@ install -D -m 755 target/release/voxtype variants/voxtype-vulkan
 %{vt_haswell_env} cargo build --release --locked -p voxtype-gguf-worker --features vulkan
 install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker-vulkan
 
-# OSD launcher, its GTK4 and Quickshell frontends, and the audio bridge the
-# Quickshell OSD reads levels from. Same invocation as Dockerfile.onnx, so
-# the daemon binaries above stay free of GTK4.
-%{vt_haswell_env} cargo build --release --locked --features osd-gtk4 \
+# OSD launcher, its GTK4 and Quickshell frontends, the audio bridge the
+# Quickshell OSD reads levels from, and the GTK4 meetings window. Same
+# invocation as Dockerfile.onnx, so the daemon binaries above stay free of
+# GTK4.
+%{vt_haswell_env} cargo build --release --locked --features osd-gtk4,meetings-gtk4 \
     --bin voxtype-osd --bin voxtype-osd-gtk4 \
-    --bin voxtype-osd-quickshell --bin voxtype-audio-bridge
+    --bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
+    --bin voxtype-meetings-gtk4
 
 # Man pages (compiles only clap and clap_mangen)
 cargo xtask man target/man
@@ -147,6 +161,8 @@ install -D -m 755 variants/voxtype-gguf-worker-vulkan %{buildroot}%{vt_libdir}/v
 # basename, so the bridge goes on PATH.
 install -D -m 755 target/release/voxtype-osd %{buildroot}%{vt_libdir}/voxtype-osd
 install -D -m 755 target/release/voxtype-osd-gtk4 %{buildroot}%{vt_libdir}/voxtype-osd-gtk4
+# `voxtype meeting view` finds the meetings window beside the daemon.
+install -D -m 755 target/release/voxtype-meetings-gtk4 %{buildroot}%{vt_libdir}/voxtype-meetings-gtk4
 install -D -m 755 target/release/voxtype-osd-quickshell %{buildroot}%{vt_libdir}/voxtype-osd-quickshell
 install -d %{buildroot}%{_bindir}
 ln -s ../lib/voxtype/voxtype-osd %{buildroot}%{_bindir}/voxtype-osd
@@ -323,6 +339,9 @@ fi
 
 %files osd-gtk4
 %{vt_libdir}/voxtype-osd-gtk4
+
+%files meetings-gtk4
+%{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
