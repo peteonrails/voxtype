@@ -241,9 +241,9 @@ impl MlDiarizer {
         if !path.exists() {
             return Err(format!(
                 "Speaker embedding model not found: {:?}\n\
-                Download from: https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb\n\
-                Place in: {:?}",
-                path, path
+                It downloads automatically when a meeting starts with diarization \
+                backend \"ml\"; check the network connection to models.voxtype.io.",
+                path
             ));
         }
 

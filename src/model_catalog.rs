@@ -189,10 +189,12 @@ pub enum ModelVerification {
 /// - Older ONNX installs have no cached manifest. Their expected file *names*
 ///   are still known, so a missing file is detectable; sizes are not, because
 ///   the compiled-in numbers have drifted from upstream.
-/// - Whisper models have no manifest anywhere (they come from HuggingFace, not
-///   the R2 mirror). The ggml file magic is the one exact check available, and
-///   it catches the common failure of an error page saved under a `.bin` name.
-///   A truncated whisper model with intact magic reads as healthy here.
+/// - Whisper models are single flat files with no cached manifest beside them
+///   (the download verifies them against the mirror's manifest, but nothing
+///   is kept on disk to re-check later). The ggml file magic is the one exact
+///   check available offline, and it catches the common failure of an error
+///   page saved under a `.bin` name. A truncated whisper model with intact
+///   magic reads as healthy here.
 pub fn model_health(engine: &str, model: &str) -> ModelHealth {
     model_health_in(&Config::models_dir(), engine, model)
 }
