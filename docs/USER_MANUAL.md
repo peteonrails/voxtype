@@ -24,10 +24,10 @@ languages as v3 automatically; it does not expose a language hint, translation o
 streaming control. The tray therefore correctly shows its language as automatic
 and read-only. Upstream inference-pipeline features are not implied by the weights.
 
-Ultra downloads are an explicit exception to the usual R2-mirror policy: they
-come directly from a pinned handy-computer Hugging Face revision, with pinned
-size and SHA-256 checks. No unpopulated Voxtype mirror is advertised. See
-[model provenance](models/parakeet-ultra.md) for attribution and CC-BY-4.0 terms.
+Ultra downloads come from Voxtype's model mirror at `models.voxtype.io`, like
+every other model, with pinned size and SHA-256 checks. See
+[model provenance](models/parakeet-ultra.md) for where the weights originate,
+attribution and CC-BY-4.0 terms.
 
 ## Handy GGUF model families
 
@@ -1437,7 +1437,7 @@ Arabic (`ar`), German (`de`), English (`en`, default), Spanish (`es`), French (`
 voxtype setup model      # Pick the Cohere section, confirm the size warning
 ```
 
-The download fetches five files from the `cstr/cohere-transcribe-onnx-int8` HuggingFace repository (Apache 2.0 licensed, not gated): the encoder/decoder ONNX graphs, their weight sidecars, and `tokens.txt`.
+The download fetches the encoder/decoder ONNX graphs, their weight sidecars and `tokens.txt` from Voxtype's model mirror at `models.voxtype.io`, checking each file's SHA-256. The files are mirrored from `onnx-community/cohere-transcribe-03-2026-ONNX` (Apache 2.0).
 
 ---
 

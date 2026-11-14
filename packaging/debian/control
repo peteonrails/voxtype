@@ -42,7 +42,7 @@ Description: Push-to-talk voice-to-text for Linux
  .
  Note: User must be in the 'input' group for hotkey detection.
  .
- This package includes the AVX2, AVX-512 and Vulkan builds, the GGUF
+ This package includes the AVX2 and Vulkan builds, the GGUF
  workers, the OSD launcher, the Quickshell OSD frontend and its audio
  bridge, OSD styles and the Omarchy Settings plugin. The GTK4 OSD frontend
  is in voxtype-osd-gtk4.

@@ -7,20 +7,17 @@ case "$1" in
         #
         # Binary variants:
         #   voxtype-avx2:   CPU - Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
-        #   voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
         #   voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
 
         # /usr/bin/voxtype is a symlink to the variant in use. An existing
         # link that still resolves is kept: `voxtype setup gpu --enable`
         # points it at voxtype-vulkan, and an upgrade must not undo that. A
-        # missing or dangling one is created for this CPU.
+        # missing or dangling one is recreated, including one left pointing at
+        # the voxtype-avx512 variant that 1.2.2-rc3 shipped and this package
+        # no longer has.
         if [ ! -e /usr/bin/voxtype ]; then
             rm -f /usr/bin/voxtype
-            if [ -f /proc/cpuinfo ] && grep -qw avx512f /proc/cpuinfo 2>/dev/null; then
-                ln -s /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
-            else
-                ln -s /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
-            fi
+            ln -s /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
         fi
         VARIANT=$(basename "$(readlink -f /usr/bin/voxtype)")
 
@@ -96,6 +93,10 @@ case "$1" in
             echo "See: https://github.com/peteonrails/voxtype/blob/main/docs/USER_MANUAL.md"
             echo ""
         fi
+        echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"
+        echo "  voxtype setup skill"
+        echo "to teach it to configure voxtype for this machine."
+        echo ""
         ;;
 esac
 

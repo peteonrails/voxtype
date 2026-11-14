@@ -1290,7 +1290,7 @@ pub async fn run_setup(
         {
             println!("  1. Set up a compositor keybinding to trigger recording:");
             println!(
-                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
+                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record toggle\n"
             );
             println!("  2. Start the daemon: voxtype daemon\n");
             println!("Optional:");
