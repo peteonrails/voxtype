@@ -321,6 +321,38 @@ pub struct Cli {
     )]
     pub duck_media_fade_ms: Option<u32>,
 
+    /// Stop a recording when the microphone delivers no audible sound
+    #[arg(long, help_heading = "Audio", hide_short_help = true)]
+    pub dead_input_check: bool,
+
+    /// Keep recording when the microphone delivers no audible sound
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "dead_input_check"
+    )]
+    pub no_dead_input_check: bool,
+
+    /// Milliseconds to check microphone input before reporting it as silent
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Audio",
+        hide_short_help = true
+    )]
+    pub dead_input_window: Option<u32>,
+
+    /// Minimum audible microphone level, in dBFS
+    #[arg(
+        long,
+        value_name = "DBFS",
+        help_heading = "Audio",
+        hide_short_help = true,
+        allow_hyphen_values = true
+    )]
+    pub dead_input_threshold: Option<f32>,
+
     // -- Output (delivery, timing, file output, hooks) --
     /// Force clipboard mode (don't try to type)
     #[arg(long, help_heading = "Output")]

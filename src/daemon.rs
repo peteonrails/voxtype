@@ -1069,6 +1069,8 @@ pub struct Daemon {
     /// see `new_speech_tracker`). `None` when idle or not armed for this
     /// session. Read by the periodic silence check in the main loop.
     silence_tracker: Option<audio::levels::SpeechTracker>,
+    /// Receiver for the one dead-input report produced by the active capture.
+    dead_input_rx: Option<tokio::sync::mpsc::Receiver<audio::input_guard::DeadInputReport>>,
     /// Whether the currently-active recording was started via an external
     /// trigger (SIGUSR1 / `record start`) rather than the hotkey. Set in
     /// `start_recording_capture`/`start_streaming_capture`, read (and
@@ -1286,6 +1288,7 @@ impl Daemon {
             level_hub: None,
             level_emitter_task: None,
             silence_tracker: None,
+            dead_input_rx: None,
             is_external_trigger: false,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
@@ -1595,6 +1598,25 @@ impl Daemon {
             })
     }
 
+    /// Arm the dead-input guard for the capture about to start.
+    fn start_dead_input_guard(&mut self) -> Option<audio::input_guard::DeadInputGuard> {
+        self.dead_input_rx = None;
+        if !self.config.audio.dead_input.enabled {
+            return None;
+        }
+
+        let (guard, report_rx) = audio::input_guard::DeadInputGuard::new(
+            self.config.audio.sample_rate,
+            &self.config.audio.dead_input,
+        );
+        self.dead_input_rx = Some(report_rx);
+        Some(guard)
+    }
+
+    fn disarm_dead_input_guard(&mut self) {
+        self.dead_input_rx = None;
+    }
+
     /// Start a batch (non-streaming) audio capture. `track_silence` arms
     /// silence-based auto-stop when the session is external-trigger and the
     /// feature is configured (see `new_speech_tracker`) — pass `false` for
@@ -1619,28 +1641,27 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
+                    let guard = self.start_dead_input_guard();
+                    let sink = self.level_hub.as_ref().map(|hub| hub.frame_sink());
 
                     // Cancel any prior emitter (defensive; should be idle).
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();
                     }
-                    let handle = if let Some(hub) = &self.level_hub {
-                        Some(audio::levels::spawn_emitter_with_streaming_tap(
+                    // With no consumer, chunk_rx is dropped, as it was before
+                    // silence tracking and the dead-input guard existed.
+                    if audio::levels::needs_chunk_pump(
+                        sink.is_some(),
+                        speech_tracker.is_some(),
+                        guard.is_some(),
+                    ) {
+                        self.level_emitter_task = Some(audio::levels::spawn_chunk_pump(
                             chunk_rx,
-                            hub.frame_sink(),
+                            sink,
                             None,
                             speech_tracker,
-                        ))
-                    } else {
-                        // No OSD sink. If silence tracking is armed it still
-                        // needs a consumer for chunk_rx — otherwise it'd
-                        // just be dropped, matching the pre-tracking
-                        // behaviour when tracking isn't armed either.
-                        speech_tracker
-                            .map(|tracker| audio::levels::spawn_silence_tracker(chunk_rx, tracker))
-                    };
-                    if let Some(handle) = handle {
-                        self.level_emitter_task = Some(handle);
+                            guard,
+                        ));
                     }
                     Ok(capture)
                 }
@@ -1888,6 +1909,8 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
     ) {
+        self.disarm_dead_input_guard();
+
         // Notify an external-trigger caller that this session is ending,
         // regardless of why (stop, silence timeout, hard timeout) — it may
         // not be the one that decided to stop it — and disarm silence
@@ -2034,6 +2057,7 @@ impl Daemon {
     /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
     /// the caller to disown (or keep, to receive trailing finals).
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+        self.disarm_dead_input_guard();
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
         if let Some(mut c) = audio_capture.take() {
@@ -2050,6 +2074,8 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
+        self.disarm_dead_input_guard();
+
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
@@ -2162,6 +2188,8 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
     ) {
+        self.disarm_dead_input_guard();
+
         if state.is_streaming() {
             tracing::info!("Recording cancelled");
             self.end_external_session(true).await;
@@ -2271,18 +2299,18 @@ impl Daemon {
         }
     }
 
-    /// Cancel an active streaming session: signal the backend, drop capture,
-    /// rewind any typed text, and reset to idle (with cancel feedback +
-    /// notification).
+    /// Tear down an active streaming session: signal the backend, drop
+    /// capture, rewind any typed text, and reset to idle. Callers choose the
+    /// feedback and notification.
     #[allow(clippy::too_many_arguments)]
-    async fn cancel_streaming_to_idle(
+    async fn teardown_streaming_to_idle(
         &mut self,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         streaming_handle: &mut Option<StreamHandle>,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-        notification_body: &str,
+        outcome: osd::session::OutcomeKind,
     ) {
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
@@ -2307,8 +2335,31 @@ impl Daemon {
 
         discard_recording_overrides();
         *state = State::Idle;
-        self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+        self.publish_osd_outcome(outcome, 0);
         self.update_state("idle");
+        self.disarm_dead_input_guard();
+    }
+
+    /// Cancel an active streaming session with cancellation feedback.
+    #[allow(clippy::too_many_arguments)]
+    async fn cancel_streaming_to_idle(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        notification_body: &str,
+    ) {
+        self.teardown_streaming_to_idle(
+            state,
+            audio_capture,
+            streaming_handle,
+            streaming_session,
+            streaming_chain,
+            osd::session::OutcomeKind::Cancelled,
+        )
+        .await;
         self.play_feedback(SoundEvent::Cancelled);
 
         if let Some(cmd) = &self.config.output.post_output_command {
@@ -2327,6 +2378,91 @@ impl Daemon {
             )
             .await;
         }
+    }
+
+    /// Stop a capture that delivered no audible input and explain why.
+    #[allow(clippy::too_many_arguments)]
+    async fn abort_recording_dead_input(
+        &mut self,
+        report: audio::input_guard::DeadInputReport,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
+    ) {
+        self.end_external_session(state.is_recording()).await;
+        if let Some(path) = peek_file_output_path(&self.config) {
+            write_result_sidecar(&path, &TranscriptOutcome::error("Microphone silent"));
+        }
+
+        if state.is_streaming() {
+            self.teardown_streaming_to_idle(
+                state,
+                audio_capture,
+                streaming_handle,
+                streaming_session,
+                streaming_chain,
+                osd::session::OutcomeKind::NoInput,
+            )
+            .await;
+            // Leave the compositor submap that pre_recording_command entered,
+            // as every other streaming exit does.
+            if let Some(cmd) = &self.config.output.post_output_command {
+                if let Err(error) = output::run_hook(cmd, "post_output").await {
+                    tracing::warn!(%error, "post-output hook failed");
+                }
+            }
+        } else {
+            self.stop_level_emitter();
+            if let Some(mut capture) = audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+            if let Some(task) = self.model_load_task.take() {
+                task.abort();
+            }
+            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                task.abort();
+            }
+            if let State::EagerRecording {
+                accumulated_audio,
+                chunk_results,
+                chunks_sent,
+                tasks_in_flight,
+                ..
+            } = state
+            {
+                accumulated_audio.clear();
+                chunk_results.clear();
+                *chunks_sent = 0;
+                *tasks_in_flight = 0;
+            }
+            *eager_transcriber = None;
+            self.publish_osd_outcome(osd::session::OutcomeKind::NoInput, 0);
+            self.reset_to_idle(state).await;
+        }
+
+        self.show_tray_error();
+
+        self.play_feedback(SoundEvent::Error);
+        notification::close_persistent().await;
+        let source = audio::input_guard::source_label(&self.config.audio.device).await;
+        tracing::warn!(
+            source = %source,
+            peak_dbfs = report.peak_dbfs,
+            threshold_dbfs = report.threshold_dbfs,
+            "microphone delivered no audible input; recording stopped"
+        );
+        notification::send_alert(
+            "Microphone silent",
+            &format!(
+                "No sound after the microphone settled in the next {:.1} seconds. \
+                 Check that the microphone is powered on and unmuted.",
+                report.window_ms as f32 / 1_000.0,
+            ),
+        )
+        .await;
     }
 
     /// Start a streaming-mode audio capture.
@@ -2356,36 +2492,15 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
-                    let handle = if let Some(hub) = &self.level_hub {
-                        audio::levels::spawn_emitter_with_streaming_tap(
-                            chunk_rx,
-                            hub.frame_sink(),
-                            Some(streaming_tx),
-                            speech_tracker,
-                        )
-                    } else {
-                        // No OSD: still need to drive chunk_rx → streaming_tx,
-                        // and optionally bucket for silence tracking too.
-                        tokio::spawn(async move {
-                            let mut rx = chunk_rx;
-                            let mut bucketer = audio::levels::LevelBucketer::new();
-                            let mut out = Vec::with_capacity(8);
-                            while let Some(chunk) = rx.recv().await {
-                                if let Some(tracker) = &speech_tracker {
-                                    out.clear();
-                                    bucketer.push(&chunk, &mut out);
-                                    for frame in out.drain(..) {
-                                        tracker.observe(frame.peak_dbfs).await;
-                                    }
-                                }
-                                if let Err(e) = streaming_tx.try_send(chunk) {
-                                    // Backend slow or gone; drop and keep going.
-                                    tracing::trace!("streaming sample tap try_send failed: {}", e);
-                                }
-                            }
-                        })
-                    };
-                    self.level_emitter_task = Some(handle);
+                    let guard = self.start_dead_input_guard();
+                    let sink = self.level_hub.as_ref().map(|hub| hub.frame_sink());
+                    self.level_emitter_task = Some(audio::levels::spawn_chunk_pump(
+                        chunk_rx,
+                        sink,
+                        Some(streaming_tx),
+                        speech_tracker,
+                        guard,
+                    ));
                     Ok((capture, streaming_rx))
                 }
                 Err(e) => {
@@ -3276,6 +3391,8 @@ impl Daemon {
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&mut self, state: &mut State) {
+        self.disarm_dead_input_guard();
+
         discard_recording_overrides();
         self.restore_recording_media();
         *state = State::Idle;
@@ -5222,6 +5339,24 @@ impl Daemon {
                 }, if self.transcription_task.is_some() => {
                     self.transcription_task = None;
                     self.handle_transcription_result(&mut state, result).await;
+                }
+
+                Some(report) = async {
+                    match self.dead_input_rx.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.dead_input_rx.is_some() && state.is_recording() => {
+                    self.abort_recording_dead_input(
+                        report,
+                        &mut state,
+                        &mut audio_capture,
+                        &mut streaming_handle,
+                        &mut streaming_session,
+                        &mut streaming_chain,
+                        &mut eager_transcriber,
+                    )
+                    .await;
                 }
 
                 // Streaming event pump (active only while State::Streaming).

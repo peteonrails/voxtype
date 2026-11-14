@@ -1,5 +1,6 @@
 //! Audio capture and feedback configuration.
 
+use super::default_true;
 use serde::{Deserialize, Serialize};
 
 /// Audio capture configuration
@@ -42,6 +43,9 @@ pub struct AudioConfig {
     /// Fade duration in milliseconds for the ducking ramp (0 = instant)
     #[serde(default = "default_duck_media_fade_ms")]
     pub duck_media_fade_ms: u32,
+    /// Guard settings for captures that deliver no audible input.
+    #[serde(default)]
+    pub dead_input: DeadInputConfig,
 
     /// Audio feedback settings
     #[serde(default)]
@@ -103,6 +107,7 @@ impl Default for AudioConfig {
             external_trigger_speech_threshold_dbfs: default_external_trigger_speech_threshold_dbfs(
             ),
             external_trigger_stop_command: None,
+            dead_input: DeadInputConfig::default(),
         }
     }
 }
@@ -135,6 +140,40 @@ fn default_duck_media_fade_ms() -> u32 {
 
 fn default_external_trigger_speech_threshold_dbfs() -> f32 {
     -20.0
+}
+
+/// Dead-input guard configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeadInputConfig {
+    /// Stop a recording that delivers no audible input.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How long to observe the capture after settling, in milliseconds.
+    #[serde(default = "default_dead_input_window_ms")]
+    pub window_ms: u32,
+
+    /// Frame level required for the capture to count as live, in dBFS.
+    #[serde(default = "default_dead_input_threshold_dbfs")]
+    pub threshold_dbfs: f32,
+}
+
+fn default_dead_input_window_ms() -> u32 {
+    1_500
+}
+
+fn default_dead_input_threshold_dbfs() -> f32 {
+    -100.0
+}
+
+impl Default for DeadInputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_ms: default_dead_input_window_ms(),
+            threshold_dbfs: default_dead_input_threshold_dbfs(),
+        }
+    }
 }
 
 /// Audio feedback configuration for sound cues

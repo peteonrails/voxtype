@@ -29,6 +29,9 @@ pub struct AudioState {
     pub duck_media: bool,
     pub duck_media_volume_percent: u8,
     pub duck_media_fade_ms: u32,
+    pub dead_input_enabled: bool,
+    pub dead_input_window_ms: u32,
+    pub dead_input_threshold_dbfs: f32,
     pub feedback_enabled: bool,
     pub feedback_theme: String,
     pub feedback_volume: f32,
@@ -79,6 +82,9 @@ pub enum Field {
     DuckMedia,
     DuckMediaVolume,
     DuckMediaFade,
+    DeadInputEnabled,
+    DeadInputWindow,
+    DeadInputThreshold,
     FeedbackEnabled,
     FeedbackTheme,
     FeedbackVolume,
@@ -92,6 +98,9 @@ impl Field {
         Field::DuckMedia,
         Field::DuckMediaVolume,
         Field::DuckMediaFade,
+        Field::DeadInputEnabled,
+        Field::DeadInputWindow,
+        Field::DeadInputThreshold,
         Field::FeedbackEnabled,
         Field::FeedbackTheme,
         Field::FeedbackVolume,
@@ -109,6 +118,12 @@ const DUCK_VOLUME_STEP: i32 = 5;
 /// `audio::media`, so every stop lands on a value that produces whole steps.
 const DUCK_FADE_STEP: i32 = 50;
 const DUCK_FADE_MAX: u32 = 2000;
+const DEAD_INPUT_WINDOW_STEP: i32 = 100;
+const DEAD_INPUT_WINDOW_MIN: u32 = 300;
+const DEAD_INPUT_WINDOW_MAX: u32 = 30_000;
+const DEAD_INPUT_THRESHOLD_STEP: f32 = 5.0;
+const DEAD_INPUT_THRESHOLD_MIN: f32 = -120.0;
+const DEAD_INPUT_THRESHOLD_MAX: f32 = 0.0;
 
 impl AudioState {
     pub fn load() -> Result<Self, EditorError> {
@@ -131,6 +146,20 @@ impl AudioState {
                 .get_int("audio", "duck_media_fade_ms")
                 .map(|n| n.clamp(0, DUCK_FADE_MAX as i64) as u32)
                 .unwrap_or_else(|| AudioConfig::default().duck_media_fade_ms),
+            dead_input_enabled: ed
+                .get_bool("audio.dead_input", "enabled")
+                .unwrap_or_else(|| AudioConfig::default().dead_input.enabled),
+            dead_input_window_ms: ed
+                .get_int("audio.dead_input", "window_ms")
+                .map(|n| n.clamp(DEAD_INPUT_WINDOW_MIN as i64, DEAD_INPUT_WINDOW_MAX as i64) as u32)
+                .unwrap_or_else(|| AudioConfig::default().dead_input.window_ms),
+            dead_input_threshold_dbfs: ed
+                .get_f32_or(
+                    "audio.dead_input",
+                    "threshold_dbfs",
+                    AudioConfig::default().dead_input.threshold_dbfs,
+                )
+                .clamp(DEAD_INPUT_THRESHOLD_MIN, DEAD_INPUT_THRESHOLD_MAX),
             feedback_enabled: ed.get_bool("audio.feedback", "enabled").unwrap_or(false),
             feedback_theme: ed
                 .get_string("audio.feedback", "theme")
@@ -225,6 +254,17 @@ impl AudioState {
             "duck_media_fade_ms",
             self.duck_media_fade_ms as i64,
         );
+        ed.set_bool("audio.dead_input", "enabled", self.dead_input_enabled);
+        ed.set_int(
+            "audio.dead_input",
+            "window_ms",
+            self.dead_input_window_ms as i64,
+        );
+        ed.set_f32(
+            "audio.dead_input",
+            "threshold_dbfs",
+            self.dead_input_threshold_dbfs,
+        );
         ed.set_bool("audio.feedback", "enabled", self.feedback_enabled);
         ed.set_string("audio.feedback", "theme", &self.feedback_theme);
         ed.set_f32("audio.feedback", "volume", self.feedback_volume);
@@ -317,6 +357,20 @@ impl AudioState {
             Field::DuckMediaFade => {
                 let next = self.duck_media_fade_ms as i32 + delta * DUCK_FADE_STEP;
                 self.duck_media_fade_ms = next.clamp(0, DUCK_FADE_MAX as i32) as u32;
+            }
+            Field::DeadInputEnabled => {
+                self.dead_input_enabled = !self.dead_input_enabled;
+            }
+            Field::DeadInputWindow => {
+                let next = self.dead_input_window_ms as i32 + delta * DEAD_INPUT_WINDOW_STEP;
+                self.dead_input_window_ms =
+                    next.clamp(DEAD_INPUT_WINDOW_MIN as i32, DEAD_INPUT_WINDOW_MAX as i32) as u32;
+            }
+            Field::DeadInputThreshold => {
+                let next =
+                    self.dead_input_threshold_dbfs + delta as f32 * DEAD_INPUT_THRESHOLD_STEP;
+                self.dead_input_threshold_dbfs =
+                    next.clamp(DEAD_INPUT_THRESHOLD_MIN, DEAD_INPUT_THRESHOLD_MAX);
             }
             Field::FeedbackEnabled => {
                 self.feedback_enabled = !self.feedback_enabled;
@@ -489,6 +543,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         )
         .dimmed(!state.duck_media),
         FormRowSpec::new(
+            state.field == Field::DeadInputEnabled,
+            "Stop silent microphone input",
+            yesno(state.dead_input_enabled),
+        ),
+        FormRowSpec::new(
+            state.field == Field::DeadInputWindow,
+            "Silent-input window",
+            format!("{} ms", state.dead_input_window_ms),
+        )
+        .dimmed(!state.dead_input_enabled),
+        FormRowSpec::new(
+            state.field == Field::DeadInputThreshold,
+            "Silent-input threshold",
+            format!("{:.0} dBFS", state.dead_input_threshold_dbfs),
+        )
+        .dimmed(!state.dead_input_enabled),
+        FormRowSpec::new(
             state.field == Field::FeedbackEnabled,
             "Audio feedback sounds",
             if state.feedback_enabled { "on" } else { "off" },
@@ -660,6 +731,46 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
                 Style::default().fg(Color::Gray),
             )),
         ],
+        Field::DeadInputEnabled => vec![
+            heading("Stop silent microphone input"),
+            Line::from(""),
+            Line::from(
+                "Stops a recording that begins with no sound, then plays the \
+                 error cue and names the audio source in a notification.",
+            ),
+            Line::from(""),
+            Line::from(
+                "Turn this off only when you need to record even if the \
+                 microphone starts silent.",
+            ),
+        ],
+        Field::DeadInputWindow => vec![
+            heading("Silent-input window"),
+            Line::from(""),
+            Line::from(
+                "How long voxtype listens after the microphone settles. The \
+                 loudest 100 ms frame decides, so a short silent startup is \
+                 not treated as a dead microphone.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "1500 ms is the default. 300 ms is the shortest allowed window.",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
+        Field::DeadInputThreshold => vec![
+            heading("Silent-input threshold"),
+            Line::from(""),
+            Line::from(
+                "A frame at or above this level counts as live microphone \
+                 input. Lower (more negative) values accept quieter input.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "The measurement removes DC offset before measuring sound.",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
         Field::FeedbackEnabled => vec![
             heading("Audio feedback sounds"),
             Line::from(""),
@@ -812,6 +923,9 @@ mod tests {
                 Field::DuckMedia => "audio.duck_media",
                 Field::DuckMediaVolume => "audio.duck_media_volume_percent",
                 Field::DuckMediaFade => "audio.duck_media_fade_ms",
+                Field::DeadInputEnabled => "audio.dead_input.enabled",
+                Field::DeadInputWindow => "audio.dead_input.window_ms",
+                Field::DeadInputThreshold => "audio.dead_input.threshold_dbfs",
                 Field::FeedbackEnabled => "audio.feedback.enabled",
                 Field::FeedbackTheme => "audio.feedback.theme",
                 Field::FeedbackVolume => "audio.feedback.volume",
@@ -844,5 +958,8 @@ mod tests {
         let cfg = AudioConfig::default();
         assert_eq!(cfg.duck_media_volume_percent, 34);
         assert_eq!(cfg.duck_media_fade_ms, 150);
+        assert!(cfg.dead_input.enabled);
+        assert_eq!(cfg.dead_input.window_ms, 1_500);
+        assert_eq!(cfg.dead_input.threshold_dbfs, -100.0);
     }
 }

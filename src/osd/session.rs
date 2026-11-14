@@ -48,6 +48,9 @@ pub enum OutcomeKind {
     Ok,
     /// Voice activity detection found no speech; nothing was transcribed.
     NoSpeech,
+    /// The capture source opened but did not deliver audible input.
+    NoInput,
+
     /// The recording was too short to be deliberate (an accidental tap).
     TooShort,
     /// Transcription ran but produced no text.
@@ -194,6 +197,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(OutcomeKind::OutputFailed).unwrap(),
             "output_failed"
+        );
+        assert_eq!(
+            serde_json::to_value(OutcomeKind::NoInput).unwrap(),
+            "no_input"
         );
     }
 

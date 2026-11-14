@@ -51,6 +51,7 @@
 //! work as if the daemon had just started. That's an acceptable trade-off
 //! since the alternative is a permanently broken socket.
 
+use super::input_guard::DeadInputGuard;
 use crate::config::Config;
 use std::io;
 use std::path::PathBuf;
@@ -615,67 +616,84 @@ pub fn spawn_emitter(
     spawn_emitter_with_streaming_tap(chunk_rx, sink, None, None)
 }
 
-/// Like [`spawn_emitter`] but also forwards every chunk to an optional
-/// `streaming_tx` (used by the streaming transcription pipeline to feed
-/// audio into a backend without disturbing the OSD level emitter) and
-/// updates an optional [`SpeechTracker`] from each bucketed frame's peak
-/// level (used for silence-based auto-stop).
-///
-/// When `streaming_tx` is `Some`, each chunk is cloned and `try_send`'d to
-/// it. Failure to send (closed receiver, full bounded channel) is logged at
-/// trace and never blocks the level emitter. When both optional args are
-/// `None`, behavior is identical to [`spawn_emitter`].
+/// Like [`spawn_emitter`] but also forwards chunks to a streaming backend and
+/// updates an optional silence tracker.
 pub fn spawn_emitter_with_streaming_tap(
-    mut chunk_rx: mpsc::Receiver<Vec<f32>>,
+    chunk_rx: mpsc::Receiver<Vec<f32>>,
     sink: FrameSink,
     streaming_tx: Option<mpsc::Sender<Vec<f32>>>,
     speech_tracker: Option<SpeechTracker>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut bucketer = LevelBucketer::new();
-        // Reusable scratch buffer for emitted frames per chunk.
-        // 4 frames is plenty for typical 10–40 ms chunks; we'll grow if needed.
-        let mut out: Vec<AudioFrame> = Vec::with_capacity(8);
-
-        while let Some(chunk) = chunk_rx.recv().await {
-            out.clear();
-            bucketer.push(&chunk, &mut out);
-            for frame in out.drain(..) {
-                if let Some(tracker) = &speech_tracker {
-                    tracker.observe(frame.peak_dbfs).await;
-                }
-                sink.publish(frame);
-            }
-
-            if let Some(ref tx) = streaming_tx {
-                if let Err(e) = tx.try_send(chunk) {
-                    tracing::trace!("streaming sample tap try_send failed: {}", e);
-                }
-            }
-        }
-        tracing::trace!("Audio level emitter task ended");
-    })
+    spawn_chunk_pump(chunk_rx, Some(sink), streaming_tx, speech_tracker, None)
 }
 
-/// Like [`spawn_emitter_with_streaming_tap`] but with no `FrameSink` to
-/// publish to — for silence tracking on a recording that has no OSD level
-/// hub running (OSD disabled or bind failed). Buckets samples purely to
-/// feed `speech_tracker`; frames are computed and discarded otherwise.
+/// Like [`spawn_emitter_with_streaming_tap`] without an OSD frame sink.
 pub fn spawn_silence_tracker(
-    mut chunk_rx: mpsc::Receiver<Vec<f32>>,
+    chunk_rx: mpsc::Receiver<Vec<f32>>,
     speech_tracker: SpeechTracker,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_chunk_pump(chunk_rx, None, None, Some(speech_tracker), None)
+}
+
+/// Whether a capture stream has a consumer that must drain it.
+pub(crate) const fn needs_chunk_pump(
+    has_sink: bool,
+    has_speech_tracker: bool,
+    has_dead_input_guard: bool,
+) -> bool {
+    has_sink || has_speech_tracker || has_dead_input_guard
+}
+
+/// Drain a capture chunk stream and feed each configured consumer: level
+/// frames to `sink`, frame peaks to `speech_tracker`, raw chunks to the
+/// dead-input `guard` and to `streaming_tx`.
+///
+/// Chunks are bucketed into frames only when `sink` or `speech_tracker`
+/// needs them. A `streaming_tx` send that fails (closed receiver, full
+/// channel) is logged at trace and never blocks the pump. When the guard is
+/// the only consumer, the task ends as soon as it reaches a verdict.
+pub fn spawn_chunk_pump(
+    mut chunk_rx: mpsc::Receiver<Vec<f32>>,
+    sink: Option<FrameSink>,
+    streaming_tx: Option<mpsc::Sender<Vec<f32>>>,
+    speech_tracker: Option<SpeechTracker>,
+    mut guard: Option<DeadInputGuard>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut bucketer = LevelBucketer::new();
-        let mut out: Vec<AudioFrame> = Vec::with_capacity(8);
+        let mut frames =
+            (sink.is_some() || speech_tracker.is_some()).then(|| Vec::with_capacity(8));
+
         while let Some(chunk) = chunk_rx.recv().await {
-            out.clear();
-            bucketer.push(&chunk, &mut out);
-            for frame in out.drain(..) {
-                speech_tracker.observe(frame.peak_dbfs).await;
+            if let Some(active_guard) = guard.as_mut() {
+                if active_guard.observe(&chunk) {
+                    guard = None;
+                }
+            }
+            if guard.is_none() && frames.is_none() && streaming_tx.is_none() {
+                break;
+            }
+
+            if let Some(frames) = frames.as_mut() {
+                frames.clear();
+                bucketer.push(&chunk, frames);
+                for frame in frames.drain(..) {
+                    if let Some(tracker) = &speech_tracker {
+                        tracker.observe(frame.peak_dbfs).await;
+                    }
+                    if let Some(sink) = &sink {
+                        sink.publish(frame);
+                    }
+                }
+            }
+
+            if let Some(tx) = &streaming_tx {
+                if let Err(error) = tx.try_send(chunk) {
+                    tracing::trace!(%error, "streaming sample tap try_send failed");
+                }
             }
         }
-        tracing::trace!("Silence-tracking-only emitter task ended");
+        tracing::trace!("Audio chunk pump task ended");
     })
 }
 
@@ -729,6 +747,14 @@ mod tests {
 
     pub(super) fn should_panic_now() -> bool {
         ACCEPT_PANIC_NEXT.swap(false, Ordering::SeqCst)
+    }
+
+    #[test]
+    fn chunk_pump_is_required_for_each_consumer() {
+        assert!(!needs_chunk_pump(false, false, false));
+        assert!(needs_chunk_pump(true, false, false));
+        assert!(needs_chunk_pump(false, true, false));
+        assert!(needs_chunk_pump(false, false, true));
     }
 
     fn arm_global_panic() {
