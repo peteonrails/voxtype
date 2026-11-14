@@ -24,6 +24,7 @@ pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+pub mod file;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -438,28 +439,30 @@ pub fn create_output_chain_with_override(
                 config.restore_clipboard_delay_ms,
             )));
         }
-        crate::config::OutputMode::File => {
-            // The daemon writes the file itself before reaching the output
-            // chain, so with a file_path this chain only backs the startup
-            // log. Warn only when there is genuinely nowhere to write.
-            if file_mode_lacks_path(config) {
+        crate::config::OutputMode::File => match &config.file_path {
+            Some(path) => {
+                chain.push(Box::new(file::FileOutput::new(
+                    path.clone(),
+                    config.file_mode.clone(),
+                )));
+                if config.fallback_to_clipboard {
+                    chain.push(Box::new(clipboard::ClipboardOutput::new(
+                        config.append_text.clone(),
+                    )));
+                }
+            }
+            None => {
                 tracing::warn!(
                     "Output mode is 'file' but no file_path configured. Falling back to clipboard."
                 );
+                chain.push(Box::new(clipboard::ClipboardOutput::new(
+                    config.append_text.clone(),
+                )));
             }
-            chain.push(Box::new(clipboard::ClipboardOutput::new(
-                config.append_text.clone(),
-            )));
-        }
+        },
     }
 
     chain
-}
-
-/// True when mode = "file" has no file_path to write to, so the output
-/// chain's clipboard fallback is what actually delivers the text.
-fn file_mode_lacks_path(config: &OutputConfig) -> bool {
-    config.mode == crate::config::OutputMode::File && config.file_path.is_none()
 }
 
 /// Run a shell command (for pre/post hooks)
@@ -611,22 +614,6 @@ pub async fn output_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn file_mode_warns_only_without_a_path() {
-        let mut config = OutputConfig {
-            mode: crate::config::OutputMode::File,
-            ..Default::default()
-        };
-        assert!(file_mode_lacks_path(&config));
-
-        config.file_path = Some(PathBuf::from("/tmp/notes.txt"));
-        assert!(!file_mode_lacks_path(&config));
-
-        config.file_path = None;
-        config.mode = crate::config::OutputMode::Clipboard;
-        assert!(!file_mode_lacks_path(&config));
-    }
 
     #[test]
     fn test_normalize_quotes_no_change() {

@@ -5,7 +5,7 @@
 
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
-use crate::config::{ActivationMode, Config, FileMode, OutputMode};
+use crate::config::{ActivationMode, Config, FileMode, OutputConfig, OutputMode};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
 #[cfg(target_os = "linux")]
@@ -498,6 +498,26 @@ fn read_output_mode_override() -> Option<OutputOverride> {
             None
         }
     }
+}
+
+/// Fold a per-recording output override into the configuration used to build
+/// a streaming session's output chain.
+fn apply_output_override(
+    base: &OutputConfig,
+    override_mode: Option<OutputOverride>,
+) -> OutputConfig {
+    let mut config = base.clone();
+    match override_mode {
+        Some(OutputOverride::FileWithPath(path)) => {
+            config.mode = OutputMode::File;
+            config.file_path = Some(path);
+        }
+        Some(OutputOverride::Mode(mode)) => {
+            config.mode = mode;
+        }
+        None => {}
+    }
+    config
 }
 
 /// Remove every per-recording override (`voxtype record start --file`,
@@ -1805,18 +1825,18 @@ impl Daemon {
             }
         };
 
-        // A `--file=path` (or config/`mode = "file"`) override means this
-        // session accumulates into `finalized_text` instead of typing —
-        // see the Partial/Final/Replace arms in the event pump, gated on
-        // `file_output_path`. The chain is still built normally; it's
-        // simply unused for a file-output session.
+        // Batch transcription reads the output override when it has a final
+        // transcript. A streaming session needs the same override before it
+        // builds its chain, otherwise --clipboard, --type, and --paste all
+        // silently use the configured default.
         let output_override = read_output_mode_override();
         let file_output_path = self.resolve_file_output_path(&output_override, None);
+        let output_config = apply_output_override(&self.config.output, output_override);
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
-        *streaming_chain = Some(output::create_output_chain(&self.config.output));
+        *streaming_chain = Some(output::create_output_chain(&output_config));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
             model_override,
@@ -6291,6 +6311,61 @@ while True:
             }
             // Should not panic
         });
+    }
+
+    #[test]
+    fn file_override_with_a_path_sets_file_mode_and_path() {
+        let resolved = apply_output_override(
+            &crate::config::OutputConfig::default(),
+            Some(OutputOverride::FileWithPath(PathBuf::from("/tmp/out.txt"))),
+        );
+
+        assert_eq!(resolved.mode, OutputMode::File);
+        assert_eq!(resolved.file_path, Some(PathBuf::from("/tmp/out.txt")));
+    }
+
+    #[test]
+    fn bare_file_override_keeps_the_configured_path() {
+        let base = crate::config::OutputConfig {
+            file_path: Some(PathBuf::from("/tmp/configured.txt")),
+            ..crate::config::OutputConfig::default()
+        };
+
+        let resolved = apply_output_override(&base, Some(OutputOverride::Mode(OutputMode::File)));
+
+        assert_eq!(resolved.mode, OutputMode::File);
+        assert_eq!(
+            resolved.file_path,
+            Some(PathBuf::from("/tmp/configured.txt"))
+        );
+    }
+
+    #[test]
+    fn mode_overrides_replace_only_the_mode() {
+        let base = crate::config::OutputConfig {
+            mode: OutputMode::File,
+            append_text: Some("!".to_string()),
+            ..crate::config::OutputConfig::default()
+        };
+
+        for mode in [OutputMode::Type, OutputMode::Clipboard, OutputMode::Paste] {
+            let resolved = apply_output_override(&base, Some(OutputOverride::Mode(mode.clone())));
+
+            assert_eq!(resolved.mode, mode);
+            assert_eq!(resolved.append_text, Some("!".to_string()));
+        }
+    }
+
+    #[test]
+    fn absent_override_preserves_the_mode() {
+        let base = crate::config::OutputConfig {
+            mode: OutputMode::Paste,
+            ..crate::config::OutputConfig::default()
+        };
+
+        let resolved = apply_output_override(&base, None);
+
+        assert_eq!(resolved.mode, OutputMode::Paste);
     }
 
     #[test]
