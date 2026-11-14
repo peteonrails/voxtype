@@ -9,6 +9,7 @@ pub mod dual_capture;
 #[cfg(feature = "onnx-common")]
 pub mod enhance;
 pub mod feedback;
+pub mod input_guard;
 pub mod levels;
 pub mod media;
 pub mod resampler;

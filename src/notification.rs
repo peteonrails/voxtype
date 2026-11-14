@@ -59,6 +59,40 @@ pub async fn send(title: &str, body: &str) {
     send_with_engine(title, body, None).await;
 }
 
+/// Send an error notification that remains visible long enough to act on.
+///
+/// Alerts intentionally do not replace the daemon's recording-status slot:
+/// an input failure must remain visible after the recording state returns to
+/// idle.
+pub async fn send_alert(title: &str, body: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let result = Command::new("notify-send")
+            .args([
+                "--app-name=Voxtype",
+                "--urgency=critical",
+                "--expire-time=15000",
+                title,
+                body,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "failed to send alert notification");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    send_macos_native(title, body, None);
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (title, body);
+    }
+}
+
 /// Send a desktop notification with optional engine icon.
 ///
 /// On macOS, when an engine is provided, the engine-specific icon is shown

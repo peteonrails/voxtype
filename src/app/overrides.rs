@@ -287,6 +287,17 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(fade_ms) = cli.duck_media_fade_ms {
         config.audio.duck_media_fade_ms = fade_ms;
     }
+    apply_bool_override(
+        &mut config.audio.dead_input.enabled,
+        cli.dead_input_check,
+        cli.no_dead_input_check,
+    );
+    if let Some(window_ms) = cli.dead_input_window {
+        config.audio.dead_input.window_ms = window_ms;
+    }
+    if let Some(threshold) = cli.dead_input_threshold {
+        config.audio.dead_input.threshold_dbfs = threshold;
+    }
 
     // Output overrides
     if let Some(ref append_text) = cli.append_text {

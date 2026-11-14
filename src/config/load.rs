@@ -223,6 +223,19 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             config.audio.duck_media_fade_ms = n;
         }
     }
+    if let Ok(val) = std::env::var("VOXTYPE_DEAD_INPUT_DETECTION") {
+        config.audio.dead_input.enabled = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_DEAD_INPUT_WINDOW_MS") {
+        if let Ok(window_ms) = val.parse::<u32>() {
+            config.audio.dead_input.window_ms = window_ms;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_DEAD_INPUT_THRESHOLD_DBFS") {
+        if let Ok(threshold) = val.parse::<f32>() {
+            config.audio.dead_input.threshold_dbfs = threshold;
+        }
+    }
 
     // Output
     if let Ok(mode) = std::env::var("VOXTYPE_OUTPUT_MODE") {

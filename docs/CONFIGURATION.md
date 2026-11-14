@@ -651,6 +651,55 @@ duck_media_fade_ms = 150
 
 ---
 
+## [audio.dead_input]
+
+Stops a recording whose input device delivers no sound.
+
+A microphone that is off, muted in hardware, or asleep can still open and
+stream. The guard checks the beginning of every recording and stops a capture
+that carries only silence or a DC offset. It plays the error cue and shows a
+notification naming the audio source.
+
+```toml
+[audio.dead_input]
+enabled = true
+window_ms = 1500
+threshold_dbfs = -100.0
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Set to `false` to record regardless of the input level. Use
+`--dead-input-check` or `--no-dead-input-check` to override this for one run.
+
+### window_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `1500`
+**Required:** No
+
+How long the guard listens after its 100 ms settling period. It evaluates
+100 ms frames and treats the loudest frame as the verdict, so a brief silent
+startup does not discard a live recording. Values below `300` are raised to
+`300`. Use `--dead-input-window <MS>` to override it for one run.
+
+### threshold_dbfs
+
+**Type:** Float (dBFS)
+**Default:** `-100.0`
+**Required:** No
+
+The level a frame must reach for the input to count as live. Measurement uses
+a 150 Hz high-pass filter, so a DC offset alone does not count as sound. Lower
+the threshold to make the guard less sensitive to quiet input, or use
+`--dead-input-threshold <DBFS>` to override it for one run.
+
+---
+
 ## [audio.feedback]
 
 Controls audio feedback sounds (beeps when recording starts/stops).
@@ -4152,6 +4201,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |
 | `VOXTYPE_AUDIO_FEEDBACK` | bool | `audio.feedback.enabled` |
+| `VOXTYPE_DEAD_INPUT_DETECTION` | bool | `audio.dead_input.enabled` |
+| `VOXTYPE_DEAD_INPUT_WINDOW_MS` | integer | `audio.dead_input.window_ms` |
+| `VOXTYPE_DEAD_INPUT_THRESHOLD_DBFS` | float | `audio.dead_input.threshold_dbfs` |
 
 **Output:**
 

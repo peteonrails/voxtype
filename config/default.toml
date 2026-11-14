@@ -79,6 +79,13 @@ max_duration_secs = 60
 # duck_media = false
 # duck_media_volume_percent = 34
 
+# [audio.dead_input]
+# Stop a recording whose input delivers only silence or a DC offset.
+# enabled = true
+# window_ms = 1500
+# threshold_dbfs = -100.0
+
+
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)
 # enabled = true

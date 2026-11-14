@@ -381,7 +381,7 @@ sets the window class to `voxtype` so compositors can float it.
 | General | Active engine, variant binary, daemon status, hardware-aware variant recommendation |
 | Engine | Per-engine tuning for Whisper / Parakeet / Moonshine / SenseVoice / Paraformer / Dolphin / Omnilingual / Cohere |
 | Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
-| Audio | Input device, max recording length, MPRIS pause/ducking, audio feedback theme/volume |
+| Audio | Input device, max recording length, silent-input guard, MPRIS pause/ducking, audio feedback theme/volume |
 | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
 | Text Cleanup | Independent deterministic stages, opt-in LARD cleanup/model path, learned punctuation/casing, smart auto-submit, replacements editor |
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
@@ -718,6 +718,15 @@ max_duration_secs = 60
 # pause_media = false
 # duck_media = false
 # duck_media_volume_percent = 70
+
+# Stop a capture that opens but delivers no sound. After a 100 ms settling
+# period, Voxtype checks the next 1.5 seconds, plays the error cue, and names
+# the source in a notification.
+[audio.dead_input]
+# enabled = true
+# window_ms = 1500
+# threshold_dbfs = -100.0
+
 
 [whisper]
 # Model to use for transcription

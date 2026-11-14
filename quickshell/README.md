@@ -62,9 +62,9 @@ in with the recording tint and a live waveform during `recording`, the
 streaming tint during `streaming`, and the transcribing tint with a slow
 travelling ripple during `transcribing`. The exact colors come from the
 palette (the Omarchy palette maps them from the active theme). When the
-session ends, the card shows the result for a moment (a check and the
-number of characters, "No speech detected", "Transcription failed", and so
-on) and then animates out.
+session ends, the card shows the result for a moment: a check and the number
+of characters, "No speech detected", "Microphone silent", "Transcription
+failed", and so on. It then animates out.
 
 While recording, the card shows the elapsed time. In the last stretch before
 `audio.max_duration_secs` stops the recording (the final 15 seconds, or the

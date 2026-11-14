@@ -472,6 +472,36 @@ systemctl --user restart pipewire pipewire-pulse
 systemctl --user restart pulseaudio
 ```
 
+### "Microphone silent" notification stops a recording
+
+**Cause:** The dead-input guard received no sound after a 100 ms settling
+period and during its 1.5 second observation window. This usually means the
+selected microphone is off, muted in hardware, or asleep. The notification
+names the audio source that stayed silent.
+
+**Solution:** Turn the microphone on, unmute it, or select another source:
+
+```bash
+pactl get-default-source
+pactl list sources short
+pavucontrol
+```
+
+If the source is intentionally gated or takes more than 1.5 seconds to wake,
+increase `window_ms` or disable the guard. Lowering the threshold cannot make
+digital silence count as live input.
+
+```toml
+[audio.dead_input]
+window_ms = 3000
+# enabled = false
+```
+
+A source that emits a DC offset with slow drift can look like quiet live audio
+after the high-pass filter. If a dictation still produces no text without this
+alert, record the source with `arecord` and check the playback before changing
+the guard.
+
 ### "Audio format not supported"
 
 **Cause:** Audio device doesn't support 16kHz sample rate.

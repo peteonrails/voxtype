@@ -92,6 +92,21 @@ max_duration_secs = 60
 # counts once a short burst sustains it, so stray noise spikes don't count.
 # external_trigger_speech_threshold_dbfs = -20.0
 
+# [audio.dead_input]
+# Stop a recording when the selected input delivers only silence or a DC
+# offset. The guard checks the beginning of every capture, then plays the
+# error cue and names the source in a desktop notification if it finds no
+# audible input.
+# enabled = true
+#
+# Observation time after a 100 ms settling period, in milliseconds.
+# window_ms = 1500
+#
+# The 100 ms frame level required for input to count as live, in dBFS.
+# Measurement uses a 150 Hz high-pass filter, so DC offset alone does not
+# count as sound.
+# threshold_dbfs = -100.0
+
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)
 # enabled = true
@@ -508,6 +523,9 @@ mod tests {
 
         assert!(config.output.notification.on_no_speech);
         assert!(config.output.notification.show_edits);
+        assert!(config.audio.dead_input.enabled);
+        assert_eq!(config.audio.dead_input.window_ms, 1_500);
+        assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
     }
 
     #[test]
@@ -521,6 +539,9 @@ mod tests {
         assert!(!config.text.collapse_restarts);
         assert!(config.vad.enabled);
         assert_eq!(config.vad.backend, VadBackend::Energy);
+        assert!(config.audio.dead_input.enabled);
+        assert_eq!(config.audio.dead_input.window_ms, 1_500);
+        assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
     }
 
     #[test]

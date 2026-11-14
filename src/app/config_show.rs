@@ -93,6 +93,14 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("  theme = {:?}", config.audio.feedback.theme);
     println!("  volume = {}", config.audio.feedback.volume);
 
+    println!("\n[audio.dead_input]");
+    println!("  enabled = {}", config.audio.dead_input.enabled);
+    println!("  window_ms = {}", config.audio.dead_input.window_ms);
+    println!(
+        "  threshold_dbfs = {}",
+        config.audio.dead_input.threshold_dbfs
+    );
+
     // Show current engine
     println!("\n[engine]");
     println!("  engine = {:?}", config.engine);

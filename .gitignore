@@ -29,6 +29,7 @@
 # Exception: test fixtures are intentionally committed
 !tests/fixtures/vad/*.wav
 !tests/fixtures/sensevoice/*.wav
+!tests/fixtures/input_guard/*.wav
 
 # Claude Code
 .claude/settings.local.json
