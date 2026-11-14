@@ -1371,7 +1371,13 @@ Network or DNS issue reaching `wss://stt-rt.soniox.com`. Check:
 - Firewall / corporate proxy blocking outbound 443
 - VPN that mangles WebSocket handshakes
 
-Voxtype emits one `Streaming Error` notification and returns to idle. Press the hotkey again to retry once the network is back.
+Voxtype retains captured audio and recovers it through the configured batch backend when streaming fails before delivery. It notifies you with **Dictation Recovered**. To disable this fallback or change its stop deadline:
+
+```toml
+[streaming_recovery]
+enabled = false
+stop_timeout_secs = 10
+```
 
 ### 401 Unauthorized / 403 Forbidden
 

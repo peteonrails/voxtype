@@ -17,6 +17,14 @@
 # Required for `voxtype record toggle` and `voxtype status` commands.
 state_file = "auto"
 
+# Streaming recovery retains the full capture while a streaming backend runs.
+# If the backend errors or misses its stop deadline, Voxtype uses the configured
+# batch backend to deliver undelivered dictation.
+# [streaming_recovery]
+# enabled = true
+# stop_timeout_secs = 10
+
+
 [hotkey]
 # Built-in hotkey using evdev (Linux input subsystem)
 #

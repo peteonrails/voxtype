@@ -785,6 +785,17 @@ language_hints = ["en"]
 
 See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, performance tips with dotoold, privacy considerations).
 
+### Streaming Recovery
+
+Voxtype retains the capture while streaming. If a backend errors before delivering the dictation or does not finish after stop, it transcribes the retained audio with the configured batch backend and sends a **Dictation Recovered** notification. The default stop deadline is 10 seconds, above Soniox's five-second drain timeout.
+
+```toml
+[streaming_recovery]
+enabled = true
+stop_timeout_secs = 10
+```
+
+
 ### Creating a Custom Configuration
 
 ```bash
