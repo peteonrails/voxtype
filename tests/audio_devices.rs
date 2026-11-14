@@ -7,36 +7,50 @@
 //! wait forever in ALSA; it must now give up in time with a clear error,
 //! and then there is no list to check.
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+struct KillGuard(Option<Child>);
+
+impl Drop for KillGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 #[test]
 fn info_devices_lists_default_once_or_reports_no_sound_server_in_time() {
     let dir = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_voxtype"))
-        .args(["info", "devices", "--json"])
-        .env("XDG_CONFIG_HOME", dir.path().join("config"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
-        .env("XDG_DATA_HOME", dir.path().join("data"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = KillGuard(Some(
+        Command::new(env!("CARGO_BIN_EXE_voxtype"))
+            .args(["info", "devices", "--json"])
+            .env("HOME", dir.path())
+            .env("XDG_RUNTIME_DIR", dir.path().join("runtime"))
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_STATE_HOME", dir.path().join("state"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
 
     // 5 s for the sound server, plus room for a slow machine.
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = child.0.as_mut().unwrap().try_wait().unwrap() {
             break status;
         }
         if started.elapsed() > Duration::from_secs(15) {
-            let _ = child.kill();
             panic!("voxtype info devices still running after 15 s");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let output = child.wait_with_output().unwrap();
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 

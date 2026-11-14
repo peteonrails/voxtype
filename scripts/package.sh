@@ -646,6 +646,23 @@ if [[ "$PLUGIN_VERSION" != "$VERSION" ]]; then
     exit 1
 fi
 
+# The source RPM spec and Debian source package are what COPR and other
+# from-source builds use. Nothing exercised them, so both sat at 0.4.2 for a
+# year without the OSD. Their versions cannot carry the -rcN suffix, so
+# compare the release part.
+SPEC_VERSION=$(sed -n 's/^Version:[[:space:]]*//p' "$PROJECT_DIR/packaging/rpm/voxtype.spec")
+if [[ "$SPEC_VERSION" != "${VERSION%%-*}" ]]; then
+    echo "Error: packaging/rpm/voxtype.spec Version is '$SPEC_VERSION', expected '${VERSION%%-*}'."
+    echo "Bump it together with Cargo.toml, and add a %changelog entry."
+    exit 1
+fi
+DEB_SOURCE_VERSION=$(sed -n '1s/^voxtype (\([^-)]*\).*/\1/p' "$PROJECT_DIR/packaging/debian/changelog")
+if [[ "$DEB_SOURCE_VERSION" != "${VERSION%%-*}" ]]; then
+    echo "Error: packaging/debian/changelog is at '$DEB_SOURCE_VERSION', expected '${VERSION%%-*}'."
+    echo "Add a changelog entry for the release together with the Cargo.toml bump."
+    exit 1
+fi
+
 # OSD style packages and recipes. The style resolver searches
 # /usr/share/voxtype/osd/<name> after the user paths, so shipping the
 # examples gives `[osd] style = "<name>"` something to resolve out of the
@@ -798,6 +815,10 @@ echo ""
 echo "  Optional: Switch to Parakeet engine (faster, lower memory):"
 echo "     voxtype setup parakeet --enable"
 echo ""
+echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"
+echo "  voxtype setup skill"
+echo "to teach it to configure voxtype for this machine."
+echo ""
 POSTINST
 else
     # aarch64: Single binary, no CPU detection needed
@@ -825,6 +846,10 @@ echo "     voxtype setup --download"
 echo ""
 echo "  4. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
+echo ""
+echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"
+echo "  voxtype setup skill"
+echo "to teach it to configure voxtype for this machine."
 echo ""
 POSTINST
 fi

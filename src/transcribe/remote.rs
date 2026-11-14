@@ -515,6 +515,40 @@ mod tests {
         Ok(request)
     }
 
+    /// 1.2.2's regression test for a fixture socket accepted in nonblocking
+    /// mode (BSD sockets inherit the listener's): read_request must switch
+    /// it back to blocking and read a request that arrives in fragments.
+    #[test]
+    fn fixture_reads_a_fragmented_request_after_a_nonblocking_accept() {
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        // Emulate BSD accepted-socket inheritance even on Linux.
+        stream.set_nonblocking(true).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let reader = std::thread::spawn(move || read_request(&mut stream, 16_384));
+        for fragment in [
+            &b"POST / HTTP/1.1\r\nContent-Len"[..],
+            &b"gth: 4\r\n\r"[..],
+            &b"\n"[..],
+            &b"\0\xff"[..],
+            &b"\x01\x80"[..],
+        ] {
+            std::thread::sleep(Duration::from_millis(50));
+            client.write_all(fragment).unwrap();
+        }
+        let request = reader.join().unwrap().unwrap();
+        assert_eq!(
+            request,
+            b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n\0\xff\x01\x80"
+        );
+    }
+
     // The listener is loopback-only; release verification runs these tests in
     // the private no-egress NAS container, never against a provider or desktop.
     fn capture_request(endpoint_suffix: &str, translate: bool) -> String {
