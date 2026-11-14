@@ -577,7 +577,7 @@ impl Tools {
                     .into(),
             );
         }
-        if !command.is_some_and(|c| !c.trim().is_empty()) {
+        if command.is_none_or(|c| c.trim().is_empty()) {
             why.insert(
                 "command".into(),
                 "No share command is set. Set one with: voxtype config set meeting.share.command \"<command>\"".into(),

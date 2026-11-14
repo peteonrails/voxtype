@@ -96,14 +96,35 @@ pub struct Connect<'a> {
 /// `len` bytes from the kernel's random source.
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
-    let mut filled = 0;
-    while filled < len {
-        // SAFETY: writes at most len - filled bytes into buf after filled.
-        let n = unsafe { libc::getrandom(buf[filled..].as_mut_ptr().cast(), len - filled, 0) };
-        if n > 0 {
-            filled += n as usize;
-        } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            panic!("getrandom failed: {}", std::io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        let mut filled = 0;
+        while filled < len {
+            // Flags 0 waits for kernel RNG initialization. Do not substitute
+            // /dev/urandom or a nonblocking fallback for OAuth secrets.
+            // SAFETY: writes at most len - filled bytes into buf after filled.
+            let n = unsafe { libc::getrandom(buf[filled..].as_mut_ptr().cast(), len - filled, 0) };
+            if n > 0 {
+                filled += n as usize;
+            } else if n < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            } else {
+                panic!(
+                    "getrandom failed or made no progress: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    for chunk in buf.chunks_mut(256) {
+        // macOS supplies getentropy instead of getrandom, with a 256-byte
+        // request limit. Any failure must abort rather than weaken the source.
+        // SAFETY: chunk points to chunk.len() writable bytes in buf.
+        if unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) } != 0 {
+            panic!("getentropy failed: {}", std::io::Error::last_os_error());
         }
     }
     buf
