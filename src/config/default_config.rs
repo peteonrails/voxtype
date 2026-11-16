@@ -209,7 +209,11 @@ fallback_to_clipboard = true
 # Custom driver order for type mode (optional)
 # Default order: wtype -> dotool -> ydotool -> clipboard
 # Customize to prefer a specific driver or change the fallback order.
-# Available drivers: wtype, dotool, ydotool, clipboard
+# Available drivers: wtype, eitype, dotool, ydotool, clipboard, xclip, fcitx5
+# fcitx5 (opt-in) commits text through the fcitx5 input method and the
+# separate fcitx5-dictation add-on, without key presses; with no text field
+# focused, the next driver (clipboard) takes the text:
+#   driver_order = ["fcitx5", "clipboard"]
 # Example: prefer ydotool over dotool:
 #   driver_order = ["wtype", "ydotool", "dotool", "clipboard"]
 # Example: use only ydotool, no fallback:

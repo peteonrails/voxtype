@@ -834,6 +834,38 @@ impl TranscriptOutcome {
     }
 }
 
+/// The OSD outcome and notification text for text that ended up on the
+/// clipboard because the input method found nowhere to type it. `None` for
+/// an ordinary delivery.
+fn copied_outcome(delivery: output::Delivery) -> Option<(osd::session::OutcomeKind, &'static str)> {
+    match delivery {
+        output::Delivery::Delivered => None,
+        output::Delivery::CopiedNoTextField => Some((
+            osd::session::OutcomeKind::CopiedNoTextField,
+            "No text field had focus.",
+        )),
+        output::Delivery::CopiedPasswordField => Some((
+            osd::session::OutcomeKind::CopiedPasswordField,
+            "Not typed into a password field.",
+        )),
+    }
+}
+
+/// Whether the OSD will show a copied-to-clipboard outcome itself, so no
+/// notification is needed. Only the Quickshell frontend reads `outcome.json`,
+/// and it needs the state file (where `outcome.json` lives) and an OSD that
+/// isn't suppressed for this session.
+fn osd_shows_copied_outcome(
+    osd: &osd::config::OsdConfig,
+    has_state_file: bool,
+    suppressed: bool,
+) -> bool {
+    osd.enabled
+        && osd.frontend == osd::config::OsdFrontend::Quickshell
+        && has_state_file
+        && !suppressed
+}
+
 /// Path of the completion sidecar for a transcript.
 pub fn result_sidecar_path(transcript: &std::path::Path) -> std::path::PathBuf {
     let mut sidecar = transcript.as_os_str().to_os_string();
@@ -1217,7 +1249,17 @@ impl Daemon {
             );
         }
 
-        if config.streaming_enabled() && config.output.post_process.is_some() {
+        if config.streaming_enabled() && !output::supports_streaming(&config.output) {
+            tracing::warn!(
+                "Streaming is enabled, but the fcitx5 output driver can't stream. \
+                 Dictation runs in batch mode: text is committed when you finish."
+            );
+        }
+
+        if config.streaming_enabled()
+            && output::supports_streaming(&config.output)
+            && config.output.post_process.is_some()
+        {
             // [text] rules no longer belong in this warning: since the #669
             // fix they are applied when a streaming segment is committed, and
             // warning that a working setting is ignored is worse than not
@@ -1749,7 +1791,8 @@ impl Daemon {
     /// - the preloaded transcriber is `None` (e.g., on_demand_loading without
     ///   a successful background load yet);
     /// - the preloaded transcriber's `as_streaming()` returns `None`;
-    /// - audio capture or `start_stream` fail.
+    /// - audio capture or `start_stream` fail;
+    /// - the output config can't stream (the fcitx5 driver).
     ///
     /// On `false`, callers should fall through to the existing batch
     /// recording path.
@@ -1777,6 +1820,10 @@ impl Daemon {
             ) {
                 return false;
             }
+        }
+        // The fcitx5 driver can't stream (see output::supports_streaming).
+        if !output::supports_streaming(&self.config.output) {
+            return false;
         }
         // Clone out of the field so the borrow doesn't overlap the
         // `&mut self` capture start below.
@@ -4014,30 +4061,57 @@ impl Daemon {
                         ),
                     };
 
-                    if let Err(e) =
-                        output::output_with_fallback(&output_chain, &final_text, output_options)
-                            .await
+                    match output::output_with_fallback(&output_chain, &final_text, output_options)
+                        .await
                     {
-                        tracing::error!("Output failed: {}", e);
-                        self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
-                    } else {
-                        self.publish_osd_text_outcome(&final_text);
-                        self.play_feedback(SoundEvent::TranscriptionComplete);
+                        Err(e) => {
+                            tracing::error!("Output failed: {}", e);
+                            self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
+                        }
+                        Ok(delivery) => {
+                            let copied = copied_outcome(delivery);
+                            match copied {
+                                Some((kind, _)) => {
+                                    self.publish_osd_outcome(kind, final_text.chars().count())
+                                }
+                                None => self.publish_osd_text_outcome(&final_text),
+                            }
+                            self.play_feedback(SoundEvent::TranscriptionComplete);
 
-                        if self.config.output.notification.on_transcription {
-                            // Send notification on successful output
-                            output::send_transcription_notification(
-                                &final_text,
-                                self.config
-                                    .output
-                                    .notification
-                                    .show_edits
-                                    .then_some(text.as_str()),
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                &self.config.output.notification.urgency,
-                            )
-                            .await;
+                            // The OSD shows where copied text went; without it,
+                            // a notification says so, or the user is left
+                            // looking at an empty cursor wondering where it went.
+                            let osd_shows_result = osd_shows_copied_outcome(
+                                &self.config.osd,
+                                self.state_file_path.is_some(),
+                                self.osd_session_suppressed
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                            );
+                            if let Some((_, why)) = copied.filter(|_| !osd_shows_result) {
+                                crate::notification::send_status(
+                                    "Copied to clipboard",
+                                    &format!("{} Paste it where you want it.", why),
+                                    &self.config.output.notification.urgency,
+                                    crate::notification::Lifetime::Millis(4000),
+                                )
+                                .await;
+                            } else if copied.is_none()
+                                && self.config.output.notification.on_transcription
+                            {
+                                // Send notification on successful output
+                                output::send_transcription_notification(
+                                    &final_text,
+                                    self.config
+                                        .output
+                                        .notification
+                                        .show_edits
+                                        .then_some(text.as_str()),
+                                    self.config.output.notification.show_engine_icon,
+                                    self.config.engine,
+                                    &self.config.output.notification.urgency,
+                                )
+                                .await;
+                            }
                         }
                     }
 
@@ -4178,6 +4252,7 @@ impl Daemon {
         // streaming is enabled. The user's config file is left untouched; this
         // override only applies to the running daemon.
         if self.config.streaming_active()
+            && output::supports_streaming(&self.config.output)
             && self.config.hotkey.mode == crate::config::ActivationMode::PushToTalk
         {
             tracing::warn!(
@@ -6093,6 +6168,55 @@ while True:
             "the quick brown fox"
         );
         assert!(!staged.exists(), "staging file must not survive the write");
+    }
+
+    #[test]
+    fn clipboard_redirects_get_their_own_outcome() {
+        use osd::session::OutcomeKind;
+        assert_eq!(copied_outcome(output::Delivery::Delivered), None);
+        assert_eq!(
+            copied_outcome(output::Delivery::CopiedNoTextField).map(|(k, _)| k),
+            Some(OutcomeKind::CopiedNoTextField)
+        );
+        assert_eq!(
+            copied_outcome(output::Delivery::CopiedPasswordField).map(|(k, _)| k),
+            Some(OutcomeKind::CopiedPasswordField)
+        );
+    }
+
+    #[test]
+    fn only_the_quickshell_osd_shows_copied_outcomes() {
+        use osd::config::{OsdConfig, OsdFrontend};
+        let quickshell = OsdConfig {
+            enabled: true,
+            frontend: OsdFrontend::Quickshell,
+            ..Default::default()
+        };
+        assert!(osd_shows_copied_outcome(&quickshell, true, false));
+        // No state file means no outcome.json; a suppressed session shows nothing.
+        assert!(!osd_shows_copied_outcome(&quickshell, false, false));
+        assert!(!osd_shows_copied_outcome(&quickshell, true, true));
+        let disabled = OsdConfig {
+            enabled: false,
+            ..quickshell.clone()
+        };
+        assert!(!osd_shows_copied_outcome(&disabled, true, false));
+        // gtk4 (the default) and native don't read outcome.json.
+        for frontend in [OsdFrontend::Gtk4, OsdFrontend::Native] {
+            let other = OsdConfig {
+                frontend,
+                ..quickshell.clone()
+            };
+            assert!(
+                !osd_shows_copied_outcome(&other, true, false),
+                "{frontend:?}"
+            );
+        }
+        assert!(!osd_shows_copied_outcome(
+            &OsdConfig::default(),
+            true,
+            false
+        ));
     }
 
     #[test]

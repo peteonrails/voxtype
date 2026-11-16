@@ -40,6 +40,10 @@ ShellRoot {
   s=factory.createObject(tests);s.outcome={outcome:"ok",at_ms:now,chars:42};tests.check(!s.flashing,"unidentified pre-release outcome is ignored safely");s.destroy();
   s=factory.createObject(tests);s.outcome=tests.outcome(now,false,"cancelled");tests.check(!s.flashing,"cancel stays quiet");s.destroy();
   s=factory.createObject(tests);s.outcome=tests.outcome(now,false,"too_short");tests.check(!s.flashing,"accidental tap stays quiet");s.destroy();
+  s=factory.createObject(tests);s.outcome=tests.outcome(now,false,"copied_no_text_field");
+  tests.check(s.flashing&&s.flashText==="Copied to clipboard"&&s.flashIcon==="done","no text field result says the text was copied");s.destroy();
+  s=factory.createObject(tests);s.outcome=tests.outcome(now,false,"copied_password_field");
+  tests.check(s.flashing&&s.flashText==="Copied to clipboard","password field result says the text was copied");s.destroy();
   s=factory.createObject(tests);s.session={started_at_ms:now,max_duration_secs:60};s.session=null;
   s.outcome=tests.outcome(now-1000,false);tests.check(!s.flashing,"older result rejected after latest session metadata clears");s.destroy();
   console.info("OUTCOME_LIFECYCLE_RESULT passed="+passed+" failed="+failed);Qt.exit(failed>0?1:0);

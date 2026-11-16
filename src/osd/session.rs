@@ -58,6 +58,11 @@ pub enum OutcomeKind {
     Error,
     /// Transcription succeeded but no output method could deliver it.
     OutputFailed,
+    /// The text went to the clipboard because no text field had focus.
+    CopiedNoTextField,
+    /// The text went to the clipboard because the focused field is a
+    /// password field.
+    CopiedPasswordField,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -67,7 +72,7 @@ pub struct OsdOutcome {
     pub session_started_at_ms: u64,
     /// Durable --no-osd policy, including after frontend restart/hotplug.
     pub suppressed: bool,
-    /// Characters delivered; zero unless `outcome` is `ok`.
+    /// Characters delivered; zero unless `outcome` is `ok` or `copied_*`.
     pub chars: usize,
     /// True when the session was ended by `max_duration_secs`, not the user.
     pub limit_reached: bool,
@@ -194,6 +199,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(OutcomeKind::OutputFailed).unwrap(),
             "output_failed"
+        );
+        assert_eq!(
+            serde_json::to_value(OutcomeKind::CopiedNoTextField).unwrap(),
+            "copied_no_text_field"
+        );
+        assert_eq!(
+            serde_json::to_value(OutcomeKind::CopiedPasswordField).unwrap(),
+            "copied_password_field"
         );
     }
 

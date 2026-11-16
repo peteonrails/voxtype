@@ -84,6 +84,7 @@ src/
 │   ├── ydotool.rs    # X11/TTY fallback (requires daemon)
 │   ├── clipboard.rs  # Universal fallback via wl-copy
 │   ├── paste.rs      # Clipboard + Ctrl+V
+│   ├── fcitx5.rs     # fcitx5 input method via D-Bus add-on (opt-in, no keystrokes)
 │   └── post_process.rs   # LLM cleanup command
 ├── text/             # Text transformations
 │   └── mod.rs        # Spoken punctuation, replacements

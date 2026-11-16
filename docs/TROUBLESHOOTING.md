@@ -204,6 +204,7 @@ graphical frontend is installed, install a supported terminal or run
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
+  - [fcitx5 driver copies instead of typing](#fcitx5-driver-copies-instead-of-typing)
   - [Edit-list post-processing keeps the original text](#edit-list-post-processing-keeps-the-original-text)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
@@ -1115,6 +1116,16 @@ Some applications (terminals, games) may block simulated input.
 [output]
 mode = "clipboard"
 ```
+
+### fcitx5 driver copies instead of typing
+
+With `driver_order = ["fcitx5", ...]`, "Copied to clipboard" means fcitx5 found no text field of the focused app with input focus, or the focused field is a password field, which dictation never types into. The text is on the clipboard either way.
+
+If it happens in a text field you're looking at:
+
+- **The app doesn't use the input method.** Check that fcitx5 is active in that app (its candidate window or indicator shows up when you type). Electron and Chromium apps on Wayland need `--enable-wayland-ime`. To have voxtype type key by key in those apps instead, put a keystroke driver after fcitx5: `driver_order = ["fcitx5", "wtype", "clipboard"]`.
+- **fcitx5 knows the app by another name.** voxtype passes the window's app id, class and program name. Run `voxtype -vv` and look for `fcitx5: focused window goes by [...]`.
+- **The add-on isn't running.** `busctl --user introspect org.fcitx.Fcitx5 /dictation` should list `CommitTo`. If it doesn't, the fcitx5 driver fails (voxtype logs why) and the next driver takes over.
 
 ### First CJK character dropped (wtype)
 

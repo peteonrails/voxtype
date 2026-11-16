@@ -154,6 +154,17 @@ pub enum OutputError {
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
+    /// The input method reported that no text field has focus, so there is
+    /// nowhere to type. The chain falls through (normally to the clipboard)
+    /// and the session reports that distinct outcome.
+    #[error("No text field has focus")]
+    NoTextField,
+
+    /// The focused field is a password or other sensitive field, which
+    /// dictation never types into.
+    #[error("The focused field in {0} is a password field")]
+    PasswordField(String),
+
     #[error(
         "All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available."
     )]

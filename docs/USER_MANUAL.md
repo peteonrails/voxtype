@@ -1997,7 +1997,7 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11), `fcitx5` (opt-in, see below)
 
 **Examples:**
 
@@ -2020,6 +2020,24 @@ voxtype --driver=ydotool,clipboard daemon
 ```
 
 When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried and in what order.
+
+### Typing Through fcitx5 (No Key Presses)
+
+If you run the [fcitx5](https://fcitx-im.org/) input method with the separate [fcitx5-dictation](https://github.com/charlielockyer-rice/fcitx5-dictation) add-on, which serves `org.fcitx.Fcitx5.Dictation1` at `/dictation` on the session bus, voxtype can hand the text straight to the focused text field, the way an input method commits a finished word. Nothing is typed key by key, so held modifier keys can't turn it into shortcuts, keyboard layouts don't matter, and the clipboard is left alone.
+
+```toml
+[output]
+mode = "type"
+driver_order = ["fcitx5", "clipboard"]
+```
+
+voxtype asks the compositor which window has focus (Hyprland via `hyprctl`, Sway via `swaymsg`, niri via `niri msg`) and fcitx5 types only into a text field of that app. On other compositors (GNOME, KDE and so on) it can't confirm focus, so the `fcitx5` driver fails like any unavailable driver, logs a warning once, and the next driver takes the text as usual.
+
+When the compositor says no window has focus, or the focused app has no focused text field, or the focused field is a password field, nothing is typed: the text goes to the next driver, normally the clipboard. The Quickshell OSD (`[osd] frontend = "quickshell"`) then says "Copied to clipboard". A notification says so instead only when the OSD can't show it: the OSD is disabled, its frontend is not `quickshell` (the default `gtk4` and `native` frontends don't show this), `state_file` is disabled, or the OSD is suppressed for the session with `--no-osd`. That notification is sent even with `on_transcription = false`, and the usual transcription notification is not sent for copied text.
+
+If you put a keystroke driver such as `wtype` after `fcitx5`, it types instead of the clipboard; that helps with apps that don't use the input method, at the cost of typing into whatever has focus.
+
+fcitx5 can't press Enter, so `auto_submit` has no effect with this driver. Streaming engines run in batch mode while `fcitx5` is in the driver order: streaming corrects partial text with BackSpace key presses, which this driver never sends. The text is committed when you finish dictating.
 
 ### Typing Options
 
