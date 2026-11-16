@@ -144,6 +144,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(key) = std::env::var("VOXTYPE_CANCEL_KEY") {
         config.hotkey.cancel_key = Some(key);
     }
+    if let Ok(key) = std::env::var("VOXTYPE_PASTE_LAST_KEY") {
+        config.hotkey.paste_last_key = Some(key);
+    }
 
     // Whisper / engine
     if let Ok(model) = std::env::var("VOXTYPE_MODEL") {

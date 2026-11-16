@@ -24,6 +24,7 @@ pub struct HotkeyState {
     pub mode: Mode,
     pub enabled: bool,
     pub cancel_key: Option<String>,
+    pub paste_last_key: Option<String>,
     pub modifier: Option<String>,
     /// Status banner shown after Save / Reset, cleared on the next edit.
     pub feedback: Option<Feedback>,
@@ -62,6 +63,7 @@ pub enum Field {
     Key,
     Mode,
     CancelKey,
+    PasteLastKey,
     Modifier,
 }
 
@@ -71,6 +73,7 @@ impl Field {
         Field::Key,
         Field::Mode,
         Field::CancelKey,
+        Field::PasteLastKey,
         Field::Modifier,
     ];
 }
@@ -91,6 +94,14 @@ const KEY_CHOICES: &[&str] = &[
     "RIGHTALT",
     "RIGHTMETA",
     "CAPSLOCK",
+];
+
+const PASTE_LAST_CHOICES: &[Option<&str>] = &[
+    None,
+    Some("CTRL+ALT+V"),
+    Some("F9"),
+    Some("F10"),
+    Some("SUPER+ALT+V"),
 ];
 
 const CANCEL_CHOICES: &[Option<&str>] = &[
@@ -124,6 +135,7 @@ impl HotkeyState {
             },
             enabled: ed.get_bool("hotkey", "enabled").unwrap_or(true),
             cancel_key: ed.get_string("hotkey", "cancel_key"),
+            paste_last_key: ed.get_string("hotkey", "paste_last_key"),
             modifier: ed.get_string("hotkey", "model_modifier"),
             feedback: None,
             dirty_since_load: false,
@@ -156,6 +168,10 @@ impl HotkeyState {
         match &self.cancel_key {
             Some(k) => ed.set_string("hotkey", "cancel_key", k),
             None => ed.unset("hotkey", "cancel_key"),
+        }
+        match &self.paste_last_key {
+            Some(k) => ed.set_string("hotkey", "paste_last_key", k),
+            None => ed.unset("hotkey", "paste_last_key"),
         }
         match &self.modifier {
             Some(k) => ed.set_string("hotkey", "model_modifier", k),
@@ -214,7 +230,10 @@ impl HotkeyState {
     fn is_text_field(field: Field) -> bool {
         // Free-text on Key / CancelKey / Modifier so users can type custom
         // KEY_* names that aren't in the curated cycle list.
-        matches!(field, Field::Key | Field::CancelKey | Field::Modifier)
+        matches!(
+            field,
+            Field::Key | Field::CancelKey | Field::PasteLastKey | Field::Modifier
+        )
     }
 
     fn start_edit_if_text_field(&mut self) -> bool {
@@ -226,6 +245,7 @@ impl HotkeyState {
         let initial = match self.field {
             Field::Key => self.key.clone(),
             Field::CancelKey => self.cancel_key.clone().unwrap_or_default(),
+            Field::PasteLastKey => self.paste_last_key.clone().unwrap_or_default(),
             Field::Modifier => self.modifier.clone().unwrap_or_default(),
             _ => String::new(),
         };
@@ -244,6 +264,13 @@ impl HotkeyState {
             }
             Field::CancelKey => {
                 self.cancel_key = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_uppercase())
+                };
+            }
+            Field::PasteLastKey => {
+                self.paste_last_key = if trimmed.is_empty() {
                     None
                 } else {
                     Some(trimmed.to_uppercase())
@@ -280,6 +307,10 @@ impl HotkeyState {
             }
             Field::CancelKey => {
                 self.cancel_key = cycle_opt(CANCEL_CHOICES, self.cancel_key.as_deref(), delta);
+            }
+            Field::PasteLastKey => {
+                self.paste_last_key =
+                    cycle_opt(PASTE_LAST_CHOICES, self.paste_last_key.as_deref(), delta);
             }
             Field::Modifier => {
                 self.modifier = cycle_opt(MODIFIER_CHOICES, self.modifier.as_deref(), delta);
@@ -377,6 +408,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         )
         .dimmed(greyout),
         FormRowSpec::new(
+            state.field == Field::PasteLastKey,
+            "Paste last dictation",
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::PasteLastKey => e.input.caret_string(),
+                _ => state
+                    .paste_last_key
+                    .as_deref()
+                    .unwrap_or("(none)")
+                    .to_string(),
+            },
+        )
+        .dimmed(greyout),
+        FormRowSpec::new(
             state.field == Field::Modifier,
             "Modifier (secondary model)",
             match state.editing.as_ref() {
@@ -419,6 +463,7 @@ fn guidance_for_field(state: &HotkeyState) -> Vec<Line<'_>> {
         Field::Key => guidance_key(state),
         Field::Mode => guidance_mode(state),
         Field::CancelKey => guidance_cancel(state),
+        Field::PasteLastKey => guidance_paste_last(state),
         Field::Modifier => guidance_modifier(state),
     }
 }
@@ -603,6 +648,28 @@ fn guidance_mode<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         )));
     }
     lines
+}
+
+fn guidance_paste_last<'a>(_state: &'a HotkeyState) -> Vec<Line<'a>> {
+    vec![
+        heading("Paste last dictation"),
+        Line::from(""),
+        Line::from(
+            "Sends your last dictation again, into whatever window has focus. \
+             For when the text went to the wrong window, or you need it twice.",
+        ),
+        Line::from(""),
+        Line::from(
+            "A key, or modifiers and a key joined with +. CTRL+ALT+V is the \
+             combination other dictation tools use. CTRL, ALT, SHIFT and SUPER \
+             match either side of the keyboard.",
+        ),
+        Line::from(""),
+        Line::from(
+            "The text comes from history, so history has to be on. The focused \
+             app also sees the keys you press, so pick a combination it ignores.",
+        ),
+    ]
 }
 
 fn guidance_cancel<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {

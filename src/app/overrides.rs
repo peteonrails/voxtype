@@ -202,6 +202,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref cancel_key) = cli.cancel_key {
         config.hotkey.cancel_key = Some(cancel_key.clone());
     }
+    if let Some(ref paste_last_key) = cli.paste_last_key {
+        config.hotkey.paste_last_key = Some(paste_last_key.clone());
+    }
     if let Some(ref model_modifier) = cli.model_modifier {
         config.hotkey.model_modifier = Some(model_modifier.clone());
     }

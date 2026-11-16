@@ -1310,6 +1310,47 @@ pub struct Daemon {
 
 impl Daemon {
     /// Create a new daemon with the given configuration
+    /// Send the last dictation again, for the paste-last key. The text is in
+    /// history, so this runs `voxtype history paste last`, the same command
+    /// a compositor binding would: one code path for both kinds of hotkey.
+    fn paste_last_dictation(&self) {
+        if !self.config.history.enabled {
+            tracing::warn!(
+                "The paste-last key needs history, which is off. Turn it on with: voxtype history enable"
+            );
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            tracing::warn!("Could not find the voxtype binary to paste the last dictation");
+            return;
+        };
+        let mut command = tokio::process::Command::new(exe);
+        if let Some(path) = &self.config_path {
+            command.arg("--config").arg(path);
+        }
+        // A short wait lets the keys of the combination come back up before
+        // the text is typed or pasted into the focused window.
+        command
+            .args(["history", "paste", "last", "--delay-ms", "150"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match command.spawn() {
+            Ok(mut child) => {
+                tokio::spawn(async move {
+                    match child.wait().await {
+                        Ok(status) if !status.success() => {
+                            tracing::warn!("Pasting the last dictation failed ({status})")
+                        }
+                        Err(e) => tracing::warn!("Pasting the last dictation failed: {e}"),
+                        _ => {}
+                    }
+                });
+            }
+            Err(e) => tracing::warn!("Could not paste the last dictation: {e}"),
+        }
+    }
+
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
         let state_file_path = config.resolve_state_file();
         let history = Arc::new(std::sync::Mutex::new(
@@ -6251,6 +6292,15 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::Toggle) => {
                             // In toggle mode, we ignore key release events
                             tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
+                        }
+
+                        // === PASTE-LAST KEY (works in both modes) ===
+                        (HotkeyEvent::PasteLast, _) => {
+                            if state.is_idle() {
+                                self.paste_last_dictation();
+                            } else {
+                                tracing::debug!("Ignoring the paste-last key while a dictation is in progress");
+                            }
                         }
 
                         // === CANCEL KEY (works in both modes) ===

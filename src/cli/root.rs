@@ -264,6 +264,10 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub cancel_key: Option<String>,
 
+    /// Key that pastes the last dictation again (e.g., CTRL+ALT+V, F9); needs history on
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
+    pub paste_last_key: Option<String>,
+
     /// Modifier key for secondary model selection (e.g., LEFTSHIFT)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub model_modifier: Option<String>,

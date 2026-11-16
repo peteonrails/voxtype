@@ -245,6 +245,7 @@ const HOTKEY_KEY_CHOICES: &[&str] = &[
     "CAPSLOCK",
 ];
 const HOTKEY_CANCEL_CHOICES: &[&str] = &["ESC", "BACKSPACE", "F12", "DELETE", "END"];
+const HOTKEY_PASTE_LAST_CHOICES: &[&str] = &["CTRL+ALT+V", "F9", "F10", "SUPER+ALT+V"];
 const HOTKEY_MODIFIER_CHOICES: &[&str] =
     &["LEFTSHIFT", "RIGHTSHIFT", "LEFTCTRL", "LEFTALT", "LEFTMETA"];
 
@@ -1051,6 +1052,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Hotkey",
         "Cancel key",
         "Key that aborts an in-flight recording or transcription.",
+    ),
+    spec(
+        "hotkey.paste_last_key",
+        "hotkey",
+        "paste_last_key",
+        open(HOTKEY_PASTE_LAST_CHOICES),
+        "Hotkey",
+        "Paste last dictation key",
+        "Key, or modifiers and a key joined with +, that sends your last dictation again. Built-in hotkey detection only, and history must be on.",
     ),
     spec(
         "hotkey.model_modifier",
@@ -3224,6 +3234,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             ActivationMode::Toggle => "toggle",
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
+        "hotkey.paste_last_key" => opt_str(cfg.hotkey.paste_last_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
 
         "audio.device" => json!(cfg.audio.device),

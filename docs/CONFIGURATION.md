@@ -420,6 +420,33 @@ secondary_model = "large-v3-turbo"
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --model <model>` instead.
 
+### paste_last_key
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+Optional key that sends your last dictation again, into whatever window has focus. Use it when the text went to the wrong window, or when you need it a second time after copying something else.
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+paste_last_key = "CTRL+ALT+V"
+```
+
+The value is a key, or modifiers and a key joined with `+`. `CTRL`, `ALT`, `SHIFT` and `SUPER` match either side of the keyboard; `LEFTCTRL`, `RIGHTALT` and the other evdev names match one key. A bare key such as `F9` works too.
+
+The text comes from [history](#history), so `history.enabled` must be `true`. With history off the key does nothing and the daemon logs why.
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). The focused application also receives the keys, so choose a combination it ignores. With compositor keybindings, bind a key to `voxtype history paste last` instead:
+
+```
+bind = CTRL ALT, V, exec, voxtype history paste last
+```
+
+Also `VOXTYPE_PASTE_LAST_KEY` and `--paste-last-key`.
+
 ### cancel_key
 
 **Type:** String
@@ -4770,6 +4797,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+| `VOXTYPE_PASTE_LAST_KEY` | string | `hotkey.paste_last_key` |
 
 **Whisper / Engine:**
 

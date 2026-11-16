@@ -27,6 +27,7 @@ pub struct EvdevListener {
     modifier_keys: HashSet<Key>,
     /// Optional cancel key
     cancel_key: Option<Key>,
+    paste_last: Option<KeyCombo>,
     /// Optional model modifier key (when held, use secondary model)
     model_modifier: Option<Key>,
     /// Secondary model to use when model_modifier is held
@@ -53,6 +54,13 @@ impl EvdevListener {
             .cancel_key
             .as_ref()
             .map(|k| parse_key_name(k))
+            .transpose()?;
+
+        let paste_last = config
+            .paste_last_key
+            .as_deref()
+            .filter(|k| !k.trim().is_empty())
+            .map(parse_key_combo)
             .transpose()?;
 
         // Parse optional model modifier key
@@ -97,6 +105,7 @@ impl EvdevListener {
             target_key,
             modifier_keys,
             cancel_key,
+            paste_last,
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
@@ -119,6 +128,7 @@ impl HotkeyListener for EvdevListener {
         let target_key = self.target_key;
         let modifier_keys = self.modifier_keys.clone();
         let cancel_key = self.cancel_key;
+        let paste_last = self.paste_last.clone();
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
@@ -129,6 +139,7 @@ impl HotkeyListener for EvdevListener {
                 target_key,
                 modifier_keys,
                 cancel_key,
+                paste_last,
                 model_modifier,
                 secondary_model,
                 profile_modifiers,
@@ -488,6 +499,7 @@ fn evdev_listener_loop(
     target_key: Key,
     modifier_keys: HashSet<Key>,
     cancel_key: Option<Key>,
+    paste_last: Option<KeyCombo>,
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
@@ -500,6 +512,13 @@ fn evdev_listener_loop(
     watched_keys.insert(target_key);
     watched_keys.extend(modifier_keys.iter().copied());
     watched_keys.extend(cancel_key);
+    if let Some(combo) = &paste_last {
+        watched_keys.insert(combo.key);
+        watched_keys.extend(combo.modifiers.iter().flatten().copied());
+        tracing::info!("Paste-last key: {:?}", combo);
+    }
+    // Modifiers of the paste-last combination that are down right now.
+    let mut paste_last_held: HashSet<Key> = HashSet::new();
     watched_keys.extend(model_modifier);
     watched_keys.extend(profile_modifiers.keys().copied());
 
@@ -642,6 +661,27 @@ fn evdev_listener_loop(
                 }
             }
 
+            if let Some(combo) = &paste_last {
+                if combo.modifiers.iter().flatten().any(|m| *m == key) {
+                    match value {
+                        1 => {
+                            paste_last_held.insert(key);
+                        }
+                        0 => {
+                            paste_last_held.remove(&key);
+                        }
+                        _ => {}
+                    }
+                }
+                if key == combo.key && value == 1 && combo.satisfied_by(&paste_last_held) {
+                    tracing::debug!("Paste-last key pressed");
+                    if tx.blocking_send(HotkeyEvent::PasteLast).is_err() {
+                        return Ok(()); // Channel closed
+                    }
+                    continue;
+                }
+            }
+
             // Check cancel key first (if configured)
             if let Some(cancel) = cancel_key {
                 if key == cancel && value == 1 {
@@ -712,6 +752,109 @@ fn evdev_listener_loop(
 }
 
 /// Parse a key name string to evdev Key
+/// A key with the modifiers that must be held for it, such as Ctrl+Alt+V.
+/// Each modifier is a set of keys, any one of which counts: "CTRL" is either
+/// control key, "LEFTCTRL" only the left one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyCombo {
+    pub key: Key,
+    pub modifiers: Vec<Vec<Key>>,
+}
+
+impl KeyCombo {
+    fn satisfied_by(&self, held: &HashSet<Key>) -> bool {
+        self.modifiers
+            .iter()
+            .all(|any_of| any_of.iter().any(|k| held.contains(k)))
+    }
+}
+
+/// Parse "CTRL+ALT+V", "LEFTSHIFT+F9" or a bare "F9". The last part is the
+/// key; everything before it is a modifier.
+pub(crate) fn parse_key_combo(text: &str) -> Result<KeyCombo, HotkeyError> {
+    let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(HotkeyError::UnknownKey(text.to_string()));
+    }
+    let (key, modifiers) = parts.split_last().expect("split always yields a part");
+    let modifiers = modifiers
+        .iter()
+        .map(|name| match name.to_ascii_uppercase().as_str() {
+            "CTRL" | "CONTROL" => Ok(vec![Key::KEY_LEFTCTRL, Key::KEY_RIGHTCTRL]),
+            "ALT" => Ok(vec![Key::KEY_LEFTALT, Key::KEY_RIGHTALT]),
+            "SHIFT" => Ok(vec![Key::KEY_LEFTSHIFT, Key::KEY_RIGHTSHIFT]),
+            "SUPER" | "META" | "WIN" => Ok(vec![Key::KEY_LEFTMETA, Key::KEY_RIGHTMETA]),
+            _ => parse_key_name(name).map(|k| vec![k]),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = match letter_or_digit(key) {
+        // A letter or digit on its own would fire while typing.
+        Some(_) if modifiers.is_empty() => {
+            return Err(HotkeyError::UnknownKey(format!(
+                "{text}. A letter or digit needs a modifier, such as CTRL+ALT+{}",
+                key.to_ascii_uppercase()
+            )))
+        }
+        Some(key) => key,
+        None => parse_key_name(key)?,
+    };
+    Ok(KeyCombo { key, modifiers })
+}
+
+/// Letters and digits are usable inside a combination. They are not in
+/// `parse_key_name`, which names keys that work as a hotkey on their own.
+fn letter_or_digit(name: &str) -> Option<Key> {
+    const LETTERS: [Key; 26] = [
+        Key::KEY_A,
+        Key::KEY_B,
+        Key::KEY_C,
+        Key::KEY_D,
+        Key::KEY_E,
+        Key::KEY_F,
+        Key::KEY_G,
+        Key::KEY_H,
+        Key::KEY_I,
+        Key::KEY_J,
+        Key::KEY_K,
+        Key::KEY_L,
+        Key::KEY_M,
+        Key::KEY_N,
+        Key::KEY_O,
+        Key::KEY_P,
+        Key::KEY_Q,
+        Key::KEY_R,
+        Key::KEY_S,
+        Key::KEY_T,
+        Key::KEY_U,
+        Key::KEY_V,
+        Key::KEY_W,
+        Key::KEY_X,
+        Key::KEY_Y,
+        Key::KEY_Z,
+    ];
+    const DIGITS: [Key; 10] = [
+        Key::KEY_0,
+        Key::KEY_1,
+        Key::KEY_2,
+        Key::KEY_3,
+        Key::KEY_4,
+        Key::KEY_5,
+        Key::KEY_6,
+        Key::KEY_7,
+        Key::KEY_8,
+        Key::KEY_9,
+    ];
+    let mut chars = name.chars();
+    let (c, None) = (chars.next()?.to_ascii_uppercase(), chars.next()) else {
+        return None;
+    };
+    match c {
+        'A'..='Z' => Some(LETTERS[(c as u8 - b'A') as usize]),
+        '0'..='9' => Some(DIGITS[(c as u8 - b'0') as usize]),
+        _ => None,
+    }
+}
+
 fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
     let trimmed = name.trim();
 
@@ -956,6 +1099,36 @@ fn fd_is_hung_up(fd: RawFd) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_combos_parse_with_either_side_modifiers() {
+        let combo = super::parse_key_combo("ctrl+ALT + V").unwrap();
+        assert_eq!(combo.key, Key::KEY_V);
+        assert_eq!(combo.modifiers.len(), 2);
+        let mut held = HashSet::new();
+        assert!(!combo.satisfied_by(&held));
+        held.insert(Key::KEY_RIGHTCTRL);
+        assert!(!combo.satisfied_by(&held));
+        held.insert(Key::KEY_LEFTALT);
+        assert!(combo.satisfied_by(&held));
+
+        let bare = super::parse_key_combo("F9").unwrap();
+        assert_eq!(bare.key, Key::KEY_F9);
+        assert!(bare.satisfied_by(&HashSet::new()));
+
+        let one_side = super::parse_key_combo("LEFTSHIFT+F9").unwrap();
+        assert_eq!(one_side.modifiers, vec![vec![Key::KEY_LEFTSHIFT]]);
+
+        assert!(
+            super::parse_key_combo("V").is_err(),
+            "a bare letter fires while typing"
+        );
+        assert_eq!(
+            super::parse_key_combo("super+shift+7").unwrap().key,
+            Key::KEY_7
+        );
+        assert!(super::parse_key_combo("CTRL+").is_err());
+        assert!(super::parse_key_combo("CTRL+NOTAKEY").is_err());
+    }
 
     /// #546: a mouse's spare buttons are ordinary evdev keycodes, and the
     /// parser used to force a KEY_ prefix onto every name, so "BTN_SIDE"
