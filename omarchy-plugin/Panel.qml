@@ -1081,11 +1081,14 @@ Item {
         manifest: root.manifest
         historyConfigPath: historyHost.configPath
       }
+      OmarchyTheme { id: historyTheme }
       HistoryWindow {
         id: historyWindow
         client: historyClient
+        theme: historyTheme
         visible: root.opened && root.view === "history" && root.activeHistoryHost === historyHost
         onPasteRequested: root.dismiss()
+        onCloseRequested: root.dismiss()
         onPasteFailed: root.requestOpen(JSON.stringify({ view: "history", config: historyHost.configPath }))
         onVisibleChanged: {
           if (!visible && root.opened && root.view === "history" && root.activeHistoryHost === historyHost)
