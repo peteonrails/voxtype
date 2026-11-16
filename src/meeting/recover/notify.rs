@@ -6,15 +6,21 @@
 //! announced is kept in the state directory, so a later restart never
 //! announces the same meeting again.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 use futures_util::StreamExt;
+#[cfg(target_os = "linux")]
 use zbus::{zvariant::Value, Connection, Proxy};
 
 use super::RecoverableMeeting;
 
+#[cfg(target_os = "linux")]
 const DEST: &str = "org.freedesktop.Notifications";
+#[cfg(target_os = "linux")]
 const PATH: &str = "/org/freedesktop/Notifications";
 const STATE_FILE: &str = "meeting-recover-notified.json";
 
@@ -114,6 +120,7 @@ pub fn wording(meetings: &[RecoverableMeeting]) -> (String, String, Vec<(String,
 /// Post the notification and wait for a click. `None` when it was
 /// dismissed, or when the server cannot show actions, in which case the
 /// body names the command instead.
+#[cfg(target_os = "linux")]
 pub async fn announce(
     conn: &Connection,
     meetings: &[RecoverableMeeting],

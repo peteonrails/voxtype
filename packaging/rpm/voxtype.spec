@@ -351,6 +351,7 @@ fi
 - Ship the GTK4 meetings window in voxtype-meetings-gtk4
 - Built-in Kokoro recording announcement; the ElevenLabs voice is a download
 - Whisper, VAD, speaker and echo models download from models.voxtype.io
+- RC2: fix macOS meeting portability and verify baseline CI model downloads
 
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
 - Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes
