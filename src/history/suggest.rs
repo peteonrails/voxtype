@@ -55,6 +55,11 @@ pub fn suggest_rule(
     if from == to {
         return None;
     }
+    // `voxtype history rule` writes the rule through `config set`, whose
+    // dotted keys cannot carry a period inside the dictated text.
+    if from.contains('.') {
+        return None;
+    }
     if from.to_lowercase() == to.to_lowercase() {
         // Rules match without regard to case. "github" to "GitHub" is a
         // rule; capitalising the first word of a sentence is not.
@@ -173,6 +178,11 @@ mod tests {
             suggest("Tell erin about it", "Tell Erin about it"),
             Some(("erin".into(), "Erin".into()))
         );
+    }
+
+    #[test]
+    fn dictated_text_with_a_period_inside_is_not_offered() {
+        assert_eq!(suggest("Open node.js docs", "Open Node docs"), None);
     }
 
     #[test]

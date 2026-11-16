@@ -291,6 +291,12 @@ async fn execute(
             if from.is_empty() || to.is_empty() {
                 bail!("A replacement needs both the dictated text and what to type in its place");
             }
+            if from.contains('.') {
+                bail!(
+                    "The dictated text can't contain a period here. Add \"{from}\" = \"{to}\" \
+                     under [text.replacements] in the config file instead."
+                );
+            }
             let replaced = config
                 .text
                 .replacements
