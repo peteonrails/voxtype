@@ -47,6 +47,13 @@ pub fn suggest_rule(
     if old_span.len() > MAX_FROM_WORDS || new_span.len() > MAX_TO_WORDS {
         return None;
     }
+    // "Okay so send it" to "Send it" removes words and recapitalises what
+    // is left. That is still a deletion (or, the other way, an insertion).
+    if old_span.len() != new_span.len()
+        && (is_affix(new_span, old_span) || is_affix(old_span, new_span))
+    {
+        return None;
+    }
 
     let (from, to) = peel_shared_punctuation(&old_span.join(" "), &new_span.join(" "));
     if from.chars().filter(|c| c.is_alphanumeric()).count() < 3 || to.is_empty() {
@@ -98,6 +105,19 @@ fn peel_shared_punctuation(from: &str, to: &str) -> (String, String) {
         to = &to[b.len_utf8()..];
     }
     (from.trim().to_string(), to.trim().to_string())
+}
+
+/// Whether `short` is the start or the end of `long`, ignoring case.
+fn is_affix(short: &[&str], long: &[&str]) -> bool {
+    if short.len() >= long.len() {
+        return false;
+    }
+    let same = |a: &[&str], b: &[&str]| {
+        a.iter()
+            .zip(b)
+            .all(|(x, y)| x.to_lowercase() == y.to_lowercase())
+    };
+    same(short, &long[..short.len()]) || same(short, &long[long.len() - short.len()..])
 }
 
 fn only_first_letter_differs(from: &str, to: &str) -> bool {

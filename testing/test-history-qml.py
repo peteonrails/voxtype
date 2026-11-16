@@ -97,6 +97,9 @@ with tempfile.TemporaryDirectory(dir='/work/scratch', prefix='history-qml-') as 
         item = next((o for o in visual_items(window.contentItem()) if o.objectName()==name),None)
         assert item is not None, 'Missing history control: '+name
         wait(lambda: item.isVisible() and item.width()>0 and item.height()>0)
+        # Rows re-lay out when they enter and leave correction; a position
+        # read before the next frame is the old one.
+        QTest.qWait(60)
         QTest.mouseClick(window,Qt.LeftButton,Qt.NoModifier,item.mapToScene(QPointF(item.width()/2,item.height()/2)).toPoint())
         app.processEvents()
     wait(lambda: 'synthetic-editor' in labels() and 'synthetic-model.gguf' in labels())
@@ -200,13 +203,17 @@ with tempfile.TemporaryDirectory(dir='/work/scratch', prefix='history-qml-') as 
     if os.environ.get('VOX_HISTORY_QML_CASE') == 'search':
         search = next((o for o in visual_items(panel) if o.objectName() == 'history-search'), None)
         assert search is not None, 'History needs its unified search field'
-        search.setProperty('text', 'invoice')
-        button = next(o for o in visual_items(panel) if o.objectName() == 'history-search-submit')
-        QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, button.mapToScene(QPointF(button.width()/2,button.height()/2)).toPoint())
+        # Search runs as you type: there is no submit button.
+        assert not any(o.objectName() == 'history-search-submit' for o in visual_items(panel))
+        def type_query(text):
+            click_named('history-search')
+            QTest.keySequence(window, 'Ctrl+A')
+            for ch in text:
+                QTest.keyClick(window, ch)
+        type_query('invoice')
         wait(lambda: ['search','invoice'] in client.commands)
-        assert panel.property('entryCount') == 1
-        search.setProperty('text', 'definitely-not-present')
-        QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, button.mapToScene(QPointF(button.width()/2,button.height()/2)).toPoint())
+        wait(lambda: panel.property('entryCount') == 1)
+        type_query('definitely-not-present')
         wait(lambda: panel.property('entryCount') == 0)
         assert 'No matches' in labels()
         assert window.grabWindow().save('/work/out/history-qml-search.png')
