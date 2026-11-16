@@ -34,6 +34,9 @@ Rectangle {
   // Where the caret goes when a correction starts; -1 puts it at the end.
   property int correctionCursor: -1
   property string deleteId: ""
+  // After a correction that changes one phrase, the offer to always make
+  // that change: { id, from, to }, or null.
+  property var ruleOffer: null
   property string pasteId: ""
   // The host sets this to the window's visibility, so a hidden window stops
   // asking for new dictations.
@@ -97,6 +100,7 @@ Rectangle {
   function beginCorrection(id, cursor) {
     if (pending !== "") return
     errorText = ""
+    ruleOffer = null
     correctionCursor = cursor === undefined ? -1 : cursor
     correctionId = String(id)
   }
@@ -112,6 +116,11 @@ Rectangle {
     // Nothing changed: leave the dictation unmarked.
     if (String(text) === String(original)) { cancelCorrection(); return }
     requestAction("correct", ["correct", correctionId, "--", String(text)])
+  }
+
+  function addRule() {
+    if (!ruleOffer || pending !== "") return
+    requestAction("rule", ["rule", "--", String(ruleOffer.from), String(ruleOffer.to)])
   }
 
   function requestAction(kind, args) {
@@ -309,8 +318,22 @@ Rectangle {
             root.errorText = (value && value.error) || message || "Correction did not complete"
             return
           }
+          root.ruleOffer = value && value.rule_suggestion
+            ? { id: root.correctionId, from: String(value.rule_suggestion.from), to: String(value.rule_suggestion.to) }
+            : null
           root.correctionId = ""
           root.refresh()
+          return
+        }
+        if (kind === "rule") {
+          if (!ok) {
+            root.errorText = (value && value.error) || message || "The replacement was not added"
+            return
+          }
+          root.ruleOffer = null
+          root.noticeText = value && value.restart_required
+            ? "Replacement added. It applies the next time Voxtype starts."
+            : "Replacement added."
           return
         }
         if (kind === "delete") {
@@ -717,6 +740,35 @@ Rectangle {
               wrapMode: Text.Wrap
               color: root.errorText !== "" ? root.bad : root.dim
               font.pixelSize: 11
+            }
+            RowLayout {
+              objectName: "history-rule-offer"
+              Layout.fillWidth: true
+              Layout.leftMargin: 4
+              Layout.topMargin: 2
+              Layout.bottomMargin: 2
+              visible: root.ruleOffer !== null && root.ruleOffer.id === entryCard.entryId && !entryCard.editing
+              spacing: 6
+              Label {
+                Layout.fillWidth: true
+                text: root.ruleOffer ? "Always type \u201c" + root.ruleOffer.to + "\u201d when Voxtype hears \u201c" + root.ruleOffer.from + "\u201d?" : ""
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: root.accent
+                font.pixelSize: 12
+              }
+              Chip {
+                objectName: "history-rule-add"
+                outlined: true
+                enabled: root.pending === ""
+                text: "Add replacement"
+                onClicked: root.addRule()
+              }
+              Chip {
+                objectName: "history-rule-dismiss"
+                text: "Not now"
+                onClicked: root.ruleOffer = null
+              }
             }
             RowLayout {
               Layout.fillWidth: true

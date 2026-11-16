@@ -7,13 +7,16 @@
 //! - [`index`]: the contentless FTS5 search index beside the meetings'.
 //! - [`recorder`]: the daemon's side, building and writing entries.
 //! - [`focus`]: which app has focus, for `app` and `exclude_apps`.
+//! - [`suggest`]: the text replacement a correction implies.
 
 pub mod entry;
 pub mod focus;
 pub mod index;
 pub mod recorder;
 pub mod store;
+pub mod suggest;
 
 pub use entry::{edits_between, Edit, EndedBy, HistoryEntry, Outcome, OutputInfo, Trigger};
 pub use index::{HistoryHit, HistoryIndex, HistoryQuery};
 pub use store::{DayFile, HistoryStore};
+pub use suggest::{suggest_rule, RuleSuggestion};

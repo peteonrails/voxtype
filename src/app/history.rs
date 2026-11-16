@@ -271,11 +271,40 @@ async fn execute(
         }
         HistoryAction::Correct { id, text } => {
             let entry = find(&store, &id)?;
+            // What the user was looking at when they made the change.
+            let before = entry.best_text().to_string();
+            let suggestion =
+                voxtype::history::suggest_rule(&before, &text, &config.text.replacements);
             let corrected = store
                 .update(&entry.id, |e| e.corrected_text = Some(text))?
                 .context("Dictation was deleted before the correction could be saved")?;
             HistoryIndex::open(&db)?.sync(&store)?;
-            Ok(serde_json::to_value(corrected)?)
+            let mut result = serde_json::to_value(corrected)?;
+            if let Some(rule) = suggestion {
+                result["rule_suggestion"] = serde_json::to_value(rule)?;
+            }
+            Ok(result)
+        }
+        HistoryAction::Rule { from, to } => {
+            let from = from.trim().to_lowercase();
+            let to = to.trim().to_string();
+            if from.is_empty() || to.is_empty() {
+                bail!("A replacement needs both the dictated text and what to type in its place");
+            }
+            let replaced = config
+                .text
+                .replacements
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == from)
+                .map(|(_, v)| v.clone());
+            let path = super::config_set::resolve_config_path_for_write(config_path)?;
+            let outcome = config_set::set_key(path, &format!("text.replacements.{from}"), &to)?;
+            Ok(json!({
+                "from": from,
+                "to": to,
+                "replaced": replaced,
+                "restart_required": outcome.restart_required,
+            }))
         }
         HistoryAction::Delete { id } => {
             let entry = find(&store, &id)?;

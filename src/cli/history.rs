@@ -135,6 +135,19 @@ pub enum HistoryAction {
     /// Turn history off (sets history.enabled = false); keeps what is stored
     Disable,
 
+    /// Always type a misheard word or phrase your way (adds a text replacement)
+    ///
+    /// Adds FROM = TO to [text.replacements], the same rule `voxtype config
+    /// set text.replacements.<from> <to>` writes. Matching ignores case and
+    /// respects word boundaries. The daemon applies it after a restart.
+    /// History offers this after a correction that changes one phrase.
+    Rule {
+        /// The word or phrase as Voxtype typed it
+        from: String,
+        /// What it should be typed as
+        to: String,
+    },
+
     /// Set how many days of history to keep (sets history.retention_days)
     ///
     /// Older days are deleted the next time the daemon prunes: when it starts
