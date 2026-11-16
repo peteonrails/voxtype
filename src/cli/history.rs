@@ -135,6 +135,15 @@ pub enum HistoryAction {
     /// Turn history off (sets history.enabled = false); keeps what is stored
     Disable,
 
+    /// Set how many days of history to keep (sets history.retention_days)
+    ///
+    /// Older days are deleted the next time the daemon prunes: when it starts
+    /// and once a day after that. 0 keeps history forever.
+    Retention {
+        /// Days to keep; 0 keeps everything
+        days: u32,
+    },
+
     /// Whether history is on, paused, and how much it holds
     Status,
 

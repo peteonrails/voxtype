@@ -329,6 +329,12 @@ async fn execute(
             let saved = config::load_config(Some(&path))?;
             state(&saved, &store)
         }
+        HistoryAction::Retention { days } => {
+            let path = super::config_set::resolve_config_path_for_write(config_path)?;
+            config_set::set_key(path.clone(), "history.retention_days", &days.to_string())?;
+            let saved = config::load_config(Some(&path))?;
+            state(&saved, &store)
+        }
         HistoryAction::Copy { id } => {
             let entry = find(&store, id.as_deref().unwrap_or("last"))?;
             let clipboard = config::OutputConfig {
