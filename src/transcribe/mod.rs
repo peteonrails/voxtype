@@ -16,6 +16,8 @@
 
 pub mod cli;
 pub mod lines;
+mod metadata;
+pub use metadata::RuntimeMetadata;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
@@ -187,6 +189,12 @@ pub trait Transcriber: Send + Sync {
     /// [`Self::transcribe`].
     fn last_detected_language(&self) -> Option<String> {
         None
+    }
+
+    /// Runtime measurements from this engine instance, not compile-time GPU
+    /// capabilities. Backends without a measurement leave it unknown.
+    fn runtime_metadata(&self) -> RuntimeMetadata {
+        RuntimeMetadata::default()
     }
 }
 

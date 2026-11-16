@@ -93,6 +93,73 @@ Item {
     Quickshell.execDetached([root.terminalLauncher, command])
   }
 
+  // ------------------------------------------------------------- history
+
+  signal historyReply(string token, bool ok, var value, string message)
+  property var historyQueue: []
+  property string historyConfigPath: ""
+
+  function historyRequest(token, args) {
+    var command = [root.bin]
+    if (root.historyConfigPath !== "") command.push("--config", root.historyConfigPath)
+    command.push("history", "--json")
+    for (var i = 0; i < args.length; ++i) command.push(String(args[i]))
+    var queue = root.historyQueue.slice()
+    queue.push({token:String(token), command:command})
+    root.historyQueue = queue
+    root.pumpHistory()
+  }
+
+  function meetingRequest(token, id) {
+    var command = [root.bin]
+    if (root.historyConfigPath !== "") command.push("--config", root.historyConfigPath)
+    command.push("meeting", "view", String(id))
+    var queue = root.historyQueue.slice()
+    queue.push({token:String(token), command:command, meetingLaunch:true})
+    root.historyQueue = queue
+    root.pumpHistory()
+  }
+
+  function pumpHistory() {
+    if (historyProc.running || historyProc.startPending || root.historyQueue.length === 0) return
+    var request = root.historyQueue[0]
+    root.historyQueue = root.historyQueue.slice(1)
+    historyProc.token = request.token
+    historyProc.meetingLaunch = !!request.meetingLaunch
+    historyProc.out = ""
+    historyProc.err = ""
+    historyProc.launch(request.command)
+  }
+
+  CliProcess {
+    id: historyProc
+    property bool meetingLaunch: false
+    property string token: ""
+    property string out: ""
+    property string err: ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: historyProc.out = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: historyProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (historyProc.meetingLaunch) {
+        root.historyReply(historyProc.token, code === 0, null, historyProc.err || (code === 0 ? "" : "Meeting launch did not complete"))
+        Qt.callLater(root.pumpHistory)
+        return
+      }
+      var value = null
+      var message = historyProc.err
+      try { value = JSON.parse(historyProc.out) }
+      catch (e) { message = message || "History command did not return JSON" }
+      if (value && value.error) message = String(value.error)
+      root.historyReply(historyProc.token, code === 0 && value !== null, value, message)
+      Qt.callLater(root.pumpHistory)
+    }
+    onFailedToStart: {
+      root.historyReply(historyProc.token, false, null, "Could not run " + root.bin)
+      root.cliUnavailable(root.bin)
+      Qt.callLater(root.pumpHistory)
+    }
+  }
+
   // ------------------------------------------------------------- schema
 
   function fetchSchema() {

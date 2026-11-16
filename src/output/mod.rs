@@ -508,6 +508,8 @@ pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
 
 /// Output configuration for the fallback chain
 pub struct OutputOptions<'a> {
+    /// Present only for a dictation whose history is being collected.
+    pub history_context: Option<&'a crate::history::recorder::DeliveryContext>,
     pub pre_output_command: Option<&'a str>,
     pub post_output_command: Option<&'a str>,
     /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before
@@ -542,6 +544,26 @@ pub async fn output_with_fallback(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<(), OutputError> {
+    deliver_with_fallback(chain, text, options)
+        .await
+        .map(|_| ())
+}
+
+/// Which output method delivered the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivered {
+    /// The method's name, such as `wtype` or `clipboard`.
+    pub driver: String,
+    /// Whether an earlier method in the chain was skipped or failed first.
+    pub fell_back: bool,
+}
+
+/// [`output_with_fallback`], also saying which method delivered the text.
+pub async fn deliver_with_fallback(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+) -> Result<Delivered, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
 
@@ -593,7 +615,7 @@ pub async fn output_with_fallback(
 
     // Try each output method
     let mut result = Err(OutputError::AllMethodsFailed);
-    for output in chain {
+    for (position, output) in chain.iter().enumerate() {
         if skip_keystroke_methods && is_keystroke_method(output.name()) {
             tracing::debug!(
                 "{} skipped (modifier still held), trying next",
@@ -607,10 +629,20 @@ pub async fn output_with_fallback(
             continue;
         }
 
-        match output.output(&normalized_text).await {
+        if let Some(context) = options.history_context {
+            context.capture().await;
+        }
+        let attempt = output.output(&normalized_text).await;
+        if let Some(context) = options.history_context {
+            context.capture().await;
+        }
+        match attempt {
             Ok(()) => {
                 tracing::debug!("Text output via {}", output.name());
-                result = Ok(());
+                result = Ok(Delivered {
+                    driver: output.name().to_string(),
+                    fell_back: position > 0,
+                });
                 break;
             }
             Err(e) => {

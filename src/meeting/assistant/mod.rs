@@ -796,6 +796,11 @@ mod tests {
         }
         // Consent for one agent is not consent for another.
         sb.fake_codex();
+        // Discovery must reach the consent gate even on a builder without
+        // bwrap. This test never completes a Codex request or runs a jail.
+        if !sb.has_bwrap() {
+            crate::test_support::write_script(&sb.bin().join("bwrap"), "#!/bin/sh\nexit 97\n");
+        }
         let err = choose_backend(
             &sb.settings(),
             &Overrides {

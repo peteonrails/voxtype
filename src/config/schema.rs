@@ -2989,7 +2989,7 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
             })
         }
         KeyType::String | KeyType::DynamicEnum { .. } | KeyType::MapString => {
-            if raw.is_empty() {
+            if raw.is_empty() && spec.key != "history.exclude_apps" {
                 return Err(ValueError::Empty { key: spec.key });
             }
             Ok(TypedValue::Str(raw.to_string()))
@@ -3450,10 +3450,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "history.enabled" => json!(cfg.history.enabled),
         "history.paused" => json!(cfg.history.paused),
         "history.retention_days" => json!(cfg.history.retention_days),
-        "history.exclude_apps" => match cfg.history.exclude_apps.as_slice() {
-            [] => Json::Null,
-            apps => json!(apps.join(",")),
-        },
+        "history.exclude_apps" => json!(cfg.history.exclude_apps.join(",")),
         "history.record_app" => json!(cfg.history.record_app),
         "history.record_window_title" => json!(cfg.history.record_window_title),
 

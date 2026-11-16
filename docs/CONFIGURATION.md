@@ -4494,6 +4494,10 @@ it when you add your own. Also `VOXTYPE_HISTORY_EXCLUDE_APPS` and
 > apply and every dictation is recorded with an empty app. A password manager
 > running in a browser tab is the browser as far as the desktop is concerned.
 > Pause history instead in those cases.
+>
+> The same limitation applies if a supported compositor's lookup fails or times
+> out. History still records the dictation with an unknown app; exclusions are
+> not a fail-closed protection. Pause before starting sensitive dictation.
 
 ### record_app
 

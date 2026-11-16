@@ -44,6 +44,7 @@ const QUICKSHELL_SUBDIR: &str = "voxtype/quickshell";
 /// Files at the root of the QML tree that are part of the install.
 const ROOT_FILES: &[&str] = &[
     "shell.qml",
+    "history.qml",
     "OsdSurface.qml",
     "EnginePicker.qml",
     "MeetingControls.qml",

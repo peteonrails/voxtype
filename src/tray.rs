@@ -104,10 +104,30 @@ pub struct MeetingMenu {
     pub restart_pending: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HistoryMenu {
+    enabled: bool,
+    paused: bool,
+}
+
+impl From<&crate::config::HistoryConfig> for HistoryMenu {
+    fn from(config: &crate::config::HistoryConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            paused: config.paused,
+        }
+    }
+}
+
 /// Closed set of actions. No user-controlled command strings or shell evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     OpenSettings,
+    OpenHistory,
+    EnableHistory,
+    CopyLastTranscript,
+    PauseHistory,
+    ResumeHistory,
     /// The meeting view: the Omarchy panel's `meetings` verb when it
     /// answers, otherwise `voxtype meeting view` (the standalone shell).
     OpenMeetings,
@@ -145,6 +165,11 @@ impl TrayAction {
             Self::PauseMeeting => &["meeting", "pause"],
             Self::ResumeMeeting => &["meeting", "resume"],
             Self::OpenMeetings => &["meeting", "view"],
+            Self::OpenHistory => &["history", "view"],
+            Self::EnableHistory => &["history", "enable", "--json"],
+            Self::CopyLastTranscript => &["history", "copy", "--json"],
+            Self::PauseHistory => &["history", "pause", "--json"],
+            Self::ResumeHistory => &["history", "resume", "--json"],
             _ => return None,
         })
     }
@@ -208,6 +233,7 @@ struct VoxtypeTray {
     language: Option<Arc<Mutex<crate::language_selection::LanguageMenu>>>,
     upgrade: UpgradeMenu,
     meeting: MeetingMenu,
+    history: HistoryMenu,
     /// When Start Meeting was clicked, while waiting for the daemon.
     starting: Option<std::time::Instant>,
     /// Tells the tray task to arm the start timeout.
@@ -534,6 +560,56 @@ impl Tray for VoxtypeTray {
             .into(),
         ];
         menu.extend(self.upgrade_items());
+        menu.push(
+            StandardItem {
+                label: if self.history.enabled {
+                    "History"
+                } else {
+                    "Enable History"
+                }
+                .into(),
+                activate: Box::new(|this: &mut Self| {
+                    (this.actions)(if this.history.enabled {
+                        TrayAction::OpenHistory
+                    } else {
+                        TrayAction::EnableHistory
+                    })
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+        if self.history.enabled {
+            menu.push(
+                StandardItem {
+                    label: "Copy last transcript".into(),
+                    activate: Box::new(|this: &mut Self| {
+                        (this.actions)(TrayAction::CopyLastTranscript)
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            menu.push(
+                StandardItem {
+                    label: if self.history.paused {
+                        "Resume History (paused)"
+                    } else {
+                        "Pause History"
+                    }
+                    .into(),
+                    activate: Box::new(|this: &mut Self| {
+                        (this.actions)(if this.history.paused {
+                            TrayAction::ResumeHistory
+                        } else {
+                            TrayAction::PauseHistory
+                        })
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         if self.meeting.enabled {
             menu.push(
                 StandardItem {
@@ -682,6 +758,7 @@ fn spawn_inner(
     language: Option<Arc<Mutex<crate::language_selection::LanguageMenu>>>,
     mut upgrade_rx: mpsc::UnboundedReceiver<UpgradeMenu>,
     mut meeting_rx: watch::Receiver<MeetingMenu>,
+    mut history_rx: watch::Receiver<HistoryMenu>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let initial = *rx.borrow_and_update();
@@ -692,6 +769,7 @@ fn spawn_inner(
             language,
             upgrade: UpgradeMenu::default(),
             meeting: *meeting_rx.borrow_and_update(),
+            history: *history_rx.borrow_and_update(),
             starting: None,
             start_clicked: Some(start_tx),
         };
@@ -708,11 +786,13 @@ fn spawn_inner(
         // Reflect a state that arrived during registration.
         let state = *rx.borrow_and_update();
         let meeting = *meeting_rx.borrow_and_update();
+        let history = *history_rx.borrow_and_update();
         handle
             .0
             .update(|tray| {
                 tray.state = state;
                 tray.set_meeting(meeting);
+                tray.history = history;
             })
             .await;
         // The state channel alone decides the tray's lifetime; upgrade senders
@@ -720,6 +800,7 @@ fn spawn_inner(
         // does the meeting channel.
         let mut upgrades_open = true;
         let mut meeting_open = true;
+        let mut history_open = true;
         let mut start_deadline: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
@@ -770,6 +851,11 @@ fn spawn_inner(
                         break;
                     }
                 }
+                changed = history_rx.changed(), if history_open => {
+                    if changed.is_err() { history_open = false; continue; }
+                    let history = *history_rx.borrow_and_update();
+                    if handle.0.update(|tray| tray.history = history).await.is_none() { break; }
+                }
             }
         }
         handle.0.shutdown().await;
@@ -789,6 +875,7 @@ pub fn spawn_with_actions(
         None,
         mpsc::unbounded_channel().1,
         watch::channel(MeetingMenu::default()).1,
+        watch::channel(HistoryMenu::default()).1,
     )
 }
 
@@ -800,10 +887,15 @@ pub fn spawn(rx: watch::Receiver<TrayState>) -> tokio::task::JoinHandle<()> {
         None,
         mpsc::unbounded_channel().1,
         watch::channel(MeetingMenu::default()).1,
+        watch::channel(HistoryMenu::default()).1,
     )
 }
 
 fn dispatch_action(action: TrayAction) {
+    if is_history_action(action) {
+        tokio::spawn(run_history_action(action, None));
+        return;
+    }
     if matches!(action, TrayAction::SelectLanguage(_)) {
         tracing::warn!("Language action requires the daemon control channel");
         return;
@@ -862,6 +954,37 @@ fn dispatch_action(action: TrayAction) {
             }
         }
     });
+}
+
+fn is_history_action(action: TrayAction) -> bool {
+    matches!(
+        action,
+        TrayAction::OpenHistory
+            | TrayAction::EnableHistory
+            | TrayAction::CopyLastTranscript
+            | TrayAction::PauseHistory
+            | TrayAction::ResumeHistory
+    )
+}
+
+async fn run_history_action(action: TrayAction, config_path: Option<std::path::PathBuf>) {
+    // The public history frontdoor owns integrated/standalone/GTK selection.
+    let result = async {
+        let mut command = Command::new(std::env::current_exe()?);
+        if let Some(path) = config_path {
+            command.arg("--config").arg(path);
+        }
+        command
+            .args(action.cli_args().unwrap_or_default())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+    }
+    .await;
+    match result {
+        Ok(output) if output.status.success() => {}
+        result => tracing::warn!(?action, ?result, "History tray action failed"),
+    }
 }
 
 /// The meeting view in the Omarchy panel when that plugin answers, otherwise
@@ -1197,6 +1320,8 @@ pub struct TrayRuntime {
     upgrade_tx: mpsc::UnboundedSender<UpgradeMenu>,
     upgrade_refresh: Option<tokio::task::JoinHandle<()>>,
     meeting_tx: watch::Sender<MeetingMenu>,
+    history_tx: watch::Sender<HistoryMenu>,
+    history_refresh: Option<tokio::task::JoinHandle<()>>,
 }
 impl TrayRuntime {
     pub fn start(enabled: bool) -> Option<Self> {
@@ -1206,14 +1331,24 @@ impl TrayRuntime {
         let (tx, rx) = watch::channel(TrayState::Idle);
         let (upgrade_tx, upgrade_rx) = mpsc::unbounded_channel();
         let (meeting_tx, meeting_rx) = watch::channel(MeetingMenu::default());
+        let (history_tx, history_rx) = watch::channel(HistoryMenu::default());
         Some(Self {
             tx: Some(tx),
-            task: spawn_inner(rx, Arc::new(dispatch_action), None, upgrade_rx, meeting_rx),
+            task: spawn_inner(
+                rx,
+                Arc::new(dispatch_action),
+                None,
+                upgrade_rx,
+                meeting_rx,
+                history_rx,
+            ),
             language: None,
             language_rx: mpsc::unbounded_channel().1,
             upgrade_tx,
             upgrade_refresh: None,
             meeting_tx,
+            history_tx,
+            history_refresh: None,
         })
     }
     /// The daemon's tray. Reads the model upgrade offer once startup has
@@ -1254,6 +1389,7 @@ impl TrayRuntime {
         let meeting_slot: Arc<OnceLock<watch::Sender<MeetingMenu>>> = Arc::new(OnceLock::new());
         let slot = meeting_slot.clone();
         let enable_path = config_path.clone();
+        let history_path = config_path.clone();
         let actions: Actions = Arc::new(move |action| match action {
             TrayAction::CleanupOldModels => {
                 let refresher = refresher.clone();
@@ -1267,10 +1403,38 @@ impl TrayRuntime {
                     tokio::spawn(enable_meetings(enable_path.clone(), tx));
                 }
             }
+            action if is_history_action(action) => {
+                tokio::spawn(run_history_action(action, history_path.clone()));
+            }
             action => dispatch_action(action),
         });
         let mut runtime = Self::start_controlled(config, actions, upgrade_tx, upgrade_rx)?;
         let _ = meeting_slot.set(runtime.meeting_tx.clone());
+        let history_tx = runtime.history_tx.clone();
+        let mut history_reader =
+            crate::history::recorder::Recorder::new(config, config_path.clone());
+        runtime.history_refresh = Some(tokio::spawn(async move {
+            loop {
+                let refreshed = tokio::task::spawn_blocking(move || {
+                    let menu = HistoryMenu::from(history_reader.refresh());
+                    (history_reader, menu)
+                })
+                .await;
+                let Ok((reader, menu)) = refreshed else {
+                    break;
+                };
+                history_reader = reader;
+                history_tx.send_if_modified(|old| {
+                    if *old == menu {
+                        false
+                    } else {
+                        *old = menu;
+                        true
+                    }
+                });
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
         let initial = runtime.upgrade_tx.clone();
         let meeting_tx = runtime.meeting_tx.clone();
         let (enabled, offer_enabled) = (config.meeting.enabled, config.meeting.offer_enable);
@@ -1326,7 +1490,15 @@ impl TrayRuntime {
             enabled: config.meeting.enabled,
             ..Default::default()
         });
-        let task = spawn_inner(rx, actions, Some(language.clone()), upgrade_rx, meeting_rx);
+        let (history_tx, history_rx) = watch::channel(HistoryMenu::from(&config.history));
+        let task = spawn_inner(
+            rx,
+            actions,
+            Some(language.clone()),
+            upgrade_rx,
+            meeting_rx,
+            history_rx,
+        );
         Some(Self {
             tx: Some(tx),
             task,
@@ -1335,6 +1507,8 @@ impl TrayRuntime {
             upgrade_tx,
             upgrade_refresh: None,
             meeting_tx,
+            history_tx,
+            history_refresh: None,
         })
     }
     /// Replace the upgrade entries with what the status object now says, for
@@ -1376,6 +1550,9 @@ impl TrayRuntime {
         });
     }
     pub async fn shutdown(mut self) {
+        if let Some(refresh) = self.history_refresh.take() {
+            refresh.abort();
+        }
         if let Some(refresh) = self.upgrade_refresh.take() {
             refresh.abort();
         }
@@ -1390,6 +1567,9 @@ impl TrayRuntime {
 }
 impl Drop for TrayRuntime {
     fn drop(&mut self) {
+        if let Some(refresh) = self.history_refresh.take() {
+            refresh.abort();
+        }
         if let Some(refresh) = self.upgrade_refresh.take() {
             refresh.abort();
         }
@@ -1438,6 +1618,7 @@ mod tests {
             "cohere-transcribe-03-2026-Q4_K_M.gguf",
         );
         let tray = VoxtypeTray {
+            history: HistoryMenu::default(),
             state: TrayState::Idle,
             actions: Arc::new(|_| {}),
             language: Some(Arc::new(Mutex::new(
@@ -1464,6 +1645,7 @@ mod tests {
     #[test]
     fn language_submenu_is_present() {
         let tray = VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state: TrayState::Idle,
             actions: Arc::new(|_| {}),
@@ -1479,6 +1661,7 @@ mod tests {
     #[test]
     fn menu_offers_app_without_duplicate_recording_actions() {
         let tray = VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state: TrayState::Transcribing,
             actions: std::sync::Arc::new(|_| {}),
@@ -1523,6 +1706,7 @@ mod tests {
     #[test]
     fn recording_and_transcription_have_distinct_icons() {
         let mut tray = VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state: TrayState::Idle,
             actions: std::sync::Arc::new(|_| {}),
@@ -1567,6 +1751,7 @@ mod tests {
 
     fn tray_with(upgrade: UpgradeMenu, log: Arc<Mutex<Vec<TrayAction>>>) -> VoxtypeTray {
         VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state: TrayState::Idle,
             actions: Arc::new(move |action| log.lock().unwrap().push(action)),
@@ -1841,6 +2026,7 @@ mod tests {
         use ksni::Tray;
         // Must match the filename stem written by setup::icons::install().
         let t = VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state: TrayState::Idle,
             actions: std::sync::Arc::new(|_| {}),
@@ -1856,6 +2042,7 @@ mod tests {
     fn attention_pixmap_is_not_shadowed_by_missing_theme() {
         use ksni::Tray;
         let t = VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state: TrayState::Idle,
             actions: std::sync::Arc::new(|_| {}),
@@ -1917,6 +2104,7 @@ mod tests {
         log: Arc<Mutex<Vec<TrayAction>>>,
     ) -> VoxtypeTray {
         VoxtypeTray {
+            history: HistoryMenu::default(),
             language: None,
             state,
             actions: Arc::new(move |action| log.lock().unwrap().push(action)),
@@ -2139,9 +2327,10 @@ mod tests {
             let pos = |l: &str| labels.iter().position(|x| x == l);
             assert_eq!(
                 pos("Meetings..."),
-                pos("Settings...").map(|p| p + 1),
+                pos("Enable History").map(|p| p + 1),
                 "{labels:?}"
             );
+            assert_eq!(pos("Enable History"), pos("Settings...").map(|p| p + 1));
             click(&mut tray, "Meetings...");
         }
         assert_eq!(
@@ -2364,5 +2553,57 @@ mod tests {
             .iter()
             .any(|i| i.label == "Turn on meetings..."));
         assert_eq!(meeting_entries(&tray), entries(&[("Start Meeting", true)]));
+    }
+
+    #[test]
+    fn history_off_offers_an_enable_action_without_opening_settings() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = tray_with(UpgradeMenu::default(), log.clone());
+        assert!(standard_items(&tray)
+            .iter()
+            .any(|i| i.label == "Enable History"));
+        click(&mut tray, "Enable History");
+        let actions: Vec<String> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect();
+        assert_eq!(actions, vec!["EnableHistory"]);
+    }
+
+    #[test]
+    fn history_on_exposes_recovery_and_a_clear_paused_state() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tray = tray_with(UpgradeMenu::default(), log.clone());
+        tray.history = HistoryMenu {
+            enabled: true,
+            paused: false,
+        };
+        assert!(!standard_items(&tray)
+            .iter()
+            .any(|i| i.label == "Enable History"));
+        click(&mut tray, "History");
+        click(&mut tray, "Copy last transcript");
+        click(&mut tray, "Pause History");
+        tray.history.paused = true;
+        click(&mut tray, "Resume History (paused)");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                TrayAction::OpenHistory,
+                TrayAction::CopyLastTranscript,
+                TrayAction::PauseHistory,
+                TrayAction::ResumeHistory
+            ]
+        );
+        assert_eq!(
+            TrayAction::EnableHistory.cli_args(),
+            Some(["history", "enable", "--json"].as_slice())
+        );
+        assert_eq!(
+            TrayAction::PauseHistory.cli_args(),
+            Some(["history", "pause", "--json"].as_slice())
+        );
     }
 }

@@ -194,7 +194,7 @@ pub(crate) async fn dispatch(
             match action {
                 Some(SetupAction::Check) => {
                     warn_if_root("check");
-                    setup::run_checks(&config).await?;
+                    setup::run_checks(&config, config_path.as_deref()).await?;
                 }
                 Some(SetupAction::Systemd { uninstall, status }) => {
                     warn_if_root("systemd");
@@ -605,6 +605,21 @@ pub(crate) async fn dispatch(
 
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
+        }
+
+        Commands::History {
+            action,
+            json,
+            limit,
+            failed,
+        } => {
+            super::history::run(
+                &config,
+                cli.config.clone(),
+                action.unwrap_or(voxtype::HistoryAction::List { limit, failed }),
+                json,
+            )
+            .await?;
         }
 
         Commands::CheckUpdate => {

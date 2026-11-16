@@ -128,6 +128,8 @@ pub(crate) async fn open_view(
 
     match resolution.active {
         ViewFrontend::Gtk4 => {
+            use std::os::unix::process::CommandExt;
+
             let path = resolution.path.clone().expect("gtk4 resolves with a path");
             let mut cmd = std::process::Command::new(path);
             if let Some(id) = &args.meeting_id {
@@ -145,6 +147,9 @@ pub(crate) async fn open_view(
             if let Some(p) = config::Config::path_override() {
                 cmd.arg("--config").arg(p);
             }
+            // The history reader may own the controlling terminal's session.
+            // Its exit must not send SIGHUP to the newly opened window.
+            cmd.process_group(0);
             cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

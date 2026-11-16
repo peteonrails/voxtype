@@ -5,9 +5,13 @@
 //! - [`store`]: the day files, their permissions, atomic rewrites,
 //!   compression and retention.
 //! - [`index`]: the contentless FTS5 search index beside the meetings'.
+//! - [`recorder`]: the daemon's side, building and writing entries.
+//! - [`focus`]: which app has focus, for `app` and `exclude_apps`.
 
 pub mod entry;
+pub mod focus;
 pub mod index;
+pub mod recorder;
 pub mod store;
 
 pub use entry::{edits_between, Edit, EndedBy, HistoryEntry, Outcome, OutputInfo, Trigger};

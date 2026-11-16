@@ -278,7 +278,7 @@ impl HistoryEntry {
     /// The best text there is: the correction, else what was output, else
     /// what the engine heard.
     pub fn best_text(&self) -> &str {
-        if let Some(c) = self.corrected_text.as_deref().filter(|c| !c.is_empty()) {
+        if let Some(c) = self.corrected_text.as_deref() {
             return c;
         }
         if !self.text.is_empty() {

@@ -3,7 +3,7 @@
 use clap::builder::PossibleValuesParser;
 use clap::Subcommand;
 
-use super::{ConfigAction, InfoAction, MeetingAction, RecordAction, SetupAction};
+use super::{ConfigAction, HistoryAction, InfoAction, MeetingAction, RecordAction, SetupAction};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -170,6 +170,25 @@ pub enum Commands {
     Meeting {
         #[command(subcommand)]
         action: MeetingAction,
+    },
+
+    /// Recover, search and manage dictation history
+    #[command(after_help = super::HISTORY_AFTER_HELP)]
+    History {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+
+        /// Machine-readable output (accepted by every subcommand)
+        #[arg(long, global = true)]
+        json: bool,
+
+        /// Number of recent dictations to show
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+
+        /// Only unsuccessful dictations
+        #[arg(long)]
+        failed: bool,
     },
 
     /// Check for updates

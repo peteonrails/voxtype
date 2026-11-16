@@ -16,7 +16,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::{Days, NaiveDate};
@@ -78,13 +78,23 @@ fn day_name(date: NaiveDate, gzipped: bool) -> String {
 /// Open a file for writing, created `0600`.
 fn create_private(path: &Path, append: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.mode(FILE_MODE).create(true);
+    options
+        .read(true)
+        .mode(FILE_MODE)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     if append {
         options.append(true);
     } else {
         options.write(true).truncate(true);
     }
     let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "History requires a regular file",
+        ));
+    }
     // `mode` only applies when the file is created; tighten an older one too.
     let perms = file.metadata()?.permissions();
     if perms.mode() & 0o777 != FILE_MODE {
@@ -94,14 +104,22 @@ fn create_private(path: &Path, append: bool) -> io::Result<File> {
 }
 
 /// An exclusive advisory lock on the directory, held while writing.
-struct DirLock {
+pub(crate) struct DirLock {
     _file: File,
 }
 
 impl DirLock {
-    fn take(dir: &Path) -> io::Result<Self> {
+    pub(super) fn take(dir: &Path) -> io::Result<Self> {
         use std::os::fd::AsRawFd;
         let file = create_private(&dir.join(".lock"), true)?;
+        #[cfg(test)]
+        {
+            let mut observers = LOCK_OBSERVERS.lock().unwrap();
+            if let Some(position) = observers.iter().position(|(path, _)| path == dir) {
+                let (_, sender) = observers.remove(position);
+                let _ = sender.send(());
+            }
+        }
         // SAFETY: flock on a file descriptor we own; it is released when the
         // descriptor is closed, which is when `_file` drops.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -114,6 +132,138 @@ impl DirLock {
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+/// Serialize a config's atomic save with the final history append decision.
+/// Writers take the day-store lock first, then this short-lived control lock.
+/// Config saves take only this lock: a busy store cannot delay a pause save.
+pub(crate) fn privacy_lock(config_path: &Path) -> io::Result<DirLock> {
+    let dir = privacy_dir(config_path)?;
+    ensure_private_dir(&dir)?;
+    DirLock::take(&dir)
+}
+
+fn privacy_dir(config_path: &Path) -> io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let parent = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = config_path
+        .file_name()
+        .ok_or_else(|| io::Error::other("config path has no filename"))?;
+    let identity = parent.canonicalize()?.join(name);
+    let key = format!(
+        "{:x}",
+        Sha256::digest(identity.as_os_str().as_encoded_bytes())
+    );
+    // Keep locks writable even when the selected config is system-owned.
+    Ok(crate::config::Config::data_dir()
+        .join("history-control")
+        .join(key))
+}
+
+/// Call only while holding this config's privacy lock.
+pub(crate) fn privacy_generation(config_path: &Path) -> io::Result<u64> {
+    let path = privacy_dir(config_path)?.join("generation");
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() || file.metadata()?.len() != 8 {
+        return Err(io::Error::other(
+            "Invalid history privacy generation; history is not being recorded",
+        ));
+    }
+    let mut bytes = [0; 8];
+    file.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Invalidate in-flight sessions before persisting a pause/disable. If a
+/// subsequent config save fails, discarding those sessions is privacy-safe.
+/// Call only while holding this config's privacy lock.
+pub(crate) fn advance_privacy_generation(config_path: &Path) -> io::Result<()> {
+    let next = privacy_generation(config_path)?
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("History privacy generation exhausted"))?;
+    let dir = privacy_dir(config_path)?;
+    let mut file = tempfile::Builder::new()
+        .prefix(".tmp-generation-")
+        .tempfile_in(&dir)?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
+    file.write_all(&next.to_le_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(dir.join("generation"))
+        .map_err(|error| error.error)?;
+    sync_dir(&dir)
+}
+
+#[cfg(test)]
+static LOCK_OBSERVERS: std::sync::Mutex<Vec<(PathBuf, std::sync::mpsc::Sender<()>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn observe_next_lock(dir: &Path) -> std::sync::mpsc::Receiver<()> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    LOCK_OBSERVERS
+        .lock()
+        .unwrap()
+        .push((dir.to_path_buf(), sender));
+    receiver
+}
+
+/// Create private directories without following pre-planted directory links.
+/// Existing ancestors are inspected but never chmodded.
+pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    let absolute = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Use a history path without parent traversal",
+            ));
+        }
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "History directories must not be symbolic links or files",
+                ))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match fs::DirBuilder::new().mode(DIR_MODE).create(&current) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                        let meta = fs::symlink_metadata(&current)?;
+                        if !meta.is_dir() || meta.file_type().is_symlink() {
+                            return Err(e);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let pinned = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&absolute)?;
+    pinned.set_permissions(fs::Permissions::from_mode(DIR_MODE))
 }
 
 impl HistoryStore {
@@ -133,6 +283,7 @@ impl HistoryStore {
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let store = Self::at(dir);
         store.ensure_dir()?;
+        let _lock = DirLock::take(&store.dir)?;
         store.remove_stale_temps();
         Ok(store)
     }
@@ -142,12 +293,7 @@ impl HistoryStore {
     }
 
     fn ensure_dir(&self) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
-        let perms = fs::metadata(&self.dir)?.permissions();
-        if perms.mode() & 0o777 != DIR_MODE {
-            fs::set_permissions(&self.dir, fs::Permissions::from_mode(DIR_MODE))?;
-        }
-        Ok(())
+        ensure_private_dir(&self.dir)
     }
 
     fn remove_stale_temps(&self) {
@@ -165,6 +311,11 @@ impl HistoryStore {
     /// file (a crash between writing the `.gz` and removing the plain one)
     /// lists the plain file, which is the complete one.
     pub fn days(&self) -> io::Result<Vec<DayFile>> {
+        match fs::symlink_metadata(&self.dir) {
+            Ok(_) => self.ensure_dir()?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
         let rd = match fs::read_dir(&self.dir) {
             Ok(rd) => rd,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -197,7 +348,16 @@ impl HistoryStore {
 
     /// The raw lines of a day file.
     fn read_lines(file: &DayFile) -> io::Result<Vec<String>> {
-        let raw = File::open(&file.path)?;
+        let raw = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&file.path)?;
+        if !raw.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "History requires a regular day file",
+            ));
+        }
         let reader: Box<dyn Read> = if file.gzipped {
             Box::new(GzDecoder::new(raw))
         } else {
@@ -242,13 +402,34 @@ impl HistoryStore {
 
     /// Append an entry to its day file.
     pub fn append(&self, entry: &HistoryEntry) -> io::Result<()> {
+        self.ensure_dir()?;
+        let _lock = DirLock::take(&self.dir)?;
+        self.append_locked(entry)
+    }
+
+    /// Prepare under the storage lock; keep the returned guard through fsync.
+    /// A rejected entry never reaches serialization or a day file.
+    pub(crate) fn append_prepared<G>(
+        &self,
+        entry: &mut HistoryEntry,
+        prepare: impl FnOnce(&mut HistoryEntry) -> io::Result<Option<G>>,
+    ) -> io::Result<bool> {
+        self.ensure_dir()?;
+        let _lock = DirLock::take(&self.dir)?;
+        let Some(_privacy) = prepare(entry)? else {
+            return Ok(false);
+        };
+        self.remove_stale_temps();
+        self.append_locked(entry)?;
+        Ok(true)
+    }
+
+    fn append_locked(&self, entry: &HistoryEntry) -> io::Result<()> {
         let date = entry
             .day()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "malformed entry id"))?;
         let mut line = serde_json::to_string(entry).map_err(io::Error::other)?;
         line.push('\n');
-        self.ensure_dir()?;
-        let _lock = DirLock::take(&self.dir)?;
         match self.day_file(date)? {
             // An old day that is already compressed: rewrite it with the new
             // line. Only happens for an entry dated in the past, such as one
@@ -261,6 +442,16 @@ impl HistoryStore {
             _ => {
                 let path = self.dir.join(day_name(date, false));
                 let mut file = create_private(&path, true)?;
+                let length = file.metadata()?.len();
+                if length > 0 {
+                    let mut last = [0u8];
+                    file.read_exact_at(&mut last, length - 1)?;
+                    if last[0] != b'\n' {
+                        // A crash may leave either valid JSON or a fragment
+                        // without its newline. Never glue the next entry to it.
+                        file.write_all(b"\n")?;
+                    }
+                }
                 file.write_all(line.as_bytes())?;
                 file.sync_data()
             }
@@ -281,40 +472,31 @@ impl HistoryStore {
             }
             return sync_dir(&self.dir);
         }
-        let temp = self.dir.join(format!(
-            "{TEMP_PREFIX}{}-{}",
-            day_name(date, gzipped),
-            std::process::id()
-        ));
-        let result = (|| {
-            let file = create_private(&temp, false)?;
-            let mut body = String::new();
-            for line in lines {
-                body.push_str(line);
-                body.push('\n');
-            }
-            let file = if gzipped {
-                let mut gz = GzEncoder::new(file, flate2::Compression::default());
-                gz.write_all(body.as_bytes())?;
-                gz.finish()?
-            } else {
-                let mut file = file;
-                file.write_all(body.as_bytes())?;
-                file
-            };
-            file.sync_all()?;
-            fs::rename(&temp, &target)?;
-            match fs::remove_file(&other) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-            sync_dir(&self.dir)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temp);
+        let mut temp = tempfile::Builder::new()
+            .prefix(TEMP_PREFIX)
+            .tempfile_in(&self.dir)?;
+        temp.as_file()
+            .set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
+        let mut body = String::new();
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
         }
-        result
+        if gzipped {
+            let mut gz = GzEncoder::new(temp.as_file_mut(), flate2::Compression::default());
+            gz.write_all(body.as_bytes())?;
+            gz.finish()?;
+        } else {
+            temp.as_file_mut().write_all(body.as_bytes())?;
+        }
+        temp.as_file().sync_all()?;
+        temp.persist(&target).map_err(|e| e.error)?;
+        match fs::remove_file(&other) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        sync_dir(&self.dir)
     }
 
     /// Rewrite the day an entry lives in, applying `change` to the line with
@@ -332,6 +514,7 @@ impl HistoryStore {
         if !self.dir.exists() {
             return Ok(None);
         }
+        self.ensure_dir()?;
         let _lock = DirLock::take(&self.dir)?;
         let Some(file) = self.day_file(date)? else {
             return Ok(None);
@@ -346,6 +529,9 @@ impl HistoryStore {
         let before: HistoryEntry = serde_json::from_str(&lines[index]).map_err(io::Error::other)?;
         match change(before.clone()) {
             Some(after) => {
+                if before.schema != super::entry::SCHEMA_VERSION {
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, "This history entry uses another schema version. Upgrade Voxtype before correcting it; its original file has not been changed."));
+                }
                 lines[index] = serde_json::to_string(&after).map_err(io::Error::other)?
             }
             None => {
@@ -420,6 +606,7 @@ impl HistoryStore {
         if !self.dir.exists() {
             return Ok(Vec::new());
         }
+        self.ensure_dir()?;
         let _lock = DirLock::take(&self.dir)?;
         let mut removed = Vec::new();
         for day in self.days()? {
@@ -464,6 +651,7 @@ impl HistoryStore {
         if !self.dir.exists() {
             return Ok(0);
         }
+        self.ensure_dir()?;
         let _lock = DirLock::take(&self.dir)?;
         let mut done = 0;
         for day in self.days()? {

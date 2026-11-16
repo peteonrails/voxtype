@@ -267,33 +267,56 @@ What to tell the user about it:
 
 ### Dictation history (on and off)
 
-Built-in transcript history is on the roadmap
-([#209](https://github.com/peteonrails/voxtype/issues/209)). Check whether this
-version already has it before doing anything else:
+Check the installed executable before choosing the built-in history or a legacy
+workaround. Inspect the exact `history.enabled` and `history.paused` keys in
+`voxtype config schema --json`, and check `voxtype history --help`. A mention of
+history in a description is not proof that those settings are supported.
 
 ```bash
-voxtype config schema | grep -i history
-voxtype --help | grep -i history
+voxtype config schema --json
+voxtype history --help
 ```
 
-If either shows a history setting or command, use that and skip the rest of
-this section: read its `--help` or `voxtype config schema` entry to turn it on
-and off, and tell the user where it stores transcripts.
+When those keys and the command exist, use the built-in feature and skip the
+legacy logger below. Ask before enabling it for an upgrading user: old configs
+stay off, while newly generated configs turn it on. Explain that the files
+contain dictated text, including failed and cancelled results, and are not
+encrypted by Voxtype.
 
-Until then, the post-process command can keep a history. Tell the user it is a
-stopgap that built-in history will replace, and that they can switch it off
-once they upgrade. Ask first, and tell them plainly that the log will contain
-everything they dictate, including anything sensitive.
+```bash
+voxtype history enable --json
+voxtype history status --json
+voxtype history pause --json       # before anything sensitive
+voxtype history resume --json
+voxtype history disable --json     # keeps existing files
+```
+
+These changes apply without a manual restart, unless a daemon flag or environment
+override takes precedence. The files live under the XDG data directory, normally
+`~/.local/share/voxtype/history/YYYY-MM-DD.jsonl`, with older days compressed as
+`.jsonl.gz`. Retention is 30 days; `history.retention_days = 0` keeps everything.
+Common password managers are excluded by `history.exclude_apps`. Focus detection
+supports Hyprland, Sway/i3 and niri; on other desktops or a failed lookup the app
+is unknown and exclusions cannot apply. Pause instead of trusting exclusions in
+those cases. Window titles require explicit `history.record_window_title = true`.
+
+Only for an older executable without the built-in history command, the
+post-process logger below is a legacy workaround. It does not honor history
+pause or app exclusions and does not capture failed or cancelled dictations.
+Ask first and explain that its separate log contains dictated text, including
+anything sensitive. Do not combine it with built-in history. Remove the legacy
+post-process hook when upgrading, preserving any unrelated cleanup command;
+enabling or pausing built-in history cannot control this separate logger.
 
 To turn it on, install this script as `~/.local/bin/voxtype-history`:
 
 ```sh
 #!/bin/sh
 # Voxtype post-process command: log each transcription, pass it through unchanged.
+umask 077
 log="${VOXTYPE_HISTORY_FILE:-$HOME/.local/share/voxtype/history.tsv}"
 mkdir -p "$(dirname "$log")"
 text=$(cat)
-umask 077
 printf '%s\t%s\n' "$(date -Iseconds)" "$(printf '%s' "$text" | tr '\t\n' '  ')" >> "$log"
 printf '%s' "$text"
 ```

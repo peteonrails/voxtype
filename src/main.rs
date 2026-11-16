@@ -46,6 +46,10 @@ async fn main() -> anyhow::Result<()> {
         })
     );
 
+    // History's JSON contract includes output actions, whose drivers log at
+    // info level. Keep those diagnostics away from machine-readable stdout.
+    let is_history_json = matches!(cli.command, Some(Commands::History { json: true, .. }));
+
     // Initialize logging
     let log_level = if cli.quiet {
         "error"
@@ -66,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
             .add_directive("ureq=info".parse().expect("a valid directive"))
     };
 
-    if is_worker || is_import {
+    if is_worker || is_import || is_history_json {
         // Worker uses stderr for logging (stdout is reserved for IPC protocol)
         tracing_subscriber::fmt()
             .with_env_filter(log_filter(log_level))

@@ -243,8 +243,15 @@ pub async fn ask(command: &Command, timeout: Duration) -> Result<Agenda, Calenda
         path.push_str(&extra.display().to_string());
     }
     let mut cmd = tokio::process::Command::new("bash");
+    // Login startup files can replace an inherited PATH. Restore our exact
+    // search path after startup, including the plugin bin, as shell data.
+    let command_with_path = format!(
+        "export PATH='{}'; {}",
+        path.replace('\'', "'\\''"),
+        command.command
+    );
     cmd.arg("-lc")
-        .arg(&command.command)
+        .arg(command_with_path)
         .env("PATH", path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -634,6 +641,26 @@ mod tests {
         assert_eq!(
             lookup(&cmd, Duration::from_secs(3), 10).await.unwrap(),
             found("From the plugin", None)
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_path_is_shell_data_after_login_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("quoted ' plugin bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::test_support::write_script(
+            &bin.join("voxtype-test-quoted-agenda"),
+            "#!/bin/sh\necho '{\"title\":\"Quoted plugin\",\"ongoing\":true}'\n",
+        );
+        let cmd = Command {
+            command: "voxtype-test-quoted-agenda --next-json".into(),
+            extra_path: Some(bin),
+            source: "test",
+        };
+        assert_eq!(
+            lookup(&cmd, Duration::from_secs(3), 10).await.unwrap(),
+            found("Quoted plugin", None)
         );
     }
 

@@ -16,8 +16,12 @@
 //! `PRAGMA secure_delete = ON`, which zeroes freed pages, and every removal is
 //! followed by an FTS5 `optimize`, which rewrites the term segments without
 //! the deleted rows instead of leaving tombstones over the old terms.
+//! WAL cleanup is checked after commit. A reader that pins old WAL frames
+//! produces an explicit error; a later sync retries the checkpoint even
+//! when no day fingerprints changed.
 
 use std::collections::HashMap;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -77,6 +81,8 @@ pub enum IndexError {
     Sqlite(#[from] rusqlite::Error),
     #[error("History search index: {0}")]
     Io(#[from] std::io::Error),
+    #[error("History files were updated, but another SQLite reader prevents clearing historical WAL pages. Close other history/meeting views and retry `voxtype history reindex`; index cleanup is not complete yet.")]
+    WalReaders,
 }
 
 /// The file's identity as far as reindexing cares.
@@ -144,9 +150,27 @@ impl HistoryIndex {
     /// Open (and create) the history tables in the database at `path`.
     pub fn open(path: &Path) -> Result<Self, IndexError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            super::store::ensure_private_dir(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "History index must be a regular file",
+            )
+            .into());
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         Self::with_connection(conn)
     }
 
@@ -247,31 +271,21 @@ impl HistoryIndex {
             .map(|_| ())
     }
 
-    /// Index one entry the daemon just appended, and note its day file as
-    /// indexed, so the next [`sync`](Self::sync) has nothing to do.
-    pub fn add(&self, store: &HistoryStore, entry: &HistoryEntry) -> Result<(), IndexError> {
-        let Some(date) = entry.day() else {
-            return Ok(());
-        };
-        let day = date.to_string();
-        let tx = self.conn.unchecked_transaction()?;
-        let known = self
+    fn checkpoint(&self) -> Result<(), IndexError> {
+        let busy: i64 = self
             .conn
-            .query_row(
-                "SELECT version FROM history_search_days WHERE day = ?1",
-                params![day],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?;
-        if known.is_some_and(|v| v >= INDEX_VERSION) {
-            self.insert_entry(&day, entry)?;
-            if let Some(file) = store.days()?.into_iter().find(|d| d.date == date) {
-                self.mark_day(&day, &fingerprint(&file)?)?;
-            }
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(IndexError::WalReaders);
         }
-        // A day never indexed is left for sync, which indexes the whole file.
-        tx.commit()?;
         Ok(())
+    }
+
+    /// Reconcile the authoritative files after an append. A single entry
+    /// cannot certify a whole day's fingerprint: another append, correction
+    /// or deletion may have missed its best-effort update.
+    pub fn add(&self, store: &HistoryStore, _entry: &HistoryEntry) -> Result<(), IndexError> {
+        self.sync(store).map(|_| ())
     }
 
     /// Bring the index up to date with the day files. Returns how many days
@@ -293,18 +307,45 @@ impl HistoryIndex {
 
         let mut changed = 0;
         let mut removed_any = false;
+        let mut read_error = None;
         let tx = self.conn.unchecked_transaction()?;
         for file in &files {
             let day = file.date.to_string();
-            let print = fingerprint(file)?;
-            let current = indexed
-                .remove(&day)
-                .is_some_and(|(p, v)| p == print && v >= INDEX_VERSION);
+            let previous = indexed.remove(&day);
+            let print = match fingerprint(file) {
+                Ok(print) => print,
+                Err(error) => {
+                    removed_any |= self.remove_day_rows(&day)? > 0;
+                    self.conn.execute(
+                        "DELETE FROM history_search_days WHERE day = ?1",
+                        params![day],
+                    )?;
+                    read_error.get_or_insert(error);
+                    changed += 1;
+                    continue;
+                }
+            };
+            let current = previous.is_some_and(|(p, v)| p == print && v >= INDEX_VERSION);
             if current {
                 continue;
             }
             removed_any |= self.remove_day_rows(&day)? > 0;
-            for entry in HistoryStore::read_day_file(file)?.entries {
+            let entries = match HistoryStore::read_day_file(file) {
+                Ok(read) => read.entries,
+                Err(error) => {
+                    // Unreadable authority cannot certify old search terms.
+                    // Commit their removal and missing-day cleanup even though
+                    // the caller still receives this read failure.
+                    self.conn.execute(
+                        "DELETE FROM history_search_days WHERE day = ?1",
+                        params![day],
+                    )?;
+                    read_error.get_or_insert(error);
+                    changed += 1;
+                    continue;
+                }
+            };
+            for entry in entries {
                 if entry.day() == Some(file.date) {
                     self.insert_entry(&day, &entry)?;
                 }
@@ -325,6 +366,12 @@ impl HistoryIndex {
             self.purge()?;
         }
         tx.commit()?;
+        // Always retry: the previous sync may have committed its logical
+        // deletion but reported a reader-blocked checkpoint afterwards.
+        self.checkpoint()?;
+        if let Some(error) = read_error {
+            return Err(error.into());
+        }
         Ok(changed)
     }
 

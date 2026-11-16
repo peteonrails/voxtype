@@ -529,6 +529,95 @@ bindings, lists them in the About pane, and suggests config-format-specific
 snippets for any standard role you haven't bound (cancel, toggle, meeting
 start/stop). Suggestions skip key combos already in use by other actions.
 
+### `voxtype history`
+
+History keeps the engine's original text, the processed text, automatic edits,
+delivery outcome and optional user correction. Failed, empty, too-short and
+cancelled dictations can be inspected too. It does not retain dictation audio.
+
+An upgrade does **not** enable history for an existing config. Newly generated
+configs enable it with 30-day retention. To choose it explicitly:
+
+```bash
+voxtype history status --json
+voxtype history enable
+voxtype history                 # recent dictations, newest first
+voxtype history --failed       # failed, cancelled and empty outcomes
+voxtype history show last
+voxtype history search invoice # searches dictations and meetings together
+voxtype history copy           # copies the most recent transcript
+```
+
+Every history command accepts `--json`. JSON is written to stdout; a failed
+operation returns a nonzero exit status. `history view --json` returns recent
+entry data without opening an interactive window. `history view --tui` opens
+the terminal reader. Enter expands the selected entry to show the original
+text, processed text and automatic edits. Press `c` to copy the selected
+dictation through the same clipboard command as `voxtype history copy`.
+Press `a` to send it again. Confirming closes the reader and restores the
+terminal before a 1.5-second delay, giving you time to switch to the target
+application. Replay uses your selected configuration's output settings;
+cancel with `n` or Escape without sending anything.
+Search with `/` to include saved meetings. Select a meeting result and press
+`o` to close the reader and open that meeting through the normal meeting-view
+command, preserving the selected configuration.
+
+Recover or correct an entry using its ID from the list, or `last`:
+
+```bash
+voxtype history paste last --delay-ms 2000
+voxtype history correct last "The corrected sentence."
+voxtype history correct last ""  # an intentional empty correction
+voxtype history delete last
+voxtype history clear --before 2026-11-01 --yes
+```
+
+`paste` sends the saved text through the normal output chain. Switch to the
+intended destination before its delay expires: without a delay, a terminal
+command can type back into that terminal. Re-sending does not add another
+dictation. Copy and paste prefer `corrected_text`, including an intentional
+empty correction, then processed text, then the engine's original text.
+Corrections preserve the original fields rather than replacing them.
+
+#### Pause and privacy
+
+```bash
+voxtype history pause   # before starting a private dictation
+voxtype history resume
+voxtype history disable
+```
+
+Enable, disable, pause and resume write the corresponding validated config key.
+The running daemon reloads history settings without a restart. Explicit daemon
+flags and environment overrides still take precedence. An invalid config edit
+does not replace the daemon's last valid settings; check the command's exit
+status rather than assuming a failed write paused history. Disabling history
+keeps existing entries and does not change the daemon's logging policy.
+
+The built-in excluded apps include KeePassXC, Bitwarden, 1Password and Proton
+Pass. An exclusion suppresses the entry when the focused app is identified at
+either end of the dictation. **Unknown focus is not a privacy guarantee:** on
+unsupported desktops, or if compositor IPC fails or times out, the app can be
+unknown and the dictation is still recorded. A password manager in a browser
+tab is identified as the browser. Pause history before sensitive dictation in
+these cases. Window titles are recorded only after opting in.
+
+The authoritative record is one private JSONL file per day in
+`$XDG_DATA_HOME/voxtype/history` (normally `~/.local/share/voxtype/history`).
+Directories are `0700`, files `0600`; days older than a week are gzipped. The
+derived, contentless search index shares the meetings `index.db` and can be
+rebuilt with `voxtype history reindex`. `history.retention_days = 0` keeps all
+days; the default removes whole days older than 30 days.
+
+Deletion rewrites the affected day atomically and removes its index entries.
+It is not secure erasure of filesystem snapshots, backups or old disk blocks.
+Use full-disk encryption for data at rest. If a SQLite reader prevents clearing
+old WAL pages, the command reports incomplete index cleanup: close history and
+meeting views, then run `voxtype history reindex` and check its exit status.
+
+See [History configuration](CONFIGURATION.md#history) for exclusions, title
+recording, retention, environment variables and CLI overrides.
+
 ### `voxtype status`
 
 Query the daemon's current state (for Waybar/Polybar integration).

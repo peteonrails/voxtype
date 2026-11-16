@@ -7,10 +7,11 @@
 //! - Auto-detect: Let Whisper detect from all ~99 supported languages
 //! - Constrained auto-detect: Detect from a user-specified subset of languages
 
-use super::{TimedSegment, Transcriber};
+use super::{RuntimeMetadata, TimedSegment, Transcriber};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -36,6 +37,9 @@ pub struct WhisperTranscriber {
     /// (since whisper-rs does not currently expose the chosen language
     /// from the full() pipeline). Read via [`Transcriber::last_detected_language`].
     last_language: Mutex<Option<String>>,
+    runtime: RuntimeMetadata,
+    cpu_context: bool,
+    decoded: AtomicBool,
 }
 
 impl WhisperTranscriber {
@@ -83,6 +87,7 @@ impl WhisperTranscriber {
             tracing::info!("Flash attention enabled");
         }
 
+        let cpu_context = !ctx_params.use_gpu;
         let ctx = WhisperContext::new_with_params(
             model_path
                 .to_str()
@@ -92,6 +97,11 @@ impl WhisperTranscriber {
         .map_err(|e| TranscribeError::InitFailed(e.to_string()))?;
 
         tracing::info!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
+        let runtime = RuntimeMetadata {
+            model: Some(model_path.display().to_string()),
+            backend: None,
+            model_load_ms: Some(start.elapsed().as_millis() as u64),
+        };
 
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
 
@@ -104,6 +114,9 @@ impl WhisperTranscriber {
             initial_prompt: config.initial_prompt.clone(),
             active_vocabulary: Mutex::new(Vec::new()),
             last_language: Mutex::new(None),
+            runtime,
+            cpu_context,
+            decoded: AtomicBool::new(false),
         })
     }
 
@@ -220,6 +233,7 @@ impl WhisperTranscriber {
         state
             .full(params, samples)
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        self.decoded.store(true, Ordering::Relaxed);
 
         let mut segments = Vec::new();
         for segment in state.as_iter() {
@@ -343,6 +357,7 @@ impl Transcriber for WhisperTranscriber {
     }
 
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.decoded.store(false, Ordering::Relaxed);
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -401,6 +416,7 @@ impl Transcriber for WhisperTranscriber {
     /// pause-delimited phrase) with real start and end times. Meeting mode
     /// relies on this to keep a single call per chunk for Whisper.
     fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        self.decoded.store(false, Ordering::Relaxed);
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -434,6 +450,17 @@ impl Transcriber for WhisperTranscriber {
 
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn runtime_metadata(&self) -> RuntimeMetadata {
+        let mut runtime = self.runtime.clone();
+        // A completed decode with GPU disabled proves CPU execution. With GPU
+        // enabled the context may fall back, so do not guess from build flags
+        // or the requested device. Loading alone is not a completed decode.
+        if self.cpu_context && self.decoded.load(Ordering::Relaxed) {
+            runtime.backend = Some("cpu".into());
+        }
+        runtime
     }
 }
 

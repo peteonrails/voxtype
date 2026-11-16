@@ -28,6 +28,7 @@ verification.
 |------|----------------|
 | [CLI Overrides](smoke_tests/cli-overrides.md) | `--model`, `--engine`, `--device`, and other per-invocation flags |
 | [File Output](smoke_tests/file-output.md) | `--file`, append vs overwrite, config-based paths, directory creation |
+| [Dictation History](smoke_tests/history.md) | Private per-day history, every outcome, shared search, recovery/corrections, terminal/app/tray parity and upgrade defaults |
 | [Transcribe Command](smoke_tests/transcribe-command-file-input.md) | `voxtype transcribe <wav>` for offline file transcription |
 
 ## Recording behaviour

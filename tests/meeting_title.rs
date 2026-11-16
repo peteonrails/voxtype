@@ -185,6 +185,16 @@ fn a_running_meeting_is_retitled_through_the_daemon() {
         .unwrap();
     let mut lines = BufReader::new(stream);
 
+    // Prove the CLI's metadata-only write before allowing the independent
+    // daemon consumer to rewrite Markdown. Without this barrier a fast daemon
+    // can legitimately finish before the assertion below (observed on NAS).
+    let pid = nix::unistd::Pid::from_raw(_daemon.0.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).unwrap();
+    assert_eq!(
+        nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WUNTRACED)).unwrap(),
+        nix::sys::wait::WaitStatus::Stopped(pid, nix::sys::signal::Signal::SIGSTOP)
+    );
+
     // The daemon is recording this meeting, as far as the CLI can tell.
     std::fs::write(
         s.path("runtime/voxtype/meeting_state"),
@@ -200,6 +210,7 @@ fn a_running_meeting_is_retitled_through_the_daemon() {
         std::fs::read_to_string(folder.join("transcript.md")).unwrap(),
         md_before
     );
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let event = loop {

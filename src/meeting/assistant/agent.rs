@@ -388,9 +388,9 @@ mod tests {
             for b in bins {
                 script(&dir.path().join("bin"), b, "exit 0");
             }
-            if let Ok(bwrap) = which::which("bwrap") {
-                std::os::unix::fs::symlink(bwrap, dir.path().join("bin/bwrap")).unwrap();
-            }
+            // These are discovery tests, not jail execution. Never depend on
+            // the machine's bwrap, and fail closed if accidentally executed.
+            script(&dir.path().join("bin"), "bwrap", "exit 97");
             Self { dir }
         }
 
@@ -544,10 +544,7 @@ mod tests {
     #[test]
     fn codex_with_bwrap_resolves_to_a_jail() {
         let f = Fixture::new(&["codex"]);
-        if !f.dir.path().join("bin/bwrap").exists() {
-            eprintln!("skipping: bwrap is not installed");
-            return;
-        }
+        assert!(f.dir.path().join("bin/bwrap").exists());
         let a = f.resolve(Some("codex")).agent.unwrap();
         let jail = a.jail.unwrap();
         assert!(jail.program.ends_with("bin/codex"));

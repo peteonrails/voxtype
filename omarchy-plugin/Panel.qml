@@ -40,8 +40,10 @@ Item {
   property string omarchyPath: ""
 
   property bool opened: false
-  // "settings" or "meetings": which of the plugin's two windows `opened` shows.
+  // The selected application view; each history config keeps its own client.
   property string view: "settings"
+  property var historyHosts: ({})
+  property var activeHistoryHost: null
 
   // ---------------------------------------------------------------- state
 
@@ -88,6 +90,7 @@ Item {
   property string accelEvidence: ""
 
   property bool restartNeeded: false
+  property string restartFileState: ""
   property string restartError: ""
   // The daemon that was running when the banner went up, by main pid. It read
   // the config before the change, so a different pid means a restart happened
@@ -275,8 +278,22 @@ Item {
     var payload = {}
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
 
-    root.view = payload.view === "meetings" ? "meetings" : "settings"
+    root.view = payload.view === "meetings" ? "meetings" : payload.view === "history" ? "history" : "settings"
     root.opened = true
+    if (root.view === "history") {
+      var path = payload.config === undefined ? "" : String(payload.config)
+      var host = root.historyHosts[path]
+      if (!host) {
+        host = historyHostFactory.createObject(root, { configPath: path })
+        if (!host) { root.opened = false; return }
+        var next = Object.assign({}, root.historyHosts)
+        next[path] = host
+        root.historyHosts = next
+      }
+      root.activeHistoryHost = host
+      host.window.refresh()
+      return
+    }
     if (root.view === "meetings") {
       meetings.select(payload)
       return
@@ -600,6 +617,15 @@ Item {
       return root.requestOpen(JSON.stringify({ section: wanted }))
     }
 
+    // History uses an immutable client for each explicit configuration.
+    function history(): string {
+      return root.requestOpen(JSON.stringify({ view: "history" }))
+    }
+
+    function historyConfig(path: string): string {
+      return root.requestOpen(JSON.stringify({ view: "history", config: path }))
+    }
+
     // The live meeting view, or a no-op if it is already up.
     function meetings(): string {
       if (root.opened && root.view === "meetings") return "ok"
@@ -651,6 +677,7 @@ Item {
     // its signal(var) can wrap it as a QML sequence: length/indexing survive,
     // but Array.isArray does not. Rejecting that wrapper hides every section.
     var normalized = []
+    var restartValues = []
     var incoming = next.keys && next.keys.length !== undefined ? next.keys : []
     for (var i = 0; i < incoming.length; ++i) {
       if (!incoming[i]) continue
@@ -658,7 +685,20 @@ Item {
       for (var key in incoming[i]) spec[key] = incoming[i][key]
       spec.section = canonicalSection(spec.section || "")
       normalized.push(spec)
+      if (String(spec.key).indexOf("history.") !== 0)
+        restartValues.push([String(spec.key), spec.file_value])
     }
+    // Scalars use file-layer values rather than environment overrides or TOML
+    // formatting. Replacements and profiles are separate canonical structures;
+    // profile vocabulary is cached at daemon startup. Our own live History
+    // writes must not create or clear an unrelated restart requirement.
+    var restartState = JSON.stringify([restartValues, next.replacements || ({}), next.profiles || ({})])
+    if (root.configPath === String(next.config_path || "")
+        && root.restartFileState !== "" && root.restartFileState !== restartState
+        && !cli.upgrading && Date.now() - root.upgradeSettledAt > 2000
+        && cli.restartRequestedAt < root.configChangedAt)
+      root.noteRestartNeeded()
+    root.restartFileState = restartState
     root.keys = normalized
     var secrets = []
     var incomingSecrets = next.secrets && next.secrets.length !== undefined ? next.secrets : []
@@ -872,9 +912,10 @@ Item {
     }
     onWriteSucceeded: function(key) {
       root.clearError(key)
-      // The daemon only reads config at startup, so a successful write is
-      // exactly when the restart prompt becomes true.
-      root.noteRestartNeeded()
+      // History refreshes its settings and privacy generation without a
+      // restart. Do not imply a saved pause needs one, or clear a restart
+      // already required by an unrelated setting.
+      if (key.indexOf("history.") !== 0) root.noteRestartNeeded()
       root.restartError = ""
       cli.fetchSchema()
       if (key === "engine") cli.fetchModels()
@@ -1012,16 +1053,9 @@ Item {
       cli.fetchSchema()
       cli.fetchModels()
       cli.fetchOsdStatus()
-      // The banner's claim is that the file on disk no longer matches what the
-      // daemon loaded at startup, which an edit from the CLI or the TUI makes
-      // just as true as one made here. Without this the panel would quietly
-      // refresh to show a setting the running daemon is not using. An accepted
-      // upgrade is the exception: it restarted the daemon after its own write.
-      // A restart the panel started after the change (Switch on the OSD offer
-      // writes and restarts back to back) has already loaded it.
-      if (!cli.upgrading && Date.now() - root.upgradeSettledAt > 2000
-          && cli.restartRequestedAt < root.configChangedAt)
-        root.noteRestartNeeded()
+      // applySchema compares the refreshed non-History file-layer settings.
+      // A watcher notification alone cannot distinguish a live History save
+      // from an external edit that really requires a restart.
     }
   }
 
@@ -1035,6 +1069,31 @@ Item {
   }
 
   // ---------------------------------------------------------------- window
+
+  Component {
+    id: historyHostFactory
+    Item {
+      id: historyHost
+      required property string configPath
+      readonly property alias window: historyWindow
+      VoxtypeCli {
+        id: historyClient
+        manifest: root.manifest
+        historyConfigPath: historyHost.configPath
+      }
+      HistoryWindow {
+        id: historyWindow
+        client: historyClient
+        visible: root.opened && root.view === "history" && root.activeHistoryHost === historyHost
+        onPasteRequested: root.dismiss()
+        onPasteFailed: root.requestOpen(JSON.stringify({ view: "history", config: historyHost.configPath }))
+        onVisibleChanged: {
+          if (!visible && root.opened && root.view === "history" && root.activeHistoryHost === historyHost)
+            root.dismiss()
+        }
+      }
+    }
+  }
 
   OmarchyMeetingsHost {
     id: meetings

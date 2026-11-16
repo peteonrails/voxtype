@@ -17,21 +17,23 @@
 //! opened from the list is read-only and shows its `summary.md`.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 
-use voxtype::config::Config;
+#[path = "voxtype_meetings_gtk4/history.rs"]
+mod history;
+
 use voxtype::meeting::storage::MeetingListEntry;
 use voxtype::meeting::view::client::{spawn_feed, Feed, FeedHandle};
 use voxtype::meeting::view::commands::{self, AskAnswer, Cli, Outcome, Request};
 use voxtype::meeting::view::{
     clock, escape_markup, line_markup, meter, summary_markup, Change, MeetingView, SpeakerChip,
-    ViewState, SPEAKER_COLORS,
+    ViewEvent, ViewState, SPEAKER_COLORS,
 };
 use voxtype::meeting::{MeetingConfig, StorageConfig};
 
@@ -44,13 +46,14 @@ const SMOKE_ENV: &str = "VOXTYPE_MEETINGS_GTK4_SMOKE";
 /// What a launch asked for.
 #[derive(Debug, Default, Clone)]
 struct Launch {
+    config_path: Option<PathBuf>,
     meeting: Option<String>,
     tab: Option<String>,
     ask_id: Option<String>,
     ask: Option<String>,
 }
 
-fn parse_launch(args: &[String]) -> Launch {
+fn parse_launch(args: &[String], cwd: Option<&Path>) -> Result<Launch, &'static str> {
     let mut l = Launch::default();
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
@@ -61,9 +64,12 @@ fn parse_launch(args: &[String]) -> Launch {
             "--ask-id" => l.ask_id = value(),
             "--ask" => l.ask = value(),
             "--config" => {
-                if let Some(p) = value() {
-                    Config::set_path_override(PathBuf::from(p));
-                }
+                let p = PathBuf::from(value().ok_or("--config needs a path")?);
+                l.config_path = Some(if p.is_absolute() {
+                    p
+                } else {
+                    cwd.ok_or("Cannot resolve relative --config: invocation working directory is unavailable")?.join(p)
+                });
             }
             "--version" => {
                 println!("voxtype-meetings-gtk4 {}", env!("CARGO_PKG_VERSION"));
@@ -72,18 +78,26 @@ fn parse_launch(args: &[String]) -> Launch {
             _ => {}
         }
     }
-    l
+    Ok(l)
 }
 
 /// Messages from worker threads.
 enum Msg {
-    Done(Outcome),
+    Done(ViewAuthority, Outcome),
     /// A speaker chip was clicked.
-    Rename(SpeakerChip),
+    Rename(ViewAuthority, SpeakerChip),
     /// `meeting label` named these keys; the socket does not say so.
-    Labeled(Vec<String>, String),
-    AskLine(String),
-    AskExited(bool),
+    Labeled(ViewAuthority, Vec<String>, String),
+    AskLine(ViewAuthority, u64, String),
+    AskExited(ViewAuthority, u64, bool),
+}
+
+/// Configuration and effective selection that authorized a meeting action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ViewAuthority {
+    generation: u64,
+    view_epoch: u64,
+    meeting_id: Option<String>,
 }
 
 /// Widgets the refresh code updates.
@@ -119,6 +133,13 @@ struct Ui {
 
 /// Everything the window knows.
 struct State {
+    generation: u64,
+    view_epoch: u64,
+    // A hello can replace live.meeting_id before selection is reconciled.
+    view_id: Option<String>,
+    ask_serial: u64,
+    snapshot_ready: bool,
+    pending_launch: Option<(Instant, Launch)>,
     meetings: MeetingConfig,
     cli: Cli,
     live: MeetingView,
@@ -138,10 +159,43 @@ struct State {
     notes_loaded_for: Option<String>,
     notes_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     tx: Sender<Msg>,
+    rx: Receiver<Msg>,
+    feed_rx: Receiver<Feed>,
     feed: Option<FeedHandle>,
 }
 
 impl State {
+    fn new(meetings: MeetingConfig, cli: Cli, generation: u64) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let (feed_tx, feed_rx) = mpsc::channel();
+        let feed = spawn_feed(voxtype::meeting::events::default_socket_path(), feed_tx);
+        Self {
+            generation,
+            view_epoch: 0,
+            view_id: None,
+            ask_serial: 0,
+            snapshot_ready: false,
+            pending_launch: None,
+            list: voxtype::meeting::list_meeting_entries(&meetings, Some(50)).unwrap_or_default(),
+            meetings,
+            cli,
+            live: MeetingView::live(),
+            stored: None,
+            past: false,
+            follow: true,
+            selected: None,
+            rendered_revision: None,
+            ask: None,
+            notes_dirty: false,
+            notes_loaded_for: None,
+            notes_seen_at: None,
+            tx,
+            rx,
+            feed_rx,
+            feed: Some(feed),
+        }
+    }
+
     fn view(&self) -> &MeetingView {
         self.stored.as_ref().unwrap_or(&self.live)
     }
@@ -150,26 +204,33 @@ impl State {
         self.view().meeting_id.clone()
     }
 
+    fn authority(&self) -> ViewAuthority {
+        ViewAuthority {
+            generation: self.generation,
+            view_epoch: self.view_epoch,
+            meeting_id: self.view_id.clone(),
+        }
+    }
+
     fn run(&self, request: Request) {
         let cli = self.cli.clone();
         let tx = self.tx.clone();
+        let origin = self.authority();
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Done(cli.run(&request)));
+            let _ = tx.send(Msg::Done(origin, cli.run(&request)));
         });
     }
 
     /// Name a speaker chip: one `meeting label` per key behind it, in
     /// order, stopping at the first that fails; then apply it here.
-    fn label(&self, chip: &SpeakerChip, name: &str) {
-        let Some(id) = self.meeting_id() else {
-            return;
-        };
+    fn label(&self, id: &str, chip: &SpeakerChip, name: &str) {
         let requests: Vec<Request> = chip
             .keys
             .iter()
-            .map(|key| commands::label(&id, key, name))
+            .map(|key| commands::label(id, key, name))
             .collect();
         let (cli, tx) = (self.cli.clone(), self.tx.clone());
+        let origin = self.authority();
         let (keys, name) = (chip.keys.clone(), name.to_string());
         std::thread::spawn(move || {
             let mut last = None;
@@ -183,9 +244,9 @@ impl State {
             }
             if let Some(out) = last {
                 if out.ok {
-                    let _ = tx.send(Msg::Labeled(keys, name));
+                    let _ = tx.send(Msg::Labeled(origin.clone(), keys, name));
                 }
-                let _ = tx.send(Msg::Done(out));
+                let _ = tx.send(Msg::Done(origin, out));
             }
         });
     }
@@ -201,21 +262,37 @@ type Shared = Rc<RefCell<State>>;
 /// The window once it exists, for later launches to reuse.
 type Running = Rc<RefCell<Option<(Rc<Ui>, Shared)>>>;
 
-fn meeting_config() -> MeetingConfig {
-    let config =
-        voxtype::config::load_config(Config::path_override().as_deref()).unwrap_or_default();
+fn meeting_config(config_path: Option<&Path>) -> anyhow::Result<MeetingConfig> {
+    use anyhow::Context;
+    if let Some(path) = config_path {
+        std::fs::File::open(path)
+            .with_context(|| format!("Cannot read config {}", path.display()))?;
+    }
+    let config = voxtype::config::load_config(config_path)?;
     let storage_path = if config.meeting.storage_path == "auto" {
         StorageConfig::default_storage_path()
     } else {
         PathBuf::from(&config.meeting.storage_path)
     };
-    MeetingConfig {
+    Ok(MeetingConfig {
         storage: StorageConfig {
             storage_path,
             my_name: config.meeting.my_name.clone(),
             ..StorageConfig::default()
         },
         ..MeetingConfig::default()
+    })
+}
+
+fn meeting_cli(config_path: Option<&Path>) -> Cli {
+    use voxtype::osd::frontend::{OsdProbe, SystemProbe};
+    Cli {
+        exe: SystemProbe
+            .find_voxtype_binary("voxtype")
+            .unwrap_or_else(|| PathBuf::from("voxtype")),
+        global_args: config_path
+            .map(|p| vec!["--config".into(), p.display().to_string()])
+            .unwrap_or_default(),
     }
 }
 
@@ -548,6 +625,8 @@ fn refresh(ui: &Ui, st: &mut State) {
                 format!("{who} is answering…")
             }
         ));
+    } else {
+        ui.ask_answer.set_text("");
     }
 }
 
@@ -612,8 +691,9 @@ fn render_side(ui: &Ui, st: &mut State, view: &MeetingView) {
         b.set_widget_name(&chip.name);
         b.add_css_class("flat");
         let (tx, chip) = (st.tx.clone(), chip.clone());
+        let origin = st.authority();
         b.connect_clicked(move |_| {
-            let _ = tx.send(Msg::Rename(chip.clone()));
+            let _ = tx.send(Msg::Rename(origin.clone(), chip.clone()));
         });
         ui.chips.append(&b);
     }
@@ -777,6 +857,32 @@ fn prompt(
     win.present();
 }
 
+fn select_view(ui: &Ui, st: &mut State, id: Option<String>) {
+    if st.view_id != id {
+        st.view_epoch = st.view_epoch.wrapping_add(1);
+        st.view_id = id;
+        st.ask_serial = st.ask_serial.wrapping_add(1);
+        st.ask = None;
+        st.selected = None;
+        st.notes_dirty = false;
+        st.notes_loaded_for = None;
+        st.notes_seen_at = None;
+        st.rendered_revision = None;
+        ui.ask_entry.set_text("");
+        ui.ask_answer.set_text("");
+        ui.status.set_text("");
+    }
+}
+
+fn dialog_current(ui: &Ui, st: &State, origin: &ViewAuthority) -> bool {
+    let current = st.authority() == *origin && !st.read_only();
+    if !current {
+        ui.status
+            .set_text("Meeting selection changed. Reopen this action in the current meeting.");
+    }
+    current
+}
+
 fn open_meeting(ui: &Ui, st: &mut State, id: Option<&str>) {
     let live_id = st.live.meeting_id.clone();
     st.past = false;
@@ -794,6 +900,8 @@ fn open_meeting(ui: &Ui, st: &mut State, id: Option<&str>) {
             }
         },
     }
+    let selected_id = st.meeting_id();
+    select_view(ui, st, selected_id);
     st.follow = st.stored.is_none();
     st.selected = None;
     st.notes_dirty = false;
@@ -802,6 +910,24 @@ fn open_meeting(ui: &Ui, st: &mut State, id: Option<&str>) {
 }
 
 fn apply_launch(ui: &Ui, st: &mut State, launch: &Launch) {
+    let implicit = launch.meeting.is_none() || launch.meeting.as_deref() == Some("current");
+    if implicit
+        && !st.snapshot_ready
+        && (launch.ask.is_some() || launch.ask_id.is_some() || launch.tab.is_some())
+    {
+        // Identity belongs to this context's initial snapshot, not the old
+        // window or a guessed stored ID. Replacing State drops this intent.
+        st.pending_launch = Some((Instant::now() + Duration::from_secs(3), launch.clone()));
+        ui.status
+            .set_text("Waiting for the current meeting status…");
+        ui.window.present();
+        return;
+    }
+    apply_resolved_launch(ui, st, launch);
+}
+
+fn apply_resolved_launch(ui: &Ui, st: &mut State, launch: &Launch) {
+    ui.status.set_text("");
     if launch.meeting.is_some()
         || launch.tab.is_some()
         || launch.ask_id.is_some()
@@ -809,13 +935,29 @@ fn apply_launch(ui: &Ui, st: &mut State, launch: &Launch) {
     {
         open_meeting(ui, st, launch.meeting.as_deref());
     }
+    let implicit = launch.meeting.is_none() || launch.meeting.as_deref() == Some("current");
+    if implicit
+        && st.meeting_id().is_none()
+        && (launch.ask.is_some() || launch.ask_id.is_some() || launch.tab.is_some())
+    {
+        ui.status.set_text(if st.snapshot_ready {
+            "No active meeting is available. Open a saved meeting to use this view."
+        } else {
+            "Meeting status is unavailable. Reconnect to the daemon or open a saved meeting."
+        });
+        ui.window.present();
+        return;
+    }
     if let (Some(ask_id), Some(id)) = (&launch.ask_id, st.meeting_id()) {
+        let mut found = false;
         if let Ok(m) = voxtype::meeting::get_meeting(&st.meetings, &id) {
             if let Some(folder) = m.metadata.storage_path.as_deref() {
                 if let Some(rec) = voxtype::meeting::assistant::asks::load(folder)
                     .into_iter()
                     .find(|r| &r.id == ask_id)
                 {
+                    found = true;
+                    st.ask_serial = st.ask_serial.wrapping_add(1);
                     st.ask = Some(AskAnswer {
                         question: rec.question,
                         answer: rec.answer,
@@ -826,9 +968,23 @@ fn apply_launch(ui: &Ui, st: &mut State, launch: &Launch) {
                 }
             }
         }
+        if !found {
+            ui.status.set_text(&format!(
+                "Could not find saved question {ask_id} for meeting {id}"
+            ));
+        }
     }
     if let Some(q) = &launch.ask {
-        start_ask(st, q);
+        if st.meeting_id().is_some() {
+            ui.status.set_text("");
+            start_ask(st, q);
+        } else {
+            ui.status.set_text(if st.snapshot_ready {
+                "No active meeting is available. Open a saved meeting before asking a question."
+            } else {
+                "Meeting status is unavailable. Reconnect to the daemon or open a saved meeting."
+            });
+        }
     }
     if launch.tab.as_deref() == Some("ask") || launch.ask_id.is_some() {
         ui.ask_entry.grab_focus();
@@ -844,13 +1000,15 @@ fn start_ask(st: &mut State, question: &str) {
         return;
     };
     st.ask = Some(AskAnswer::new(question));
+    st.ask_serial = st.ask_serial.wrapping_add(1);
+    let (origin, serial) = (st.authority(), st.ask_serial);
     let (cli, tx, q) = (st.cli.clone(), st.tx.clone(), question.to_string());
     std::thread::spawn(move || {
         let tx2 = tx.clone();
         let ok = cli.ask(&id, &q, |line| {
-            let _ = tx2.send(Msg::AskLine(line.to_string()));
+            let _ = tx2.send(Msg::AskLine(origin.clone(), serial, line.to_string()));
         });
-        let _ = tx.send(Msg::AskExited(ok));
+        let _ = tx.send(Msg::AskExited(origin, serial, ok));
     });
 }
 
@@ -863,7 +1021,7 @@ fn selected_segment(ui: &Ui, st: &State) -> Option<u32> {
         .map(|s| s.id)
 }
 
-fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Msg>) {
+fn wire(ui: Rc<Ui>, shared: Shared) {
     // Pause / Resume / Stop.
     {
         let s = shared.clone();
@@ -880,14 +1038,17 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
         let (s, u) = (shared.clone(), ui.clone());
         ui.stop_button.connect_clicked(move |_| {
             let s = s.clone();
+            let origin = s.borrow().authority();
+            let u2 = u.clone();
             prompt(
                 &u.window,
                 "Stop the meeting?",
                 &["Stop meeting".to_string()],
                 "Or press Escape to keep recording",
                 move |choice| {
-                    if choice == "Stop meeting" {
-                        s.borrow().run(commands::stop());
+                    let st = s.borrow();
+                    if choice == "Stop meeting" && dialog_current(&u2, &st, &origin) {
+                        st.run(commands::stop());
                     }
                 },
             );
@@ -911,6 +1072,7 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
         ui.back_button.connect_clicked(move |_| {
             let mut st = s.borrow_mut();
             st.stored = None;
+            select_view(&u, &mut st, None);
             st.list =
                 voxtype::meeting::list_meeting_entries(&st.meetings, Some(50)).unwrap_or_default();
             render_list(&u, &st);
@@ -993,6 +1155,8 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                 return;
             };
             let names: Vec<String> = st.view().speakers().into_iter().map(|c| c.name).collect();
+            let origin = st.authority();
+            let u2 = u.clone();
             let s2 = s.clone();
             prompt(
                 &u.window,
@@ -1000,7 +1164,10 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                 &names,
                 "New speaker's name",
                 move |who| {
-                    s2.borrow().run(commands::reassign(&id, seg, &who));
+                    let st = s2.borrow();
+                    if dialog_current(&u2, &st, &origin) {
+                        st.run(commands::reassign(&id, seg, &who));
+                    }
                 },
             );
         });
@@ -1014,8 +1181,13 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                 return;
             };
             let s2 = s.clone();
+            let origin = st.authority();
+            let u2 = u.clone();
             prompt(&u.window, "Note on this line", &[], "Note", move |text| {
-                s2.borrow().run(commands::annotate(&id, seg, &text));
+                let st = s2.borrow();
+                if dialog_current(&u2, &st, &origin) {
+                    st.run(commands::annotate(&id, seg, &text));
+                }
             });
         });
     }
@@ -1065,12 +1237,16 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
         let mut resync = false;
         let mut list_changed = false;
         let mut started = false;
-        while let Ok(feed) = feed_rx.try_recv() {
+        while let Ok(feed) = st.feed_rx.try_recv() {
             match feed {
                 Feed::Connected => {}
                 Feed::Disconnected => st.live.disconnected(),
                 Feed::Line(line) => {
                     let was_live = st.live.state.is_live();
+                    let snapshot = matches!(ViewEvent::parse(&line), Some(ViewEvent::Hello { .. }));
+                    let previous_id = snapshot.then(|| st.live.meeting_id.clone()).flatten();
+                    let initial_snapshot = snapshot && !st.snapshot_ready;
+                    st.snapshot_ready |= snapshot;
                     if st.live.apply_line(&line) == Change::Resync {
                         resync = true;
                     }
@@ -1080,7 +1256,14 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                     if was_live != st.live.state.is_live() {
                         list_changed = true;
                     }
-                    if !was_live && st.live.state.is_live() {
+                    let preserve_saved = initial_snapshot
+                        && st
+                            .stored
+                            .as_ref()
+                            .is_some_and(|stored| stored.meeting_id != st.live.meeting_id);
+                    let changed_identity = snapshot && previous_id != st.live.meeting_id;
+                    if st.live.state.is_live() && (!was_live || changed_identity) && !preserve_saved
+                    {
                         started = true;
                     }
                 }
@@ -1090,15 +1273,26 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
         // view, whatever was on screen.
         if started {
             open_meeting(&u, &mut st, None);
+        } else if u.stack.visible_child_name().as_deref() == Some("meeting") {
+            let id = st.meeting_id();
+            select_view(&u, &mut st, id);
+        }
+        if st
+            .pending_launch
+            .as_ref()
+            .is_some_and(|(deadline, _)| st.snapshot_ready || Instant::now() >= *deadline)
+        {
+            let (_, launch) = st.pending_launch.take().unwrap();
+            apply_resolved_launch(&u, &mut st, &launch);
         }
         if resync {
             if let Some(f) = st.feed.as_ref() {
                 f.resync();
             }
         }
-        while let Ok(msg) = msg_rx.try_recv() {
+        while let Ok(msg) = st.rx.try_recv() {
             match msg {
-                Msg::Done(out) => {
+                Msg::Done(origin, out) if origin == st.authority() => {
                     u.status.set_text(&out.status_line());
                     let ended = st.stored.is_some() || !st.live.state.is_live();
                     if out.ok && out.reload && ended {
@@ -1109,31 +1303,47 @@ fn wire(ui: Rc<Ui>, shared: Shared, feed_rx: Receiver<Feed>, msg_rx: Receiver<Ms
                         }
                     }
                 }
-                Msg::Rename(chip) => {
+                Msg::Rename(origin, chip) => {
+                    if !dialog_current(&u, &st, &origin) {
+                        continue;
+                    }
                     if st.meeting_id().is_some() && !st.read_only() {
                         let s2 = s.clone();
+                        let u2 = u.clone();
                         prompt(
                             &u.window,
                             &format!("Rename {}", chip.name),
                             &[],
                             "Name",
-                            move |new_name| s2.borrow().label(&chip, &new_name),
+                            move |new_name| {
+                                let st = s2.borrow();
+                                if dialog_current(&u2, &st, &origin) {
+                                    if let Some(id) = origin.meeting_id.as_deref() {
+                                        st.label(id, &chip, &new_name);
+                                    }
+                                }
+                            },
                         );
                     }
                 }
-                Msg::Labeled(keys, name) => {
+                Msg::Labeled(origin, keys, name) if origin == st.authority() => {
                     st.live.apply_label(&keys, &name);
                 }
-                Msg::AskLine(line) => {
+                Msg::AskLine(origin, serial, line)
+                    if origin == st.authority() && serial == st.ask_serial =>
+                {
                     if let Some(a) = st.ask.as_mut() {
                         a.apply_line(&line);
                     }
                 }
-                Msg::AskExited(ok) => {
+                Msg::AskExited(origin, serial, ok)
+                    if origin == st.authority() && serial == st.ask_serial =>
+                {
                     if let Some(a) = st.ask.as_mut() {
                         a.finished(ok);
                     }
                 }
+                _ => {}
             }
         }
         if list_changed && u.stack.visible_child_name().as_deref() == Some("list") {
@@ -1216,7 +1426,28 @@ fn smoke_report(ui: &Ui, st: &State) -> serde_json::Value {
     })
 }
 
+fn launch_error(
+    cmdline: &gio::ApplicationCommandLine,
+    error: impl std::fmt::Display,
+) -> glib::ExitCode {
+    use glib::translate::ToGlibPtr;
+    let message = std::ffi::CString::new(format!("{error}\n").replace('\0', "\\0")).unwrap();
+    // The literal Rust binding needs GLib 2.80. This ABI is available on our
+    // older supported GLib versions and sends errors to the forwarded caller.
+    unsafe {
+        gio::ffi::g_application_command_line_printerr(
+            cmdline.to_glib_none().0,
+            c"%s".as_ptr(),
+            message.as_ptr(),
+        );
+    }
+    glib::ExitCode::FAILURE
+}
+
 fn main() -> glib::ExitCode {
+    if std::env::args().any(|arg| arg == "--history") {
+        return history::run();
+    }
     // Before GTK starts: the release check runs this where there is no display.
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("voxtype-meetings-gtk4 {}", env!("CARGO_PKG_VERSION"));
@@ -1240,48 +1471,47 @@ fn main() -> glib::ExitCode {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let launch = parse_launch(&args);
+        let launch = match parse_launch(&args, cmdline.cwd().as_deref()) {
+            Ok(launch) => launch,
+            Err(error) => return launch_error(cmdline, error),
+        };
+        let meetings = match meeting_config(launch.config_path.as_deref()) {
+            Ok(meetings) => meetings,
+            Err(error) => return launch_error(cmdline, error),
+        };
+        let cli = meeting_cli(launch.config_path.as_deref());
         let mut cell = ui_cell.borrow_mut();
         if let Some((ui, shared)) = cell.as_ref() {
-            // A second launch: show what it asked for in this window.
-            apply_launch(ui, &mut shared.borrow_mut(), &launch);
+            // Replace both authority and mailboxes. Old workers keep their
+            // original client, but cannot reply into a different context.
+            let mut st = shared.borrow_mut();
+            let generation = st.generation + 1;
+            *st = State::new(meetings, cli, generation);
+            ui.ask_answer.set_text("");
+            ui.ask_entry.set_text("");
+            ui.start_title.set_text("");
+            ui.status.set_text("");
+            render_list(ui, &st);
+            ui.stack.set_visible_child_name("list");
+            apply_launch(ui, &mut st, &launch);
+            refresh(ui, &mut st);
             return glib::ExitCode::SUCCESS;
         }
 
         let ui = Rc::new(build_ui(app));
-        let (feed_tx, feed_rx) = mpsc::channel();
-        let feed = spawn_feed(voxtype::meeting::events::default_socket_path(), feed_tx);
-        let (tx, msg_rx) = mpsc::channel();
-        let meetings = meeting_config();
-        let state = State {
-            list: voxtype::meeting::list_meeting_entries(&meetings, Some(50)).unwrap_or_default(),
-            meetings,
-            cli: Cli::current().unwrap_or(Cli {
-                exe: PathBuf::from("voxtype"),
-                global_args: Vec::new(),
-            }),
-            live: MeetingView::live(),
-            stored: None,
-            past: false,
-            follow: true,
-            selected: None,
-            rendered_revision: None,
-            ask: None,
-            notes_dirty: false,
-            notes_loaded_for: None,
-            notes_seen_at: None,
-            tx,
-            feed: Some(feed),
-        };
+        let state = State::new(meetings, cli, 0);
         let shared: Shared = Rc::new(RefCell::new(state));
         render_list(&ui, &shared.borrow());
         ui.stack.set_visible_child_name("list");
-        wire(ui.clone(), shared.clone(), feed_rx, msg_rx);
+        wire(ui.clone(), shared.clone());
         {
             // Let the first hello arrive, then honour the launch.
             let (u, s) = (ui.clone(), shared.clone());
             glib::timeout_add_local_once(Duration::from_millis(400), move || {
                 let mut st = s.borrow_mut();
+                if st.generation != 0 {
+                    return;
+                }
                 apply_launch(&u, &mut st, &launch);
                 render_list(&u, &st);
                 refresh(&u, &mut st);
@@ -1319,4 +1549,69 @@ fn main() -> glib::ExitCode {
         glib::ExitCode::SUCCESS
     });
     app.run()
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    #[test]
+    fn relative_config_uses_each_invocations_cwd_without_global_state() {
+        let args = vec!["gtk".into(), "--config".into(), "config.toml".into()];
+        for root in ["/private/A", "/private/B"] {
+            let launch = parse_launch(&args, Some(Path::new(root))).unwrap();
+            assert_eq!(
+                launch.config_path,
+                Some(Path::new(root).join("config.toml"))
+            );
+        }
+        assert!(parse_launch(&args, None).is_err());
+        assert!(parse_launch(&["gtk".into()], None)
+            .unwrap()
+            .config_path
+            .is_none());
+    }
+
+    #[test]
+    fn client_is_canonical_and_keeps_explicit_or_default_config() {
+        let client = meeting_cli(Some(Path::new("/private/A/config.toml")));
+        assert_eq!(client.exe.file_name().unwrap(), "voxtype");
+        assert_eq!(client.global_args, ["--config", "/private/A/config.toml"]);
+        assert!(meeting_cli(None).global_args.is_empty());
+    }
+
+    #[test]
+    fn replacing_context_disconnects_old_worker_and_widget_mailboxes() {
+        let root = tempfile::tempdir().unwrap();
+        let meetings = MeetingConfig {
+            storage: StorageConfig {
+                storage_path: root.path().join("meetings"),
+                ..StorageConfig::default()
+            },
+            ..MeetingConfig::default()
+        };
+        let mut state = State::new(
+            meetings.clone(),
+            meeting_cli(Some(Path::new("/private/A.toml"))),
+            0,
+        );
+        let old_tx = state.tx.clone();
+        let old_client = state.cli.clone();
+        let old_authority = state.authority();
+        state = State::new(meetings, meeting_cli(Some(Path::new("/private/B.toml"))), 1);
+        assert!(old_tx
+            .send(Msg::AskLine(
+                old_authority,
+                0,
+                "obsolete private A answer".into(),
+            ))
+            .is_err());
+        assert!(matches!(
+            state.rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(old_client.global_args, ["--config", "/private/A.toml"]);
+        assert_eq!(state.cli.global_args, ["--config", "/private/B.toml"]);
+        assert_eq!(state.generation, 1);
+    }
 }

@@ -459,7 +459,7 @@ impl SchemaForm {
             return;
         };
         let text = input.buffer().trim();
-        if text.is_empty() {
+        if text.is_empty() && spec.key != "history.exclude_apps" {
             self.set(spec, Pending::Unset);
             return;
         }

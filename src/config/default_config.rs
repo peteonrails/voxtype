@@ -591,9 +591,15 @@ mod tests {
         let prose = "What we need is a switch. No one knows. We shipped it. iPhone users benefit. Version one point two point three.";
         assert_eq!(processor.process(prose), prose);
 
+        let cleaned = processor.process("Um, one of the things we need costs twenty five dollars.");
+        #[cfg(feature = "itn")]
+        assert_eq!(cleaned, "One of the things we need costs $25.");
+        // Without the optional number formatter, filler/casing cleanup still
+        // runs, but spoken quantities must not pretend ITN was compiled in.
+        #[cfg(not(feature = "itn"))]
         assert_eq!(
-            processor.process("Um, one of the things we need costs twenty five dollars."),
-            "One of the things we need costs $25."
+            cleaned,
+            "One of the things we need costs twenty five dollars."
         );
     }
 }

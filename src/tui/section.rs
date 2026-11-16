@@ -10,6 +10,7 @@ pub enum Section {
     Text,
     Vad,
     Meeting,
+    History,
     Notifications,
     Osd,
     Waybar,
@@ -26,6 +27,7 @@ impl Section {
         Section::Text,
         Section::Vad,
         Section::Meeting,
+        Section::History,
         Section::Notifications,
         Section::Osd,
         Section::Waybar,
@@ -42,6 +44,7 @@ impl Section {
             Section::Text => "Text Cleanup",
             Section::Vad => "VAD",
             Section::Meeting => "Meeting",
+            Section::History => "History",
             Section::Notifications => "Notifications",
             Section::Osd => "OSD",
             Section::Waybar => "Status",
@@ -61,10 +64,26 @@ impl Section {
             Section::Text => "Deterministic cleanup, optional LARD model, replacements",
             Section::Vad => "Silero VAD, energy thresholds, eager processing",
             Section::Meeting => "Meeting mode, call detection, audio, speakers, summary",
+            Section::History => "Dictation history, pause, retention and focused-app privacy",
             Section::Notifications => "Desktop notifications and expire times",
             Section::Osd => "Floating waveform OSD: frontend, position, size, opacity",
             Section::Waybar => "Native Linux tray, Waybar icon theme and overrides",
             Section::Advanced => "GPU isolation, flash attention, on-demand loading",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Section;
+
+    #[test]
+    fn history_configurator_has_a_discoverable_section() {
+        assert!(
+            Section::ALL
+                .iter()
+                .any(|section| section.label() == "History"),
+            "History collection/privacy settings need their own configurator page"
+        );
     }
 }

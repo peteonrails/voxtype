@@ -191,6 +191,60 @@ graphical frontend is installed, install a supported terminal or run
   availability, input devices, OSD styles) is left empty rather than showing old
   entries. Run the same command with `--json` in a terminal for the full error.
 
+## Dictation history
+
+### No entries after upgrading
+
+Existing configurations keep history off unless you choose it. Run
+`voxtype history status --json`, then `voxtype history enable` if you want
+dictations stored. Enable and resume are different: an enabled but paused
+history still writes nothing. The daemon reloads valid history settings without
+a restart. Explicit daemon flags or environment overrides can keep the
+effective setting different from the saved file.
+
+Commands return nonzero on failure. If a config write fails validation or the
+config cannot be read, do not assume that history was paused or disabled. Fix
+the reported config error and read the state back before private dictation.
+
+### An exclusion did not stop an entry
+
+Exclusions use the focused app's class or app ID, not its window title. They
+apply when either the starting or ending window is identified as excluded.
+Unknown focus is still recorded: unsupported desktops, a failed compositor
+connection, a timeout or an unrecognized response can leave the app unknown.
+A password manager running inside a browser is seen as the browser. Pause
+history before sensitive dictation when app identification cannot protect it.
+Turning `record_app` off hides the recorded app field; it does not disable
+exclusion checks or make unknown focus fail closed.
+
+### History files exist but search is missing or stale
+
+Day files are authoritative; `index.db` is derived. Run
+`voxtype history reindex --json` and inspect both stdout and its exit status.
+Unreadable day files are reported, not silently certified as a complete rebuild.
+Days older than a week can be `.jsonl.gz`; do not rename them to `.jsonl`.
+
+A symlinked history directory or day file is rejected rather than followed.
+Rewrites use exclusively created, randomly named temporary files instead of
+opening a pre-existing temporary path. Check the path reported by the error. Do not solve
+this by broadly changing permissions or recursively deleting files. Preserve
+the data before correcting an unintended link or ownership problem.
+
+### A delete reports that SQLite readers block WAL cleanup
+
+The authoritative file change may already have completed, but cleanup is not
+finished. Close other history and meeting views, then run
+`voxtype history reindex --json` and require a successful exit. A successful
+file rewrite alone does not mean old WAL pages were cleared. Filesystem
+snapshots, backups and previously allocated disk blocks are outside SQLite's
+secure-delete guarantee; use full-disk encryption for data at rest.
+
+### A correction is refused for a newer schema
+
+Upgrade Voxtype before editing that entry. The original file is left unchanged
+so unknown nested fields are not lost. An empty correction is intentional: it
+must not restore the original text when copying or re-sending.
+
 ## Meeting view
 
 The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says

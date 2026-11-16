@@ -379,6 +379,41 @@ impl ConfigEditor {
             path: parent.to_path_buf(),
             source: e,
         })?;
+        let _history_privacy =
+            crate::history::store::privacy_lock(&self.path).map_err(|source| {
+                EditorError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
+        let current_history = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| toml::from_str::<config::Config>(&text).ok())
+            .map(|config| config.history);
+        let invalidates_history = current_history
+            .as_ref()
+            .map_or(next.history.paused || !next.history.enabled, |old| {
+                (!old.paused && next.history.paused) || (old.enabled && !next.history.enabled)
+            });
+        if invalidates_history {
+            crate::history::store::advance_privacy_generation(&self.path).map_err(|source| {
+                EditorError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
+        }
+
+        let permissions = match fs::metadata(&self.path) {
+            Ok(metadata) => Some(metadata.permissions()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(EditorError::Write {
+                    path: self.path.clone(),
+                    source,
+                })
+            }
+        };
 
         // Back up the existing on-disk config the first time the TUI saves.
         // toml_edit reformats whitespace, comment placement, and key
@@ -396,44 +431,65 @@ impl ConfigEditor {
             name.push(".bak");
             bak.set_file_name(name);
             if !bak.exists() {
-                let _ = fs::copy(&self.path, &bak);
+                // Keep the best-effort, first-backup behavior without following
+                // a dangling .bak symlink or exposing a newly created backup.
+                let _ = (|| -> std::io::Result<()> {
+                    let mut backup = tempfile::NamedTempFile::new_in(parent)?;
+                    std::io::copy(&mut fs::File::open(&self.path)?, backup.as_file_mut())?;
+                    backup.as_file().sync_all()?;
+                    backup
+                        .persist_noclobber(&bak)
+                        .map_err(|error| error.error)?;
+                    Ok(())
+                })();
             }
         }
 
-        let mut tmp = self.path.clone();
-        let mut file_name = tmp
-            .file_name()
-            .map(|n| n.to_os_string())
-            .unwrap_or_default();
-        file_name.push(".tmp");
-        tmp.set_file_name(file_name);
-
-        {
-            let mut f = fs::File::create(&tmp).map_err(|e| EditorError::Write {
-                path: tmp.clone(),
-                source: e,
+        // NamedTempFile creates a unique 0600 replacement before any config
+        // bytes are written, independent of umask and preexisting .tmp paths.
+        let mut tmp =
+            tempfile::NamedTempFile::new_in(parent).map_err(|source| EditorError::Write {
+                path: parent.to_path_buf(),
+                source,
             })?;
-            f.write_all(serialized.as_bytes())
-                .map_err(|e| EditorError::Write {
-                    path: tmp.clone(),
-                    source: e,
-                })?;
-            f.sync_all().map_err(|e| EditorError::Write {
-                path: tmp.clone(),
-                source: e,
+        tmp.write_all(serialized.as_bytes())
+            .map_err(|source| EditorError::Write {
+                path: tmp.path().to_path_buf(),
+                source,
             })?;
-        }
+        tmp.as_file()
+            .sync_all()
+            .map_err(|source| EditorError::Write {
+                path: tmp.path().to_path_buf(),
+                source,
+            })?;
 
         // Validate by loading via the same code path the daemon uses.
-        if let Err(e) = config::load_config(Some(&tmp)) {
-            let _ = fs::remove_file(&tmp);
+        if let Err(e) = config::load_config(Some(tmp.path())) {
             return Err(EditorError::Validate(format!("{}", e)));
         }
 
-        fs::rename(&tmp, &self.path).map_err(|e| EditorError::Write {
-            path: self.path.clone(),
-            source: e,
-        })?;
+        // Restore an existing file's intended permissions only after the
+        // sensitive write and validation. A new config remains private 0600.
+        if let Some(permissions) = permissions {
+            tmp.as_file()
+                .set_permissions(permissions)
+                .map_err(|source| EditorError::Write {
+                    path: tmp.path().to_path_buf(),
+                    source,
+                })?;
+        }
+        tmp.as_file()
+            .sync_all()
+            .map_err(|source| EditorError::Write {
+                path: tmp.path().to_path_buf(),
+                source,
+            })?;
+        tmp.persist(&self.path)
+            .map_err(|error| EditorError::Write {
+                path: self.path.clone(),
+                source: error.error,
+            })?;
 
         self.dirty = false;
         Ok(())

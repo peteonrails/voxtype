@@ -1022,7 +1022,7 @@ async fn write_transcription_to_file(
 
 /// Where a file-mode transcript ended up.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum FileDelivery {
+pub enum FileDelivery {
     Written,
     /// The write failed (error text) and the fallback chain took the text.
     FellBack(String),
@@ -1034,11 +1034,22 @@ enum FileDelivery {
 /// every other output mode, so a compositor submap entered for the recording
 /// is always reset. When the write fails, `fallback` (the clipboard chain,
 /// empty when `fallback_to_clipboard` is off) gets the text instead.
+#[cfg(test)]
 async fn deliver_to_file(
     path: &Path,
     text: &str,
     cfg: &crate::config::OutputConfig,
     fallback: &[Box<dyn TextOutput>],
+) -> FileDelivery {
+    deliver_to_file_observed(path, text, cfg, fallback, None).await
+}
+
+pub async fn deliver_to_file_observed(
+    path: &Path,
+    text: &str,
+    cfg: &crate::config::OutputConfig,
+    fallback: &[Box<dyn TextOutput>],
+    history_context: Option<&crate::history::recorder::DeliveryContext>,
 ) -> FileDelivery {
     if let Some(cmd) = &cfg.pre_output_command {
         if let Err(e) = output::run_hook(cmd, "pre_output").await {
@@ -1056,6 +1067,7 @@ async fn deliver_to_file(
                     fallback,
                     text,
                     output::OutputOptions {
+                        history_context,
                         pre_output_command: None,
                         post_output_command: None,
                         wait_for_modifier_release: false,
@@ -1125,6 +1137,14 @@ type TranscriberLoadTask = tokio::task::JoinHandle<
 >;
 
 /// Main daemon that orchestrates all components
+#[cfg(test)]
+type HistoryTestEagerLoop = (
+    State,
+    Arc<dyn Transcriber>,
+    Arc<dyn Transcriber>,
+    tokio::sync::mpsc::Receiver<HotkeyEvent>,
+);
+
 pub struct Daemon {
     config: Config,
     pending_language: Option<Config>,
@@ -1199,6 +1219,15 @@ pub struct Daemon {
     // keyboard-layout hints to eitype/dotool, see issue #180) after the task
     // completes. Cleared when transcription_task is taken.
     active_transcriber: Option<Arc<dyn Transcriber>>,
+    // Exercise streaming startup/tap without opening an audio device.
+    #[cfg(test)]
+    history_test_capture: Option<Box<dyn AudioCapture>>,
+    #[cfg(test)]
+    history_test_eager_loop: Option<HistoryTestEagerLoop>,
+    #[cfg(test)]
+    history_test_next_capture: Option<Box<dyn AudioCapture>>,
+    #[cfg(test)]
+    history_test_completion_observer: Option<Arc<std::sync::atomic::AtomicBool>>,
     // Engine instance preloaded at startup when on_demand_loading is off.
     // Whisper draws its transcriber from model_manager instead; every other
     // engine clones from here. A field rather than a `run()` local so the
@@ -1211,6 +1240,8 @@ pub struct Daemon {
         usize,
         tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>,
     )>,
+    // A fresh Arc fences late blocking work from a cancelled eager recording.
+    eager_decoded: Arc<std::sync::atomic::AtomicBool>,
     // Voice Activity Detection (filters silence-only recordings)
     vad: Option<Arc<dyn crate::vad::VoiceActivityDetector>>,
     // Meeting mode daemon (optional, created when meeting starts)
@@ -1269,12 +1300,21 @@ pub struct Daemon {
     // transcription, after which `setup migrate --cleanup` may delete the
     // previous model. Read once at startup so the hot path does no I/O.
     model_upgrade_pending: bool,
+    // Dictation history (#209): settings, paths, and the dictation in
+    // flight. Filled in as the session goes, written once it is back to
+    // idle, so recording it never delays output.
+    history: Arc<std::sync::Mutex<crate::history::recorder::Recorder>>,
+    dictation: std::sync::Mutex<Option<crate::history::recorder::Pending>>,
+    history_maintenance: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Daemon {
     /// Create a new daemon with the given configuration
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
         let state_file_path = config.resolve_state_file();
+        let history = Arc::new(std::sync::Mutex::new(
+            crate::history::recorder::Recorder::new(&config, config_path.clone()),
+        ));
 
         // Initialize audio feedback if enabled
         let audio_feedback = if config.audio.feedback.enabled {
@@ -1412,8 +1452,17 @@ impl Daemon {
             whisper_prepare_task: None,
             transcription_task: None,
             active_transcriber: None,
+            #[cfg(test)]
+            history_test_capture: None,
+            #[cfg(test)]
+            history_test_eager_loop: None,
+            #[cfg(test)]
+            history_test_next_capture: None,
+            #[cfg(test)]
+            history_test_completion_observer: None,
             transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
+            eager_decoded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vad,
             meeting_daemon: None,
             meeting_state_file_path,
@@ -1439,7 +1488,120 @@ impl Daemon {
             osd_session_suppressed: std::sync::atomic::AtomicBool::new(false),
             osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
             model_upgrade_pending,
+            history,
+            dictation: std::sync::Mutex::new(None),
+            history_maintenance: None,
         }
+    }
+
+    /// Add to the dictation in flight, when history is recording it.
+    fn history_note(&self, note: impl FnOnce(&mut crate::history::recorder::Pending)) {
+        if let Some(pending) = self
+            .dictation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            note(pending);
+        }
+    }
+
+    /// Start recording a dictation to history, if it is on and not paused.
+    fn history_context(&self) -> Option<crate::history::recorder::DeliveryContext> {
+        self.dictation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|pending| pending.delivery_context())
+    }
+
+    /// Copy facts reported by the engine selected for this recording.
+    fn history_transcriber_metadata(&self, engine: &dyn Transcriber) {
+        let metadata = engine.runtime_metadata();
+        let language = engine.last_detected_language();
+        self.history_note(|pending| {
+            if let Some(model) = metadata.model {
+                pending.entry.model = model;
+            }
+            pending.entry.backend = metadata.backend;
+            pending.entry.model_load_ms = metadata.model_load_ms;
+            if language.is_some() {
+                pending.entry.language = language;
+            }
+        });
+    }
+
+    /// Start recording a dictation to history, if it is on and not paused.
+    fn history_eager_transcriber_metadata(&self, engine: &dyn Transcriber) {
+        if self
+            .eager_decoded
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.history_transcriber_metadata(engine);
+        } else {
+            let loaded = engine.runtime_metadata();
+            self.history_note(|pending| {
+                if let Some(model) = loaded.model {
+                    pending.entry.model = model;
+                }
+                pending.entry.model_load_ms = loaded.model_load_ms;
+                pending.entry.backend = None;
+                pending.entry.language = None;
+            });
+        }
+    }
+
+    fn history_begin(&self, state: &State) {
+        use crate::history::Trigger;
+        let pending = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .begin();
+        let pending = pending.map(|mut p| {
+            let model_override = match state {
+                State::Recording { model_override, .. }
+                | State::EagerRecording { model_override, .. }
+                | State::Streaming { model_override, .. } => model_override.as_deref(),
+                _ => None,
+            };
+            let (engine, model) = self.recording_engine_and_model(model_override);
+            p.entry.engine = engine;
+            p.entry.model = model;
+            p.entry.language = self.config.active_language().map(str::to_string);
+            p.entry.streaming = state.is_streaming();
+            p.entry.trigger = if self.is_external_trigger {
+                Trigger::Record
+            } else {
+                Trigger::Hotkey
+            };
+            let device = self.config.audio.device.trim();
+            p.entry.input_device = (!device.is_empty()).then(|| device.to_string());
+            let (variant, _) = crate::history::recorder::binary_variant_and_backend();
+            p.entry.variant = variant;
+            p
+        });
+        *self.dictation.lock().unwrap_or_else(|e| e.into_inner()) = pending;
+    }
+
+    /// The dictation is over: write it in the background.
+    fn history_commit(&self) {
+        let pending = self
+            .dictation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(mut pending) = pending else {
+            return;
+        };
+        if self.osd_limit_reached && pending.entry.ended_by == crate::history::EndedBy::Released {
+            pending.entry.ended_by = crate::history::EndedBy::Timeout;
+        }
+        let _ = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commit(pending);
     }
 
     /// Play audio feedback sound if enabled
@@ -1600,6 +1762,7 @@ impl Daemon {
                 set_osd_suppressed(suppressed);
             }
             "idle" | "stopped" => {
+                self.history_commit();
                 set_osd_suppressed(false);
                 if self.state_file_path.is_some() {
                     osd::session::clear_session(&Config::runtime_dir());
@@ -1637,6 +1800,9 @@ impl Daemon {
     /// Skipped when the state file is disabled, like every runtime file the
     /// OSD reads.
     fn begin_osd_session(&mut self, state: &State) {
+        self.active_transcriber = None;
+        self.eager_decoded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.history_begin(state);
         self.osd_limit_reached = false;
         self.osd_outcome_sent
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1692,6 +1858,20 @@ impl Daemon {
     /// Publish `outcome.json` saying how the session just ended, for OSD
     /// frontends to confirm the result.
     fn publish_osd_outcome(&self, outcome: osd::session::OutcomeKind, chars: usize) {
+        {
+            use crate::history::Outcome;
+            use osd::session::OutcomeKind;
+            let decided = match outcome {
+                OutcomeKind::Ok => Outcome::Delivered,
+                OutcomeKind::NoSpeech => Outcome::NoSpeech,
+                OutcomeKind::TooShort => Outcome::TooShort,
+                OutcomeKind::Empty => Outcome::Empty,
+                OutcomeKind::Cancelled => Outcome::Cancelled,
+                OutcomeKind::Error => Outcome::TranscriptionFailed,
+                OutcomeKind::OutputFailed => Outcome::OutputFailed,
+            };
+            self.history_note(|p| p.outcome(decided, None));
+        }
         if self.state_file_path.is_none()
             || self
                 .osd_outcome_sent
@@ -1756,7 +1936,14 @@ impl Daemon {
         // ever apply to a recording that was live, or already requested,
         // when it was issued (#606).
         discard_stale_cancel(self.start_request);
-        match audio::create_capture(&self.config.audio) {
+        #[cfg(test)]
+        let capture = match self.history_test_capture.take() {
+            Some(capture) => Ok(capture),
+            None => audio::create_capture(&self.config.audio),
+        };
+        #[cfg(not(test))]
+        let capture = audio::create_capture(&self.config.audio);
+        match capture {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     self.is_external_trigger = track_silence;
@@ -1824,7 +2011,8 @@ impl Daemon {
         } else {
             Vec::new()
         };
-        let delivery = deliver_to_file(path, text, cfg, &fallback).await;
+        let context = self.history_context();
+        let delivery = deliver_to_file_observed(path, text, cfg, &fallback, context.as_ref()).await;
         match &delivery {
             FileDelivery::Written => {}
             FileDelivery::FellBack(err) => {
@@ -1958,7 +2146,6 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
@@ -1970,6 +2157,10 @@ impl Daemon {
         };
         self.update_state("streaming");
         self.begin_osd_session(state);
+        self.active_transcriber = Some(transcriber);
+        self.history_note(|pending| pending.transcribing(0));
+        *streaming_session =
+            Some(StreamingSession::new().with_history_context(self.history_context()));
         self.play_feedback(SoundEvent::RecordingStart);
 
         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -2109,15 +2300,19 @@ impl Daemon {
             )
             .await;
 
-            let transcriber = match self
-                .get_transcriber_for_recording(model_override.as_deref())
-                .await
-            {
-                Ok(t) => t,
-                Err(()) => {
-                    *state = State::Idle;
-                    self.update_state("idle");
-                    return;
+            let transcriber = if let Some(selected) = eager_transcriber.as_ref() {
+                selected.clone()
+            } else {
+                match self
+                    .get_transcriber_for_recording(model_override.as_deref())
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(()) => {
+                        *state = State::Idle;
+                        self.update_state("idle");
+                        return;
+                    }
                 }
             };
 
@@ -2128,6 +2323,7 @@ impl Daemon {
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
+                self.active_transcriber = None;
                 self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                 self.reset_to_idle(state).await;
             }
@@ -2180,9 +2376,48 @@ impl Daemon {
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
         if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+            if let Ok(samples) = c.stop().await {
+                self.history_note(|pending| pending.entry.audio_ms = samples.len() as u64 / 16);
+            }
         }
         self.restore_recording_media();
+    }
+
+    // The event pump and private completion regressions share this exact error
+    // branch. Keep it separate from capture startup, which opens real devices.
+    async fn end_streaming_with_error(
+        &mut self,
+        error: crate::error::TranscribeError,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        tracing::error!("Streaming backend error: {}", error);
+        self.history_note(|pending| {
+            pending.outcome(
+                crate::history::Outcome::TranscriptionFailed,
+                Some(error.to_string()),
+            )
+        });
+        self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+        send_notification(
+            "Streaming Error",
+            &error.to_string(),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "critical",
+        )
+        .await;
+        self.end_streaming(
+            state,
+            audio_capture,
+            streaming_handle,
+            streaming_session,
+            streaming_chain,
+        )
+        .await;
     }
 
     async fn end_streaming(
@@ -2194,7 +2429,9 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
         if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+            if let Ok(samples) = c.stop().await {
+                self.history_note(|pending| pending.entry.audio_ms = samples.len() as u64 / 16);
+            }
         }
         self.restore_recording_media();
         if let Some(h) = streaming_handle.take() {
@@ -2203,6 +2440,11 @@ impl Daemon {
             let _ = h.task.await;
         }
         self.stop_streaming_drain_pump();
+
+        if let Some(engine) = self.active_transcriber.take() {
+            self.history_transcriber_metadata(engine.as_ref());
+        }
+        self.history_note(|pending| pending.transcribed());
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -2241,11 +2483,31 @@ impl Daemon {
             let vocabulary = read_profile_override()
                 .as_ref()
                 .and_then(|name| self.profile_vocabularies.get(name));
+            let raw_text = final_text;
             let final_text = self
                 .text_processor
-                .process_with_vocabulary(&final_text, vocabulary);
+                .process_with_vocabulary(&raw_text, vocabulary);
+            self.history_note(|p| p.texts(&raw_text, &final_text));
 
-            match self.deliver_file_output(&output_path, &final_text).await {
+            let delivery = self.deliver_file_output(&output_path, &final_text).await;
+            {
+                let (fell_back, error) = match &delivery {
+                    FileDelivery::Written => (false, None),
+                    FileDelivery::FellBack(_) => (true, None),
+                    FileDelivery::Lost(err) => (false, Some(err.to_string())),
+                };
+                self.history_note(|p| {
+                    p.entry.output = Some(crate::history::OutputInfo {
+                        mode: "file".into(),
+                        driver: Some(if fell_back { "clipboard" } else { "file" }.into()),
+                        fell_back,
+                    });
+                    if let Some(err) = error {
+                        p.outcome(crate::history::Outcome::OutputFailed, Some(err));
+                    }
+                });
+            }
+            match delivery {
                 FileDelivery::Written => {
                     let mode_str = match self.config.output.file_mode {
                         FileMode::Overwrite => "wrote",
@@ -2271,10 +2533,42 @@ impl Daemon {
             return;
         }
 
+        // Non-file Partial events were already successfully delivered by the
+        // event pump. Commit their remaining bookkeeping without retyping or
+        // processing them, just as file completion folds its buffered tail.
+        if let Some(session) = streaming_session.as_mut() {
+            session.finalize_pending_partial();
+        }
         let streamed = streaming_session
             .as_ref()
             .map(|s| s.finalized_text().to_string())
             .unwrap_or_default();
+        let raw = streaming_session
+            .as_ref()
+            .map(StreamingSession::history_raw_text)
+            .unwrap_or_default();
+        let output_error = streaming_session
+            .as_ref()
+            .and_then(|session| session.output_error())
+            .map(str::to_owned);
+        let delivery = streaming_session
+            .as_ref()
+            .and_then(|session| session.last_delivery())
+            .cloned();
+        {
+            let mode = format!("{:?}", self.config.output.mode).to_lowercase();
+            self.history_note(|p| {
+                p.texts(&raw, &streamed);
+                p.entry.output = Some(crate::history::OutputInfo {
+                    mode,
+                    driver: delivery.as_ref().map(|delivery| delivery.driver.clone()),
+                    fell_back: delivery.as_ref().is_some_and(|delivery| delivery.fell_back),
+                });
+                if let Some(error) = output_error {
+                    p.outcome(crate::history::Outcome::OutputFailed, Some(error));
+                }
+            });
+        }
         self.publish_osd_text_outcome(&streamed);
         *streaming_session = None;
         *streaming_chain = None;
@@ -2339,6 +2633,24 @@ impl Daemon {
                 task.abort();
             }
 
+            if let Some(engine) = self.active_transcriber.take() {
+                if state.is_eager_recording() {
+                    self.history_eager_transcriber_metadata(engine.as_ref());
+                } else {
+                    self.history_transcriber_metadata(engine.as_ref());
+                }
+            } else if let Some(engine) = eager_transcriber.as_ref() {
+                // Loaded does not mean this recording reached a decode.
+                let loaded = engine.runtime_metadata();
+                self.history_note(|pending| {
+                    if let Some(model) = loaded.model {
+                        pending.entry.model = model;
+                    }
+                    pending.entry.model_load_ms = loaded.model_load_ms;
+                });
+            }
+            self.history_note(|pending| pending.transcribed());
+
             if let State::EagerRecording {
                 accumulated_audio,
                 chunk_results,
@@ -2389,6 +2701,10 @@ impl Daemon {
             }
             // Drop the cloned transcriber Arc so it isn't held until the
             // next transcription.
+            if let Some(engine) = self.active_transcriber.as_ref() {
+                self.history_transcriber_metadata(engine.as_ref());
+            }
+            self.history_note(|pending| pending.transcribed());
             self.active_transcriber = None;
 
             discard_recording_overrides();
@@ -2448,6 +2764,11 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
+        if let Some(engine) = self.active_transcriber.take() {
+            self.history_transcriber_metadata(engine.as_ref());
+        }
+        self.history_note(|pending| pending.transcribed());
+
         discard_recording_overrides();
         *state = State::Idle;
         self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
@@ -2486,7 +2807,14 @@ impl Daemon {
         track_silence: bool,
     ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
     {
-        match audio::create_capture(&self.config.audio) {
+        #[cfg(test)]
+        let capture = match self.history_test_capture.take() {
+            Some(capture) => Ok(capture),
+            None => audio::create_capture(&self.config.audio),
+        };
+        #[cfg(not(test))]
+        let capture = audio::create_capture(&self.config.audio);
+        match capture {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     // Bounded; backed-up streaming backend drops chunks
@@ -4211,6 +4539,8 @@ impl Daemon {
         chunk_audio: Vec<f32>,
         transcriber: Arc<dyn Transcriber>,
     ) {
+        self.active_transcriber = Some(transcriber.clone());
+        self.history_note(|pending| pending.transcribing(0));
         tracing::debug!(
             "Spawning eager transcription for chunk {} ({:.1}s)",
             chunk_index,
@@ -4221,6 +4551,7 @@ impl Daemon {
         // like Whisper invent text for silence, and a silent chunk mid-way
         // through a recording would otherwise land in the output.
         let vad = self.vad.clone();
+        let decoded = self.eager_decoded.clone();
         let task = tokio::task::spawn_blocking(move || {
             if let Some(vad) = vad {
                 match vad.detect(&chunk_audio) {
@@ -4232,7 +4563,9 @@ impl Daemon {
                     Err(e) => tracing::warn!("VAD failed on chunk {}: {}", chunk_index, e),
                 }
             }
-            transcriber.transcribe(&chunk_audio)
+            let result = transcriber.transcribe(&chunk_audio);
+            decoded.store(true, std::sync::atomic::Ordering::Release);
+            result
         });
 
         self.eager_chunk_tasks.push((chunk_index, task));
@@ -4267,6 +4600,7 @@ impl Daemon {
     async fn poll_chunk_tasks(&mut self) -> Vec<ChunkResult> {
         let mut completed = Vec::new();
         let mut remaining_tasks = Vec::new();
+        let mut failure = None;
 
         for (chunk_index, task) in self.eager_chunk_tasks.drain(..) {
             if task.is_finished() {
@@ -4279,6 +4613,7 @@ impl Daemon {
                     Ok(Err(e)) => {
                         tracing::warn!("Chunk {} transcription failed: {}", chunk_index, e);
                         // Add empty result to maintain ordering
+                        failure = Some(e.to_string());
                         completed.push(ChunkResult {
                             text: String::new(),
                             chunk_index,
@@ -4286,6 +4621,7 @@ impl Daemon {
                     }
                     Err(e) => {
                         tracing::warn!("Chunk {} task panicked: {}", chunk_index, e);
+                        failure = Some(e.to_string());
                         completed.push(ChunkResult {
                             text: String::new(),
                             chunk_index,
@@ -4298,12 +4634,18 @@ impl Daemon {
         }
 
         self.eager_chunk_tasks = remaining_tasks;
+        if let Some(error) = failure {
+            self.history_note(|pending| {
+                pending.outcome(crate::history::Outcome::TranscriptionFailed, Some(error))
+            });
+        }
         completed
     }
 
     /// Wait for all remaining chunk tasks to complete
     async fn wait_for_chunk_tasks(&mut self) -> Vec<ChunkResult> {
         let mut results = Vec::new();
+        let mut failure = None;
 
         for (chunk_index, task) in self.eager_chunk_tasks.drain(..) {
             match task.await {
@@ -4313,6 +4655,7 @@ impl Daemon {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("Chunk {} transcription failed: {}", chunk_index, e);
+                    failure = Some(e.to_string());
                     results.push(ChunkResult {
                         text: String::new(),
                         chunk_index,
@@ -4324,6 +4667,7 @@ impl Daemon {
                     } else {
                         tracing::warn!("Chunk {} task panicked: {}", chunk_index, e);
                     }
+                    failure = Some(e.to_string());
                     results.push(ChunkResult {
                         text: String::new(),
                         chunk_index,
@@ -4332,6 +4676,11 @@ impl Daemon {
             }
         }
 
+        if let Some(error) = failure {
+            self.history_note(|pending| {
+                pending.outcome(crate::history::Outcome::TranscriptionFailed, Some(error))
+            });
+        }
         results
     }
 
@@ -4352,6 +4701,8 @@ impl Daemon {
         };
 
         let audio_duration = accumulated_audio.len() as f32 / 16000.0;
+        self.active_transcriber = Some(transcriber.clone());
+        self.history_note(|p| p.transcribing(accumulated_audio.len()));
         tracing::info!(
             "Finishing eager recording: {:.1}s of audio, {} chunks already transcribed",
             audio_duration,
@@ -4390,7 +4741,12 @@ impl Daemon {
                 tail_start
             );
             let tail_transcriber = transcriber.clone();
-            tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio))
+            let decoded = self.eager_decoded.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = tail_transcriber.transcribe(&tail_audio);
+                decoded.store(true, std::sync::atomic::Ordering::Release);
+                result
+            })
         });
 
         if let Some(task) = vad_task {
@@ -4400,6 +4756,8 @@ impl Daemon {
                         task.abort();
                     }
                     self.report_no_speech(&result).await;
+                    self.history_eager_transcriber_metadata(transcriber.as_ref());
+                    self.history_note(|pending| pending.transcribed());
                     self.publish_empty_outcome();
                     return None;
                 }
@@ -4420,14 +4778,28 @@ impl Daemon {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("Tail transcription failed: {}", e);
+                    self.history_note(|pending| {
+                        pending.outcome(
+                            crate::history::Outcome::TranscriptionFailed,
+                            Some(e.to_string()),
+                        )
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("Tail transcription task panicked: {}", e);
+                    self.history_note(|pending| {
+                        pending.outcome(
+                            crate::history::Outcome::TranscriptionFailed,
+                            Some(e.to_string()),
+                        )
+                    });
                 }
             }
         }
 
         // Combine all chunk results
+        self.history_eager_transcriber_metadata(transcriber.as_ref());
+        self.history_note(|pending| pending.transcribed());
         let combined = eager::combine_chunk_results(chunk_results);
         tracing::info!("Combined eager transcription: {:?}", combined);
 
@@ -4471,6 +4843,7 @@ impl Daemon {
             match stop_result {
                 Ok(samples) => {
                     let audio_duration = samples.len() as f32 / 16000.0;
+                    self.history_note(|p| p.transcribing(samples.len()));
 
                     // Skip if too short (likely accidental press)
                     if audio_duration < 0.3 {
@@ -4516,6 +4889,12 @@ impl Daemon {
                     {
                         Ok(transcriber) => transcriber,
                         Err(()) => {
+                            self.history_note(|p| {
+                                p.outcome(
+                                    crate::history::Outcome::TranscriptionFailed,
+                                    Some("the model could not be loaded".into()),
+                                )
+                            });
                             self.reset_to_idle(state).await;
                             return false;
                         }
@@ -4534,6 +4913,12 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
+                    self.history_note(|p| {
+                        p.outcome(
+                            crate::history::Outcome::TranscriptionFailed,
+                            Some(format!("recording error: {e}")),
+                        )
+                    });
                     self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                     self.reset_to_idle(state).await;
                     false
@@ -4616,6 +5001,10 @@ impl Daemon {
         // task error). The Ok(Ok(_)) branch consults it for the language
         // layout hint before letting it drop.
         let active_transcriber = self.active_transcriber.take();
+        if let Some(engine) = active_transcriber.as_ref() {
+            self.history_transcriber_metadata(engine.as_ref());
+        }
+        self.history_note(|pending| pending.transcribed());
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
@@ -4780,12 +5169,47 @@ impl Daemon {
                     let auto_submit_override = read_bool_override("auto_submit");
                     let shift_enter_override = read_bool_override("shift_enter");
 
+                    {
+                        let language = active_transcriber
+                            .as_ref()
+                            .and_then(|t| t.last_detected_language());
+                        let profile = profile_override.clone();
+                        self.history_note(|p| {
+                            p.texts(&text, &final_text);
+                            if language.is_some() {
+                                p.entry.language = language;
+                            }
+                            p.entry.profile = profile;
+                        });
+                    }
+
                     if let Some(output_path) = file_output_path {
                         *state = State::Outputting {
                             text: final_text.clone(),
                         };
 
-                        match self.deliver_file_output(&output_path, &final_text).await {
+                        let delivery = self.deliver_file_output(&output_path, &final_text).await;
+                        {
+                            use crate::history::{Outcome, OutputInfo};
+                            let (fell_back, error) = match &delivery {
+                                FileDelivery::Written => (false, None),
+                                FileDelivery::FellBack(_) => (true, None),
+                                FileDelivery::Lost(err) => (false, Some(err.to_string())),
+                            };
+                            self.history_note(|p| {
+                                p.entry.output = Some(OutputInfo {
+                                    mode: "file".into(),
+                                    driver: Some(
+                                        if fell_back { "clipboard" } else { "file" }.into(),
+                                    ),
+                                    fell_back,
+                                });
+                                if let Some(err) = error {
+                                    p.outcome(Outcome::OutputFailed, Some(err));
+                                }
+                            });
+                        }
+                        match delivery {
                             FileDelivery::Written => {
                                 let mode_str = match self.config.output.file_mode {
                                     FileMode::Overwrite => "wrote",
@@ -4920,7 +5344,9 @@ impl Daemon {
                         text: final_text.clone(),
                     };
 
+                    let history_context = self.history_context();
                     let output_options = output::OutputOptions {
+                        history_context: history_context.as_ref(),
                         pre_output_command: output_config.pre_output_command.as_deref(),
                         post_output_command: output_config.post_output_command.as_deref(),
                         wait_for_modifier_release: output_config.wait_for_modifier_release,
@@ -4929,10 +5355,30 @@ impl Daemon {
                         ),
                     };
 
-                    if let Err(e) =
-                        output::output_with_fallback(&output_chain, &final_text, output_options)
-                            .await
+                    let delivery =
+                        output::deliver_with_fallback(&output_chain, &final_text, output_options)
+                            .await;
                     {
+                        use crate::history::{Outcome, OutputInfo};
+                        let mode = format!("{:?}", output_config.mode).to_lowercase();
+                        let auto_submit = output_config.auto_submit;
+                        let (driver, fell_back, error) = match &delivery {
+                            Ok(d) => (Some(d.driver.clone()), d.fell_back, None),
+                            Err(e) => (None, false, Some(e.to_string())),
+                        };
+                        self.history_note(|p| {
+                            p.entry.output = Some(OutputInfo {
+                                mode,
+                                driver,
+                                fell_back,
+                            });
+                            p.entry.auto_submit = auto_submit;
+                            if let Some(err) = error {
+                                p.outcome(Outcome::OutputFailed, Some(err));
+                            }
+                        });
+                    }
+                    if let Err(e) = delivery {
                         tracing::error!("Output failed: {}", e);
                         self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
                     } else {
@@ -4962,6 +5408,12 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.history_note(|p| {
+                    p.outcome(
+                        crate::history::Outcome::TranscriptionFailed,
+                        Some(e.to_string()),
+                    )
+                });
                 self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                 self.reset_to_idle(state).await;
             }
@@ -4969,8 +5421,15 @@ impl Daemon {
                 // JoinError - task was cancelled or panicked
                 if !join_error_poisons_engine(&e) {
                     tracing::debug!("Transcription task was cancelled");
+                    self.history_note(|p| p.outcome(crate::history::Outcome::Cancelled, None));
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
+                    self.history_note(|p| {
+                        p.outcome(
+                            crate::history::Outcome::TranscriptionFailed,
+                            Some("the transcription engine crashed".into()),
+                        )
+                    });
                     self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
 
                     // spawn_blocking already kept the panic from reaching the
@@ -5167,6 +5626,15 @@ impl Daemon {
             "none"
         };
         osd::frontend::publish_active(&Config::runtime_dir(), osd_active);
+
+        // History retention and compression: now, then once a day. Runs
+        // whether or not history is on, so turning it off never leaves old
+        // days past their retention.
+        if self.history_maintenance.is_none() {
+            self.history_maintenance = Some(crate::history::recorder::spawn_daily_maintenance(
+                self.history.clone(),
+            ));
+        }
 
         // The single-instance lock is already held. Never register a duplicate tray.
         #[cfg(target_os = "linux")]
@@ -5413,6 +5881,25 @@ impl Daemon {
         let mut streaming_session: Option<StreamingSession> = None;
         let mut streaming_chain: Option<Vec<Box<dyn TextOutput>>> = None;
 
+        // Private synthetic session injection exercises the real select! stop
+        // callers without an input device, capture device or provider factory.
+        #[cfg(test)]
+        if let Some((initial, selected, replacement, events)) = self.history_test_eager_loop.take()
+        {
+            state = initial;
+            hotkey_rx = Some(events);
+            audio_capture = self.history_test_capture.take();
+            self.begin_osd_session(&state);
+            self.history_test_capture = self.history_test_next_capture.take();
+            if let Some(flag) = self.history_test_completion_observer.take() {
+                self.eager_decoded = flag;
+            }
+            self.config.engine = crate::config::TranscriptionEngine::Soniox;
+            self.transcriber_preloaded = Some(replacement);
+            self.spawn_chunk_transcription(0, vec![0.2; 16000], selected.clone());
+            eager_transcriber = Some(selected);
+        }
+
         // Persistent poll timers for the recording and transcribing arms. A
         // `sleep()` arm is rebuilt every loop iteration, so it competes with
         // the unconditional 100ms poll below: both are due on the same tick,
@@ -5594,14 +6081,16 @@ impl Daemon {
 
                                 end_recording_notification("Recording Stopped", "Transcribing...", &self.config.output.notification, self.config.engine).await;
 
-                                let transcriber = match self.get_transcriber_for_recording(
-                                    model_override.as_deref(),
-                                ).await {
-                                    Ok(t) => t,
-                                    Err(()) => {
-                                        state = State::Idle;
-                                        self.update_state("idle");
-                                        continue;
+                                let transcriber = if let Some(selected) = eager_transcriber.as_ref() {
+                                    selected.clone()
+                                } else {
+                                    match self.get_transcriber_for_recording(model_override.as_deref()).await {
+                                        Ok(t) => t,
+                                        Err(()) => {
+                                            state = State::Idle;
+                                            self.update_state("idle");
+                                            continue;
+                                        }
                                     }
                                 };
 
@@ -5732,14 +6221,16 @@ impl Daemon {
 
                                 end_recording_notification("Recording Stopped", "Transcribing...", &self.config.output.notification, self.config.engine).await;
 
-                                let transcriber = match self.get_transcriber_for_recording(
-                                    model_override.as_deref(),
-                                ).await {
-                                    Ok(t) => t,
-                                    Err(()) => {
-                                        state = State::Idle;
-                                        self.update_state("idle");
-                                        continue;
+                                let transcriber = if let Some(selected) = eager_transcriber.as_ref() {
+                                    selected.clone()
+                                } else {
+                                    match self.get_transcriber_for_recording(model_override.as_deref()).await {
+                                        Ok(t) => t,
+                                        Err(()) => {
+                                            state = State::Idle;
+                                            self.update_state("idle");
+                                            continue;
+                                        }
                                     }
                                 };
 
@@ -5765,83 +6256,14 @@ impl Daemon {
                         // === CANCEL KEY (works in both modes) ===
                         (HotkeyEvent::Cancel, _) => {
                             tracing::debug!("Received HotkeyEvent::Cancel");
-
-                            if state.is_streaming() {
-                                tracing::info!("Streaming cancelled via hotkey");
-                                self.cancel_streaming_to_idle(
-                                    &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
-                                    "Recording discarded",
-                                ).await;
-                            } else if state.is_recording() {
-                                tracing::info!("Recording cancelled via hotkey");
-
-                                // A cancelled external-trigger session is
-                                // still an ended session — tell the caller
-                                // and disarm tracking.
-                                self.end_external_session(state.is_recording()).await;
-
-                                // Stop recording and discard audio
-                                if let Some(mut capture) = audio_capture.take() {
-                                    let _ = capture.stop().await;
-                                }
-                                self.restore_recording_media();
-
-                                // Cancel any pending model load task
-                                if let Some(task) = self.model_load_task.take() {
-                                    task.abort();
-                                }
-
-                                // Cancel any pending eager chunk tasks
-                                for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                    task.abort();
-                                }
-
-                                discard_recording_overrides();
-                                state = State::Idle;
-                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
-                                self.update_state("idle");
-                                self.play_feedback(SoundEvent::Cancelled);
-
-                                // Run post_output_command to reset compositor submap
-                                if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                        tracing::warn!("{}", e);
-                                    }
-                                }
-
-                                end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
-                            } else if matches!(state, State::Transcribing { .. }) {
-                                tracing::info!("Transcription cancelled via hotkey");
-
-                                // Abort the transcription task
-                                if let Some(task) = self.transcription_task.take() {
-                                    task.abort();
-                                }
-                                // Drop the cloned transcriber Arc so it isn't
-                                // held until the next transcription.
-                                self.active_transcriber = None;
-
-                                discard_recording_overrides();
-                                state = State::Idle;
-                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
-                                self.update_state("idle");
-                                self.play_feedback(SoundEvent::Cancelled);
-
-                                // Run post_output_command to reset compositor submap
-                                if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                        tracing::warn!("{}", e);
-                                    }
-                                }
-
-                                end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
-                            } else {
-                                tracing::trace!("Cancel ignored - not recording or transcribing");
-                            }
+                            self.cancel_requested_session(
+                                &mut state,
+                                &mut audio_capture,
+                                &mut streaming_handle,
+                                &mut streaming_session,
+                                &mut streaming_chain,
+                                &mut eager_transcriber,
+                            ).await;
                         }
                     }
                 }
@@ -5954,6 +6376,9 @@ impl Daemon {
                                         elapsed.as_secs_f32(),
                                         timeout_secs
                                     );
+                                    self.history_note(|p| {
+                                        p.entry.ended_by = crate::history::EndedBy::Silence
+                                    });
                                     self.stop_active_recording(
                                         &mut state,
                                         &mut audio_capture,
@@ -6017,13 +6442,15 @@ impl Daemon {
                             }
                             self.restore_recording_media();
 
-                            let transcriber = match self.get_transcriber_for_recording(
-                                model_override.as_deref(),
-                            ).await {
-                                Ok(transcriber) => transcriber,
-                                Err(()) => {
-                                    self.reset_to_idle(&mut state).await;
-                                    continue;
+                            let transcriber = if let Some(selected) = eager_transcriber.as_ref() {
+                                selected.clone()
+                            } else {
+                                match self.get_transcriber_for_recording(model_override.as_deref()).await {
+                                    Ok(transcriber) => transcriber,
+                                    Err(()) => {
+                                        self.reset_to_idle(&mut state).await;
+                                        continue;
+                                    }
                                 }
                             };
 
@@ -6279,15 +6706,8 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Error(err)) => {
-                            tracing::error!("Streaming backend error: {}", err);
-                            send_notification(
-                                "Streaming Error",
-                                &err.to_string(),
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                "critical",
-                            ).await;
-                            self.end_streaming(
+                            self.end_streaming_with_error(
+                                err,
                                 &mut state,
                                 &mut audio_capture,
                                 &mut streaming_handle,
@@ -6630,6 +7050,10 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
+    mod history_contracts {
+        include!("daemon/history_contract_tests.rs");
+    }
+
     #[cfg(all(target_os = "linux", feature = "cohere-gguf"))]
     #[tokio::test]
     async fn tray_language_next_backend_receives_hint_resident_and_on_demand() {
@@ -6846,6 +7270,413 @@ while True:
     /// A cancel issued before a start/stop signal is applied first when the
     /// daemon has a live session, so `record cancel; record start` records
     /// again instead of the start landing on the session being cancelled.
+    fn history_daemon(dir: &Path) -> Daemon {
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        config.state_file = None;
+        config.history.enabled = true;
+        let mut daemon = Daemon::new(config.clone(), None);
+        daemon.history = Arc::new(std::sync::Mutex::new(
+            crate::history::recorder::Recorder::with_paths(
+                config.history.clone(),
+                dir.join("history"),
+                dir.join("meetings").join("index.db"),
+            ),
+        ));
+        daemon
+    }
+
+    async fn wait_for_entries(dir: &Path, n: usize) -> Vec<crate::history::HistoryEntry> {
+        let store = crate::history::HistoryStore::at(dir.join("history"));
+        for _ in 0..200 {
+            let all = store.all().unwrap();
+            if all.len() >= n {
+                return all;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("history entries never appeared");
+    }
+
+    #[tokio::test]
+    async fn every_dictation_outcome_lands_in_history_once_idle() {
+        use crate::history::{EndedBy, Outcome};
+        let t = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(t.path());
+        let recording = State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        };
+
+        // Delivered.
+        daemon.begin_osd_session(&recording);
+        daemon.history_note(|p| p.texts("um hello there", "Hello there."));
+        daemon.publish_osd_text_outcome("Hello there.");
+        daemon.update_state("idle");
+        // Cancelled.
+        daemon.begin_osd_session(&recording);
+        daemon.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+        daemon.update_state("idle");
+        // Cut off by max_duration_secs, then no speech.
+        daemon.begin_osd_session(&recording);
+        daemon.osd_limit_reached = true;
+        daemon.publish_osd_outcome(osd::session::OutcomeKind::NoSpeech, 0);
+        daemon.update_state("idle");
+
+        let entries = wait_for_entries(t.path(), 3).await;
+        let mut by_outcome: Vec<_> = entries.iter().map(|e| (e.outcome, e.ended_by)).collect();
+        by_outcome.sort_by_key(|(o, _)| o.as_str());
+        assert_eq!(
+            by_outcome,
+            vec![
+                (Outcome::Cancelled, EndedBy::Cancelled),
+                (Outcome::Delivered, EndedBy::Released),
+                (Outcome::NoSpeech, EndedBy::Timeout),
+            ]
+        );
+        let delivered = entries
+            .iter()
+            .find(|e| e.outcome == Outcome::Delivered)
+            .unwrap();
+        assert_eq!(delivered.raw_text, "um hello there");
+        assert_eq!(delivered.text, "Hello there.");
+        assert!(!delivered.edits.is_empty());
+        assert_eq!(delivered.trigger, crate::history::Trigger::Hotkey);
+        assert!(!delivered.engine.is_empty());
+
+        // Idle again with nothing in flight writes nothing more.
+        daemon.update_state("idle");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            crate::history::HistoryStore::at(t.path().join("history"))
+                .all()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn history_keeps_actual_transcriber_metadata_after_an_inference_error() {
+        struct ReportedMetadata;
+        impl Transcriber for ReportedMetadata {
+            fn transcribe(
+                &self,
+                _: &[f32],
+            ) -> std::result::Result<String, crate::error::TranscribeError> {
+                panic!("The completion fixture must not perform inference")
+            }
+            fn runtime_metadata(&self) -> crate::transcribe::RuntimeMetadata {
+                crate::transcribe::RuntimeMetadata {
+                    model: Some("actual-fixture.gguf".into()),
+                    backend: Some("fixture-cpu".into()),
+                    model_load_ms: Some(17),
+                }
+            }
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(fixture.path());
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        daemon.active_transcriber = Some(Arc::new(ReportedMetadata));
+        let mut state = State::Transcribing { audio: Vec::new() };
+        daemon
+            .handle_transcription_result(
+                &mut state,
+                Ok(Err(crate::error::TranscribeError::InferenceFailed(
+                    "synthetic inference failure".into(),
+                ))),
+            )
+            .await;
+        let entries = wait_for_entries(fixture.path(), 1).await;
+        assert_eq!(entries[0].model, "actual-fixture.gguf");
+        assert_eq!(entries[0].backend.as_deref(), Some("fixture-cpu"));
+        assert_eq!(entries[0].model_load_ms, Some(17));
+        assert_eq!(
+            entries[0].outcome,
+            crate::history::Outcome::TranscriptionFailed
+        );
+        assert!(!entries[0].delivered);
+    }
+
+    #[tokio::test]
+    async fn history_cancelled_before_inference_does_not_invent_a_backend() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(fixture.path());
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        daemon.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+        daemon.update_state("idle");
+        let entries = wait_for_entries(fixture.path(), 1).await;
+        assert!(
+            entries[0].backend.is_none(),
+            "A binary capability is not evidence that an inference backend ran"
+        );
+        assert!(entries[0].model_load_ms.is_none());
+        assert_eq!(entries[0].outcome, crate::history::Outcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn history_keeps_configured_language_for_a_cancelled_dictation() {
+        let t = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(t.path());
+        daemon.config.engine = crate::config::TranscriptionEngine::Whisper;
+        daemon.config.whisper.language = crate::config::LanguageConfig::Single("de".into());
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        daemon.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+        daemon.update_state("idle");
+        let entries = wait_for_entries(t.path(), 1).await;
+        assert_eq!(entries[0].language.as_deref(), Some("de"));
+    }
+
+    #[tokio::test]
+    async fn history_keeps_configured_language_after_file_delivery() {
+        const PROBE: &str = "configured-language-file-delivery";
+        if std::env::var("VOXTYPE_HISTORY_METADATA_PROBE").as_deref() != Ok(PROBE) {
+            // Run the actual completion path with a private runtime and no
+            // inherited desktop, config, signal sentinels or output helpers.
+            let fixture = tempfile::tempdir().unwrap();
+            let runtime = fixture.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::history_keeps_configured_language_after_file_delivery",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", fixture.path())
+                .env("XDG_CONFIG_HOME", fixture.path().join("config"))
+                .env("XDG_DATA_HOME", fixture.path().join("data"))
+                .env("XDG_RUNTIME_DIR", runtime)
+                .env("TMPDIR", fixture.path())
+                .env("RUST_MIN_STACK", "16777216")
+                .env("VOXTYPE_HISTORY_METADATA_PROBE", PROBE)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(fixture.path());
+        daemon.config.engine = crate::config::TranscriptionEngine::Whisper;
+        daemon.config.whisper.language = crate::config::LanguageConfig::Single("de".into());
+        daemon.config.output.mode = crate::config::OutputMode::File;
+        daemon.config.output.file_path = Some(fixture.path().join("transcript.txt"));
+        daemon.config.output.fallback_to_clipboard = false;
+        daemon.config.output.notification.on_transcription = false;
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        let mut state = State::Transcribing { audio: Vec::new() };
+        daemon
+            .handle_transcription_result(&mut state, Ok(Ok("synthetic invoice".into())))
+            .await;
+        let entries = wait_for_entries(fixture.path(), 1).await;
+        assert_eq!(entries[0].language.as_deref(), Some("de"));
+        assert_eq!(entries[0].raw_text, "synthetic invoice");
+        assert_eq!(entries[0].output.as_ref().unwrap().mode, "file");
+        assert!(entries[0].delivered);
+    }
+
+    #[tokio::test]
+    async fn history_off_records_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(t.path());
+        daemon.history = Arc::new(std::sync::Mutex::new(
+            crate::history::recorder::Recorder::with_paths(
+                crate::config::HistoryConfig::default(),
+                t.path().join("history"),
+                t.path().join("index.db"),
+            ),
+        ));
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        daemon.publish_osd_text_outcome("secret");
+        daemon.update_state("idle");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!t.path().join("history").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_excludes_delivery_destination_before_post_hook_restores_focus() {
+        const NAME: &str =
+            "daemon::tests::history_excludes_delivery_destination_before_post_hook_restores_focus";
+        if std::env::var_os("VOXTYPE_HISTORY_FOCUS_CHILD").is_none() {
+            for mode in ["batch", "streaming", "file-fallback", "allowed", "unknown"] {
+                let root = tempfile::tempdir().unwrap();
+                let bin = root.path().join("bin");
+                let runtime = root.path().join("runtime");
+                std::fs::create_dir(&bin).unwrap();
+                std::fs::create_dir(&runtime).unwrap();
+                for name in ["sh", "cat", "which"] {
+                    std::os::unix::fs::symlink(which::which(name).unwrap(), bin.join(name))
+                        .unwrap();
+                }
+                let shell = which::which("sh").unwrap();
+                crate::test_support::write_script(&bin.join("wl-copy"), &format!(
+                "#!{}\ncat \"$HOME/focus\" > \"$HOME/delivered-app\"\ncat > \"$HOME/captured-text\"\n", shell.display()));
+                let result = tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", NAME, "--nocapture"])
+                    .env_clear()
+                    .env("HOME", root.path())
+                    .env("TMPDIR", root.path())
+                    .env("PATH", &bin)
+                    .env("XDG_RUNTIME_DIR", &runtime)
+                    .env("XDG_CONFIG_HOME", root.path().join("config"))
+                    .env("XDG_DATA_HOME", root.path().join("data"))
+                    .env("NIRI_SOCKET", runtime.join("synthetic-focus.sock"))
+                    .env("WAYLAND_DISPLAY", "synthetic-no-display-socket")
+                    .env("RUST_MIN_STACK", "16777216")
+                    .env("VOXTYPE_HISTORY_FOCUS_CHILD", "1")
+                    .env("VOXTYPE_HISTORY_FOCUS_MODE", mode)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{mode}: {}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+            return;
+        }
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let focus = root.join("focus");
+        std::fs::write(&focus, "synthetic-editor").unwrap();
+        let listener =
+            tokio::net::UnixListener::bind(std::env::var_os("NIRI_SOCKET").unwrap()).unwrap();
+        let start_observed = Arc::new(tokio::sync::Notify::new());
+        let signal = start_observed.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = tokio::io::BufReader::new(stream);
+                let mut request = String::new();
+                stream.read_line(&mut request).await.unwrap();
+                assert_eq!(request, "\"FocusedWindow\"\n");
+                let app = std::fs::read_to_string(&focus).unwrap();
+                let reply = serde_json::json!({"Ok":{"FocusedWindow":{"app_id":app,"title":"Synthetic fixture"}}});
+                stream
+                    .get_mut()
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                signal.notify_one();
+            }
+        });
+        let mut daemon = history_daemon(&root);
+        daemon.config.output.mode = crate::config::OutputMode::Clipboard;
+        daemon.config.output.append_text = None;
+        daemon.config.output.wait_for_modifier_release = false;
+        daemon.config.output.notification.on_transcription = false;
+        let mode = std::env::var("VOXTYPE_HISTORY_FOCUS_MODE").unwrap();
+        let destination = match mode.as_str() {
+            "allowed" => "synthetic-destination",
+            "unknown" => "",
+            _ => "Bitwarden",
+        };
+        daemon.config.output.pre_output_command =
+            Some(format!("printf '%s' '{destination}' > \"$HOME/focus\""));
+        daemon.config.output.post_output_command =
+            Some("printf synthetic-editor > \"$HOME/focus\"".into());
+        if mode == "file-fallback" {
+            std::fs::write(root.join("blocked-parent"), "synthetic non-directory").unwrap();
+            daemon.config.output.mode = crate::config::OutputMode::File;
+            daemon.config.output.file_path = Some(root.join("blocked-parent/transcript.txt"));
+            daemon.config.output.fallback_to_clipboard = true;
+        }
+        let (finished, receiver) = std::sync::mpsc::channel();
+        daemon.history.lock().unwrap().test_finished = Some(finished);
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        tokio::time::timeout(Duration::from_secs(5), start_observed.notified())
+            .await
+            .unwrap();
+        let mut state = State::Transcribing { audio: Vec::new() };
+        if mode == "streaming" {
+            let chain = output::create_output_chain(&daemon.config.output);
+            let mut session =
+                StreamingSession::new().with_history_context(daemon.history_context());
+            session
+                .commit_segment(
+                    &chain,
+                    "synthetic sensitive words",
+                    None,
+                    daemon.config.output.pre_output_command.as_deref(),
+                    daemon.config.output.post_output_command.as_deref(),
+                )
+                .await
+                .unwrap();
+            daemon.history_note(|pending| {
+                pending.texts("synthetic sensitive words", session.finalized_text())
+            });
+            daemon.publish_osd_text_outcome(session.finalized_text());
+            daemon.update_state("idle");
+        } else {
+            daemon
+                .handle_transcription_result(&mut state, Ok(Ok("synthetic sensitive words".into())))
+                .await;
+        }
+        tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(5)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("delivered-app")).unwrap(),
+            destination
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("focus")).unwrap(),
+            "synthetic-editor"
+        );
+        assert!(!std::fs::read_to_string(root.join("captured-text"))
+            .unwrap()
+            .is_empty());
+        server.abort();
+        let entries = crate::history::HistoryStore::at(root.join("history"))
+            .all()
+            .unwrap();
+        if mode == "allowed" || mode == "unknown" {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                entries[0].app.as_deref(),
+                if mode == "allowed" {
+                    Some(destination)
+                } else {
+                    None
+                }
+            );
+            assert!(entries[0].window_title.is_none());
+        } else {
+            assert!(
+                entries.is_empty(),
+                "excluded delivery was retained after the output hook restored an allowed focus"
+            );
+            assert!(!root.join("meetings/index.db").exists());
+        }
+    }
+
     #[test]
     fn pending_cancel_applies_to_live_sessions_only() {
         let now = std::time::Instant::now();

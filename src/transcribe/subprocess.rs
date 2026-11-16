@@ -41,6 +41,8 @@ struct WorkerResponse {
     /// Timed segments, when they were asked for
     #[serde(default)]
     segments: Option<Vec<TimedSegment>>,
+    #[serde(default)]
+    metadata: super::RuntimeMetadata,
 }
 
 /// A prepared worker process ready to receive audio
@@ -71,6 +73,7 @@ pub struct SubprocessTranscriber {
     /// `WhisperTranscriber::last_language` so the daemon can derive a layout
     /// hint after transcription. See [`Transcriber::last_detected_language`].
     last_language: Mutex<Option<String>>,
+    last_metadata: Mutex<super::RuntimeMetadata>,
 }
 
 impl SubprocessTranscriber {
@@ -85,6 +88,7 @@ impl SubprocessTranscriber {
             active_vocabulary: Mutex::new(Vec::new()),
             prepared_worker: Mutex::new(None),
             last_language: Mutex::new(None),
+            last_metadata: Mutex::new(super::RuntimeMetadata::default()),
         })
     }
 
@@ -234,6 +238,10 @@ impl SubprocessTranscriber {
     }
 
     fn run(&self, samples: &[f32], timed: bool) -> Result<WorkerResponse, TranscribeError> {
+        *self
+            .last_metadata
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = super::RuntimeMetadata::default();
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -270,6 +278,10 @@ impl SubprocessTranscriber {
 
         // Read response
         let response = Self::read_worker_response(&mut worker.stdout)?;
+        *self
+            .last_metadata
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = response.metadata.clone();
 
         // Wait for process to exit
         let status = worker.child.wait().map_err(|e| {
@@ -364,6 +376,13 @@ impl Transcriber for SubprocessTranscriber {
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
     }
+
+    fn runtime_metadata(&self) -> super::RuntimeMetadata {
+        self.last_metadata
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -391,5 +410,96 @@ mod tests {
             serde_json::from_str(r#"{"ok": true, "text": "Privet", "language": "ru"}"#).unwrap();
         assert!(success.ok);
         assert_eq!(success.language, Some("ru".to_string()));
+    }
+
+    #[test]
+    #[ignore = "administrative private worker helper, reexecuted by metadata lifecycle test"]
+    fn history_metadata_worker_helper() {
+        let response =
+            std::env::var("VOXTYPE_HISTORY_WORKER_RESPONSE").expect("private worker marker");
+        println!("HISTORY_PRIVATE_WORKER_READY");
+        std::io::stdout().flush().unwrap();
+        let mut input = std::io::stdin().lock();
+        let mut count = [0u8; 4];
+        input.read_exact(&mut count).unwrap();
+        let count = u32::from_le_bytes(count);
+        assert_eq!(count, 16);
+        let mut samples = [0u8; 64];
+        input.read_exact(&mut samples).unwrap();
+        assert!(samples.iter().all(|byte| *byte == 0));
+        println!("{response}");
+        std::io::stdout().flush().unwrap();
+    }
+
+    #[test]
+    fn history_subprocess_metadata_follows_the_current_worker_response() {
+        let fixture = tempfile::tempdir().unwrap();
+        let engine = SubprocessTranscriber::new(&WhisperConfig::default(), None).unwrap();
+        let measured = super::super::RuntimeMetadata {
+            model: Some("actual-fixture.bin".into()),
+            backend: Some("fixture-vulkan".into()),
+            model_load_ms: Some(17),
+        };
+        for (response, ok, expected) in [
+            (
+                serde_json::json!({"ok":true,"text":"fixture","metadata":measured}),
+                true,
+                measured.clone(),
+            ),
+            (
+                serde_json::json!({"ok":true,"text":"fixture"}),
+                true,
+                super::super::RuntimeMetadata::default(),
+            ),
+            (
+                serde_json::json!({"ok":false,"error":"synthetic failure","metadata":measured}),
+                false,
+                measured.clone(),
+            ),
+        ] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "transcribe::subprocess::tests::history_metadata_worker_helper",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", fixture.path())
+                .env("TMPDIR", fixture.path())
+                .env("XDG_CONFIG_HOME", fixture.path().join("config"))
+                .env("XDG_DATA_HOME", fixture.path().join("data"))
+                .env("XDG_RUNTIME_DIR", fixture.path().join("runtime"))
+                .env("RUST_MIN_STACK", "16777216")
+                .env("VOXTYPE_HISTORY_WORKER_RESPONSE", response.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdin = child.stdin.take().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            loop {
+                let mut line = String::new();
+                assert!(
+                    stdout.read_line(&mut line).unwrap() > 0,
+                    "Private worker exited before readiness"
+                );
+                if line.contains("HISTORY_PRIVATE_WORKER_READY") {
+                    break;
+                }
+            }
+            *engine.prepared_worker.lock().unwrap() = Some(PreparedWorker {
+                child,
+                stdin,
+                stdout,
+            });
+            assert_eq!(engine.transcribe(&[0.0; 16]).is_ok(), ok);
+            assert_eq!(
+                engine.runtime_metadata(),
+                expected,
+                "No capability guesses or stale metadata from the previous worker"
+            );
+        }
     }
 }

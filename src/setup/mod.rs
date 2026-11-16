@@ -1305,8 +1305,23 @@ pub async fn run_setup(
     Ok(())
 }
 
-/// Run system checks (blocking, shows red X for failures)
-pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
+fn history_control_command(path: Option<&std::path::Path>, action: &str) -> Option<String> {
+    let path = path?;
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    // Use the same POSIX single-quote escaping as meeting assistant commands.
+    let quoted = path.to_str()?.replace('\'', "'\\''");
+    Some(format!("voxtype --config '{quoted}' history {action}"))
+}
+
+/// Run system checks for the caller's loaded configuration, not live daemon state.
+pub async fn run_checks(
+    config: &Config,
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     println!("Voxtype System Check\n");
     println!("====================\n");
 
@@ -1354,6 +1369,27 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
             all_ok = false;
         }
     }
+
+    println!("\nDictation History:");
+    let action = if !config.history.enabled {
+        print_info("History is off in this loaded configuration. Existing configs stay off until you enable it.");
+        println!("       Enable History in the tray controls that daemon's own config.");
+        "enable"
+    } else if config.history.paused {
+        print_info("History is paused in this loaded configuration.");
+        "resume"
+    } else {
+        print_info("History is on in this loaded configuration; pause before sensitive dictation.");
+        "pause"
+    };
+    if let Some(command) = history_control_command(config_path, action) {
+        println!("       Run: {command}");
+    } else {
+        print_warning("Cannot print a safe command for the selected config path; use the same --config file for history controls.");
+    }
+    print_info("This describes the loaded configuration, not verified state of a live daemon. Daemon CLI/environment overrides can take precedence over saved settings.");
+    print_info("History controls do not disable independent legacy logging or file output.");
+    print_info("Focused-app exclusions cannot protect an unknown app. Pause before sensitive dictation, including browser-hosted password managers.");
 
     // Check input group
     println!("\nInput:");

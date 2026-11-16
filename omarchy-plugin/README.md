@@ -6,8 +6,8 @@ panel plugin inside `omarchy-shell`. It renders whatever `voxtype config schema
 panel, the CLI, and `voxtype configure` all agree about defaults and validation
 without keeping a second copy of the schema.
 
-Omarchy lists it as **Voxtype**: the same panel holds the settings and the
-live meeting view (`omarchy-shell io.voxtype.settings open` or `meetings`).
+Omarchy lists it as **Voxtype**: the same plugin holds settings, live meetings,
+and dictation history in normal application windows.
 
 ### Why the ID is still `io.voxtype.settings`
 
@@ -105,6 +105,8 @@ keybind or a script because it takes no JSON:
 | `omarchy-shell io.voxtype.settings toggle` | open or close |
 | `omarchy-shell io.voxtype.settings section Hotkey` | open on a section, or jump to it if already open (re-reading everything, as opening does) |
 | `omarchy-shell io.voxtype.settings meetings` | open the live meeting view (no-op if already open) |
+| `omarchy-shell io.voxtype.settings history` | open dictation history with the default configuration |
+| `omarchy-shell io.voxtype.settings historyConfig /absolute/path/config.toml` | open history with an explicit configuration |
 | `omarchy-shell io.voxtype.settings restart` | restart the voxtype daemon without opening anything |
 | `omarchy-shell io.voxtype.settings download <model>` | start the same download the model row's button starts |
 | `omarchy-shell io.voxtype.settings cancelDownload` | stop the download in progress |
@@ -121,6 +123,20 @@ Because a keybind can fire while the panel has never been opened, the manifest
 sets `keepLoaded: true` — the panel is instantiated with the shell so its IPC
 target exists from the start. Adding or removing that flag needs a full
 `omarchy-restart-shell`; `rescanPlugins` alone will not re-instantiate it.
+
+## Dictation history
+
+Use `voxtype history view` to open history through the available graphical
+frontend, or `voxtype history view --tui` for the terminal view. On Omarchy,
+the graphical command uses this plugin's history window. For an alternate
+configuration, use `voxtype --config /path/config.toml history view`; the CLI
+resolves relative paths in the caller's directory before forwarding them.
+
+History windows retain their own configuration clients. Reopening one does not
+change another window's collection controls. Enable, disable, pause, and resume
+write through the canonical history CLI. Closing a window does not turn off
+collection. Existing saved dictations remain readable while collection is off.
+See the user manual's history section for storage, retention, and privacy rules.
 
 ## Meetings
 
