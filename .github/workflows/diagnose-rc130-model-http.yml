@@ -1,0 +1,310 @@
+# PROPOSED ONLY. Needs independent review and separate public-action consent.
+# Immutable RC2 source remains 52bdfadb37244ca22150e9c71045e6d1e7b02c62.
+name: RC2 public model HTTP diagnostic v2
+on:
+  push:
+    branches: [diag/rc130-model-http-20261115]
+permissions: {}
+jobs:
+  model-http:
+    if: github.ref == 'refs/heads/diag/rc130-model-http-20261115'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    steps:
+      - name: Capture bounded fixed-classification evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          #!/usr/bin/env python3
+          """Bounded evidence capture only; no redirect, retry, availability or inference gate."""
+          import fcntl
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import selectors
+          import subprocess
+          import time
+          import urllib.parse
+          
+          URL = 'https://models.voxtype.io/whisper/tiny.en/ggml-tiny.en.bin'
+          CURL = '/usr/bin/curl'
+          CAPS = {'body': 8192, 'headers': 8192, 'metadata': 32, 'stderr': 2048}
+          PIPE_BYTES = 4096
+          READ_BYTES = 1024
+          PROBE_SECONDS = 8.0
+          TOTAL_SECONDS = 24.0
+          REAP_SECONDS = 2.0
+          OUTPUT_BYTES = 16384
+          
+          
+          def location_class(value):
+              result = {'kind': 'malformed', 'signed_query_hint': False, 'expiry_hint': False}
+              try:
+                  text = value.decode('ascii')
+                  if any(ord(c) <= 32 or ord(c) == 127 for c in text):
+                      return result
+                  parsed = urllib.parse.urlsplit(text)
+                  _ = parsed.port
+                  if parsed.username is not None or parsed.password is not None:
+                      kind = 'userinfo'
+                  elif parsed.scheme == 'http':
+                      kind = 'http_downgrade'
+                  elif parsed.scheme and parsed.scheme != 'https':
+                      kind = 'other_scheme'
+                  elif not parsed.scheme and not parsed.netloc:
+                      kind = 'relative'
+                  elif parsed.scheme == 'https' and parsed.hostname:
+                      kind = 'same_authority' if parsed.netloc == 'models.voxtype.io' else 'other_authority'
+                  else:
+                      kind = 'malformed'
+                  result['kind'] = kind
+                  result['signed_query_hint'] = bool(re.search(r'(?:^|&)(?:X-Amz-Signature|Signature|Policy)=', parsed.query))
+                  result['expiry_hint'] = bool(re.search(r'(?:^|&)(?:X-Amz-Date|X-Amz-Expires|Expires)=', parsed.query))
+              except Exception:
+                  pass
+              return result
+          
+          
+          def classify(headers, body):
+              output = {'server': 'absent', 'content_type': 'absent', 'cache': 'absent',
+                        'mitigation': 'absent', 'ray_present': False, 'authentication_present': False,
+                        'location': {'kind': 'absent', 'signed_query_hint': False, 'expiry_hint': False},
+                        'declared_length': 'absent'}
+              status = None
+              for line in headers.splitlines():
+                  match = re.match(rb'^HTTP/(?:1\.[01]|2|3) ([1-5][0-9][0-9])(?:[ \t]|$)', line)
+                  if match:
+                      status = int(match.group(1))
+                  key, sep, value = line.partition(b':')
+                  if not sep:
+                      continue
+                  key, value = key.lower(), value.strip()
+                  lower = value.lower()
+                  if key == b'server':
+                      output['server'] = 'cloudflare' if lower == b'cloudflare' else 'other'
+                  elif key == b'content-type':
+                      mime = lower.split(b';', 1)[0].strip()
+                      output['content_type'] = {b'application/octet-stream': 'octet_stream', b'text/html': 'html',
+                                                b'application/xml': 'xml', b'text/xml': 'xml', b'application/json': 'json'}.get(mime, 'other')
+                  elif key == b'cf-cache-status':
+                      output['cache'] = {b'hit': 'hit', b'miss': 'miss', b'dynamic': 'dynamic', b'bypass': 'bypass',
+                                         b'expired': 'expired', b'revalidated': 'revalidated'}.get(lower, 'other')
+                  elif key == b'cf-mitigated':
+                      output['mitigation'] = 'challenge' if lower == b'challenge' else 'other'
+                  elif key == b'cf-ray':
+                      output['ray_present'] = True
+                  elif key == b'www-authenticate':
+                      output['authentication_present'] = True
+                  elif key == b'location':
+                      output['location'] = location_class(value)
+                  elif key == b'content-length':
+                      if re.fullmatch(rb'[0-9]{1,12}', value):
+                          output['declared_length'] = 'over_body_cap' if int(value) > CAPS['body'] else 'within_body_cap'
+                      else:
+                          output['declared_length'] = 'invalid'
+              body_lower = body.lower()
+              code = 'absent'
+              match = re.search(rb'<Code>([^<]{0,128})</Code>', body)
+              if match:
+                  code = {b'AccessDenied': 'access_denied', b'RequestExpired': 'request_expired',
+                          b'SignatureDoesNotMatch': 'signature_mismatch'}.get(match.group(1), 'other')
+              output['body'] = {'xml_code': code, 'expiration_hint': bool(re.search(rb'expir(?:ed|ation|y)', body_lower)),
+                                'signature_hint': b'signature' in body_lower,
+                                'challenge_hint': bool(re.search(rb'captcha|challenge|just a moment|cloudflare', body_lower))}
+              return status, output
+          
+          
+          def empty_result(method, outcome):
+              return {'method': method, 'outcome': outcome, 'curl_exit': None, 'http_status': None,
+                      'producer_started': False, 'producer_reaped': True, 'termination_requested': False,
+                      'accepted_bytes': {key: 0 for key in CAPS}, 'read_bytes': {key: 0 for key in CAPS},
+                      'pipe_bytes': {}, 'elapsed_ms': 0, 'classification': None}
+          
+          
+          def probe(method, collection_deadline):
+              result = empty_result(method, 'internal_error')
+              if method not in ('HEAD', 'GET'):
+                  return result
+              started = time.monotonic()
+              deadline = min(started + PROBE_SECONDS, collection_deadline)
+              if deadline <= started:
+                  result['outcome'] = 'budget_exhausted'
+                  return result
+              buffers = {key: bytearray() for key in CAPS}
+              descriptors = set()
+              selector = selectors.DefaultSelector()
+              process = None
+              outcome = None
+              streams = []
+              try:
+                  header_read, header_write = os.pipe()
+                  descriptors.update((header_read, header_write))
+                  body_read, body_write = os.pipe()
+                  descriptors.update((body_read, body_write))
+                  for fd in (header_read, body_read):
+                      fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, PIPE_BYTES)
+                  command = [CURL, '--disable', '--silent', '--show-error', '--fail-with-body',
+                             '--retry', '0', '--max-redirs', '0', '--connect-timeout', '3', '--max-time', '7',
+                             '--dump-header', '/dev/fd/' + str(header_write),
+                             '--output', '/dev/null' if method == 'HEAD' else '/dev/fd/' + str(body_write), '--write-out', '%{http_code}']
+                  if method == 'HEAD':
+                      command.append('--head')
+                  command += ['--', URL]
+                  process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, pass_fds=(header_write, body_write),
+                                             start_new_session=True, pipesize=PIPE_BYTES)
+                  result['producer_started'] = True
+                  result['producer_reaped'] = False
+                  for fd in (header_write, body_write):
+                      os.close(fd)
+                      descriptors.remove(fd)
+                  if process.stdout is None or process.stderr is None:
+                      raise RuntimeError()
+                  streams = [process.stdout, process.stderr]
+                  for name, fd in [('headers', header_read), ('body', body_read),
+                                   ('metadata', process.stdout.fileno()), ('stderr', process.stderr.fileno())]:
+                      fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, PIPE_BYTES)
+                      actual_pipe = fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
+                      result['pipe_bytes'][name] = actual_pipe
+                      if actual_pipe != PIPE_BYTES:
+                          outcome = 'pipe_budget_unavailable'
+                          break
+                      os.set_blocking(fd, False)
+                      selector.register(fd, selectors.EVENT_READ, name)
+                  while outcome is None and selector.get_map():
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          outcome = 'deadline'
+                          break
+                      for key, _ in selector.select(min(remaining, 0.05)):
+                          name = key.data
+                          allowance = CAPS[name] - len(buffers[name])
+                          data = os.read(key.fd, min(READ_BYTES, allowance + 1))
+                          if not data:
+                              selector.unregister(key.fd)
+                              continue
+                          result['read_bytes'][name] += len(data)
+                          buffers[name].extend(data[:allowance])
+                          if len(data) > allowance:
+                              outcome = name + '_limit'
+                              break
+                          if sum(result['read_bytes'].values()) > sum(CAPS.values()):
+                              outcome = 'aggregate_limit'
+                              break
+                  if outcome is None:
+                      try:
+                          process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                      except subprocess.TimeoutExpired:
+                          outcome = 'deadline'
+              except Exception:
+                  outcome = 'producer_error'
+              finally:
+                  if process is not None:
+                      try:
+                          if process.poll() is None:
+                              process.kill()
+                              result['termination_requested'] = True
+                          process.wait(timeout=REAP_SECONDS)
+                          result['producer_reaped'] = True
+                          result['curl_exit'] = process.returncode
+                      except Exception:
+                          outcome = 'producer_reap_failed'
+                  selector.close()
+                  for stream in streams:
+                      if stream is not None:
+                          try:
+                              stream.close()
+                          except Exception:
+                              pass
+                  for fd in descriptors:
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          pass
+              result['accepted_bytes'] = {key: len(value) for key, value in buffers.items()}
+              result['elapsed_ms'] = min(60000, max(0, int((time.monotonic() - started) * 1000)))
+              try:
+                  header_status, result['classification'] = classify(bytes(buffers['headers']), bytes(buffers['body']))
+                  result['http_status'] = header_status
+                  metadata = bytes(buffers['metadata'])
+                  if outcome is None:
+                      if not re.fullmatch(rb'(?:000|[1-5][0-9][0-9])', metadata):
+                          outcome = 'metadata_invalid'
+                      else:
+                          result['http_status'] = int(metadata) or None
+                          if result['curl_exit'] == 28:
+                              outcome = 'curl_timeout'
+                          else:
+                              outcome = 'captured' if result['curl_exit'] in (0, 22) and result['http_status'] else 'curl_failed'
+              except Exception:
+                  outcome = 'parser_error'
+                  result['classification'] = None
+              result['outcome'] = outcome or 'internal_error'
+              return result
+          
+          
+          def encode(report):
+              data = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode('ascii')
+              if len(data) > OUTPUT_BYTES:
+                  rows = [{'method': method, 'outcome': 'output_limit',
+                           'curl_exit': next((row['curl_exit'] for row in report.get('requests', []) if row['method'] == method), None)}
+                          for method in ('HEAD', 'GET')]
+                  report.clear()
+                  report.update({'capture_state': 'failed', 'failure': 'output_limit', 'artifact': 'written',
+                                 'availability_certified': False, 'inference_verified': False, 'requests': rows})
+                  return (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode('ascii')
+              return data
+          
+          
+          def main():
+              report = {'collector_version': 2, 'source_pin': '52bdfadb37244ca22150e9c71045e6d1e7b02c62',
+                        'capture_state': 'failed', 'availability_certified': False, 'inference_verified': False,
+                        'artifact': 'not_written', 'requests': []}
+              exit_code = 1
+              try:
+                  deadline = time.monotonic() + TOTAL_SECONDS
+                  for method in ('HEAD', 'GET'):
+                      try:
+                          report['requests'].append(probe(method, deadline))
+                      except Exception:
+                          report['requests'].append(empty_result(method, 'internal_error'))
+                  count = sum(row['outcome'] == 'captured' for row in report['requests'])
+                  report['capture_state'] = 'complete' if count == 2 else 'partial' if count == 1 else 'failed'
+                  report['artifact'] = 'written'
+                  root = Path(os.environ.get('RUNNER_TEMP', os.environ.get('TMPDIR', '.')))
+                  output = root / 'model-http-diagnostic-v2'
+                  output.mkdir(mode=0o700, exist_ok=False)
+                  fd = os.open(output / 'sanitized-results.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                  try:
+                      data = encode(report)
+                      if len(data) > OUTPUT_BYTES:
+                          raise ValueError()
+                      with os.fdopen(fd, 'wb') as destination:
+                          fd = None
+                          destination.write(data)
+                  finally:
+                      if fd is not None:
+                          os.close(fd)
+                  exit_code = 0 if count == 2 and report['capture_state'] == 'complete' else 1
+              except Exception:
+                  report['artifact'] = 'write_failed'
+                  exit_code = 1
+              try:
+                  os.write(1, encode(report))
+              except Exception:
+                  exit_code = 1
+              return exit_code
+          
+          
+          if __name__ == '__main__':
+              raise SystemExit(main())
+          PY
+      - name: Retain only sanitized diagnostic data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc130-model-http-v2-${{ github.run_id }}
+          path: ${{ runner.temp }}/model-http-diagnostic-v2/sanitized-results.json
+          if-no-files-found: error
+          retention-days: 3
