@@ -536,7 +536,7 @@ Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout
 **Workarounds:**
 
 - Use a key that keyd does not remap, such as `SCROLLLOCK`, `PAUSE`, or `F13` through `F24`. A key with no binding in your keyd config passes through unchanged.
-- If any Ctrl key is acceptable, set `key = "LEFTCTRL"`. It fires for both Ctrl keys.
+- If any Ctrl key is acceptable, set `key = "LEFTCTRL"`. Under keyd, it fires for both Ctrl keys.
 
 ---
 
