@@ -119,10 +119,8 @@ jobs:
             check_no_avx512: false
             companion_libs: 'libonnxruntime_providers_migraphx.so libonnxruntime_providers_shared.so'
             timeout_minutes: 180
-          # Experimental aarch64 variants. CPU-only — no GPU EPs on arm64
-          # (Jetson CUDA toolchain is awkward, no mainstream consumer arm64
-          # Vulkan hardware yet). Marked experimental in release notes until
-          # external users validate on Pi/Ampere/Graviton/Snapdragon X.
+          # Experimental aarch64 variants: CPU builds for Pi/Ampere/Graviton/
+          # Snapdragon X, plus ONNX CUDA 13 for NVIDIA GB10 / RTX Spark N1X.
           - variant: cpu
             arch: aarch64
             dockerfile: Dockerfile.aarch64-cpu
@@ -138,6 +136,14 @@ jobs:
             glibc_cap: '2.39'
             check_no_avx512: false
             companion_libs: ''
+            timeout_minutes: 120
+          - variant: onnx-cuda-13
+            arch: aarch64
+            dockerfile: Dockerfile.aarch64-onnx-cuda-13
+            runner: ubuntu-24.04-arm
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: 'libonnxruntime.so.1.31.1 libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
             timeout_minutes: 120
     steps:
       - uses: actions/checkout@v4
