@@ -18,6 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Pin Ubuntu mirror addresses if DNS is down
+        if: runner.os == 'Linux'
+        run: bash scripts/ci/pin-ubuntu-mirrors.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -31,6 +35,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pin Ubuntu mirror addresses if DNS is down
+        if: runner.os == 'Linux'
+        run: bash scripts/ci/pin-ubuntu-mirrors.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,6 +59,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pin Ubuntu mirror addresses if DNS is down
+        if: runner.os == 'Linux'
+        run: bash scripts/ci/pin-ubuntu-mirrors.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -92,6 +104,10 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pin Ubuntu mirror addresses if DNS is down
+        if: runner.os == 'Linux'
+        run: bash scripts/ci/pin-ubuntu-mirrors.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

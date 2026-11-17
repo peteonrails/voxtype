@@ -379,14 +379,11 @@ fn is_degenerate_transcript(text: &str) -> bool {
 
 /// Resolve model name to file path
 fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
-    // If it's already an absolute path, use it directly
-    let path = PathBuf::from(model);
-    if path.is_absolute() && path.exists() {
-        return Ok(path);
-    }
+    resolve_model_path_in(&Config::models_dir(), model)
+}
 
-    // Map model names to file names
-    let model_filename = match model {
+pub(crate) fn model_filename(model: &str) -> Option<&str> {
+    Some(match model {
         "tiny" => "ggml-tiny.bin",
         "tiny.en" => "ggml-tiny.en.bin",
         "base" => "ggml-base.bin",
@@ -399,19 +396,31 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
         "large-v2" => "ggml-large-v2.bin",
         "large-v3" => "ggml-large-v3.bin",
         "large-v3-turbo" => "ggml-large-v3-turbo.bin",
-        // If it looks like a filename, use it as-is
         other if other.ends_with(".bin") => other,
-        // Otherwise, assume it's a model name and add prefix/suffix
-        other => {
-            return Err(TranscribeError::ModelNotFound(format!(
-                "Unknown model: '{}'. Valid models: tiny, base, small, medium, large-v3, large-v3-turbo",
-                other
-            )));
-        }
-    };
+        _ => return None,
+    })
+}
+
+/// Resolve local overrides with the same aliases and search paths as inference.
+/// Recording admission uses this without loading a model or opening audio.
+pub(crate) fn resolve_model_path_in(
+    models_dir: &std::path::Path,
+    model: &str,
+) -> Result<PathBuf, TranscribeError> {
+    // If it's already an absolute path, use it directly
+    let path = PathBuf::from(model);
+    if path.is_absolute() && path.exists() {
+        return Ok(path);
+    }
+
+    let model_filename = model_filename(model).ok_or_else(|| {
+        TranscribeError::ModelNotFound(format!(
+            "Unknown model: '{}'. Valid models: tiny, base, small, medium, large-v3, large-v3-turbo",
+            model
+        ))
+    })?;
 
     // Look in the data directory
-    let models_dir = Config::models_dir();
     let model_path = models_dir.join(model_filename);
 
     if model_path.exists() {

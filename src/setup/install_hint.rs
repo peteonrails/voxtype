@@ -197,7 +197,12 @@ impl<'a> Host<'a> {
         runner: &'a dyn CommandRunner,
         onnx_pick: fn() -> Variant,
     ) -> Self {
+        // Both sides canonical, or a symlink in the package path (macOS's
+        // /var -> /private/var, a symlinked /usr/lib) puts the resolved
+        // executable outside the unresolved directory and every package
+        // install is advised to rebuild from source.
         let canonical = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+        let lib_dir = lib_dir.canonicalize().unwrap_or(lib_dir);
         let running_from_package = canonical.starts_with(&lib_dir);
         let record = PackageRecord::read(&lib_dir.join(PACKAGE_VARIANTS_FILE));
         Self {
@@ -589,6 +594,30 @@ explicit=
                 .hint(Need::Variant(Variant::WhisperVulkan))
                 .to_string(),
             "run `sudo voxtype setup gpu --enable`"
+        );
+    }
+
+    /// The package directory reached through a symlink, as macOS's temp dir
+    /// is (/var -> /private/var): the running binary still counts as the
+    /// package's. Reproduces on Linux what failed every package case on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn package_dir_behind_a_symlink_is_still_the_package() {
+        let fx = Fixture::new(Some(Variant::OnnxAvx2), &[Variant::OnnxAvx2], None);
+        let link = fx.dir.path().join("link");
+        std::os::unix::fs::symlink(fx.dir.path(), &link).unwrap();
+        let runner = runner(&[]);
+        let host = Host::new(
+            link.join("lib").join(Variant::OnnxAvx2.binary_name()),
+            link.join("lib"),
+            &runner,
+            pick_avx512,
+        );
+        assert_eq!(
+            host.hint(Need::Feature("parakeet")),
+            Hint::Switch {
+                command: "sudo voxtype setup onnx --enable"
+            }
         );
     }
 

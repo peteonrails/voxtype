@@ -188,6 +188,31 @@
     font-size: inherit;
 }
 
+/* Release download tables and long verification keys */
+#v122 .article-body > p code {
+    overflow-wrap: anywhere;
+}
+
+#v122 table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    overflow-wrap: anywhere;
+}
+
+#v122 th,
+#v122 td {
+    padding: var(--space-sm);
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--color-border);
+}
+
+#v122 th:first-child,
+#v122 td:first-child {
+    width: 35%;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .news-hero {

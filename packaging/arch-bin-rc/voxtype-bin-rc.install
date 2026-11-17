@@ -63,13 +63,31 @@ _set_default_backend() {
     fi
 }
 
+# Where pre_upgrade hands the active backend to post_upgrade. /run is a
+# root-owned tmpfs that no other user can write to; a world-writable
+# directory such as /tmp let any local user pre-create the file and, with
+# fs.protected_regular set, keep root from overwriting it, so post_upgrade
+# would have installed that user's path as /usr/bin/voxtype.
+_backend_state="/run/voxtype-backend-upgrade"
+# The only directory a restored backend may come from.
+_backend_root="/usr/lib/voxtype"
+
 _preserve_or_set_backend() {
     # Restore saved backend from pre_upgrade, or set default
-    local saved="/tmp/.voxtype-backend-upgrade"
+    local saved="$_backend_state"
     if [ -f "$saved" ]; then
         target=$(cat "$saved")
         rm -f "$saved"
-        if [ -f "$target" ]; then
+        # Only a binary this package ships may become /usr/bin/voxtype,
+        # whatever the saved file says.
+        if [ -n "$target" ]; then
+            target=$(readlink -f -- "$target" 2>/dev/null)
+            case "$target" in
+                "$_backend_root"/*) ;;
+                *) target="" ;;
+            esac
+        fi
+        if [ -n "$target" ] && [ -f "$target" ]; then
             _install_active_binary "$target"
             local short=${target##*/voxtype-}
             echo "${short%/*}"
@@ -223,10 +241,13 @@ post_install() {
 }
 
 pre_upgrade() {
+    # A file an interrupted upgrade left behind must not be taken for the
+    # current state.
+    rm -f "$_backend_state"
     local target
     target=$(_resolve_active_binary)
     if [ -n "$target" ]; then
-        echo "$target" > /tmp/.voxtype-backend-upgrade
+        echo "$target" > "$_backend_state"
     fi
 }
 

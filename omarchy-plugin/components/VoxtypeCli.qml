@@ -677,6 +677,10 @@ Item {
 
   // ------------------------------------------------------------- restart
 
+  // When the last restart this panel started began. A config change that
+  // landed before it is one the restarted daemon reads.
+  property real restartRequestedAt: 0
+
   function restartDaemon() {
     if (root.restarting) return
     if (root.writeQueue.length > 0 || root.writing) {
@@ -684,6 +688,7 @@ Item {
       return
     }
     root.restarting = true
+    root.restartRequestedAt = Date.now()
     restartCheck.err = ""
     restartCheck.launch([root.bin, "config", "validate-selection", "--require-idle"])
   }
@@ -1120,6 +1125,100 @@ Item {
     onExited: function(exitCode) {
       root.copyDismissFinished(exitCode === 0, exitCode === 0 ? ""
         : (dismissProc.err || ("voxtype setup omarchy --dismiss-copy exited " + exitCode)))
+    }
+  }
+
+  // ------------------------------------------------------- OSD frontend
+  //
+  // `setup osd --status --json` reports which OSD frontend is configured,
+  // which one that resolves to, and whether to offer the Quickshell OSD:
+  //   {configured, active, reason, quickshell_available, offer, offer_dismissed}
+  // A build without `--status` exits non-zero, which reads as "no answer": no
+  // offer, and the style picker behaves as it always did.
+
+  // null when the answer could not be read.
+  signal osdStatusLoaded(var status)
+  // action is "use-auto" or "dismiss-offer".
+  signal osdActionFinished(string action, bool ok, string message)
+
+  property bool pendingOsdStatus: false
+  readonly property bool osdSwitching: osdActionProc.running && osdActionProc.action === "use-auto"
+  readonly property bool osdDismissing: osdActionProc.running && osdActionProc.action === "dismiss-offer"
+
+  function fetchOsdStatus() {
+    if (osdStatusProc.running) {
+      // The answer in flight may predate a write; ask again once it lands.
+      root.pendingOsdStatus = true
+      return
+    }
+    root.pendingOsdStatus = false
+    osdStatusProc.out = ""
+    osdStatusProc.launch([root.bin, "setup", "osd", "--status", "--json"])
+  }
+
+  CliProcess {
+    id: osdStatusProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: osdStatusProc.out = String(text || "")
+    }
+    onFailedToStart: {
+      root.pendingOsdStatus = false
+      root.osdStatusLoaded(null)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      if (root.pendingOsdStatus) {
+        root.pendingOsdStatus = false
+        Qt.callLater(root.fetchOsdStatus)
+        return
+      }
+      var parsed = null
+      if (exitCode === 0) {
+        try {
+          parsed = JSON.parse(osdStatusProc.out)
+        } catch (e) {
+          parsed = null
+        }
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = null
+      root.osdStatusLoaded(parsed)
+    }
+  }
+
+  // Neither restarts the daemon: Switch follows `--use-auto` with the panel's
+  // own restart flow, so its validation and error reporting apply.
+  function useAutoOsd() {
+    root.runOsdAction("use-auto")
+  }
+
+  function dismissOsdOffer() {
+    root.runOsdAction("dismiss-offer")
+  }
+
+  function runOsdAction(action) {
+    if (osdActionProc.running) return
+    osdActionProc.action = action
+    osdActionProc.err = ""
+    osdActionProc.launch([root.bin, "setup", "osd", "--" + action])
+  }
+
+  CliProcess {
+    id: osdActionProc
+    property string action: ""
+    property string err: ""
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: osdActionProc.err = String(text || "").trim()
+    }
+    onFailedToStart: {
+      root.osdActionFinished(osdActionProc.action, false, "Could not run " + root.bin)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      root.osdActionFinished(osdActionProc.action, exitCode === 0, exitCode === 0 ? ""
+        : (osdActionProc.err || ("voxtype setup osd --" + osdActionProc.action + " exited " + exitCode)))
     }
   }
 

@@ -138,18 +138,26 @@ const BUILT_REQUIRING_AVX2: bool = cfg!(target_feature = "avx2");
 /// Bridge test VM, where the AVX2 binary printed the old message despite the
 /// fix being compiled in. CPUID itself executes on any x86-64 CPU.
 #[cfg(target_arch = "x86_64")]
+// CPUID executes on every x86-64 CPU. Newer Rust declares __cpuid safe;
+// Rust 1.93 and earlier (Ubuntu 26.04's default toolchain) still require
+// `unsafe`, which the newer compilers then flag as unused.
+#[allow(unused_unsafe)]
 fn cpuid_has_avx2() -> bool {
-    // AVX2: CPUID leaf 7 subleaf 0, EBX bit 5. __cpuid is safe on x86_64
-    // (the instruction predates every CPU this binary can load on).
-    core::arch::x86_64::__cpuid(0).eax >= 7
-        && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 5)) != 0
+    // AVX2: CPUID leaf 7 subleaf 0, EBX bit 5.
+    unsafe {
+        core::arch::x86_64::__cpuid(0).eax >= 7
+            && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 5)) != 0
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(unused_unsafe)]
 fn cpuid_has_avx512f() -> bool {
     // AVX-512F: CPUID leaf 7 subleaf 0, EBX bit 16.
-    core::arch::x86_64::__cpuid(0).eax >= 7
-        && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 16)) != 0
+    unsafe {
+        core::arch::x86_64::__cpuid(0).eax >= 7
+            && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 16)) != 0
+    }
 }
 
 /// Check CPU feature compatibility and warn if there might be issues.

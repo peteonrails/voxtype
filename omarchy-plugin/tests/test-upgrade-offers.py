@@ -154,9 +154,11 @@ def run(scenario, shell, evidence):
             problems.append("log contains " + marker)
     migrate = [c for c in calls if c[:2] == ["setup", "migrate"] and "--json" not in c]
     # The panel must never write config or download through any other route.
+    # The OSD status read rides every refresh; anything else under `setup osd`
+    # would be a write.
     stray = [c for c in calls if c[:2] in (["config", "set"], ["config", "select-model"], ["config", "unset"])
              or (c[:1] == ["setup"] and c[:2] != ["setup", "migrate"]
-                 and c[:2] != ["setup", "omarchy"])]
+                 and c[:2] != ["setup", "omarchy"] and c != ["setup", "osd", "--status", "--json"])]
     # Of `setup omarchy`, only the status read, plus the dismissal where Not now
     # is clicked. Switch goes to the terminal, never through here.
     omarchy = [c for c in calls if c[:2] == ["setup", "omarchy"] and c != ["setup", "omarchy", "--status", "--json"]]

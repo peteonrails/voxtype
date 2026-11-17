@@ -169,12 +169,48 @@ pub fn validate_ready_in(engine: &str, model: &str, models: &Path) -> Result<(),
 
 pub fn validate_ready(engine: &str, model: &str) -> Result<(), String> {
     validate_ready_in(engine, model, &Config::models_dir())?;
+    validate_worker(engine, model)
+}
+
+/// A GGUF checkpoint runs in the companion worker, so selecting one without
+/// the worker installed would leave the daemon unable to load it.
+pub fn validate_worker(engine: &str, model: &str) -> Result<(), String> {
     #[cfg(any(feature = "parakeet-gguf", feature = "cohere-gguf", feature = "gguf"))]
     if matches!(engine, "parakeet" | "cohere" | "gguf") && is_gguf(model) {
         let worker = crate::transcribe::gguf_subprocess::worker_path();
         if which::which(&worker).is_err() {
             return Err(format!("Matching GGUF worker '{}' is missing or not executable. Install the worker packaged with this application, or set VOXTYPE_GGUF_WORKER to a compatible executable. Config unchanged.", worker.display()));
         }
+    }
+    #[cfg(not(any(feature = "parakeet-gguf", feature = "cohere-gguf", feature = "gguf")))]
+    let _ = (engine, model);
+    Ok(())
+}
+
+/// The installed-model check `validate_ready_in` leaves to the GGUF-capable
+/// engines, for every other engine an explicit selection can name. Kept out
+/// of `validate_ready_in` because restart validation runs that for whatever
+/// engine is configured, and a Whisper config in remote mode has no local
+/// model to find.
+pub fn validate_installed_in(engine: &str, model: &str, models: &Path) -> Result<(), String> {
+    let path = Path::new(model);
+    let present = if engine == "whisper" && (path.is_absolute() || model.ends_with(".bin")) {
+        // A custom Whisper checkpoint is a file path, as the transcriber
+        // resolves it, not a catalog name under the models directory.
+        let file = model_path_in(models, model);
+        file.is_file()
+            && crate::setup::model::validate_download(
+                &file,
+                None,
+                crate::setup::model::ContentCheck::Ggml,
+            )
+            .is_ok()
+    } else {
+        crate::model_catalog::model_health_in(models, engine, model)
+            == crate::model_catalog::ModelHealth::Present
+    };
+    if !present {
+        return Err(format!("{engine} model '{model}' is missing or incomplete in {}. Config unchanged. Select an installed model, or download it first: {}", models.display(), crate::model_catalog::download_command(engine, model)));
     }
     Ok(())
 }
