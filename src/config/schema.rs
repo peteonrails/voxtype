@@ -1268,7 +1268,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Text Cleanup",
         "LARD disfluency cleanup",
-        "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+        "Opt in to the local English-only LARD model. Download it first with voxtype setup lard: without the model this stage is skipped and the other cleanup stages still run.",
     ),
     spec(
         "text.lard_model_path",
@@ -3453,6 +3453,19 @@ fn file_value(editor: &ConfigEditor, spec: &KeySpec) -> Json {
     }
 }
 
+/// What is wrong with a key's current value, when the value asks for
+/// something that cannot run. A settings UI shows it under the row, so the
+/// switch is never on without saying why it is doing nothing.
+///
+/// Today only LARD cleanup has one: on with no model installed, or with a
+/// language that is not explicit English (#696).
+pub fn key_notice(spec: &KeySpec, cfg: &Config) -> Option<String> {
+    match spec.key {
+        "text.lard_disfluency" => crate::setup::lard::problem(cfg).map(|p| p.summary()),
+        _ => None,
+    }
+}
+
 /// One entry in the schema document's `keys` array.
 fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
     let mut o = Map::new();
@@ -3494,6 +3507,10 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
     // Additive and only present when set, like `open`: older consumers ignore it.
     if spec.onnx_model_only {
         o.insert("onnx_model_only".into(), json!(true));
+    }
+    // Additive too, and only present while there is something to say.
+    if let Some(notice) = key_notice(spec, cfg) {
+        o.insert("notice".into(), json!(notice));
     }
     Json::Object(o)
 }
@@ -4090,6 +4107,50 @@ mod tests {
             .unwrap();
         assert!(spec.onnx_model_only);
         assert_eq!(spec.engine, Some("parakeet"));
+    }
+
+    /// The settings panel is built from this document. A LARD switch that is
+    /// on with nothing to run carries a notice; otherwise the field is absent.
+    #[test]
+    fn lard_key_carries_a_notice_only_while_it_cannot_run() {
+        let (_dir, path) = temp_config();
+        let ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut cfg = load_config(Some(&path)).unwrap();
+        cfg.whisper.language = LanguageConfig::Single("en".into());
+        cfg.text.lard_model_path = Some("/nonexistent/voxtype-test/lard.vxdf".into());
+
+        let notices = |cfg: &Config| -> Vec<(String, String)> {
+            schema_json(cfg, &path, &ed)["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|k| {
+                    Some((
+                        k["key"].as_str()?.to_string(),
+                        k.get("notice")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        };
+
+        // Off: nothing to say, whatever the model path is.
+        assert_eq!(notices(&cfg), []);
+
+        cfg.text.lard_disfluency = true;
+        let found = notices(&cfg);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "text.lard_disfluency");
+        assert!(found[0].1.contains("/nonexistent/voxtype-test/lard.vxdf"));
+        assert!(found[0]
+            .1
+            .contains("voxtype config set text.lard_disfluency false"));
+
+        // Installed and English: the field goes away again.
+        cfg.text.lard_model_path = Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(crate::setup::lard::SOURCE_TREE_PATH),
+        );
+        assert_eq!(notices(&cfg), []);
     }
 
     #[test]

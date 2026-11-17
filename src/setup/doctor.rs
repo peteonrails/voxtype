@@ -79,9 +79,9 @@ impl Check {
 pub enum Scope {
     /// Everything, for `voxtype doctor`.
     Full,
-    /// Only checks that cost a stat, a PATH lookup or an env read, and that
-    /// nothing else in the daemon already notifies about. Run once at daemon
-    /// startup.
+    /// Only checks that cost a stat, a PATH lookup, an env read or one small
+    /// file read, and that nothing else in the daemon already notifies about.
+    /// Run once at daemon startup.
     Startup,
 }
 
@@ -297,6 +297,24 @@ pub fn vad_check(config: &Config, models_dir: &Path) -> Option<Check> {
             ),
             "Run: voxtype setup vad   (or set [vad] backend = \"energy\")",
         )
+    })
+}
+
+/// LARD disfluency cleanup, when `text.lard_disfluency` is on.
+///
+/// The stage fails open: with no model, or a language that is not explicit
+/// English, dictation carries on without it. Nothing else notifies about
+/// that, so before this check a setting that was on and doing nothing showed
+/// only as a warning in the journal (#696). `problem` is what
+/// [`super::lard::problem`] found.
+pub fn lard_check(config: &Config, problem: Option<&super::lard::Problem>) -> Option<Check> {
+    const ID: &str = "text.lard_disfluency";
+    if !config.text.lard_disfluency {
+        return None;
+    }
+    Some(match problem {
+        None => Check::ok(ID, "LARD disfluency cleanup: model installed and loadable"),
+        Some(problem) => Check::error(ID, problem.message(), problem.fix()),
     })
 }
 
@@ -891,6 +909,7 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     ));
     checks.extend(secondary_model_check(config, &models_dir));
     checks.extend(vad_check(config, &models_dir));
+    checks.extend(lard_check(config, super::lard::problem(config).as_ref()));
 
     if scope == Scope::Full {
         // Probed in a child process that is killed if the sound server hangs.
@@ -993,6 +1012,7 @@ fn heading(id: &str) -> &'static str {
         "config" => "Configuration",
         "binary" | "gpu" => "Binary and GPU",
         "transcription" | "vad" => "Transcription",
+        "text" => "Text cleanup",
         "audio" => "Audio",
         "session" | "output" => "Output",
         "input" => "Input",
@@ -1312,6 +1332,135 @@ mod tests {
             vad_check(&config, dir.path()).unwrap().severity,
             Severity::Ok
         );
+    }
+
+    fn lard_config(model: &Path) -> Config {
+        let mut config = Config::default();
+        config.text.lard_disfluency = true;
+        config.text.lard_model_path = Some(model.to_path_buf());
+        config.whisper.language = crate::config::LanguageConfig::Single("en".into());
+        config
+    }
+
+    #[test]
+    fn lard_check_is_silent_while_the_stage_is_off() {
+        let mut config = lard_config(Path::new("/nonexistent/voxtype-test/lard.vxdf"));
+        config.text.lard_disfluency = false;
+        let problem = crate::setup::lard::problem(&config);
+        assert_eq!(lard_check(&config, problem.as_ref()), None);
+    }
+
+    #[test]
+    fn lard_check_errors_when_the_model_is_missing() {
+        let config = lard_config(Path::new("/nonexistent/voxtype-test/lard.vxdf"));
+        let problem = crate::setup::lard::problem(&config);
+        let check = lard_check(&config, problem.as_ref()).unwrap();
+        assert_eq!(check.id, "text.lard_disfluency");
+        assert_eq!(check.severity, Severity::Error);
+        assert!(check
+            .message
+            .contains("/nonexistent/voxtype-test/lard.vxdf"));
+        assert!(check
+            .fix
+            .unwrap()
+            .contains("voxtype config set text.lard_disfluency false"));
+    }
+
+    /// What a user with the setting on and no model sees, to the letter.
+    #[test]
+    fn lard_check_tells_the_user_to_run_setup_lard() {
+        let config = lard_config(Path::new("unused"));
+        let problem = crate::setup::lard::Problem::ModelMissing {
+            path: PathBuf::from("/home/u/.local/share/voxtype/models/lard-disfluency-v1.vxdf"),
+            custom: false,
+        };
+        let check = lard_check(&config, Some(&problem)).unwrap();
+        assert_eq!(check.severity, Severity::Error);
+        assert_eq!(
+            render_text(&report(vec![check.clone()]), false),
+            "Voxtype System Check\n\
+             ====================\n\
+             \n\
+             Text cleanup:\n  \
+               ✗ LARD disfluency cleanup is on but its model is not installed \
+             (/home/u/.local/share/voxtype/models/lard-disfluency-v1.vxdf)\n      \
+                   Fix: Run: voxtype setup lard, or turn it off: \
+             voxtype config set text.lard_disfluency false\n\
+             \n\
+             ---\n\
+             ✗ Some checks failed. 1 error(s), 0 warning(s). Please fix the issues above.\n"
+        );
+
+        let (title, body) = startup_notification(&report(vec![check])).unwrap();
+        assert_eq!(title, "Voxtype: 1 problem needs attention");
+        assert_eq!(
+            body,
+            "• LARD disfluency cleanup is on but its model is not installed \
+             (/home/u/.local/share/voxtype/models/lard-disfluency-v1.vxdf)\n  \
+               Run: voxtype setup lard, or turn it off: \
+             voxtype config set text.lard_disfluency false\n\
+             Run `voxtype doctor` for details."
+        );
+    }
+
+    #[test]
+    fn lard_check_errors_when_the_language_is_not_english() {
+        let model =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::setup::lard::SOURCE_TREE_PATH);
+        let mut config = lard_config(&model);
+        let problem = crate::setup::lard::problem(&config);
+        assert_eq!(
+            lard_check(&config, problem.as_ref()).unwrap().severity,
+            Severity::Ok
+        );
+
+        config.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        let problem = crate::setup::lard::problem(&config);
+        let check = lard_check(&config, problem.as_ref()).unwrap();
+        assert_eq!(check.severity, Severity::Error);
+        assert!(check.message.contains("English"));
+    }
+
+    /// Nothing else in the daemon notifies about a skipped LARD stage, so it
+    /// belongs in the grouped startup notification, once per failure set.
+    #[test]
+    fn lard_problem_is_in_the_startup_notification_until_fixed() {
+        let config = lard_config(Path::new("/nonexistent/voxtype-test/lard.vxdf"));
+        let problem = crate::setup::lard::problem(&config);
+        let check = lard_check(&config, problem.as_ref()).unwrap();
+        let r = report(vec![check.clone()]);
+
+        let (title, body) = startup_notification(&r).unwrap();
+        assert_eq!(title, "Voxtype: 1 problem needs attention");
+        assert!(body.contains("LARD disfluency cleanup is on but"));
+        assert!(body.contains("voxtype config set text.lard_disfluency false"));
+
+        assert_eq!(
+            marker_action(None, &notifiable_errors(&r)),
+            MarkerAction::Notify("text.lard_disfluency".into())
+        );
+        assert_eq!(
+            marker_action(Some("text.lard_disfluency"), &notifiable_errors(&r)),
+            MarkerAction::Keep
+        );
+        // Installing the model (or turning the stage off) clears the marker,
+        // so a later regression notifies again.
+        let fixed = report(vec![Check::ok(check.id, "ok")]);
+        assert_eq!(
+            marker_action(Some("text.lard_disfluency"), &notifiable_errors(&fixed)),
+            MarkerAction::Clear
+        );
+    }
+
+    #[test]
+    fn lard_check_has_its_own_heading() {
+        let r = report(vec![Check::error(
+            "text.lard_disfluency",
+            "LARD missing",
+            "install it",
+        )]);
+        let text = render_text(&r, false);
+        assert!(text.contains("\nText cleanup:\n  ✗ LARD missing\n      Fix: install it"));
     }
 
     #[test]

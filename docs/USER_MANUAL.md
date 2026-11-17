@@ -460,6 +460,7 @@ checked. What is covered:
 | Configuration | Config directory, models directory, config file |
 | Binary and GPU | The installed variant supports your engine; Vulkan, CUDA or MIGraphX runtime libraries for GPU variants |
 | Transcription | The configured engine's model (every engine, including the Whisper secondary model and the Soniox API key); the Silero model when VAD uses the Whisper backend |
+| Text cleanup | When `text.lard_disfluency` is on: the LARD model is installed and loads, and the engine language is explicit English |
 | Audio | The configured input device exists |
 | Output | A typing or clipboard tool works for your output mode; `WAYLAND_DISPLAY`/`DISPLAY` are visible to the systemd service |
 | Input | `/dev/input/event*` is readable when the built-in hotkey is on |
@@ -2443,7 +2444,11 @@ row visible, including replacement edit/add/delete rows. Saving unchanged cleanu
 options does not add missing keys or copy CLI/environment overrides into the file.
 Existing model selections, sibling options and TOML comments are preserved.
 The TUI's normal exit behavior can restart the daemon after saved configuration
-changes; changing a model path does not itself install or validate a model.
+changes; changing a model path does not itself install a model. While the LARD
+switch is on, the form checks it as you edit: with no model at the path, or an
+engine language that is not explicit English, the row reads
+`yes (model not installed)` or `yes (needs an English language)` and the help
+pane shows what is wrong and the fix. The switch still turns on.
 Learned punctuation/casing is separate from deterministic cleanup and is disabled
 in the TUI if this client lacks the `punctuation-casing` build feature.
 
@@ -2452,23 +2457,62 @@ In the graphical Voxtype app, the **Text Cleanup** section separates **Clean up 
 from **LARD disfluency cleanup**. Clean up text contains independent deterministic
 stage switches. There is no master switch that resets your individual choices.
 The LARD switch only changes `text.lard_disfluency`; it does not change those
-rules, enable restart collapse, install a model, or restart the daemon. The
+rules, enable restart collapse, install a model, or restart the daemon. If you
+turn it on with no model installed (or with a language that is not explicit
+English), a notice under the switch says it is not running and how to fix it;
+the notice goes away once it is fixed. The
 separate model license is linked there and opens only when clicked. Controls
 not advertised by your executable's schema are not shown, so an older binary
 may not offer LARD yet. Punctuation/casing restoration and smart auto-submit
 remain under **Other text options**, not the deterministic cleanup group.
 
-Install the separate model with
-`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`, then run
-`voxtype config set text.lard_disfluency true` and restart the daemon. Check it
-with `voxtype setup lard --status`. Use an explicit English engine language;
-auto-detected and non-English languages skip this stage.
+Install the model, turn the stage on, and restart the daemon:
+
+```bash
+voxtype setup lard
+voxtype config set text.lard_disfluency true
+systemctl --user restart voxtype
+```
+
+`voxtype setup lard` downloads the 64 KB model from the Voxtype model mirror
+and installs it only if it matches the pinned checksum. If the download fails
+or the checksum does not match, the command says which and leaves any model you
+already have in place. To install without a network, pass a copy of the file:
+`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf` (the source tree
+carries one as `assets/models/lard-disfluency-v1.vxdf`). Check the result with
+`voxtype setup lard --status`, which reports both the installed file and
+whether the stage is running for your configuration. Nothing is downloaded
+unless you run that command: not at daemon start, and not when you turn the
+setting on.
+
+Use an explicit English engine language; auto-detected and non-English
+languages skip this stage, and engines without a language setting cannot run
+it.
+
+Turning the setting on without the model does not break dictation, but the
+stage does nothing until the model is installed. Voxtype tells you instead of
+skipping it quietly:
+
+- `voxtype config set text.lard_disfluency true` still writes the setting and
+  prints a `warning:` line with the fix.
+- `voxtype configure` and the graphical app mark the switch as not running.
+- `voxtype doctor` reports it as a failed check under **Text cleanup**.
+- The daemon includes it in its "Voxtype: N problems need attention"
+  notification at startup, once per boot until it is fixed.
+
+To clear it, run `voxtype setup lard` or turn the stage off with
+`voxtype config set text.lard_disfluency false`.
 
 This opt-in stage can remove a discarded phrase such as "I need a flight no"
 from "I need a flight no I need a hotel". It does not generate replacement
-words. The model is CC BY-SA 4.0 and has its own model card under
-`assets/models/`. Publication is pending approval, so there is no implicit model
-download. Missing or invalid weights leave the remaining cleanup available.
+words. Missing or invalid weights leave the remaining cleanup available.
+
+The model is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/),
+separately from Voxtype's MIT code. It was trained on the LARD dataset
+(Passali et al., LREC 2022), which derives from the Schema-Guided Dialogue
+dataset. The [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md)
+gives the attribution, provenance, evaluation and how to reproduce it; the same
+card is in the source tree as `assets/models/lard-disfluency-v1.MODEL_CARD.md`.
 See [LARD configuration](CONFIGURATION.md#lard_disfluency-and-lard_model_path)
 for CLI/environment overrides and finalized-streaming behavior.
 

@@ -228,7 +228,7 @@
     },
     {
       "compiled": true,
-      "description": "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+      "description": "Opt in to the local English-only LARD model. Download it first with voxtype setup lard: without the model this stage is skipped and the other cleanup stages still run.",
       "engine": null,
       "file_value": null,
       "key": "text.lard_disfluency",

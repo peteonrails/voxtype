@@ -138,6 +138,13 @@ Item {
   // schema's: the Style row names the OSD frontend its styles belong to.
   property var rowNotes: ({})
   property var rowNotices: ({})
+  // The schema's own notice for a key: `notice`, present only while the key's
+  // current value asks for something that cannot run (LARD cleanup switched on
+  // with no model installed). A voxtype that predates the field sends none.
+  // The panel's notice about what it just did on the row wins.
+  function schemaNotice(spec) {
+    return spec && spec.notice ? String(spec.notice) : ""
+  }
   // Placeholder text for a text field, by key.
   property var rowPlaceholders: ({})
 
@@ -553,7 +560,7 @@ Item {
               objectName: "lardModelLicense"
               width: parent.width
               visible: root.cleanupHeading(entry.index) === "LARD disfluency cleanup"
-              text: "Optional local English-only model, off by default. Requires an explicit English language setting and separate model setup with voxtype setup lard --source /path/to/model.vxdf. Enabling the switch does not download a model. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; Voxtype source remains MIT."
+              text: "Optional local English-only model, off by default. Requires an explicit English language setting and the model, which voxtype setup lard downloads (or installs from a file with --source /path/to/model.vxdf). Enabling the switch does not download it. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; Voxtype source remains MIT."
               textFormat: Text.RichText
               onLinkActivated: function(link) { Qt.openUrlExternally(link) }
               color: Qt.darker(ShellTheme.Color.foreground, 1.5)
@@ -605,7 +612,7 @@ Item {
                 dynamicOptions: root.optionsForSource(entry.modelData.source)
                 errorText: root.errors[String(entry.modelData.key)] || ""
                 helpNote: root.rowNotes[String(entry.modelData.key)] || ""
-                noticeText: root.rowNotices[String(entry.modelData.key)] || ""
+                noticeText: root.rowNotices[String(entry.modelData.key)] || root.schemaNotice(entry.modelData)
                 placeholder: root.rowPlaceholders[String(entry.modelData.key)] || ""
                 highlighted: entry.highlighted
                 onSetRequested: function(key, value) { root.setRequested(key, value) }

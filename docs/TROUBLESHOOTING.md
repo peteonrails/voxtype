@@ -19,7 +19,7 @@ Before reading further, run:
 voxtype doctor
 ```
 
-It checks your model files, VAD model, GPU runtime libraries, audio device,
+It checks your model files, VAD model, LARD cleanup model, GPU runtime libraries, audio device,
 output tools, display environment of the systemd service, input device
 access, notifications, OSD and meeting-mode tools, and the systemd unit, and
 prints the exact fix for anything that is wrong (`✗` means broken, `!` means
@@ -2290,15 +2290,33 @@ journalctl --user -u pulseaudio -n 20
 ### Trained LARD cleanup is not running
 
 - It is off by default. Enable `text.lard_disfluency` and select an explicit
-  English language. `auto`, unknown, and non-English languages skip it.
-- Run `voxtype setup lard --status`. Install the pinned local artifact with
+  English language. `auto`, unknown, and non-English languages skip it, and so
+  do engines that have no language setting.
+- Run `voxtype doctor`. With the setting on and nothing to run, the **Text
+  cleanup** check fails and names the cause. The same problem is in the
+  daemon's "Voxtype: N problems need attention" startup notification and in
+  the log as `LARD cleanup unavailable; preserving text`.
+- "LARD disfluency cleanup is on but its model is not installed": the setting
+  is on and the model file is not there. Turning the setting on does not
+  download it. Run `voxtype setup lard`, then restart the daemon. Or turn the
+  stage off: `voxtype config set text.lard_disfluency false`.
+- `voxtype setup lard` fails with "answered HTTP ..." or "could not reach":
+  the download did not complete. Nothing was installed and an existing model
+  is untouched. Check your connection and run it again, or install from a copy
+  of the file with
   `voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`.
-- Model publication still requires approval. Do not expect a default download;
-  an explicit HTTPS URL must return the exact pinned artifact. Checksum failures
-  preserve any existing installed model.
+- `voxtype setup lard` fails with "checksum mismatch": what was downloaded (or
+  the file given to `--source`) is not the pinned model. The message shows the
+  size and SHA-256 it got and the ones it expected. Nothing was installed. A
+  captive portal or a proxy that rewrites downloads is the usual cause.
+- Run `voxtype setup lard --status` to see the installed file and whether the
+  stage is running for your configuration.
+- An explicit `--url` must be HTTPS and return the exact pinned artifact.
+- The model is licensed CC BY-SA 4.0, separately from Voxtype's MIT code. See
+  the [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md).
 - Check `text.lard_model_path` and the XDG data directory used by the daemon.
-  Restart after changing configuration. Missing or invalid models produce a
-  warning and skip only this stage; startup never tries a download.
+  Restart after changing configuration. Missing or invalid models skip only
+  this stage; startup never tries a download.
 - Streaming partials stay raw. Cleanup runs only at finalization and can revise
   already typed partials only when backspace output succeeds. For cross-segment
   cleanup, use batch or file output. LLM post-processing is still batch-only.
