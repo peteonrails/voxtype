@@ -1,4 +1,19 @@
+# /usr/bin/voxtype is created here instead of being packaged. voxtype-bin
+# creates the same path from its install script, so no package owns it, and
+# pacman will not install a package over a file nothing owns: with a packaged
+# link, switching from voxtype-bin stops at "/usr/bin/voxtype exists in
+# filesystem". An unowned link is also left alone by upgrades.
+_link_active_binary() {
+    # Keep a link that resolves: `voxtype setup gpu --enable` and `voxtype
+    # setup onnx --enable` point it at another variant, and this package is
+    # rebuilt often. Replace a missing or dangling one.
+    if [ ! -e /usr/bin/voxtype ]; then
+        ln -sfn /usr/lib/voxtype/voxtype-native /usr/bin/voxtype
+    fi
+}
+
 post_install() {
+    _link_active_binary
     cat <<'EOF'
 Voxtype development build installed (tracks upstream dev).
 Run `voxtype configure` to choose a model and configure dictation.
@@ -11,5 +26,10 @@ EOF
 }
 
 post_upgrade() {
+    _link_active_binary
     echo 'Restart the daemon to use the new build: systemctl --user restart voxtype'
+}
+
+post_remove() {
+    rm -f /usr/bin/voxtype
 }

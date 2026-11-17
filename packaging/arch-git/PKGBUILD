@@ -62,7 +62,7 @@ source=(
     'voxtype::git+https://github.com/peteonrails/voxtype.git#branch=dev'
     'voxtype-git.install'
 )
-sha256sums=('SKIP' '9471946285e36f4d30c94d6e353a690259c99a287011fc7a4ce9795997dd3da0')
+sha256sums=('SKIP' 'adf57e1d197f1a8ed93ed1f555f14b3ec2c6710fcdeb3f410edba439c8bfe4da')
 
 # The GTK4 meetings window arrived with 1.3.0. Build and test it when the
 # checked-out tree has it, so the recipe also builds a dev that is still
@@ -200,7 +200,7 @@ package() {
     fi
     install -Dm755 target/release/voxtype-audio-bridge \
         "$pkgdir/usr/bin/voxtype-audio-bridge"
-    ln -s /usr/lib/voxtype/voxtype-native "$pkgdir/usr/bin/voxtype"
+    # /usr/bin/voxtype is created by the install script; see the note there.
     ln -s /usr/lib/voxtype/voxtype-osd "$pkgdir/usr/bin/voxtype-osd"
 
     # Quickshell QML, OSD style packages and OSD recipes, copied as whole
