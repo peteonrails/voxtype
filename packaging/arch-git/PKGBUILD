@@ -36,7 +36,7 @@ optdepends=(
     'pulseaudio-alsa: ALSA compatibility for PulseAudio'
     'vulkan-icd-loader: GPU acceleration for Whisper and GGUF models, and native OSD rendering'
     'onnxruntime>=1.24.0: CPU inference for the ONNX engines'
-    'gtk4: GTK4 OSD frontend'
+    'gtk4: GTK4 OSD frontend and meetings window'
     'gtk4-layer-shell: GTK4 OSD frontend'
     'cairo: GTK4 OSD frontend'
     'glib2: GTK4 OSD frontend'
@@ -46,6 +46,10 @@ optdepends=(
     'quickshell: Quickshell OSD frontend'
     'qt6-declarative: Quickshell OSD frontend'
     'ollama: local AI summarization for meeting mode'
+    'libpulse: capture of the other side of a call in meeting mode (parec, pactl)'
+    'ffmpeg: meeting audio import, retention and playback'
+    'xdg-utils: open shared meetings and links from the meeting view'
+    'bubblewrap: sandbox for the meeting assistant'
 )
 provides=("voxtype=${pkgver}")
 conflicts=('voxtype')
@@ -59,6 +63,17 @@ source=(
     'voxtype-git.install'
 )
 sha256sums=('SKIP' '9471946285e36f4d30c94d6e353a690259c99a287011fc7a4ce9795997dd3da0')
+
+# The GTK4 meetings window arrived with 1.3.0. Build and test it when the
+# checked-out tree has it, so the recipe also builds a dev that is still
+# on 1.2.
+_companion_features() {
+    local _features=osd-gtk4,osd-native
+    if grep -q '^meetings-gtk4 *=' Cargo.toml; then
+        _features+=,meetings-gtk4
+    fi
+    printf '%s' "$_features"
+}
 
 pkgver() {
     cd voxtype
@@ -123,10 +138,15 @@ build() {
     # the same engines; users install the optional runtime to use them.
     CARGO_TARGET_DIR=target-onnx \
         cargo build --frozen --release --bin voxtype \
-        --features "parakeet-load-dynamic,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,$_gguf"
+        --features "parakeet-load-dynamic,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization,$_gguf"
 
-    # The OSD frontends and the audio bridge do not link a GPU backend, so
-    # they share the CPU build's directory.
+    # The OSD frontends, the audio bridge and the meetings window do not
+    # link a GPU backend, so they share the CPU build's directory.
+    local _features _meetings=()
+    _features=$(_companion_features)
+    if [[ $_features == *meetings-gtk4* ]]; then
+        _meetings=(--bin voxtype-meetings-gtk4)
+    fi
     CARGO_TARGET_DIR=target \
         cargo build --frozen --release \
         --bin voxtype-osd \
@@ -134,7 +154,8 @@ build() {
         --bin voxtype-osd-native \
         --bin voxtype-osd-quickshell \
         --bin voxtype-audio-bridge \
-        --features osd-gtk4,osd-native
+        "${_meetings[@]}" \
+        --features "$_features"
 }
 
 check() {
@@ -144,9 +165,10 @@ check() {
     export CC=clang
     export CXX=clang++
     export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
-    # Include both waveform implementations. Model-dependent inference
-    # tests remain opt-in, as in upstream's regular test suite.
-    cargo test --frozen --lib --bins --tests --features osd-gtk4,osd-native
+    # Include both waveform implementations and the meetings window.
+    # Model-dependent inference tests remain opt-in, as in upstream's
+    # regular test suite.
+    cargo test --frozen --lib --bins --tests --features "$(_companion_features)"
 }
 
 package() {
@@ -167,6 +189,11 @@ package() {
         target/release/voxtype-osd-gtk4 \
         target/release/voxtype-osd-native \
         target/release/voxtype-osd-quickshell
+    # `voxtype meeting view` finds the meetings window beside the daemon.
+    if [[ -f target/release/voxtype-meetings-gtk4 ]]; then
+        install -Dm755 target/release/voxtype-meetings-gtk4 \
+            "$pkgdir/usr/lib/voxtype/voxtype-meetings-gtk4"
+    fi
     install -Dm755 target/release/voxtype-audio-bridge \
         "$pkgdir/usr/bin/voxtype-audio-bridge"
     ln -s /usr/lib/voxtype/voxtype-native "$pkgdir/usr/bin/voxtype"
@@ -195,6 +222,10 @@ package() {
         "$pkgdir/usr/bin/voxtype-configure-launcher"
     install -Dm644 packaging/voxtype-configure.desktop \
         "$pkgdir/usr/share/applications/voxtype-configure.desktop"
+    if [[ -f packaging/voxtype-meetings.desktop ]]; then
+        install -Dm644 packaging/voxtype-meetings.desktop \
+            "$pkgdir/usr/share/applications/voxtype-meetings.desktop"
+    fi
     # The icon the desktop entries and notifications ask for by name.
     install -Dm644 assets/icon.svg \
         "$pkgdir/usr/share/icons/hicolor/scalable/apps/voxtype.svg"
