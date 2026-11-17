@@ -291,6 +291,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_FALLBACK_TO_CLIPBOARD") {
         config.output.fallback_to_clipboard = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_KEEP_UNDELIVERED_TEXT") {
+        config.output.keep_undelivered_text = parse_bool_env(&val);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_SPOKEN_PUNCTUATION") {
         config.text.spoken_punctuation = parse_bool_env(&val);
     }

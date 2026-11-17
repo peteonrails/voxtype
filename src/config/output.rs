@@ -23,6 +23,14 @@ pub struct OutputConfig {
     #[serde(default = "default_true")]
     pub fallback_to_clipboard: bool,
 
+    /// Keep the text of a transcription no output method could deliver, as
+    /// a file under the state directory's `undelivered/`, readable only by
+    /// the user, and name that file in the failure notification. Off means
+    /// no file is saved, the notification does not quote the text, and an
+    /// undelivered dictation is gone.
+    #[serde(default = "default_true")]
+    pub keep_undelivered_text: bool,
+
     /// Custom driver order for type mode (overrides default: wtype -> dotool -> ydotool -> clipboard)
     /// Specify which drivers to try and in what order.
     /// Example: ["ydotool", "wtype"] to prefer ydotool over wtype
@@ -200,6 +208,7 @@ impl Default for OutputConfig {
         Self {
             mode: OutputMode::default(),
             fallback_to_clipboard: true,
+            keep_undelivered_text: true,
             driver_order: None,
             notification: NotificationConfig::default(),
             type_delay_ms: 0,

@@ -413,6 +413,30 @@ pub struct Cli {
     )]
     pub no_fallback_to_clipboard: bool,
 
+    /// Keep the text of a transcription that could not be delivered (default)
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
+        long_help = "Keep the text of a transcription no output method could deliver, so it \
+        can be recovered. This is the default. The 200 most recent are kept in \
+        ~/.local/state/voxtype/undelivered/, readable only by you, and the failure \
+        notification names the file."
+    )]
+    pub keep_undelivered_text: bool,
+
+    /// Don't keep the text of a transcription that could not be delivered
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
+        conflicts_with = "keep_undelivered_text",
+        long_help = "Don't save the text of an undelivered transcription to a file, and \
+        don't quote it in the failure notification (overrides config and environment). \
+        A dictation that can't be typed or copied is then lost."
+    )]
+    pub no_keep_undelivered_text: bool,
+
     /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v), or
     /// "auto" (the default) for ctrl+v in GUI apps and --paste-keys-terminal in
     /// terminals
@@ -837,6 +861,22 @@ mod tests {
             "voxtype",
             "--keep-failed-recordings",
             "--no-keep-failed-recordings"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn keep_undelivered_text_flags_parse_and_conflict() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.keep_undelivered_text && !cli.no_keep_undelivered_text);
+        let cli = Cli::parse_from(["voxtype", "--no-keep-undelivered-text"]);
+        assert!(cli.no_keep_undelivered_text);
+        let cli = Cli::parse_from(["voxtype", "--keep-undelivered-text"]);
+        assert!(cli.keep_undelivered_text);
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-undelivered-text",
+            "--no-keep-undelivered-text"
         ])
         .is_err());
     }

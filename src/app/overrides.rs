@@ -355,6 +355,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.no_fallback_to_clipboard,
     );
     apply_bool_override(
+        &mut config.output.keep_undelivered_text,
+        cli.keep_undelivered_text,
+        cli.no_keep_undelivered_text,
+    );
+    apply_bool_override(
         &mut config.text.lard_disfluency,
         cli.lard_disfluency,
         cli.no_lard_disfluency,

@@ -2410,6 +2410,23 @@ mode = "type"
 fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 ```
 
+### keep_undelivered_text
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, a transcription that no output method could deliver (typing failed and so did the clipboard, or the clipboard fallback is off) is saved as a text file in `~/.local/state/voxtype/undelivered/` (or `$XDG_STATE_HOME/voxtype/undelivered/`). The "Voxtype: transcription not delivered" notification names the file and shows the text. The 200 most recent are kept and older ones are removed automatically. The directory and the files are private to your user (modes `0700` and `0600`).
+
+Set it to `false` to save no file. The notification then shows neither a file nor the text, because notification daemons keep a log of what they display. It still lists what failed and how to fix it, and says the text was not kept. A dictation that can't be typed or copied is then lost. Files saved earlier stay until you delete them.
+
+```toml
+[output]
+keep_undelivered_text = false
+```
+
+Also available as `--no-keep-undelivered-text` (and `--keep-undelivered-text` to override a config that turns it off) or `VOXTYPE_KEEP_UNDELIVERED_TEXT=false`.
+
 ### driver_order
 
 **Type:** Array of strings
@@ -4906,6 +4923,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_PRE_TYPE_DELAY` | integer | `output.pre_type_delay_ms` |
 | `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
+| `VOXTYPE_KEEP_UNDELIVERED_TEXT` | bool | `output.keep_undelivered_text` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
 | `VOXTYPE_PASTE_KEYS_TERMINAL` | string | `output.paste_keys_terminal` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |

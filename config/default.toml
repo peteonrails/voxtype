@@ -162,6 +162,13 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
+# Keep the text of a transcription no output method could deliver, so it can
+# be recovered. The 200 most recent are kept in
+# ~/.local/state/voxtype/undelivered/, readable only by you, and the failure
+# notification names the file. Set to false to save no file and keep the text
+# out of the notification; an undelivered dictation is then lost.
+# keep_undelivered_text = true
+
 # Per-language XKB layout variants for multilingual dictation.
 # Use this with language arrays such as `language = ["en", "ru"]` when a
 # language needs a variant that should not apply to other languages.
