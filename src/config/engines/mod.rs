@@ -12,6 +12,7 @@ mod paraformer;
 mod parakeet;
 mod sensevoice;
 mod soniox;
+mod whistle;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
@@ -23,6 +24,7 @@ pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
 pub use sensevoice::SenseVoiceConfig;
 pub use soniox::SonioxConfig;
+pub use whistle::WhistleConfig;
 
 /// Transcription engine selection (which ASR technology to use)
 #[derive(
@@ -74,6 +76,9 @@ pub enum TranscriptionEngine {
     OpenVino,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
+    /// Use Whistle (Cactus Compute on-device ASR, driven through the `needle`
+    /// runner as an external process).
+    Whistle,
 }
 
 impl TranscriptionEngine {

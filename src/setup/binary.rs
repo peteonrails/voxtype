@@ -411,6 +411,12 @@ impl Variant {
     /// moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere,
     /// OpenVINO).
     pub const fn supports_engine(self, engine: &str) -> bool {
+        // Whistle is driven as an external process (Cactus Compute's `needle`
+        // runner), so it links against neither whisper.cpp nor an ONNX
+        // runtime: every variant can run it.
+        if matches_str(engine, "whistle") {
+            return true;
+        }
         match self.family() {
             EngineFamily::Whisper => matches_str(engine, "whisper"),
             EngineFamily::Onnx => {
@@ -482,6 +488,7 @@ pub fn installed_engines(inv: &Inventory) -> std::collections::HashSet<&'static 
         "dolphin",
         "omnilingual",
         "cohere",
+        "whistle",
     ];
     let mut out = std::collections::HashSet::new();
     for status in &inv.variants {

@@ -201,6 +201,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
         "gguf" => cfg!(feature = "gguf"),
         "openvino" => cfg!(feature = "openvino-whisper"),
+        "whistle" => true,
         _ => false,
     }
 }
@@ -1000,6 +1001,67 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Seconds to wait for an async transcription before giving up.",
     )
     .for_engine("soniox"),
+    // whistle
+    spec(
+        "whistle.model",
+        "whistle",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "Whistle model file path or name (relative to models dir).",
+    )
+    .for_engine("whistle"),
+    spec(
+        "whistle.runner_path",
+        "whistle",
+        "runner_path",
+        KeyType::String,
+        "Engine",
+        "Needle runner path",
+        "Path to the Cactus `needle` CLI runner. Unset searches PATH.",
+    )
+    .for_engine("whistle"),
+    spec(
+        "whistle.language",
+        "whistle",
+        "language",
+        KeyType::String,
+        "Engine",
+        "Language",
+        "Language code (en, de, fr, es, it, nl, pl) or empty for auto.",
+    )
+    .for_engine("whistle"),
+    spec(
+        "whistle.keywords_file",
+        "whistle",
+        "keywords_file",
+        KeyType::String,
+        "Engine",
+        "Keywords file",
+        "Optional newline-separated keywords to favor during decoding.",
+    )
+    .for_engine("whistle"),
+    spec(
+        "whistle.word_timestamps",
+        "whistle",
+        "word_timestamps",
+        KeyType::Bool,
+        "Engine",
+        "Word timestamps",
+        "Include per-word start/end timestamps in results.",
+    )
+    .for_engine("whistle"),
+    spec(
+        "whistle.threads",
+        "whistle",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "Number of threads for the runner (unset = runner default).",
+    )
+    .for_engine("whistle"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -2681,6 +2743,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
     let so = || cfg.soniox.clone().unwrap_or_default();
+    let wh = || cfg.whistle.clone().unwrap_or_default();
     // Without a table, post-processing is off; report the values a new
     // table would start with.
     let pp = || cfg.output.post_process.clone().unwrap_or_default();
@@ -2814,6 +2877,22 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         },
         "soniox.async_api" => json!(so().async_api),
         "soniox.async_max_wait_secs" => json!(so().async_max_wait_secs),
+
+        "whistle.model" => json!(wh().model),
+        "whistle.runner_path" => match wh().runner_path.as_ref() {
+            Some(p) => json!(p.to_string_lossy()),
+            None => Json::Null,
+        },
+        "whistle.language" => json!(wh().language),
+        "whistle.keywords_file" => match wh().keywords_file.as_ref() {
+            Some(p) => json!(p.to_string_lossy()),
+            None => Json::Null,
+        },
+        "whistle.word_timestamps" => json!(wh().word_timestamps),
+        "whistle.threads" => match wh().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
 
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
@@ -3492,6 +3571,9 @@ mod tests {
             if *name == "whisper" {
                 continue; // always available, so it has no feature entry
             }
+            if *name == "whistle" {
+                continue; // always available, no feature entry
+            }
             assert_eq!(
                 feature_compiled(name),
                 config_set::engine_feature_compiled(name),
@@ -3508,7 +3590,7 @@ mod tests {
         for s in CONFIG_KEYS {
             let Some(engine) = s.engine else { continue };
             // Whisper and the Soniox cloud client are always compiled in.
-            if engine == "whisper" || engine == "soniox" {
+            if engine == "whisper" || engine == "soniox" || engine == "whistle" {
                 assert!(
                     s.requires_feature.is_none(),
                     "{} should not be feature-gated; {} is always compiled in",
@@ -3723,6 +3805,7 @@ mod tests {
         // Lists, which need a hand edit.
         "output.driver_order",
         "soniox.terms",
+        // Whistle config fields are all scalars and have KeySpecs.
     ];
 
     /// Tables of arbitrary keys, also a hand edit.
@@ -3759,6 +3842,7 @@ mod tests {
             "gguf",
             "openvino",
             "soniox",
+            "whistle",
         ]
         .iter()
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))

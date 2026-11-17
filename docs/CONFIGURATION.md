@@ -144,6 +144,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
+- `whistle` - Cactus Compute Whistle on-device ASR via the external `needle` runner (7 languages, 16.9 MB model, local-only)
 
 **Example:**
 ```toml
@@ -176,11 +177,13 @@ new engine to take effect.
 
 **Notes:**
 - First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
-- Whisper, Remote Whisper, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
+- Whisper, Remote Whisper, Soniox, and Whistle run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
+- Whistle runs as a local subprocess and needs no GPU, but the `needle` runner and `whistle.cact` weights are installed separately — `voxtype setup model` does not fetch them. See [WHISTLE.md](WHISTLE.md)
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
 - Cohere Transcribe is the largest model voxtype ships (~3 GB int8); use `voxtype setup model` to download it
+- Whistle runs as a local subprocess and needs no GPU, but the `needle` runner and `whistle.cact` weights are installed separately — `voxtype setup model` does not fetch them. See [WHISTLE.md](WHISTLE.md)
 
 ---
 
@@ -1870,6 +1873,144 @@ language = "en"
 ```
 
 `gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Release packages ship a Vulkan-capable worker beside the `vulkan` and x86_64 ONNX binaries and a CPU worker beside the others. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
+
+---
+
+## [whistle]
+
+Configuration for the Whistle on-device speech-to-text engine. This section is only used when `engine = "whistle"`.
+
+Whistle is [Cactus Compute](https://huggingface.co/Cactus-Compute/whistle)'s 16.9 MB on-device ASR model. Voxtype drives Cactus's `needle` CLI runner as a subprocess and reads the transcript from its JSON output, so nothing is linked into voxtype and no GPU is required. Seven languages are supported: English, German, French, Spanish, Italian, Dutch, and Polish. Every transcription spawns a new `needle` process that loads the model, transcribes, and exits; there is no resident background worker or preloaded model, so transcription latency includes model load time.
+
+Both the runner and the weights are Apache-2.0 and are downloaded separately — neither ships with voxtype, and `voxtype setup model` does not fetch them. See [WHISTLE.md](WHISTLE.md) for setup. The engine is built into every binary; no Cargo feature flag is required.
+
+**Privacy:** Fully local. Voxtype always launches the runner with `NEEDLE_TELEMETRY=0` and `DO_NOT_TRACK=1`, because the `needle` runner enables telemetry by default. Voxtype sets these variables but cannot inspect or guarantee the behaviour of prebuilt runner binaries beyond the documented environment flags.
+
+> **Note:** Whistle is not part of the model catalog, so `voxtype setup model` does not list it and the `--model` override does not select it. Switch to the engine with `voxtype config set engine whistle` and point it at the weights with `[whistle] model`.
+
+### model
+
+**Type:** String
+**Default:** `"whistle.cact"`
+**Required:** No
+
+The Whistle weights file. Can be an absolute path to a `whistle.cact`, or a short filename resolved in `~/.local/share/voxtype/models/` (a value without a `.cact` extension gets one appended).
+
+**Example:**
+```toml
+[whistle]
+model = "whistle.cact"
+```
+
+**Using absolute path:**
+```toml
+[whistle]
+model = "/opt/models/whistle/whistle.cact"
+```
+
+### runner_path
+
+**Type:** Path (optional)
+**Default:** unset (searches `PATH` and common locations)
+**Required:** No
+
+Path to the `needle` runner binary. When unset, voxtype looks for `needle` on `PATH` and then in `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle`.
+
+**Example:**
+```toml
+[whistle]
+runner_path = "/usr/local/bin/needle"
+```
+
+### language
+
+**Type:** String
+**Default:** `""` (auto-detect)
+**Required:** No
+
+Force the transcription language. Empty (the default) lets Whistle detect it, as does the literal value `auto`. Passed to the runner as `--audio-language`.
+
+**Supported values:** `en`, `de`, `fr`, `es`, `it`, `nl`, `pl`.
+
+**Example:**
+```toml
+[whistle]
+language = "de"
+```
+
+### keywords_file
+
+**Type:** Path (optional)
+**Default:** unset
+**Required:** No
+
+Path to a file of words and phrases to favour, one per line (keyword biasing). Passed to the runner as `--audio-keywords`. Use it for proper names, jargon, and product names the model would otherwise misspell.
+
+**Example:**
+```toml
+[whistle]
+keywords_file = "/home/me/voxtype-keywords.txt"
+```
+
+### word_timestamps
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, the runner is invoked with `--audio-word-timestamps` and its JSON output also carries a `words` array with `word`, `start`, `end`, and `probability` for each word.
+
+**Example:**
+```toml
+[whistle]
+word_timestamps = true
+```
+
+### threads
+
+**Type:** Integer (optional)
+**Default:** unset (the runner picks)
+**Required:** No
+
+Number of worker threads for the runner. Passed as `--threads`. Unset (or `0`) leaves the choice to the runner.
+
+**Example:**
+```toml
+[whistle]
+threads = 4
+```
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `model` | - | - | `"whistle.cact"` | Whistle weights file or short name |
+| `runner_path` | - | - | auto | Path to the `needle` runner binary |
+| `language` | - | - | `""` | One of `en`, `de`, `fr`, `es`, `it`, `nl`, `pl`; empty = auto-detect |
+| `keywords_file` | - | - | none | Newline-separated words/phrases to favour |
+| `word_timestamps` | - | - | `false` | Include per-word timings |
+| `threads` | - | - | auto | Runner worker threads |
+
+### Complete Example
+
+```toml
+engine = "whistle"
+
+[whistle]
+model = "whistle.cact"
+language = ""              # auto-detect; or one of en, de, fr, es, it, nl, pl
+# runner_path = "/usr/local/bin/needle"
+# keywords_file = "/home/me/voxtype-keywords.txt"
+word_timestamps = false
+```
+
+### Building from Source
+
+Whistle is built unconditionally; no Cargo feature flag is required:
+
+```bash
+cargo build --release
+```
 
 ---
 

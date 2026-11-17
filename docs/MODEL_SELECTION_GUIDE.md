@@ -18,6 +18,7 @@ Voxtype has eight transcription engines. Three ship in every binary — Whisper 
 | **Dolphin** | 40+ langs, 22 Chinese dialects | CTC E-Branchformer | 198 MB | Fast | No | ONNX |
 | **Omnilingual** | 1600+ | CTC wav2vec2 | 3.9 GB | Moderate | No | ONNX |
 | **Cohere** | 14 | Encoder-decoder | 1.5 - 3.9 GB | Slow (CPU) | Yes | ONNX |
+| **Whistle** | en, de, fr, es, it, nl, pl | On-device (subprocess) | 16.9 MB | Fast | No | Built-in |
 | **Soniox** (cloud) | 60+ | Cloud (WebSocket / REST) | n/a (no local model) | Cloud-bound | Yes | Built-in |
 
 **Soniox** is different from the others — it's a paid cloud service over WebSocket / REST. No local model, no GPU. Sub-second partial latency. Strong for non-English languages where local Whisper-based engines struggle on lower-end hardware. Ships in every release binary; you only need a `SONIOX_API_KEY`. See [SONIOX.md](SONIOX.md) for the full story.
@@ -452,6 +453,47 @@ Unsupported language codes are rejected at startup with a clear error rather tha
 
 ---
 
+### 9. Whistle
+
+Cactus Compute's 16.9 MB on-device ASR model. Unlike the other local engines it runs as an external process — voxtype drives Cactus's `needle` CLI runner and reads the transcript from its JSON output — so it needs no ONNX Runtime and no GPU, but two artifacts are installed by hand.
+
+**Languages:** 7 -- English, German, French, Spanish, Italian, Dutch, Polish. Auto-detected by default.
+
+**Available models:**
+
+| Model | Size | Description |
+|-------|------|-------------|
+| whistle.cact | 16.9 MB | The single Whistle release; Apache-2.0 |
+
+**Config example:**
+
+```toml
+engine = "whistle"
+
+[whistle]
+model = "whistle.cact"        # or an absolute path
+# runner_path = "/usr/local/bin/needle"
+# language = "en"             # omit to auto-detect
+# keywords_file = "/home/me/voxtype-keywords.txt"
+# threads = 4
+```
+
+Install the runner (`needle`) and the weights (`whistle.cact`) yourself; see [WHISTLE.md](WHISTLE.md).
+
+**Pros:**
+- Smallest footprint of any engine (16.9 MB, no GPU)
+- Seven languages with automatic detection
+- Ships in every binary (no `setup onnx` switch)
+- Keyword biasing and optional word timestamps
+
+**Cons:**
+- No live streaming; one pass per recording
+- Accuracy below the larger local engines
+- Two artifacts installed by hand; `voxtype setup model` does not fetch them
+- Not part of the model catalog, so the `--model` override does not select it
+
+---
+
 ## Notes
 
 ### Character-Based CJK Output
@@ -507,7 +549,7 @@ Whisper has additional options (`language`, `gpu_isolation`, `mode`, etc.) docum
 | Whisper large-v3 | 10 GB |
 | Parakeet TDT 0.6B | 4 GB (GPU), works on CPU |
 | Parakeet TDT 0.6B int8 | 2 GB (GPU), works on CPU |
-| Moonshine / SenseVoice / Paraformer / Dolphin | CPU-friendly, no GPU needed |
+| Moonshine / SenseVoice / Paraformer / Dolphin / Whistle | CPU-friendly, no GPU needed |
 | Omnilingual 300M | 4+ GB (GPU), works on CPU |
 
 ### CPU Performance (10 seconds of audio, modern CPU)
@@ -606,6 +648,8 @@ language = "auto"
 - [SenseVoice](https://github.com/FunAudioLLM/SenseVoice)
 - [Paraformer](https://github.com/modelscope/FunASR)
 - [Dolphin (DataoceanAI)](https://huggingface.co/csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02)
-- [Meta MMS / Omnilingual](https://huggingface.co/facebook/mms-1b-all)
+- [Omnilingual / Meta MMS](https://huggingface.co/facebook/mms-1b-all)
+- [Whistle (Cactus Compute)](https://huggingface.co/Cactus-Compute/whistle)
+- [needle runner (Cactus Compute)](https://huggingface.co/Cactus-Compute/needle3)
 - [HuggingFace Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard)
 - [Configuration Guide](CONFIGURATION.md)

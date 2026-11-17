@@ -2450,6 +2450,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Whistle
                 | crate::config::TranscriptionEngine::Soniox => {
                     let config = self.config.clone();
                     let vocabulary = vocabulary.clone();
@@ -2486,6 +2487,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Whistle
                 | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(ref t) = self.transcriber_preloaded {
                         let transcriber = t.clone();
@@ -2748,6 +2750,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Whistle
                 | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(t) = self.transcriber_preloaded.clone() {
                         t.set_vocabulary(&vocabulary);
@@ -4380,6 +4383,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Whistle
                 | crate::config::TranscriptionEngine::Soniox => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).

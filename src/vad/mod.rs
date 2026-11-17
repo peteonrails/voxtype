@@ -66,6 +66,7 @@ pub fn create_vad(config: &Config) -> Result<Option<Box<dyn VoiceActivityDetecto
                 | TranscriptionEngine::Cohere
                 | TranscriptionEngine::Gguf
                 | TranscriptionEngine::Soniox
+                | TranscriptionEngine::Whistle
                 | TranscriptionEngine::OpenVino => VadBackend::Energy,
             }
         }
