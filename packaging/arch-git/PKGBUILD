@@ -76,7 +76,6 @@ prepare() {
 build() {
     cd voxtype
     export RUSTUP_TOOLCHAIN=stable
-    export CARGO_TARGET_DIR=target
     export CARGO_PROFILE_RELEASE_LTO=false
     export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
     export CC=clang
@@ -94,22 +93,27 @@ build() {
     # GGML_NATIVE=OFF and the GGML_* instruction sets they share.
     export GGML_NATIVE="${GGML_NATIVE:-ON}"
 
-    # Keep the source package's native CPU and Vulkan layout. Save each
-    # daemon before the next feature set overwrites target/release/voxtype;
-    # Cargo can reuse dependencies without a cargo clean between builds.
-    cargo build --frozen --release --bin voxtype
-    cp target/release/voxtype voxtype-native
+    # Keep the source package's native CPU and Vulkan layout. Each feature
+    # set builds in its own target directory: upstream requires that no
+    # artifacts are shared between GPU feature sets, and separate directories
+    # give that without the cargo clean that would make every update of this
+    # package rebuild all of them from nothing.
+    CARGO_TARGET_DIR=target \
+        cargo build --frozen --release --bin voxtype
 
-    cargo build --frozen --release --bin voxtype --features gpu-vulkan
-    cp target/release/voxtype voxtype-vulkan
+    CARGO_TARGET_DIR=target-vulkan \
+        cargo build --frozen --release --bin voxtype --features gpu-vulkan
 
     # Dynamic loading needs no ONNX Runtime at build time. Always build
     # the same engines; users install the optional runtime to use them.
-    cargo build --frozen --release --bin voxtype \
+    CARGO_TARGET_DIR=target-onnx \
+        cargo build --frozen --release --bin voxtype \
         --features parakeet-load-dynamic,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere
-    cp target/release/voxtype voxtype-onnx
 
-    cargo build --frozen --release \
+    # The OSD frontends and the audio bridge do not link a GPU backend, so
+    # they share the CPU build's directory.
+    CARGO_TARGET_DIR=target \
+        cargo build --frozen --release \
         --bin voxtype-osd \
         --bin voxtype-osd-gtk4 \
         --bin voxtype-osd-native \
@@ -133,8 +137,13 @@ check() {
 package() {
     cd voxtype
 
+    install -Dm755 target/release/voxtype \
+        "$pkgdir/usr/lib/voxtype/voxtype-native"
+    install -Dm755 target-vulkan/release/voxtype \
+        "$pkgdir/usr/lib/voxtype/voxtype-vulkan"
+    install -Dm755 target-onnx/release/voxtype \
+        "$pkgdir/usr/lib/voxtype/voxtype-onnx"
     install -Dm755 -t "$pkgdir/usr/lib/voxtype" \
-        voxtype-native voxtype-vulkan voxtype-onnx \
         target/release/voxtype-osd \
         target/release/voxtype-osd-gtk4 \
         target/release/voxtype-osd-native \
