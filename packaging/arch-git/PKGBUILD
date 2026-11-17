@@ -156,6 +156,10 @@ build() {
         --bin voxtype-audio-bridge \
         "${_meetings[@]}" \
         --features "$_features"
+
+    # Man pages, rendered the way the other packages render them. xtask
+    # compiles only clap and clap_mangen.
+    CARGO_TARGET_DIR=target cargo --frozen xtask man target/man
 }
 
 check() {
@@ -245,8 +249,5 @@ package() {
     install -Dm644 packaging/completions/voxtype.fish \
         "$pkgdir/usr/share/fish/vendor_completions.d/voxtype.fish"
 
-    # Each feature set generates the same man pages. Use one set and
-    # fail if build.rs stopped generating them.
-    local _man_dirs=(target/release/build/voxtype-*/out/man)
-    install -Dm644 -t "$pkgdir/usr/share/man/man1" "${_man_dirs[0]}"/*.1
+    install -Dm644 -t "$pkgdir/usr/share/man/man1" target/man/*.1
 }
