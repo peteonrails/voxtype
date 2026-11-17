@@ -133,6 +133,9 @@ pub enum OutputError {
     #[error("wtype not found in PATH. Install via your package manager.")]
     WtypeNotFound,
 
+    #[error("kwtype not found in PATH. Install from https://github.com/Sporif/KWtype")]
+    KwtypeNotFound,
+
     #[error("eitype not found in PATH. Install via: cargo install eitype")]
     EitypeNotFound,
 
@@ -161,7 +164,7 @@ pub enum OutputError {
     CtrlVFailed(String),
 
     #[error(
-        "All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available."
+        "All output methods failed. Ensure kwtype, wtype, dotool, ydotool, wl-copy, or xclip is available."
     )]
     AllMethodsFailed,
 }
