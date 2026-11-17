@@ -238,10 +238,18 @@ impl SubprocessTranscriber {
     }
 
     fn run(&self, samples: &[f32], timed: bool) -> Result<WorkerResponse, TranscribeError> {
+        // What a call learned belongs to that call. Clear both before
+        // anything can fail: an empty buffer, a worker that will not start,
+        // a broken pipe or a garbled reply must not leave the previous
+        // call's language or metadata looking like this one's.
         *self
             .last_metadata
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = super::RuntimeMetadata::default();
+        *self
+            .last_language
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -429,6 +437,105 @@ mod tests {
         assert!(samples.iter().all(|byte| *byte == 0));
         println!("{response}");
         std::io::stdout().flush().unwrap();
+    }
+
+    /// A worker that is already "ready" and will answer one request with
+    /// `reply`, verbatim: the private helper test above, re-executed.
+    fn prepared_worker_replying(fixture: &std::path::Path, reply: &str) -> PreparedWorker {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "transcribe::subprocess::tests::history_metadata_worker_helper",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("HOME", fixture)
+            .env("TMPDIR", fixture)
+            .env("XDG_CONFIG_HOME", fixture.join("config"))
+            .env("XDG_DATA_HOME", fixture.join("data"))
+            .env("XDG_RUNTIME_DIR", fixture.join("runtime"))
+            .env("RUST_MIN_STACK", "16777216")
+            .env("VOXTYPE_HISTORY_WORKER_RESPONSE", reply)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        loop {
+            let mut line = String::new();
+            assert!(
+                stdout.read_line(&mut line).unwrap() > 0,
+                "Private worker exited before readiness"
+            );
+            if line.contains("HISTORY_PRIVATE_WORKER_READY") {
+                break;
+            }
+        }
+        PreparedWorker {
+            child,
+            stdin,
+            stdout,
+        }
+    }
+
+    #[test]
+    fn a_failed_call_does_not_keep_the_previous_calls_language() {
+        let fixture = tempfile::tempdir().unwrap();
+        let engine = SubprocessTranscriber::new(&WhisperConfig::default(), None).unwrap();
+        let measured = super::super::RuntimeMetadata {
+            model: Some("actual-fixture.bin".into()),
+            backend: Some("fixture-vulkan".into()),
+            model_load_ms: Some(17),
+        };
+        let russian =
+            serde_json::json!({"ok":true,"text":"Privet","language":"ru","metadata":measured})
+                .to_string();
+
+        // A reply that is not JSON: the pipe worked, the answer did not.
+        *engine.prepared_worker.lock().unwrap() =
+            Some(prepared_worker_replying(fixture.path(), &russian));
+        assert_eq!(engine.transcribe(&[0.0; 16]).unwrap(), "Privet");
+        assert_eq!(engine.last_detected_language().as_deref(), Some("ru"));
+        assert_eq!(engine.runtime_metadata(), measured);
+        *engine.prepared_worker.lock().unwrap() =
+            Some(prepared_worker_replying(fixture.path(), "this is not json"));
+        assert!(engine.transcribe(&[0.0; 16]).is_err());
+        assert_eq!(
+            engine.last_detected_language(),
+            None,
+            "stale language after a garbled reply"
+        );
+        assert_eq!(
+            engine.runtime_metadata(),
+            super::super::RuntimeMetadata::default(),
+            "stale metadata after a garbled reply"
+        );
+
+        // The timed path, and an empty buffer, which fails before any worker.
+        *engine.prepared_worker.lock().unwrap() =
+            Some(prepared_worker_replying(fixture.path(), &russian));
+        engine.transcribe(&[0.0; 16]).unwrap();
+        assert_eq!(engine.last_detected_language().as_deref(), Some("ru"));
+        assert!(engine.transcribe_timed(&[]).is_err());
+        assert_eq!(
+            engine.last_detected_language(),
+            None,
+            "stale language after an empty buffer"
+        );
+
+        // A reply from an older worker, with no language at all.
+        *engine.prepared_worker.lock().unwrap() =
+            Some(prepared_worker_replying(fixture.path(), &russian));
+        engine.transcribe(&[0.0; 16]).unwrap();
+        *engine.prepared_worker.lock().unwrap() = Some(prepared_worker_replying(
+            fixture.path(),
+            &serde_json::json!({"ok":true,"text":"hello"}).to_string(),
+        ));
+        assert_eq!(engine.transcribe(&[0.0; 16]).unwrap(), "hello");
+        assert_eq!(engine.last_detected_language(), None);
     }
 
     #[test]

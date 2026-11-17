@@ -358,6 +358,11 @@ impl Transcriber for WhisperTranscriber {
 
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         self.decoded.store(false, Ordering::Relaxed);
+        // A failure below must not leave the previous call's language
+        // standing as this call's.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = None;
+        }
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -417,6 +422,11 @@ impl Transcriber for WhisperTranscriber {
     /// relies on this to keep a single call per chunk for Whisper.
     fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
         self.decoded.store(false, Ordering::Relaxed);
+        // A failure below must not leave the previous call's language
+        // standing as this call's.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = None;
+        }
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
