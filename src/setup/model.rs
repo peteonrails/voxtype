@@ -845,7 +845,7 @@ const COHERE_GGUF_REPO: &str = "handy-computer/cohere-transcribe-03-2026-gguf";
 const COHERE_GGUF_REVISION: &str = "ab667acedcb5d8d56837ef3ed3568c3ad50dde47";
 /// Q4_K_M is the small, Vulkan-tested default; Q8_0 is the larger reference
 /// quantization. The intermediate and 4 GB variants are usable by path.
-const COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
+static COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
     GgufModelInfo {
         engine: "cohere",
         name: "cohere-transcribe-03-2026-Q4_K_M.gguf",
@@ -877,7 +877,7 @@ const PARAKEET_GGUF_REVISION: &str = "d8d8c32cb2017c57e5307767343e97870f8a7f53";
 /// F16 is the reference precision; Q8_0 is the smaller download and matched
 /// its LibriSpeech WER and Vulkan speed in our tests. The F32 and 4-6 bit
 /// variants are usable by path.
-const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
+static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
     GgufModelInfo {
         engine: "parakeet",
         name: "parakeet-tdt-0.6b-v3-F16.gguf",
@@ -930,7 +930,7 @@ const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
     },
 ];
 
-const HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
+static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
     GgufModelInfo {
         engine: "gguf",
         name: "Qwen3-ASR-0.6B-Q8_0.gguf",
