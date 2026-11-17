@@ -18,12 +18,18 @@
 //! 3. pbcopy - Native macOS clipboard
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
+//!
+//! Opt-in (via `driver_order`): fcitx5 commits text through the fcitx5 input
+//! method and the separate fcitx5-dictation add-on, without keystrokes. When it finds no text field
+//! (or a password field) the chain falls through, and the [`Delivery`] says
+//! why the text ended up on the clipboard.
 
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+pub mod fcitx5;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -328,6 +334,10 @@ fn create_driver_output(
             Box::new(clipboard::ClipboardOutput::new(config.append_text.clone()))
         }
         OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(config.append_text.clone())),
+        OutputDriver::Fcitx5 => Box::new(fcitx5::Fcitx5Output::new(
+            config.auto_submit,
+            config.append_text.clone(),
+        )),
     }
 }
 
@@ -520,9 +530,52 @@ pub struct OutputOptions<'a> {
 
 /// Output methods that synthesize keystrokes the compositor can interpret as
 /// keybindings when modifiers are held. Used to filter the chain when the
-/// modifier-release wait times out.
+/// modifier-release wait times out. fcitx5 is not one: it commits text
+/// through the input method, so held modifiers cannot turn it into shortcuts.
 fn is_keystroke_method(name: &str) -> bool {
     matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+}
+
+/// Whether streaming output can use this output config. Streaming types
+/// partial text and corrects it with BackSpace key presses, which the fcitx5
+/// driver can't do: it never presses keys, and with no text field focused
+/// each partial would land on the clipboard by itself. With fcitx5 in the
+/// driver order, dictation runs in batch mode instead.
+pub fn supports_streaming(config: &OutputConfig) -> bool {
+    !(config.mode == crate::config::OutputMode::Type
+        && config
+            .driver_order
+            .as_deref()
+            .is_some_and(|order| order.contains(&OutputDriver::Fcitx5)))
+}
+
+/// Output methods that only put the text on the clipboard.
+fn is_clipboard_method(name: &str) -> bool {
+    name.starts_with("clipboard")
+}
+
+/// How text that made it out of the chain was delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Delivered the configured way (typed, or copied when that's the mode).
+    Delivered,
+    /// Copied to the clipboard because the input method found no text field
+    /// with focus.
+    CopiedNoTextField,
+    /// Copied to the clipboard because the focused field is a password field.
+    CopiedPasswordField,
+}
+
+impl Delivery {
+    /// The delivery a clipboard method makes after `refusal` sent the text
+    /// its way.
+    fn after_refusal(refusal: &OutputError) -> Option<Self> {
+        match refusal {
+            OutputError::NoTextField => Some(Delivery::CopiedNoTextField),
+            OutputError::PasswordField(_) => Some(Delivery::CopiedPasswordField),
+            _ => None,
+        }
+    }
 }
 
 /// True when any method in the chain synthesizes keystrokes, so the
@@ -537,11 +590,15 @@ fn chain_synthesizes_keystrokes<'a>(names: impl IntoIterator<Item = &'a str>) ->
 
 /// Try each output method in the chain until one succeeds
 /// Pre/post output commands are run before and after typing (for compositor integration).
+///
+/// When a method refuses because no text field has focus (or it is a
+/// password field) and a clipboard method then takes the text, the result
+/// says so, so the caller can tell the user where the text went.
 pub async fn output_with_fallback(
     chain: &[Box<dyn TextOutput>],
     text: &str,
     options: OutputOptions<'_>,
-) -> Result<(), OutputError> {
+) -> Result<Delivery, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
 
@@ -593,6 +650,7 @@ pub async fn output_with_fallback(
 
     // Try each output method
     let mut result = Err(OutputError::AllMethodsFailed);
+    let mut refusal: Option<Delivery> = None;
     for output in chain {
         if skip_keystroke_methods && is_keystroke_method(output.name()) {
             tracing::debug!(
@@ -610,11 +668,19 @@ pub async fn output_with_fallback(
         match output.output(&normalized_text).await {
             Ok(()) => {
                 tracing::debug!("Text output via {}", output.name());
-                result = Ok(());
+                result = Ok(match refusal {
+                    Some(copied) if is_clipboard_method(output.name()) => copied,
+                    _ => Delivery::Delivered,
+                });
                 break;
             }
             Err(e) => {
-                tracing::warn!("{} failed: {}, trying next", output.name(), e);
+                if let Some(copied) = Delivery::after_refusal(&e) {
+                    tracing::info!("{}: {}, trying next", output.name(), e);
+                    refusal = Some(copied);
+                } else {
+                    tracing::warn!("{} failed: {}, trying next", output.name(), e);
+                }
             }
         }
     }
@@ -711,6 +777,7 @@ mod tests {
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
         assert!(!is_keystroke_method("clipboard (xclip/xsel)"));
+        assert!(!is_keystroke_method("fcitx5"));
     }
 
     #[test]
@@ -730,6 +797,141 @@ mod tests {
             "dotool",
             "clipboard (wl-copy)"
         ]));
+        // fcitx5 commits through the input method: no modifier guard needed.
+        assert!(!chain_synthesizes_keystrokes([
+            "fcitx5",
+            "clipboard (wl-copy)"
+        ]));
+    }
+
+    #[test]
+    fn fcitx5_turns_streaming_off() {
+        let mut config = OutputConfig::default();
+        assert!(supports_streaming(&config));
+        config.driver_order = Some(vec![OutputDriver::Wtype, OutputDriver::Clipboard]);
+        assert!(supports_streaming(&config));
+        config.driver_order = Some(vec![OutputDriver::Fcitx5, OutputDriver::Clipboard]);
+        assert!(!supports_streaming(&config));
+        // driver_order only matters in type mode.
+        config.mode = crate::config::OutputMode::Clipboard;
+        assert!(supports_streaming(&config));
+    }
+
+    /// A chain link that answers with a fixed result and counts its calls.
+    struct Fake {
+        name: &'static str,
+        result: fn() -> Result<(), OutputError>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TextOutput for Fake {
+        async fn output(&self, _text: &str) -> Result<(), OutputError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (self.result)()
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    fn fake(name: &'static str, result: fn() -> Result<(), OutputError>) -> Box<dyn TextOutput> {
+        fake_counted(name, result).0
+    }
+
+    /// A fake plus a handle on how many times it was called.
+    fn fake_counted(
+        name: &'static str,
+        result: fn() -> Result<(), OutputError>,
+    ) -> (
+        Box<dyn TextOutput>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = std::sync::Arc::<std::sync::atomic::AtomicUsize>::default();
+        let fake = Box::new(Fake {
+            name,
+            result,
+            calls: calls.clone(),
+        });
+        (fake, calls)
+    }
+
+    fn no_hooks() -> OutputOptions<'static> {
+        OutputOptions {
+            pre_output_command: None,
+            post_output_command: None,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::ZERO,
+        }
+    }
+
+    async fn deliver(chain: Vec<Box<dyn TextOutput>>) -> Result<Delivery, OutputError> {
+        output_with_fallback(&chain, "hello", no_hooks()).await
+    }
+
+    #[tokio::test]
+    async fn fcitx5_typing_is_a_plain_delivery() {
+        let (clipboard, clipboard_calls) = fake_counted("clipboard (wl-copy)", || Ok(()));
+        let chain = vec![fake("fcitx5", || Ok(())), clipboard];
+        assert_eq!(deliver(chain).await.unwrap(), Delivery::Delivered);
+        // Committed text must not also land on the clipboard.
+        assert_eq!(
+            clipboard_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn no_text_field_falls_through_to_a_distinct_clipboard_delivery() {
+        let chain = vec![
+            fake("fcitx5", || Err(OutputError::NoTextField)),
+            fake("clipboard (wl-copy)", || Ok(())),
+        ];
+        assert_eq!(deliver(chain).await.unwrap(), Delivery::CopiedNoTextField);
+
+        let chain = vec![
+            fake("fcitx5", || {
+                Err(OutputError::PasswordField("keepassxc".into()))
+            }),
+            fake("clipboard (wl-copy)", || Err(OutputError::WlCopyNotFound)),
+            fake("clipboard (xclip/xsel)", || Ok(())),
+        ];
+        assert_eq!(deliver(chain).await.unwrap(), Delivery::CopiedPasswordField);
+    }
+
+    #[tokio::test]
+    async fn a_typing_driver_after_a_refusal_is_a_plain_delivery() {
+        // With a keystroke driver next in the order, the user chose to have
+        // it type when fcitx5 sees no text field; the text was typed.
+        let chain = vec![
+            fake("fcitx5", || Err(OutputError::NoTextField)),
+            fake("wtype", || Ok(())),
+        ];
+        assert_eq!(deliver(chain).await.unwrap(), Delivery::Delivered);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_fcitx5_is_a_plain_clipboard_fallback() {
+        let chain = vec![
+            fake("fcitx5", || {
+                Err(OutputError::InjectionFailed("down".into()))
+            }),
+            fake("clipboard (wl-copy)", || Ok(())),
+        ];
+        assert_eq!(deliver(chain).await.unwrap(), Delivery::Delivered);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_with_nothing_behind_it_fails() {
+        let chain = vec![fake("fcitx5", || Err(OutputError::NoTextField))];
+        assert!(matches!(
+            deliver(chain).await,
+            Err(OutputError::AllMethodsFailed)
+        ));
     }
 
     #[test]

@@ -2347,6 +2347,7 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
+- `fcitx5` - Commits text into the focused text field through the fcitx5 input method, using the separate [fcitx5-dictation](https://github.com/charlielockyer-rice/fcitx5-dictation) add-on, which serves D-Bus `org.fcitx.Fcitx5.Dictation1` at `/dictation`. No key presses and no clipboard, so modifier keys and keyboard layouts don't matter. Not in the default order; add it yourself. It needs Hyprland, Sway or niri to confirm which window has focus; on other compositors it fails like any unavailable driver and the next driver takes the text. When no text field has focus, or it's a password field, it types nothing and the next driver (normally `clipboard`) takes the text. The session then ends with a `copied_no_text_field` or `copied_password_field` outcome, which the Quickshell OSD shows as "Copied to clipboard". A "Copied to clipboard" notification is sent instead only when the OSD can't show it: `[osd] enabled = false`, an `[osd] frontend` other than `quickshell`, `state_file` disabled, or the OSD suppressed for the session (`--no-osd`). That notification is sent whatever `[output.notification] on_transcription` says, and the usual transcription notification is not sent for copied text. Ignores `auto_submit` (it can't press Enter). With `fcitx5` in the order, streaming engines run in batch mode, since streaming corrects partial text with key presses. See [Typing Through fcitx5](USER_MANUAL.md#typing-through-fcitx5-no-key-presses).
 
 **Default behavior (no driver_order set):**
 The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
@@ -2368,6 +2369,9 @@ driver_order = ["ydotool"]
 
 # GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
 driver_order = ["eitype", "dotool", "clipboard"]
+
+# fcitx5 users: commit through the input method, clipboard when no text field has focus
+driver_order = ["fcitx5", "clipboard"]
 ```
 
 **CLI override:**
@@ -4628,12 +4632,16 @@ until the daemon returns to idle:
 
 | Field | Meaning |
 |-------|---------|
-| `outcome` | `ok`, `no_speech`, `too_short`, `empty`, `cancelled`, `error`, or `output_failed` |
+| `outcome` | `ok`, `no_speech`, `too_short`, `empty`, `cancelled`, `error`, `output_failed`, `copied_no_text_field`, or `copied_password_field` |
 | `session_started_at_ms` | Matches the recording's `started_at_ms`; reject results belonging to an older session |
 | `suppressed` | Durable `--no-osd` policy; never display a result when true, including after a frontend restart |
-| `chars` | Characters delivered; `0` unless `outcome` is `ok` |
+| `chars` | Characters delivered; `0` unless `outcome` is `ok` or `copied_*` |
 | `limit_reached` | `true` when `max_duration_secs` ended the session rather than the user |
 | `at_ms` | When the session ended, Unix milliseconds; tells a fresh outcome from an old one |
+
+`copied_no_text_field` and `copied_password_field` mean the text went to the
+clipboard because the `fcitx5` driver found no text field with focus, or a
+password field, and a clipboard driver took it instead.
 
 The built-in frontend waits until recording ends before showing a matching result.
 Pre-release outcome files without explicit session identity and suppression fields

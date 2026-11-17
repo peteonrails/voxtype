@@ -88,6 +88,9 @@ pub struct OutputChainStatus {
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
     pub xclip: OutputToolStatus,
+    /// The fcitx5-dictation add-on, answering on the session bus. Opt-in via
+    /// `driver_order`, so it is only shown when present.
+    pub fcitx5: OutputToolStatus,
     // macOS-specific
     pub osascript: OutputToolStatus,
     pub pbcopy: OutputToolStatus,
@@ -311,6 +314,9 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         None
     };
 
+    // Check the fcitx5-dictation add-on (D-Bus, not a binary on PATH)
+    let fcitx5_available = crate::output::fcitx5::add_on_reachable().await;
+
     // Check osascript (macOS)
     let osascript_path = get_command_path("osascript").await;
     let osascript_installed = osascript_path.is_some();
@@ -397,6 +403,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
             path: xclip_path,
             note: xclip_note,
         },
+        fcitx5: OutputToolStatus {
+            name: "fcitx5",
+            installed: fcitx5_available,
+            available: fcitx5_available,
+            path: fcitx5_available.then(|| "fcitx5-dictation add-on on D-Bus".to_string()),
+            note: None,
+        },
         osascript: OutputToolStatus {
             name: "osascript",
             installed: osascript_installed,
@@ -454,6 +467,7 @@ pub fn configured_primary_method(
             OutputDriver::Ydotool => status.ydotool.available,
             OutputDriver::Clipboard => status.wl_copy.available,
             OutputDriver::Xclip => status.xclip.available,
+            OutputDriver::Fcitx5 => status.fcitx5.available,
         };
         if available {
             return Some(match driver {
@@ -542,6 +556,11 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         if status.display_server == DisplayServer::X11 || status.xclip.installed {
             print_tool_status(&status.xclip, status.display_server == DisplayServer::X11);
         }
+
+        // fcitx5 (opt-in; only shown when the fcitx5-dictation add-on answers)
+        if status.fcitx5.available {
+            print_tool_status(&status.fcitx5, true);
+        }
     }
 
     // Summary
@@ -555,6 +574,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             "dotool" => "dotool (keyboard layouts via dotool_xkb_layout)",
             "ydotool" => "ydotool (CJK not supported)",
             "clipboard" => "clipboard (requires manual paste)",
+            "fcitx5" => "fcitx5 (input method, no key presses)",
             _ => method.as_str(),
         };
         match method.as_str() {
@@ -1653,6 +1673,7 @@ mod tests {
             ydotool_daemon: false,
             wl_copy: tool("wl-copy", true),
             xclip: tool("xclip", false),
+            fcitx5: tool("fcitx5", false),
             osascript: tool("osascript", false),
             pbcopy: tool("pbcopy", false),
             primary_method: Some(if wtype { "wtype" } else { "dotool" }.to_string()),

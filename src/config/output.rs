@@ -379,6 +379,9 @@ pub enum OutputDriver {
     Clipboard,
     /// Clipboard via xclip (X11)
     Xclip,
+    /// fcitx5 input method via the fcitx5-dictation add-on (D-Bus); commits text
+    /// without key presses. Opt-in: not in the default order.
+    Fcitx5,
 }
 
 impl std::fmt::Display for OutputDriver {
@@ -390,6 +393,7 @@ impl std::fmt::Display for OutputDriver {
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
             OutputDriver::Xclip => write!(f, "xclip"),
+            OutputDriver::Fcitx5 => write!(f, "fcitx5"),
         }
     }
 }
@@ -405,8 +409,9 @@ impl std::str::FromStr for OutputDriver {
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
+            "fcitx5" => Ok(OutputDriver::Fcitx5),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip, fcitx5",
                 s
             )),
         }
@@ -525,6 +530,14 @@ mod tests {
             "XCLIP".parse::<OutputDriver>().unwrap(),
             OutputDriver::Xclip
         );
+        assert_eq!(
+            "fcitx5".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Fcitx5
+        );
+        assert_eq!(
+            "FCITX5".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Fcitx5
+        );
         // Invalid
         assert!("invalid".parse::<OutputDriver>().is_err());
     }
@@ -536,6 +549,22 @@ mod tests {
         assert_eq!(OutputDriver::Ydotool.to_string(), "ydotool");
         assert_eq!(OutputDriver::Clipboard.to_string(), "clipboard");
         assert_eq!(OutputDriver::Xclip.to_string(), "xclip");
+        assert_eq!(OutputDriver::Fcitx5.to_string(), "fcitx5");
+    }
+
+    #[test]
+    fn test_parse_fcitx5_driver_order() {
+        let output: OutputConfig = toml::from_str(
+            r#"
+            mode = "type"
+            driver_order = ["fcitx5", "clipboard"]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            output.driver_order.unwrap(),
+            vec![OutputDriver::Fcitx5, OutputDriver::Clipboard]
+        );
     }
 
     #[test]

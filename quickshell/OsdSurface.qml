@@ -142,7 +142,8 @@ PanelWindow {
         // Outcome/state FileViews may settle in either order. Queue the matching
         // result until idle instead of covering the microphone indicator.
         if (live || o.session_started_at_ms < _chipShownFor) return;
-        const shown = { ok: 1, no_speech: 1, empty: 1, error: 1, output_failed: 1 };
+        const shown = { ok: 1, no_speech: 1, empty: 1, error: 1, output_failed: 1,
+                        copied_no_text_field: 1, copied_password_field: 1 };
         if (!shown[o.outcome] || _sessionSuppressed || !activeOutput) return;
         _lastOutcomeAt = o.at_ms;
         flash = { kind: o.outcome, chars: o.chars || 0, limit: !!o.limit_reached };
@@ -150,13 +151,15 @@ PanelWindow {
         flashTimer.restart();
     }
 
+    readonly property bool _flashCopied: !!flash && flash.kind.startsWith("copied_")
     readonly property string flashIcon: !flash ? ""
-        : flash.kind === "ok" ? "done"
+        : flash.kind === "ok" || _flashCopied ? "done"
         : flash.kind === "no_speech" || flash.kind === "empty" ? "nospeech"
         : "error"
     readonly property color flashColor: !flash ? stateColor
         : flash.kind === "ok" ? panel._styleColor("success", VT.Theme.meterLowColor)
-        : flash.kind === "no_speech" || flash.kind === "empty" ? panel._styleColor("warning", VT.Theme.meterMidColor)
+        : flash.kind === "no_speech" || flash.kind === "empty" || _flashCopied
+            ? panel._styleColor("warning", VT.Theme.meterMidColor)
         : panel._styleColor("error", VT.Theme.meterHighColor)
     readonly property string flashText: {
         if (!flash) return "";
@@ -164,6 +167,7 @@ PanelWindow {
             : flash.kind === "no_speech" ? "No speech detected"
             : flash.kind === "empty" ? "Nothing transcribed"
             : flash.kind === "output_failed" ? "Couldn't type the text"
+            : _flashCopied ? "Copied to clipboard"
             : "Transcription failed";
         if (flash.limit) text = "Time limit reached · " + text;
         return text;
