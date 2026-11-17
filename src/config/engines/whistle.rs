@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::default_on_demand_loading;
-
 /// Whistle speech-to-text configuration (Cactus Compute Whistle, run by the
 /// `needle` CLI runner as an external process).
 ///
@@ -53,10 +51,6 @@ pub struct WhistleConfig {
     /// Worker threads for the runner. `None`/`Some(0)` lets it pick.
     #[serde(default)]
     pub threads: Option<usize>,
-
-    /// Load model on-demand when recording starts (true) or keep loaded (false)
-    #[serde(default = "default_on_demand_loading")]
-    pub on_demand_loading: bool,
 }
 
 fn default_whistle_model() -> String {
@@ -72,7 +66,6 @@ impl Default for WhistleConfig {
             keywords_file: None,
             word_timestamps: false,
             threads: None,
-            on_demand_loading: false,
         }
     }
 }

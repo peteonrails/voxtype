@@ -1,6 +1,6 @@
 # Whistle Backend
 
-Voxtype supports [Whistle](https://huggingface.co/Cactus-Compute/whistle), Cactus Compute's 16.9 MB on-device speech recognition model, as an alternative to Whisper and the other local engines. Unlike the ONNX engines, Whistle runs as an external process: voxtype drives Cactus's `needle` CLI runner as a subprocess and reads the transcript from its JSON output, the same pattern as the whisper-cli backend.
+Voxtype supports [Whistle](https://huggingface.co/Cactus-Compute/whistle), Cactus Compute's 16.9 MB on-device speech recognition model, as an alternative to Whisper and the other local engines. Unlike the ONNX engines, Whistle runs as an external process: voxtype drives Cactus's `needle` CLI runner as a subprocess and reads the transcript from its JSON output, the same pattern as the whisper-cli backend. Every transcription starts a new `needle` process and loads the model, so there is no resident worker and per-transcription latency includes model load time.
 
 ## What is Whistle?
 
@@ -69,7 +69,7 @@ curl -L https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact 
   -o ~/.local/share/voxtype/models/whistle.cact
 ```
 
-When `runner_path` is unset, voxtype looks for `needle` in these places, in order: on your `PATH`, then `./needle`, `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle`. If your runner lives anywhere else, set `runner_path` in the `[whistle]` section.
+When `runner_path` is unset, voxtype looks for `needle` in these places, in order: on your `PATH`, then `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle`. If your runner lives anywhere else, set `runner_path` in the `[whistle]` section.
 
 ## Configuration
 
@@ -95,7 +95,6 @@ model = "whistle.cact"
 
 # word_timestamps = false
 # threads = 4
-# on_demand_loading = false
 ```
 
 Restart the daemon:
@@ -123,7 +122,6 @@ See [CONFIGURATION.md → [whistle]](CONFIGURATION.md#whistle) for the full fiel
 | `keywords_file` | Path (optional) | unset | Newline-separated words/phrases to favour |
 | `word_timestamps` | Boolean | `false` | Include per-word timings |
 | `threads` | Integer (optional) | unset (runner picks) | Runner worker threads |
-| `on_demand_loading` | Boolean | `false` | Load only when recording starts |
 
 ## Available Languages
 
@@ -180,7 +178,7 @@ NEEDLE_TELEMETRY=0
 DO_NOT_TRACK=1
 ```
 
-so no usage data is reported. This is deliberate: voxtype is a local, on-device dictation tool and does not phone home. If you run `needle` yourself — for example to try a clip before wiring it into voxtype — export both variables first to keep it local.
+so no usage data is reported. This is deliberate: voxtype is a local, on-device dictation tool and does not phone home. If you run `needle` yourself — for example to try a clip before wiring it into voxtype — export both variables first to keep it local. Voxtype sets these variables on every runner invocation, but cannot inspect or guarantee what the prebuilt runner binary does beyond honoring those flags.
 
 ## Known Limitations
 
@@ -215,7 +213,7 @@ model = "whistle.cact"
 
 ### "needle runner not found"
 
-Voxtype searched `PATH`, `./needle`, `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle` and found nothing. Download the runner from https://huggingface.co/Cactus-Compute/needle3 (pick your platform's folder) and either put it on `PATH` / in one of those locations, or point at it explicitly:
+Voxtype searched `PATH`, `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle` and found nothing. Download the runner from https://huggingface.co/Cactus-Compute/needle3 (pick your platform's folder) and either put it on `PATH` / in one of those locations, or point at it explicitly:
 
 ```toml
 [whistle]
@@ -224,7 +222,7 @@ runner_path = "/opt/whistle/needle"
 
 ### "Whistle model '...' not found"
 
-Voxtype looks for the weights in `~/.local/share/voxtype/models/` (appending `.cact` if your `model` value has no extension) and then in the current directory. Download `whistle.cact` from https://huggingface.co/Cactus-Compute/whistle:
+Voxtype looks for the weights in `~/.local/share/voxtype/models/` (appending `.cact` if your `model` value has no extension). Download `whistle.cact` from https://huggingface.co/Cactus-Compute/whistle:
 
 ```bash
 curl -L https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact \

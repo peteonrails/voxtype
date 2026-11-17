@@ -1621,11 +1621,11 @@ The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so us
 
 Configuration for the Whistle on-device speech-to-text engine. This section is only used when `engine = "whistle"`.
 
-Whistle is [Cactus Compute](https://huggingface.co/Cactus-Compute/whistle)'s 16.9 MB on-device ASR model. Voxtype drives Cactus's `needle` CLI runner as a subprocess and reads the transcript from its JSON output, so nothing is linked into voxtype and no GPU is required. Seven languages are supported: English, German, French, Spanish, Italian, Dutch, and Polish.
+Whistle is [Cactus Compute](https://huggingface.co/Cactus-Compute/whistle)'s 16.9 MB on-device ASR model. Voxtype drives Cactus's `needle` CLI runner as a subprocess and reads the transcript from its JSON output, so nothing is linked into voxtype and no GPU is required. Seven languages are supported: English, German, French, Spanish, Italian, Dutch, and Polish. Every transcription spawns a new `needle` process that loads the model, transcribes, and exits; there is no resident background worker or preloaded model, so transcription latency includes model load time.
 
 Both the runner and the weights are Apache-2.0 and are downloaded separately — neither ships with voxtype, and `voxtype setup model` does not fetch them. See [WHISTLE.md](WHISTLE.md) for setup. The engine is built into every binary; no Cargo feature flag is required.
 
-**Privacy:** Fully local. Voxtype always launches the runner with `NEEDLE_TELEMETRY=0` and `DO_NOT_TRACK=1`, because the `needle` runner enables telemetry by default.
+**Privacy:** Fully local. Voxtype always launches the runner with `NEEDLE_TELEMETRY=0` and `DO_NOT_TRACK=1`, because the `needle` runner enables telemetry by default. Voxtype sets these variables but cannot inspect or guarantee the behaviour of prebuilt runner binaries beyond the documented environment flags.
 
 > **Note:** Whistle is not part of the model catalog, so `voxtype setup model` does not list it and the `--model` override does not select it. Switch to the engine with `voxtype config set engine whistle` and point it at the weights with `[whistle] model`.
 
@@ -1635,7 +1635,7 @@ Both the runner and the weights are Apache-2.0 and are downloaded separately —
 **Default:** `"whistle.cact"`
 **Required:** No
 
-The Whistle weights file. Can be an absolute path to a `whistle.cact`, or a short filename resolved in `~/.local/share/voxtype/models/` (a value without a `.cact` extension gets one appended). If the file isn't in the models directory, voxtype also checks the current directory.
+The Whistle weights file. Can be an absolute path to a `whistle.cact`, or a short filename resolved in `~/.local/share/voxtype/models/` (a value without a `.cact` extension gets one appended).
 
 **Example:**
 ```toml
@@ -1655,7 +1655,7 @@ model = "/opt/models/whistle/whistle.cact"
 **Default:** unset (searches `PATH` and common locations)
 **Required:** No
 
-Path to the `needle` runner binary. When unset, voxtype looks for `needle` on `PATH` and then in `./needle`, `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle`.
+Path to the `needle` runner binary. When unset, voxtype looks for `needle` on `PATH` and then in `/usr/local/bin/needle`, `/usr/bin/needle`, and `~/.local/bin/needle`.
 
 **Example:**
 ```toml
@@ -1721,20 +1721,6 @@ Number of worker threads for the runner. Passed as `--threads`. Unset (or `0`) l
 threads = 4
 ```
 
-### on_demand_loading
-
-**Type:** Boolean
-**Default:** `false`
-**Required:** No
-
-Same behavior as `[whisper].on_demand_loading`. When `true`, loads the model only when recording starts and unloads after transcription.
-
-**Example:**
-```toml
-[whistle]
-on_demand_loading = true
-```
-
 ### Configuration Summary
 
 | Option | CLI Flag | Environment Variable | Default | Description |
@@ -1745,7 +1731,6 @@ on_demand_loading = true
 | `keywords_file` | - | - | none | Newline-separated words/phrases to favour |
 | `word_timestamps` | - | - | `false` | Include per-word timings |
 | `threads` | - | - | auto | Runner worker threads |
-| `on_demand_loading` | - | - | `false` | Load model only when recording starts |
 
 ### Complete Example
 
@@ -1758,7 +1743,6 @@ language = ""              # auto-detect; or one of en, de, fr, es, it, nl, pl
 # runner_path = "/usr/local/bin/needle"
 # keywords_file = "/home/me/voxtype-keywords.txt"
 word_timestamps = false
-on_demand_loading = false
 ```
 
 ### Building from Source

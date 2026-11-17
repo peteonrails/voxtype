@@ -11,12 +11,17 @@
 //! weights are downloaded separately; see [`crate::config::WhistleConfig`].
 
 use super::Transcriber;
-use crate::config::WhistleConfig;
+use crate::config::{Config, WhistleConfig};
 use crate::error::TranscribeError;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Default timeout for the needle runner process (120 seconds).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Whistle transcriber driving the `needle` runner as a subprocess.
 pub struct WhistleTranscriber {
@@ -32,6 +37,8 @@ pub struct WhistleTranscriber {
     word_timestamps: bool,
     /// Threads passed to the runner (0 = let it choose)
     threads: usize,
+    /// Bounded execution timeout for needle
+    timeout: Duration,
     /// Language reported by the most recent transcription
     last_language: Mutex<Option<String>>,
 }
@@ -86,15 +93,44 @@ impl WhistleTranscriber {
             _ => 0,
         };
 
+        let keywords_file = config.keywords_file.as_ref().map(|p| expand_tilde(p));
+
         Ok(Self {
             runner_path,
             model_path,
             language: config.language.clone(),
-            keywords_file: config.keywords_file.clone(),
+            keywords_file,
             word_timestamps: config.word_timestamps,
             threads,
+            timeout: DEFAULT_TIMEOUT,
             last_language: Mutex::new(None),
         })
+    }
+
+    /// Build the Command to run needle on an audio file.
+    pub(crate) fn build_command(&self, audio_path: &Path, word_timestamps: bool) -> Command {
+        let mut cmd = Command::new(&self.runner_path);
+        cmd.arg("--model")
+            .arg(&self.model_path)
+            .arg("--audio")
+            .arg(audio_path);
+
+        if !self.language.is_empty() && self.language != "auto" {
+            cmd.arg("--audio-language").arg(&self.language);
+        }
+        if let Some(keywords) = &self.keywords_file {
+            cmd.arg("--audio-keywords").arg(keywords);
+        }
+        if word_timestamps {
+            cmd.arg("--audio-word-timestamps");
+        }
+        if self.threads > 0 {
+            cmd.arg("--threads").arg(self.threads.to_string());
+        }
+
+        // Whistle's runner has telemetry on by default; keep it local.
+        cmd.env("NEEDLE_TELEMETRY", "0").env("DO_NOT_TRACK", "1");
+        cmd
     }
 
     /// Write audio samples to a temporary 16 kHz mono WAV file
@@ -133,51 +169,78 @@ impl WhistleTranscriber {
         Ok(temp_file)
     }
 
-    /// Run the runner on a clip and parse its JSON output.
-    fn run(&self, temp_wav: &tempfile::NamedTempFile) -> Result<WhistleOutput, TranscribeError> {
-        let mut cmd = Command::new(&self.runner_path);
-        cmd.arg("--model")
-            .arg(&self.model_path)
-            .arg("--audio")
-            .arg(temp_wav.path());
-
-        if !self.language.is_empty() && self.language != "auto" {
-            cmd.arg("--audio-language").arg(&self.language);
-        }
-        if let Some(keywords) = &self.keywords_file {
-            cmd.arg("--audio-keywords").arg(keywords);
-        }
-        if self.word_timestamps {
-            cmd.arg("--audio-word-timestamps");
-        }
-        if self.threads > 0 {
-            cmd.arg("--threads").arg(self.threads.to_string());
-        }
-
-        // Whistle's runner has telemetry on by default; keep it local.
-        cmd.env("NEEDLE_TELEMETRY", "0").env("DO_NOT_TRACK", "1");
+    /// Run the needle runner on a clip and parse its JSON output with bounded timeout.
+    fn run_needle(
+        &self,
+        temp_wav: &tempfile::NamedTempFile,
+        word_timestamps: bool,
+    ) -> Result<WhistleOutput, TranscribeError> {
+        let mut cmd = self.build_command(temp_wav.path(), word_timestamps);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         tracing::debug!("Running needle: {:?}", cmd);
 
-        let output = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to run needle: {}", e))
-            })?;
+        let mut child = cmd.spawn().map_err(|e| {
+            TranscribeError::InferenceFailed(format!("Failed to spawn needle: {}", e))
+        })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TranscribeError::InferenceFailed(format!(
-                "needle failed: {}",
-                stderr.trim()
-            )));
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    if let Some(mut out) = child.stdout.take() {
+                        let _ = out.read_to_end(&mut stdout);
+                    }
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_end(&mut stderr);
+                    }
+
+                    if !status.success() {
+                        let stderr_str = String::from_utf8_lossy(&stderr);
+                        return Err(TranscribeError::InferenceFailed(format!(
+                            "needle failed: {}",
+                            stderr_str.trim()
+                        )));
+                    }
+
+                    let stdout_str = String::from_utf8_lossy(&stdout);
+                    return parse_output(&stdout_str);
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(TranscribeError::InferenceFailed(format!(
+                            "needle timed out after {}s. Check that the model file is valid \
+                             and the runner is not stuck. See docs/WHISTLE.md troubleshooting.",
+                            self.timeout.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TranscribeError::InferenceFailed(format!(
+                        "Failed to wait for needle: {}",
+                        e
+                    )));
+                }
+            }
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_output(&stdout)
     }
+}
+
+/// Expand leading `~` to the user's home directory.
+fn expand_tilde(path: &Path) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Parse the runner's stdout, which is one JSON object (possibly with other
@@ -216,9 +279,9 @@ impl Transcriber for WhistleTranscriber {
             samples.len()
         );
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let temp_wav = self.write_temp_wav(samples)?;
-        let result = self.run(&temp_wav)?;
+        let result = self.run_needle(&temp_wav, self.word_timestamps)?;
 
         if let Some(lang) = result.language.filter(|l| !l.is_empty()) {
             if let Ok(mut guard) = self.last_language.lock() {
@@ -252,42 +315,15 @@ impl Transcriber for WhistleTranscriber {
         // Whistle only returns per-word times when asked, so run with the flag
         // regardless of the configured default.
         let temp_wav = self.write_temp_wav(samples)?;
-        let mut cmd = Command::new(&self.runner_path);
-        cmd.arg("--model")
-            .arg(&self.model_path)
-            .arg("--audio")
-            .arg(temp_wav.path())
-            .arg("--audio-word-timestamps");
-        if !self.language.is_empty() && self.language != "auto" {
-            cmd.arg("--audio-language").arg(&self.language);
-        }
-        if let Some(keywords) = &self.keywords_file {
-            cmd.arg("--audio-keywords").arg(keywords);
-        }
-        if self.threads > 0 {
-            cmd.arg("--threads").arg(self.threads.to_string());
-        }
-        cmd.env("NEEDLE_TELEMETRY", "0").env("DO_NOT_TRACK", "1");
+        let result = self.run_needle(&temp_wav, true)?;
 
-        let output = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to run needle: {}", e))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TranscribeError::InferenceFailed(format!(
-                "needle failed: {}",
-                stderr.trim()
-            )));
+        if let Some(lang) = result.language.filter(|l| !l.is_empty()) {
+            if let Ok(mut guard) = self.last_language.lock() {
+                *guard = Some(lang);
+            }
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed = parse_output(&stdout)?;
-        Ok(parsed
+        Ok(result
             .words
             .into_iter()
             .map(|w| super::TimedSegment {
@@ -308,7 +344,7 @@ fn resolve_runner_path(
     configured_path: Option<&std::path::Path>,
 ) -> Result<PathBuf, TranscribeError> {
     if let Some(path) = configured_path {
-        let p = PathBuf::from(path);
+        let p = expand_tilde(path);
         if p.exists() {
             return Ok(p);
         }
@@ -320,7 +356,6 @@ fn resolve_runner_path(
 
     let candidates = [
         which::which("needle").ok(),
-        Some(PathBuf::from("./needle")),
         Some(PathBuf::from("/usr/local/bin/needle")),
         Some(PathBuf::from("/usr/bin/needle")),
         directories::BaseDirs::new().map(|d| d.home_dir().join(".local/bin/needle")),
@@ -342,6 +377,7 @@ fn resolve_runner_path(
 /// Resolve the whistle.cact model path
 fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     let path = PathBuf::from(model);
+    let path = expand_tilde(&path);
     if path.is_absolute() && path.exists() {
         return Ok(path);
     }
@@ -358,21 +394,13 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
         return Ok(model_path);
     }
 
-    let cwd_path = PathBuf::from(&filename);
-    if cwd_path.exists() {
-        return Ok(cwd_path);
-    }
-
     Err(TranscribeError::ModelNotFound(format!(
-        "Whistle model '{}' not found. Looked in:\n  - {}\n  - {}\n\
+        "Whistle model '{}' not found. Looked in:\n  - {}\n\
          Download whistle.cact from https://huggingface.co/Cactus-Compute/whistle",
         model,
-        model_path.display(),
-        cwd_path.display()
+        model_path.display()
     )))
 }
-
-use crate::config::Config;
 
 #[cfg(test)]
 mod tests {
@@ -413,5 +441,100 @@ mod tests {
     fn resolve_missing_runner_errors() {
         let missing: Option<&std::path::Path> = Some(std::path::Path::new("/nonexistent/needle"));
         assert!(resolve_runner_path(missing).is_err());
+    }
+
+    #[test]
+    fn resolve_missing_model_error_message() {
+        let err = resolve_model_path("nonexistent_model").unwrap_err();
+        let msg = err.to_string();
+        // Should not check or report current directory
+        assert!(!msg.contains("./nonexistent_model"));
+    }
+
+    #[test]
+    fn build_command_defaults() {
+        let transcriber = WhistleTranscriber {
+            runner_path: PathBuf::from("/usr/bin/needle"),
+            model_path: PathBuf::from("/models/whistle.cact"),
+            language: String::new(),
+            keywords_file: None,
+            word_timestamps: false,
+            threads: 0,
+            timeout: DEFAULT_TIMEOUT,
+            last_language: Mutex::new(None),
+        };
+
+        let cmd = transcriber.build_command(Path::new("/tmp/clip.wav"), false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            vec![
+                "--model", "/models/whistle.cact",
+                "--audio", "/tmp/clip.wav",
+            ]
+        );
+
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|s| s.to_string_lossy().into_owned())))
+            .collect();
+        assert!(envs.contains(&("NEEDLE_TELEMETRY".into(), Some("0".into()))));
+        assert!(envs.contains(&("DO_NOT_TRACK".into(), Some("1".into()))));
+    }
+
+    #[test]
+    fn build_command_all_options() {
+        let transcriber = WhistleTranscriber {
+            runner_path: PathBuf::from("/usr/bin/needle"),
+            model_path: PathBuf::from("/models/whistle.cact"),
+            language: "de".to_string(),
+            keywords_file: Some(PathBuf::from("/etc/keywords.txt")),
+            word_timestamps: true,
+            threads: 4,
+            timeout: DEFAULT_TIMEOUT,
+            last_language: Mutex::new(None),
+        };
+
+        let cmd = transcriber.build_command(Path::new("/tmp/clip.wav"), true);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            vec![
+                "--model", "/models/whistle.cact",
+                "--audio", "/tmp/clip.wav",
+                "--audio-language", "de",
+                "--audio-keywords", "/etc/keywords.txt",
+                "--audio-word-timestamps",
+                "--threads", "4",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_command_auto_language_skipped() {
+        let transcriber = WhistleTranscriber {
+            runner_path: PathBuf::from("/usr/bin/needle"),
+            model_path: PathBuf::from("/models/whistle.cact"),
+            language: "auto".to_string(),
+            keywords_file: None,
+            word_timestamps: false,
+            threads: 0,
+            timeout: DEFAULT_TIMEOUT,
+            last_language: Mutex::new(None),
+        };
+
+        let cmd = transcriber.build_command(Path::new("/tmp/clip.wav"), false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.contains(&"--audio-language".to_string()));
+    }
+
+    #[test]
+    fn tilde_expansion_works() {
+        let expanded = expand_tilde(Path::new("~/test/path.txt"));
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expanded, home.join("test/path.txt"));
+        }
+        let unexpanded = expand_tilde(Path::new("/var/log/test.txt"));
+        assert_eq!(unexpanded, PathBuf::from("/var/log/test.txt"));
     }
 }

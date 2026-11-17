@@ -397,11 +397,8 @@ impl Config {
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
-            TranscriptionEngine::Whistle => self
-                .whistle
-                .as_ref()
-                .map(|w| w.on_demand_loading)
-                .unwrap_or(false),
+            // Whistle runs as a one-shot subprocess; each transcription loads the model.
+            TranscriptionEngine::Whistle => false,
         }
     }
 

@@ -915,16 +915,6 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Number of threads for the runner (unset = runner default).",
     )
     .for_engine("whistle"),
-    spec(
-        "whistle.on_demand_loading",
-        "whistle",
-        "on_demand_loading",
-        KeyType::Bool,
-        "Engine",
-        "Load on demand",
-        "Prepare transcriber on first recording (not currently used by subprocess engines).",
-    )
-    .for_engine("whistle"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -2623,7 +2613,6 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
-        "whistle.on_demand_loading" => json!(wh().on_demand_loading),
 
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
