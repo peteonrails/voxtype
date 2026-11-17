@@ -56,7 +56,7 @@ async fn selected_metadata_case(name: &str, eager: bool, fail: bool, cancel: boo
     let entries = wait_for_entries(root.path(), 1).await;
     let entry = &entries[0];
     let observation = serde_json::json!({"kind":"CONTROLLED_SELECTED_METADATA_PERSISTENCE_NOT_ASR","eager":eager,"fail":fail,"cancel":cancel,"empty":empty,"configured_model":daemon.config.whisper.model,"configured_language":"en","reported":selected.runtime_metadata(),"reported_language":selected.last_detected_language(),"entry":entry});
-    std::fs::write(format!("/work/out/{}.json",name.rsplit("::").next().unwrap()),serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    write_evidence(format!("{}.json",name.rsplit("::").next().unwrap()),serde_json::to_vec_pretty(&observation).unwrap());
     println!("SELECTED_METADATA_PERSISTENCE {observation}");
     assert_eq!(entries.len(),1);
     if fail { assert_eq!(entry.outcome, crate::history::Outcome::TranscriptionFailed, "A controlled failed inference must not be recorded as empty or delivered"); }

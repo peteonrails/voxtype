@@ -99,12 +99,12 @@ async fn real_whisper_history_case(name: &'static str, fixture: &'static str, re
     let entry = &entries[0];
     let normalize = |text: &str| text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
     let evidence = serde_json::json!({"kind":"ACTUAL_REAL_MODEL_SYNTHETIC_BATCH_RECORDER_NOT_LIVE_CAPTURE","fixture":fixture,"reference":reference,"reference_matches":normalize(&raw)==normalize(reference),"requested_model":MODEL,"requested_language":"en","language_source":"configured en, not automatic detection","measured":measured,"reported_language":detected,"entry":entry,"scope":"Actual daemon prepare_for_recording/start_transcription_task/handle_transcription_result + file delivery + background Recorder. Prerecorded AudioCapture fixture replaces devices. No production daemon or event-listener startup. Observations are saved BEFORE metadata assertions; consult actual producer exit."});
-    std::fs::write(format!("/work/out/{evidence_name}.json"), serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    write_evidence(format!("{evidence_name}.json"), serde_json::to_vec_pretty(&evidence).unwrap());
     println!("REAL_MODEL_HISTORY_EVIDENCE {evidence}");
     let dayfiles: Vec<_> = std::fs::read_dir(root.path().join("history")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e=="jsonl")).collect();
     assert_eq!(dayfiles.len(), 1);
     let day = std::fs::read(&dayfiles[0]).unwrap();
-    std::fs::write(format!("/work/out/{evidence_name}.jsonl"), &day).unwrap();
+    write_evidence(format!("{evidence_name}.jsonl"), &day);
     assert_eq!(detected.as_deref(), Some("en"), "The configured language used by real inference must be retained; this is not automatic language-detection acceptance");
     assert_eq!(entry.raw_text, raw);
     assert_eq!(entry.text, std::fs::read_to_string(&output).unwrap().trim_end());
@@ -163,6 +163,6 @@ fn history_real_whisper_metadata_lifecycle_never_reuses_backend_after_empty_inpu
     let rejected_timed = engine.runtime_metadata();
     assert!(rejected_timed.backend.is_none());
     let evidence = serde_json::json!({"kind":"ACTUAL_REAL_MODEL_METADATA_LIFECYCLE_NOT_ACCURACY_OR_RECORDER_ACCEPTANCE","before_decode":before,"after_batch":batch,"after_rejected_batch":rejected_batch,"after_timed":timed,"after_rejected_timed":rejected_timed,"raw_observed_not_reference":raw});
-    std::fs::write("/work/out/real-whisper-metadata-lifecycle.json", serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    write_evidence("real-whisper-metadata-lifecycle.json", serde_json::to_vec_pretty(&evidence).unwrap());
     println!("REAL_MODEL_LIFECYCLE_ASSERTIONS_PASSED {evidence}");
 }

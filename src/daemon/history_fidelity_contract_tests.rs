@@ -66,7 +66,7 @@ async fn assert_fidelity(root: &Path, daemon: &Daemon, raw: &str, tag: &str, str
     let hits = index.search(&store, &crate::history::index::HistoryQuery { text: "HISTORYTRANSFORM".into(), limit: 10, ..Default::default() }).unwrap();
     let day = store.days().unwrap();
     let observation = serde_json::json!({"kind":"ACTUAL_REAL_MODEL_HISTORY_FIDELITY_NOT_REFERENCE_ACCURACY","route":tag,"engine_output":raw,"processed":processed,"actual_output":output,"entry":entry,"index_hits":hits,"dayfile_count":day.len(),"scope":"Approved tiny.en and same committed WAV. Batch/eager compare independent direct-engine output; streaming observes actual backend events through real startup/tap, existing StreamingSession methods and canonical end_streaming, not the full daemon event loop or live capture. Original reference tests unchanged."});
-    std::fs::write(format!("/work/out/{tag}.json"), serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    write_evidence(format!("{tag}.json"), serde_json::to_vec_pretty(&observation).unwrap());
     println!("REAL_FIDELITY_OBSERVATION {observation}");
     assert_eq!(entry.raw_text, raw);
     assert_eq!(entry.text, processed);
@@ -91,7 +91,7 @@ async fn assert_fidelity(root: &Path, daemon: &Daemon, raw: &str, tag: &str, str
     assert_eq!(files.len(), 1);
     let jsonl = std::fs::read(&files[0]).unwrap();
     assert_eq!(serde_json::from_slice::<crate::history::HistoryEntry>(&jsonl).unwrap(), *entry);
-    std::fs::write(format!("/work/out/{tag}.jsonl"), jsonl).unwrap();
+    write_evidence(format!("{tag}.jsonl"), jsonl);
     println!("REAL_FIDELITY_ASSERTIONS_PASSED {tag}");
 }
 
@@ -172,7 +172,7 @@ async fn real_stream_fidelity(name: &str, partials: bool) {
     session.as_mut().unwrap().finalize_pending_partial();
     let raw = session.as_ref().unwrap().finalized_text().to_owned();
     let tag = name.rsplit("::").next().unwrap();
-    std::fs::write(format!("/work/out/{tag}-events.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+    write_evidence(format!("{tag}-events.json"), serde_json::to_vec_pretty(&observed).unwrap());
     assert!(!observed.is_empty());
     daemon.end_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain).await;
     assert_fidelity(root.path(), &daemon, &raw, tag, true).await;
@@ -220,7 +220,7 @@ async fn history_real_stream_cancel_loaded_model_stays_unknown_before_decode() {
     daemon.cancel_requested_session(&mut state, &mut capture, &mut handle, &mut session, &mut chain, &mut None).await;
     let entries = wait_for_entries(root.path(), 1).await;
     let evidence = serde_json::json!({"kind":"ACTUAL_LOADED_MODEL_STREAM_CANCEL_WITHOUT_DECODE_NOT_ASR_SUCCESS","loaded":loaded,"after":base.runtime_metadata(),"entries":entries});
-    std::fs::write("/work/out/real-stream-cancel.json", serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    write_evidence("real-stream-cancel.json", serde_json::to_vec_pretty(&evidence).unwrap());
     println!("REAL_STREAM_CANCEL_OBSERVATION {evidence}");
     assert!(base.runtime_metadata().backend.is_none(), "A stream cancelled without decode must not reuse the preceding batch backend");
     assert_eq!(entries.len(), 1);

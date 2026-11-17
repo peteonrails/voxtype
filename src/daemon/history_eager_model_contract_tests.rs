@@ -71,7 +71,7 @@ async fn history_real_whisper_inflight_eager_chunks_preserve_selected_fidelity()
     let processed=daemon.text_processor.process(&raw);
     let measured=observed.runtime_metadata();
     let evidence=serde_json::json!({"kind":"ACTUAL_REAL_WHISPER_EAGER_INFLIGHT_CHUNKS_NOT_REFERENCE_ACCURACY","spawned":spawned,"chunk_and_tail_samples":lengths,"actual_chunk_texts":calls.iter().map(|(_,text)|text).collect::<Vec<_>>(),"canonical_combined_raw":raw,"processed":processed,"measured":measured,"entry":entry,"scope":"Existing process_eager_chunks + real selected engine behind test-only task barrier + stop_active_recording waits real chunks/tail + common completion/file/Recorder. No live capture/full daemon loop or reference-accuracy claim."});
-    std::fs::write("/work/out/real-eager-inflight.json",serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    write_evidence("real-eager-inflight.json",serde_json::to_vec_pretty(&evidence).unwrap());
     println!("REAL_EAGER_INFLIGHT_OBSERVATION {evidence}");
     assert_eq!(entries.len(),1);
     assert_eq!(entry.raw_text,raw);
@@ -88,6 +88,6 @@ async fn history_real_whisper_inflight_eager_chunks_preserve_selected_fidelity()
     let day=std::fs::read_dir(root.path().join("history")).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="jsonl")).unwrap();
     let day=std::fs::read(day).unwrap();
     assert_eq!(serde_json::from_slice::<crate::history::HistoryEntry>(&day).unwrap(),*entry);
-    std::fs::write("/work/out/real-eager-inflight.jsonl",day).unwrap();
+    write_evidence("real-eager-inflight.jsonl",day);
     println!("REAL_EAGER_INFLIGHT_ASSERTIONS_PASSED");
 }

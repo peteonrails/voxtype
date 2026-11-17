@@ -1,6 +1,22 @@
 // Included inside daemon::tests::history_contracts; no live daemon or devices.
 use super::*;
 
+/// Keep a copy of what a contract test observed, when someone wants one.
+///
+/// These tests were written to run in a fixture container that mounts
+/// `/work/out`, and wrote there unconditionally, so they failed on any other
+/// machine, CI included. The copy is evidence for a reviewer, not part of
+/// the assertion: it is written to `VOXTYPE_TEST_EVIDENCE_DIR` when that is
+/// set, to `/work/out` when that directory exists, and nowhere otherwise.
+fn write_evidence(file_name: impl AsRef<str>, bytes: impl AsRef<[u8]>) {
+    let dir = std::env::var_os("VOXTYPE_TEST_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(std::path::PathBuf::from("/work/out")).filter(|dir| dir.is_dir()));
+    if let Some(dir) = dir {
+        std::fs::write(dir.join(file_name.as_ref()), bytes).unwrap();
+    }
+}
+
 fn enter_private_case(name: &str) -> bool {
     if std::env::var("VOXTYPE_HISTORY_CONTRACT_CHILD").as_deref() == Ok(name) {
         return true;

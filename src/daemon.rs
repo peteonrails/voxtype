@@ -7645,10 +7645,9 @@ while True:
     #[tokio::test]
     async fn history_delivered_text_is_untouched_when_delivery_changes_nothing() {
         let mut pending = crate::history::recorder::Recorder::with_paths(
-            {
-                let mut settings = crate::config::HistoryConfig::default();
-                settings.enabled = true;
-                settings
+            crate::config::HistoryConfig {
+                enabled: true,
+                ..Default::default()
             },
             std::env::temp_dir().join("voxtype-unused-history"),
             std::env::temp_dir().join("voxtype-unused-index.db"),
