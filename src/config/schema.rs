@@ -1595,7 +1595,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 0, max: 512 },
         "OSD",
         "Edge margin",
-        "Gap from the screen edge in physical pixels. Corner anchors use this for both axes.",
+        "Gap from the screen edge in logical pixels. Corner anchors use it for both axes; centered anchors never sit closer to the top or bottom edge than this.",
     ),
     spec(
         "osd.top_margin",
@@ -1604,7 +1604,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Vertical position",
-        "Top edge as a fraction of monitor height, matching swayosd. Only used by the centered anchors.",
+        "Top edge as a fraction of the focused output's height, matching swayosd. Only used by the centered anchors; top-center mirrors values above 0.5.",
     ),
     spec(
         "osd.opacity",
@@ -1613,7 +1613,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Opacity",
-        "Background opacity of the panel.",
+        "Opacity of the GTK4 and native OSD card. It stays the same while the card is shown.",
     ),
     spec(
         "osd.waveform_window_secs",
@@ -1643,7 +1643,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.1, max: 50.0 },
         "OSD",
         "Waveform gain",
-        "Visual gain applied before drawing. Lower for hot mics, raise for quiet ones.",
+        "Waveform sensitivity on its fixed dB scale. 10 is neutral, each doubling shows input 6 dB louder. Lower for hot mics, raise for quiet ones.",
     ),
     spec(
         "osd.frame.background",
