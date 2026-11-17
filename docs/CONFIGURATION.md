@@ -3376,6 +3376,7 @@ restart collapse or change deterministic choices.
 | `text.repair_sentence_breaks` | `--repair-sentence-breaks` / `--no-repair-sentence-breaks` | `VOXTYPE_REPAIR_SENTENCE_BREAKS` |
 | `text.format_numbers` | `--format-numbers` / `--no-format-numbers` | `VOXTYPE_FORMAT_NUMBERS` |
 | `text.lard_disfluency` | `--lard-disfluency` / `--no-lard-disfluency` | `VOXTYPE_LARD_DISFLUENCY` |
+| `text.language` | `--text-language LANG` | `VOXTYPE_TEXT_LANGUAGE` |
 
 CLI flags override environment values, which override the config file. TUI edits
 operate on the file layer only, preserving omitted options unless you change them.
@@ -3392,14 +3393,110 @@ unrelated option does not pin extra cleanup keys into the file.
 > [`[output.post_process]`](#outputpost_process) remains inactive while
 > streaming; the daemon warns at startup if it is configured.
 
+### language (text cleanup)
+
+**Type:** String (a language code, or `"auto"`)
+**Default:** `"auto"`
+**Required:** No
+
+The language you dictate in, for text cleanup. Some cleanup depends on the
+language of the text: LARD disfluency cleanup is English-only, the default
+filler list keeps `um` in Portuguese and German where it is an ordinary word,
+and French keeps its space before `? ! : ;`. Voxtype needs to know what
+language the text is in before it applies any of that.
+
+Most configurations already say. Voxtype works out the language of the text
+in this order and stops at the first answer:
+
+1. **The engine's language setting**, when it names one language:
+   `whisper.language`, `cohere.language`, `gguf.language`,
+   `sensevoice.language` or `openvino.language`. `auto`, and a Whisper list of
+   several languages, do not name one.
+2. **The model**, when it can only write one language. An English-only model
+   counts as English with nothing else set. See the table below.
+3. **`text.language`**, the language you declare here.
+
+If none of the three gives an answer, the language is unknown: English-only
+cleanup does not run, and the other stages use their language-neutral rules.
+
+So `text.language` is for one situation: a model that handles several
+languages and detects them automatically (Parakeet v3, Whisper on `auto`,
+SenseVoice on `auto`, Dolphin, Omnilingual, Soniox). If you only ever dictate
+in English with such a model, say so:
+
+```bash
+voxtype config set text.language en
+systemctl --user restart voxtype
+```
+
+```toml
+[text]
+language = "en"
+```
+
+Use a code such as `en`, `en-US`, `pt-BR` or `fr`. Only the part before the
+hyphen decides which rules apply. `"auto"` declares nothing, which is how
+every existing config behaves.
+
+This setting describes your dictation to text cleanup and nothing else. It is
+not sent to the transcription engine and does not change what is transcribed.
+To tell the engine which language to expect, use that engine's own `language`
+key.
+
+**When the settings disagree, the declaration loses.** An engine language that
+is set wins over `text.language`, and so does a model that only writes one
+language. With `whisper.language = "fr"` and `text.language = "en"`, cleanup
+treats the text as French and English-only cleanup does not run. The same
+holds when a Whisper language list or Soniox `language_hints` leave the
+declared language out: the language is then treated as unknown.
+`voxtype config set text.language ...` prints a `warning:` line when the value
+it wrote is not the one in effect, and the graphical app shows the same note
+under the row.
+
+Declare a language only if it is the one you dictate in. If you switch
+languages while a multilingual model detects them, leave this on `auto`:
+English-only cleanup removes words, and it would do that to your other
+languages too.
+
+**Models that count as one language without any setting:**
+
+| Engine | English-only models | Models for another single language |
+|---|---|---|
+| Whisper (local and `whisper-cli`) | `tiny.en`, `base.en`, `small.en`, `medium.en` | |
+| Parakeet | `parakeet-tdt-0.6b-v2`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-unified-en-0.6b` | |
+| Moonshine | `base`, `tiny` | `base-ja`, `base-zh`, `tiny-ko`, `tiny-ar` |
+| Paraformer | `paraformer-en` | |
+| GGUF | `moonshine-streaming-small-Q8_0.gguf` | `moonshine-base-ja-Q8_0.gguf` (Japanese), `gigaam-v3-e2e-rnnt-Q8_0.gguf` (Russian) |
+| OpenVINO | the `.en` exports (`base.en-int8` and so on) | |
+
+Everything else is multilingual or unknown to Voxtype: Whisper's other models,
+Parakeet v3 and `parakeet-ultra`, SenseVoice, `paraformer-zh`, Dolphin,
+Omnilingual, Cohere, Soniox, a remote Whisper server, and any model you point
+to by path. A model given as a path is never classified, even if its file name
+looks like one of the models above. Declare the language for those.
+
+**CLI flag and environment variable:**
+
+```bash
+voxtype --text-language en
+VOXTYPE_TEXT_LANGUAGE=en voxtype
+```
+
+The daemon reads this at startup, so restart it after changing the value. In
+`voxtype configure` it is the **Dictation language** row under **Text
+Cleanup**, which also shows what cleanup makes of the current value.
+
 ### lard_disfluency and lard_model_path
 
 **Types:** Boolean and optional local file path
 **Defaults:** `false` and the XDG data directory's `voxtype/models/lard-disfluency-v1.vxdf`
 
-Opt in to English-only, trained disfluency removal. Select an explicit English
-engine language (`en`, `en-US`, or `en_US`); automatic or unsupported languages
-skip this stage. Vocabulary correction runs first, followed by filler filtering
+Opt in to English-only, trained disfluency removal. It runs only when the
+dictation is English: the engine's language is set to English (`en`, `en-US`,
+or `en_US`), the model is English-only, or you declared English in
+[`text.language`](#language-text-cleanup). A multilingual model on automatic detection with
+nothing declared skips this stage, and so does any other language.
+Vocabulary correction runs first, followed by filler filtering
 and trained disfluency cleanup, punctuation/casing, number formatting, then user
 replacements. User replacements remain authoritative.
 
@@ -3438,8 +3535,19 @@ only the LARD stage; other configured cleanup still applies. The stage never
 replaces a whole dictation with empty output.
 
 With `lard_disfluency = true` and nothing to run (no model at the path, a file
-that does not load, or an engine language that is not explicit English), the
-stage is skipped and Voxtype says so:
+that does not load, or dictation that is not known to be English), the stage
+is skipped and Voxtype says so. For a language problem the message names what
+in your configuration makes the dictation not English, and the fix is the
+command for that case. With a multilingual model on automatic detection:
+
+```
+LARD disfluency cleanup is on but is being skipped: it only runs on English,
+and nothing says parakeet dictation with parakeet-tdt-0.6b-v3 is English
+    Fix: If you dictate in English, declare it: voxtype config set text.language en,
+    or turn it off: voxtype config set text.lard_disfluency false
+```
+
+The same report appears in each of these places:
 
 - `voxtype doctor` fails the `text.lard_disfluency` check under **Text
   cleanup** and prints the fix.
@@ -3447,11 +3555,17 @@ stage is skipped and Voxtype says so:
   attention" startup notification, once per boot until it is fixed.
 - `voxtype config set` writes the value, exits 0, and prints a `warning:` line
   on stderr. Writes to other keys print it only when they cause the problem,
-  for example setting the engine language back to `auto`.
+  for example switching to a multilingual model with the engine language on
+  `auto`.
 - `voxtype config schema --json` adds a `notice` string to the
   `text.lard_disfluency` entry, which the graphical app shows under the switch.
   The field is absent when there is nothing to report.
 - `voxtype configure` shows it in the switch's row and help pane.
+
+A `--model` override recording (`voxtype record start --model ...`, or the
+secondary-model hotkey) is checked on its own: LARD runs on it only if that
+model's text is English by the same rules. An English-only configured model
+does not make a multilingual override English.
 
 Use `--lard-disfluency`, `--no-lard-disfluency`, or `--lard-model-path FILE`
 for a CLI override. Environment variables are `VOXTYPE_LARD_DISFLUENCY` and
@@ -4967,6 +5081,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | path | `meeting.announcement_file` |
 | `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` | string | `meeting.announcement_voice` |
 | `VOXTYPE_LARD_MODEL_PATH` | path | `text.lard_model_path` |
+| `VOXTYPE_TEXT_LANGUAGE` | string | `text.language` |
 | `VOXTYPE_PUNCTUATION_CASING` | bool | `text.punctuation_casing` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |

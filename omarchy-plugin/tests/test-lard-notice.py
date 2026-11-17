@@ -2,8 +2,8 @@
 """The LARD switch says when it is on with nothing to run, offscreen.
 
 `config schema --json` adds `notice` to `text.lard_disfluency` while the
-switch is on and the stage cannot run (no model installed, or a language that
-is not explicit English). The form shows it under the row, so the panel never
+switch is on and the stage cannot run (no model installed, or dictation that
+is not known to be English). The form shows it under the row, so the panel never
 presents the switch as on without saying it is doing nothing.
 
 Scenarios:

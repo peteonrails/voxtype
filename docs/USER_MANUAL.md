@@ -460,7 +460,7 @@ checked. What is covered:
 | Configuration | Config directory, models directory, config file |
 | Binary and GPU | The installed variant supports your engine; Vulkan, CUDA or MIGraphX runtime libraries for GPU variants |
 | Transcription | The configured engine's model (every engine, including the Whisper secondary model and the Soniox API key); the Silero model when VAD uses the Whisper backend |
-| Text cleanup | When `text.lard_disfluency` is on: the LARD model is installed and loads, and the engine language is explicit English |
+| Text cleanup | When `text.lard_disfluency` is on: the LARD model is installed and loads, and the dictation is known to be English |
 | Audio | The configured input device exists |
 | Output | A typing or clipboard tool works for your output mode; `WAYLAND_DISPLAY`/`DISPLAY` are visible to the systemd service |
 | Input | `/dev/input/event*` is readable when the built-in hotkey is on |
@@ -2525,19 +2525,23 @@ transcript.
 In `voxtype configure`, select **Text Cleanup**. The deterministic switches are
 spoken punctuation, filler removal, restart collapse, sentence-break repair and
 number formatting. Restart collapse remains off by default. **LARD disfluency
-cleanup** is a separate opt-in switch; **LARD model path** is an independent
-inline field. Enter or Space toggles a switch; Enter/i edits the path, Enter
-commits, Esc cancels, and an empty path restores the default location. `s` saves
+cleanup** is a separate opt-in switch; **LARD model path** and **Dictation
+language** are independent inline fields. Enter or Space toggles a switch;
+Enter/i edits a field, Enter commits, Esc cancels, and an empty value restores
+the default (the default model location, or `auto`). `s` saves
 and `r` reverts. Arrow keys or j/k navigate; the form scrolls to keep the selected
 row visible, including replacement edit/add/delete rows. Saving unchanged cleanup
 options does not add missing keys or copy CLI/environment overrides into the file.
 Existing model selections, sibling options and TOML comments are preserved.
 The TUI's normal exit behavior can restart the daemon after saved configuration
 changes; changing a model path does not itself install a model. While the LARD
-switch is on, the form checks it as you edit: with no model at the path, or an
-engine language that is not explicit English, the row reads
-`yes (model not installed)` or `yes (needs an English language)` and the help
-pane shows what is wrong and the fix. The switch still turns on.
+switch is on, the form checks it as you edit: with no model at the path, or
+dictation that is not known to be English, the row reads
+`yes (model not installed)`, `yes (language not declared)` or
+`yes (language is not English)` and the help pane shows what is wrong and the
+fix. The switch still turns on. The **Dictation language** row shows what
+cleanup makes of its value, for example `auto (en, the model's only language)`,
+`auto (not known)`, or `en (unused: whisper.language is fr)`.
 Learned punctuation/casing is separate from deterministic cleanup and is disabled
 in the TUI if this client lacks the `punctuation-casing` build feature.
 
@@ -2547,9 +2551,10 @@ from **LARD disfluency cleanup**. Clean up text contains independent determinist
 stage switches. There is no master switch that resets your individual choices.
 The LARD switch only changes `text.lard_disfluency`; it does not change those
 rules, enable restart collapse, install a model, or restart the daemon. If you
-turn it on with no model installed (or with a language that is not explicit
+turn it on with no model installed (or with dictation that is not known to be
 English), a notice under the switch says it is not running and how to fix it;
-the notice goes away once it is fixed. The
+the notice goes away once it is fixed. **Dictation language**, under **Other
+text options**, is where you declare the language for a multilingual model. The
 separate model license is linked there and opens only when clicked. Controls
 not advertised by your executable's schema are not shown, so an older binary
 may not offer LARD yet. Punctuation/casing restoration and smart auto-submit
@@ -2574,9 +2579,32 @@ whether the stage is running for your configuration. Nothing is downloaded
 unless you run that command: not at daemon start, and not when you turn the
 setting on.
 
-Use an explicit English engine language; auto-detected and non-English
-languages skip this stage, and engines without a language setting cannot run
-it.
+LARD removes words, so it only runs when Voxtype knows the dictation is
+English. Three things can tell it so, and the first one that applies decides:
+
+1. The engine's language is set to English (`whisper.language = "en"`, the
+   default for Whisper, or the `language` key of Cohere, GGUF, SenseVoice or
+   OpenVINO).
+2. The model can only write English: Whisper's `.en` models, Parakeet
+   `parakeet-tdt-0.6b-v2` and `parakeet-unified-en-0.6b`, Moonshine `base` and
+   `tiny`, `paraformer-en`. These need no setting at all.
+3. You declare it. A multilingual model that detects the language
+   automatically (Parakeet v3, Whisper on `auto`, SenseVoice on `auto`,
+   Dolphin, Omnilingual, Soniox) gives Voxtype nothing to go on, so say which
+   language you dictate in:
+
+   ```bash
+   voxtype config set text.language en
+   systemctl --user restart voxtype
+   ```
+
+`text.language` only informs text cleanup. It is not passed to the engine and
+does not change transcription. An engine language that is set to something
+else wins over it, so LARD never runs on text the engine was told to write in
+another language. If you dictate in more than one language with automatic
+detection, leave `text.language` on `auto` and LARD stays off. The full rule
+and the list of single-language models are in the
+[configuration reference](CONFIGURATION.md#language-text-cleanup).
 
 Turning the setting on without the model does not break dictation, but the
 stage does nothing until the model is installed. Voxtype tells you instead of
