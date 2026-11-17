@@ -380,7 +380,7 @@ fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(
-                "Simulates keyboard typing via wtype → dotool → ydotool fallback. \
+                "Simulates keyboard typing via wtype → dotool → xdotool → ydotool fallback. \
                  Default; works in most apps.",
             ),
             Line::from(""),
