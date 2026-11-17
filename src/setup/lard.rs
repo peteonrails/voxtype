@@ -86,6 +86,15 @@ impl Problem {
         }
     }
 
+    /// A few words for a table cell, where the full message does not fit.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Problem::NotEnglish => "needs an English language",
+            Problem::ModelMissing { .. } => "model not installed",
+            Problem::ModelInvalid { .. } => "model does not load",
+        }
+    }
+
     /// Message and fix as one line, for places with a single text slot.
     pub fn summary(&self) -> String {
         format!("{}. {}", self.message(), self.fix())

@@ -28,6 +28,12 @@ pub struct TextState {
     pub lard_model_path: Option<String>,
     original_model_path: Option<String>,
     pub model_edit: Option<TextInput>,
+    /// The active engine's language in the config file, which decides
+    /// whether LARD can run at all.
+    language: Option<String>,
+    /// Why LARD would be skipped with the switch and path as they are now,
+    /// kept current as either is edited. `None` while it is off or working.
+    pub lard_problem: Option<crate::setup::lard::Problem>,
     /// Sorted by key for stable display. The user can edit keys/values via
     /// the inline editor below.
     pub replacements: Vec<(String, String)>,
@@ -108,7 +114,11 @@ impl TextState {
             config.punctuation_casing,
             config.smart_auto_submit,
         ];
-        Ok(Self {
+        let language = ed
+            .candidate_config()
+            .ok()
+            .and_then(|config| config.active_language().map(str::to_string));
+        let mut state = Self {
             spoken_punctuation: config.spoken_punctuation,
             smart_auto_submit: config.smart_auto_submit,
             filter_filler_words: config.filter_filler_words,
@@ -121,13 +131,42 @@ impl TextState {
             lard_model_path: ed.get_string("text", "lard_model_path"),
             original_model_path: ed.get_string("text", "lard_model_path"),
             model_edit: None,
+            language,
+            lard_problem: None,
             replacements,
             original_keys,
             cursor: 0,
             feedback: None,
             dirty_since_load: false,
             editing: None,
-        })
+        };
+        state.refresh_lard_problem();
+        Ok(state)
+    }
+
+    /// Re-check whether LARD can run with the switch and model path as they
+    /// stand in this form, saved or not.
+    fn refresh_lard_problem(&mut self) {
+        let text = crate::config::TextConfig {
+            lard_disfluency: self.lard_disfluency,
+            lard_model_path: self.lard_model_path.as_ref().map(Into::into),
+            ..Default::default()
+        };
+        self.lard_problem = crate::setup::lard::problem_for(&text, self.language.as_deref());
+    }
+
+    /// Say so on the feedback line when the form now has LARD on with nothing
+    /// to run. The switch still flips: this is a warning, not a refusal. The
+    /// feedback line is two rows, so it carries what is wrong and the help
+    /// pane, which is showing this row, carries the fix.
+    fn warn_about_lard(&mut self) {
+        self.refresh_lard_problem();
+        if let Some(problem) = &self.lard_problem {
+            self.feedback = Some((
+                FeedbackLevel::Warn,
+                format!("{}. The fix is in the help pane.", problem.message()),
+            ));
+        }
     }
 
     pub fn save(&mut self) -> Action {
@@ -237,6 +276,9 @@ impl TextState {
         }
         self.dirty_since_load = true;
         self.feedback = None;
+        if self.cursor == 5 {
+            self.warn_about_lard();
+        }
     }
 
     fn start_edit(&mut self) {
@@ -404,6 +446,8 @@ fn render_state(f: &mut Frame, area: Rect, state: &TextState) {
         }
         let value = if i == 6 && !cfg!(feature = "punctuation-casing") {
             format!("{} (not compiled)", yesno(value))
+        } else if let (5, Some(problem)) = (i, &state.lard_problem) {
+            format!("{} ({})", yesno(value), problem.label())
         } else {
             yesno(value)
         };
@@ -414,10 +458,14 @@ fn render_state(f: &mut Frame, area: Rect, state: &TextState) {
     }
     let model_value = match &state.model_edit {
         Some(input) => input.caret_string(),
-        None => state
-            .lard_model_path
-            .clone()
-            .unwrap_or_else(|| "default path (not checked)".into()),
+        None => state.lard_model_path.clone().unwrap_or_else(|| {
+            // Only checked while the switch is on: that is when it matters.
+            match (state.lard_disfluency, &state.lard_problem) {
+                (false, _) => "default path (not checked)".into(),
+                (true, None) => "default path (model installed)".into(),
+                (true, Some(problem)) => format!("default path ({})", problem.label()),
+            }
+        }),
     };
     rows.push(FormRowSpec::new(
         state.cursor == toggle_count(),
@@ -570,11 +618,21 @@ fn guidance(state: &TextState) -> Vec<Line<'static>> {
         return vec![heading(title), Line::from(""), Line::from(description), Line::from(""), Line::from("Clean up text stages are independent. They do not enable LARD or download any model.")];
     }
     if state.cursor == 5 || state.cursor == toggle_count() {
+        let status = match (state.lard_disfluency, &state.lard_problem) {
+            (false, _) => Line::from("Status: off."),
+            (true, None) => Line::from("Status: on, model installed, running."),
+            (true, Some(problem)) => Line::from(Span::styled(
+                format!("Status: not running. {}", problem.summary()),
+                Style::default().fg(Color::Yellow),
+            )),
+        };
         return vec![
             heading("LARD disfluency cleanup (opt-in)"),
+            status,
+            Line::from(""),
             Line::from("English only: set the engine language explicitly to en. Independent of deterministic cleanup."),
             Line::from(""),
-            Line::from("Requires a separately installed local VXDF model. Missing/invalid models skip LARD; no automatic download."),
+            Line::from("Requires a separately installed local VXDF model, which is not downloadable yet. Missing/invalid models skip LARD; no automatic download."),
             Line::from("Setup: voxtype setup lard --help"),
             Line::from("Model license: CC BY-SA 4.0 (separate from MIT code)"),
             Line::from("https://creativecommons.org/licenses/by-sa/4.0/"),
@@ -648,6 +706,7 @@ fn handle_state_key(state: &mut TextState, key: KeyEvent) -> Action {
                 state.model_edit = None;
                 state.dirty_since_load = true;
                 state.feedback = None;
+                state.warn_about_lard();
             }
         }
         return Action::None;
@@ -859,6 +918,103 @@ mod tests {
         assert!(screen.contains("Text Cleanup"));
         assert!(screen.contains("LARD disfluency cleanup"));
         assert!(screen.contains("Clean up text"));
+    }
+
+    fn screen_of(state: &TextState) -> String {
+        let backend = ratatui::backend::TestBackend::new(160, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_state(f, f.area(), state)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+    }
+
+    /// Turning LARD on with nothing to load still flips the switch, but the
+    /// form says so at once: in the row, on the feedback line and in the help.
+    #[test]
+    fn enabling_lard_without_a_model_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "engine = 'whisper'\n[whisper]\nlanguage = 'en'\n[text]\nlard_model_path = '/nonexistent/voxtype-test/lard.vxdf'\n",
+        )
+        .unwrap();
+        let ed = ConfigEditor::load_from_path(path).unwrap();
+        let mut state = TextState::from_editor(&ed).unwrap();
+        assert_eq!(state.lard_problem, None, "off: nothing to report");
+        assert!(!screen_of(&state).contains("model not installed"));
+
+        state.cursor = 5;
+        state.cycle();
+        assert!(state.lard_disfluency);
+        let (level, message) = state.feedback.clone().expect("a warning");
+        assert_eq!(level, FeedbackLevel::Warn);
+        assert!(message.contains("/nonexistent/voxtype-test/lard.vxdf"));
+        let screen = screen_of(&state);
+        assert!(screen.contains("yes (model not installed)"), "{screen}");
+        assert!(screen.contains("Status: not running."));
+
+        // Off again: the report goes with it.
+        state.cycle();
+        assert_eq!(state.lard_problem, None);
+        assert_eq!(state.feedback, None);
+        assert!(!screen_of(&state).contains("model not installed"));
+    }
+
+    #[test]
+    fn lard_status_follows_the_model_path_and_the_language() {
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::setup::lard::SOURCE_TREE_PATH);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "engine = 'whisper'\n[whisper]\nlanguage = 'en'\n[text]\nlard_disfluency = true\nlard_model_path = {:?}\n",
+                model.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = TextState::from_editor(&ed).unwrap();
+        assert_eq!(state.lard_problem, None);
+        state.cursor = 5;
+        assert!(screen_of(&state).contains("Status: on, model installed, running."));
+
+        // Point the path somewhere empty through the inline editor.
+        state.cursor = toggle_count();
+        state.start_edit();
+        let input = state.model_edit.as_mut().unwrap();
+        *input = TextInput::new("/nonexistent/voxtype-test/lard.vxdf".to_string());
+        handle_state_key(&mut state, KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(
+            state.lard_problem,
+            Some(crate::setup::lard::Problem::ModelMissing { custom: true, .. })
+        ));
+        assert_eq!(state.feedback.as_ref().unwrap().0, FeedbackLevel::Warn);
+
+        // An automatic language keeps the stage from running whatever the
+        // model, and the form reports that instead.
+        std::fs::write(
+            &path,
+            format!(
+                "engine = 'whisper'\n[whisper]\nlanguage = 'auto'\n[text]\nlard_disfluency = true\nlard_model_path = {:?}\n",
+                model.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let ed = ConfigEditor::load_from_path(path).unwrap();
+        let state = TextState::from_editor(&ed).unwrap();
+        assert_eq!(
+            state.lard_problem,
+            Some(crate::setup::lard::Problem::NotEnglish)
+        );
+        assert!(screen_of(&state).contains("yes (needs an English language)"));
     }
 
     #[test]
