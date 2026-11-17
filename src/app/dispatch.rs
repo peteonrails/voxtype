@@ -646,6 +646,12 @@ pub(crate) async fn dispatch(
             .await?;
         }
 
+        Commands::Doctor { json } => {
+            if setup::doctor::run_cli(&config, config_path.as_deref(), json).await {
+                std::process::exit(1);
+            }
+        }
+
         Commands::CheckUpdate => {
             check_for_updates().await?;
         }

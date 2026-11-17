@@ -12,12 +12,12 @@
 //!
 //! Evidence, in order of authority:
 //!
-//! 1. **The daemon's own answer.** A future daemon writes its acceleration
-//!    state to `$XDG_RUNTIME_DIR/voxtype/accel.json` when it loads a model
-//!    (see [`AccelStateFile`]); nothing else can know as reliably. The read
-//!    is implemented here already and preferred when the file exists and
-//!    names the running PID, so shipping that daemon-side write later
-//!    upgrades this command's accuracy with no change on this side.
+//! 1. **The daemon's own answer.** The daemon writes its acceleration state
+//!    to `$XDG_RUNTIME_DIR/voxtype/accel.json` when it loads a model (see
+//!    [`AccelStateFile`] and [`publish`]); nothing else can know as reliably.
+//!    It is preferred when the file exists and names the running PID. Today
+//!    the local Whisper (whisper.cpp) and OpenVINO paths write it; engines
+//!    that don't fall back to the evidence below.
 //! 2. **VRAM held by the daemon's PID**, via `rocm-smi` or `nvidia-smi`.
 //!    Proof of GPU use when present. Absence proves nothing: a daemon with
 //!    `on_demand_loading` holds no VRAM while idle.
@@ -123,8 +123,8 @@ impl AccelReport {
 
 /// Contents of `$XDG_RUNTIME_DIR/voxtype/accel.json`.
 ///
-/// Not written yet. The daemon should write it once per model load, after the
-/// backend has actually initialized, and remove it on shutdown. `pid` exists
+/// Written by [`publish`] once per model load, after the backend has actually
+/// initialized, and removed by the daemon at startup and shutdown. `pid` exists
 /// so a file left by a crashed predecessor is ignored rather than believed.
 /// `state` uses the same strings as [`AccelState::tag`], and `detail` is a
 /// free-form line for the evidence list (e.g. the device name).
@@ -139,6 +139,68 @@ pub struct AccelStateFile {
 /// Where the daemon publishes its acceleration state.
 pub fn state_file_path() -> PathBuf {
     Config::runtime_dir().join("accel.json")
+}
+
+/// Which daemon a model load in this process belongs to: the daemon itself,
+/// or its `gpu_isolation` transcription worker. `None` for anything else
+/// (`voxtype transcribe <file>`, tests), which must not overwrite the running
+/// daemon's answer.
+fn owning_daemon_pid() -> Option<i32> {
+    let daemon = daemon_status::read_pid_if_alive()?;
+    let me = std::process::id() as i32;
+    let parent = std::os::unix::process::parent_id() as i32;
+    (daemon == me || daemon == parent).then_some(daemon)
+}
+
+/// Record what a model load actually got, for `voxtype info accel`.
+///
+/// Returns `true` when this is news for the running daemon: the published
+/// state changed. Callers use that to notify once per daemon start (or once
+/// per distinct outcome) rather than on every model load, including loads in
+/// a fresh `gpu_isolation` worker process, which has no memory of its own.
+/// Returns `false`, and writes nothing, outside a daemon.
+pub fn publish(state: AccelState, backend: Option<&str>, detail: Option<String>) -> bool {
+    let Some(pid) = owning_daemon_pid() else {
+        return false;
+    };
+    publish_at(&state_file_path(), pid, state, backend, detail)
+}
+
+pub(crate) fn publish_at(
+    path: &Path,
+    pid: i32,
+    state: AccelState,
+    backend: Option<&str>,
+    detail: Option<String>,
+) -> bool {
+    let file = AccelStateFile {
+        pid,
+        state: state.tag().to_string(),
+        backend: backend.map(str::to_string),
+        detail,
+    };
+    if let Some(prev) = read_state_file_at(path, pid) {
+        if prev.state == file.state && prev.backend == file.backend && prev.detail == file.detail {
+            return false;
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string(&file) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                tracing::debug!("Could not write {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => tracing::debug!("Could not serialize acceleration state: {}", e),
+    }
+    true
+}
+
+/// Remove the published state. The daemon calls this at startup and shutdown.
+pub fn clear() {
+    let _ = std::fs::remove_file(state_file_path());
 }
 
 /// Whether a journal line proves acceleration, disproves it, or merely states
@@ -300,7 +362,12 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 
     // ONNX Runtime failures. The provider .so files are dlopened at runtime,
     // so a missing companion library shows up here and nowhere else.
-    if l.contains("failed to load library libonnxruntime_providers")
+    // ORT names the provider by full path when it sits beside the binary
+    // ("Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_...").
+    if l.contains("cudnn") && (l.contains("cannot open") || l.contains("missing")) {
+        return Some((Signal::Negative, Some("cuda")));
+    }
+    if (l.contains("failed to load library") && l.contains("libonnxruntime_providers"))
         || (l.contains("failed to create") && l.contains("executionprovider"))
         || l.contains("falling back to cpu")
         || l.contains("ep registration failed")
@@ -329,7 +396,7 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 /// Journal patterns worth pulling out of a daemon's log. Passed to
 /// `journalctl -g` so the filtering happens there rather than by streaming
 /// every line of a weeks-old daemon's journal into this process.
-const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices";
+const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices|cudnn";
 
 /// Read the GPU-relevant lines this PID logged.
 fn scan_journal(pid: i32) -> Signals {
@@ -575,6 +642,9 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
             Some("vulkan") => Some("vulkan"),
             Some("cuda") => Some("cuda"),
             Some("migraphx") => Some("migraphx"),
+            Some("metal") => Some("metal"),
+            Some("hip") => Some("hip"),
+            Some("openvino") => Some("openvino"),
             _ => variant_backend(variant),
         };
         return AccelReport {
@@ -586,8 +656,42 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
         };
     }
 
-    let signals = scan_journal(pid);
+    let mut signals = scan_journal(pid);
     let vram = vram_held_by(pid);
+
+    // A provider that cannot resolve its libraries can never load, whatever
+    // the journal says or no longer says after rotation.
+    let mut fix: Vec<String> = Vec::new();
+    if let Some(exe) = binary::running_binary_path(pid) {
+        if let Some(missing) =
+            super::gpu::unresolved_provider_deps_at(&exe).filter(|m| !m.is_empty())
+        {
+            let name = exe
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            signals.negative.push(Observation {
+                text: format!(
+                    "the GPU execution provider beside {} cannot load: missing {}",
+                    exe.display(),
+                    missing.join(", ")
+                ),
+                count: 1,
+            });
+            fix = super::gpu::provider_fix_lines(&name, &missing);
+        }
+    }
+    if fix.is_empty()
+        && signals
+            .negative
+            .iter()
+            .any(|o| o.text.to_ascii_lowercase().contains("cudnn"))
+    {
+        fix = super::parakeet::CUDNN_INSTALL_HINT
+            .lines()
+            .map(str::to_string)
+            .collect();
+    }
 
     if let Some((bytes, tool)) = vram {
         evidence.push(format!(
@@ -598,6 +702,7 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
         ));
     }
     evidence.extend(signals.evidence_lines());
+    evidence.extend(fix.iter().map(|line| format!("fix: {}", line.trim())));
 
     let (state, backend) = decide(variant, &signals, vram.map(|(bytes, _)| bytes));
     if state == AccelState::Unknown && signals.intent.is_empty() && signals.positive.is_empty() {
@@ -764,6 +869,20 @@ mod tests {
             classify_line("Failed to create MIGraphXExecutionProvider"),
             Some((Signal::Negative, None))
         );
+        // As ORT really logs it when the provider sits beside the binary
+        // and cuDNN is not installed.
+        assert_eq!(
+            classify_line(
+                "[E:onnxruntime:Default, provider_bridge_ort.cc:1745] Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file: No such file or directory"
+            ),
+            Some((Signal::Negative, Some("cuda")))
+        );
+        assert_eq!(
+            classify_line(
+                "ERROR CUDA is installed but cuDNN (libcudnn.so.9) is missing, so the CUDA execution provider cannot load: falling back to CPU."
+            ),
+            Some((Signal::Negative, Some("cuda")))
+        );
         // Partial assignment still runs most of the graph on the GPU.
         assert_eq!(
             classify_line(
@@ -861,6 +980,39 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
             "a file naming another pid is a leftover, not evidence"
         );
         assert!(read_state_file_at(&dir.path().join("absent.json"), 4242).is_none());
+    }
+
+    /// Publishing reports news only when the outcome changes, so a
+    /// `gpu_isolation` worker that re-detects the same fallback on every
+    /// transcription doesn't notify every time.
+    #[test]
+    fn publish_reports_news_once_per_distinct_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voxtype").join("accel.json");
+        let detail = || Some("no Vulkan GPU found".to_string());
+
+        assert!(publish_at(
+            &path,
+            10,
+            AccelState::CpuFallback,
+            Some("vulkan"),
+            detail()
+        ));
+        assert!(!publish_at(
+            &path,
+            10,
+            AccelState::CpuFallback,
+            Some("vulkan"),
+            detail()
+        ));
+        let read = read_state_file_at(&path, 10).unwrap();
+        assert_eq!(read.state, "cpu-fallback");
+        assert_eq!(read.detail, detail());
+
+        // A different outcome in the same daemon is news again.
+        assert!(publish_at(&path, 10, AccelState::Gpu, Some("vulkan"), None));
+        // So is the same outcome in a new daemon.
+        assert!(publish_at(&path, 11, AccelState::Gpu, Some("vulkan"), None));
     }
 
     #[test]

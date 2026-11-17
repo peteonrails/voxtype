@@ -555,13 +555,32 @@ sample_rate = 16000
 **Default:** `60`
 **Required:** No
 
-Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded.
+Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded, and a "Recording Limit Reached" notification says so. A "Recording Limit Approaching" notification comes first, 30 seconds before the limit (10 seconds for limits under two minutes, none under 30 seconds).
+
+Raise it for long dictations. A recording uses about 3.8 MB of memory per minute while it is captured. Parakeet transcribes recordings longer than [`[parakeet] max_window_secs`](#max_window_secs) in windows, so long recordings do not hit the model's length limit.
 
 **Example:**
 ```toml
 [audio]
 max_duration_secs = 120  # Allow 2-minute recordings
 ```
+
+### keep_failed_recordings
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, a recording whose transcription fails is saved as a WAV file in `~/.local/state/voxtype/failed-audio/` (or `$XDG_STATE_HOME/voxtype/failed-audio/`), and the "Transcription Failed" notification gives the `voxtype transcribe` command to retry it. The 20 most recent are kept and older ones are removed automatically. The directory and the files are private to your user (modes `0700` and `0600`).
+
+Set it to `false` to write no audio to disk. A dictation whose transcription fails is then lost, and the notification says the recording was not kept. Files saved earlier stay until you delete them.
+
+```toml
+[audio]
+keep_failed_recordings = false
+```
+
+Also available as `--no-keep-failed-recordings` (and `--keep-failed-recordings` to override a config that turns it off) or `VOXTYPE_KEEP_FAILED_RECORDINGS=false`.
 
 ### pause_media
 
@@ -2277,29 +2296,61 @@ The `paste` mode is an alternative for non-US keyboard layouts. Instead of typin
 ### paste_keys
 
 **Type:** String
-**Default:** `"shift+insert"` in the shipped `config.toml`; `"ctrl+v"` is the built-in fallback if the key is removed from the file entirely
+**Default:** `"shift+insert"` in the shipped `config.toml`; `"auto"` when the key is absent from the file (the config written by `voxtype setup` leaves it out)
 **Required:** No
 
-Keystroke to simulate for paste mode. The shipped default is `shift+insert` because it pastes correctly in terminal emulators as well as GUI apps — many terminals bind `ctrl+v` to their own function (readline's literal-insert, a tmux/screen prefix, etc.) rather than treating it as paste. Change this if your environment uses a different paste shortcut.
+Keystroke to simulate for paste mode, or `"auto"` to pick one per window.
 
-**Format:** `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
+With `"auto"`, voxtype asks the compositor which window has focus just before pasting. Terminals get `paste_keys_terminal` (default `ctrl+shift+v`); everything else gets `ctrl+v`. A terminal can't use `ctrl+v`: the terminal passes it to the running program as a raw `^V`, which readline treats as literal-insert, tmux and screen may use as a prefix, and the Codex CLI treats as "paste an image from the clipboard", so the dictation never arrives.
+
+Terminal detection works on:
+- **Hyprland**: `hyprctl activewindow -j`. A window with the `terminal` tag counts as a terminal (Omarchy tags every terminal it knows, and dynamic tags such as `terminal*` match too); otherwise the window class is checked against a list of known terminals.
+- **Sway**: `swaymsg -t get_tree`, matching the focused window's app_id or X11 class.
+- **niri**: `niri msg --json focused-window`, matching its app_id.
+
+On other desktops, or if the query fails or takes longer than 250ms, `auto` sends `ctrl+v`, which is what paste mode sent before `auto` existed. The query runs during the pre-paste delay, so it adds no latency.
+
+An explicit keystroke such as `"shift+insert"` is sent everywhere, exactly as before, unless `paste_keys_terminal` is also set.
+
+**Format:** `"auto"`, `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
 
 **Common values:**
-- `"shift+insert"` - Universal paste shortcut, works in terminals and GUI apps (shipped default)
+- `"auto"` - `ctrl+v` in GUI apps, `paste_keys_terminal` in terminals (built-in default)
+- `"shift+insert"` - Pastes in GUI apps and in terminals that map it to the clipboard (Omarchy's do); stock Ghostty, Kitty, Alacritty, foot and WezTerm paste the primary selection with it instead (shipped default)
 - `"ctrl+v"` - Standard GUI paste shortcut
-- `"ctrl+shift+v"` - Some terminal emulators
+- `"ctrl+shift+v"` - Clipboard paste in most terminal emulators
 
 **Example:**
 ```toml
 [output]
 mode = "paste"
-paste_keys = "shift+insert"  # For Hyprland/Omarchy
+paste_keys = "auto"
 ```
 
 **Supported keys:**
 - Modifiers: `ctrl`, `shift`, `alt`, `super` (also `leftctrl`, `rightctrl`, etc.)
 - Letters: `a-z`
 - Special: `insert`, `enter`
+
+### paste_keys_terminal
+
+**Type:** String
+**Default:** `"ctrl+shift+v"`
+**Required:** No
+
+Keystroke paste mode sends when the focused window is a terminal. Used by `paste_keys = "auto"`, and also when `paste_keys` holds an explicit keystroke: setting both makes `paste_keys` the GUI keystroke and this one the terminal keystroke.
+
+The default, `ctrl+shift+v`, is the clipboard paste binding in stock Ghostty, Kitty, Alacritty, foot, WezTerm, Konsole and GNOME Terminal, and in Omarchy's terminal configs. If your terminals map `shift+insert` to the clipboard, as Omarchy's do, you can use that to match Omarchy's universal paste (Super+V).
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"
+paste_keys_terminal = "shift+insert"
+```
+
+Also settable with `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS_TERMINAL`.
 
 ### restore_clipboard
 
@@ -2737,7 +2788,7 @@ When `true`, shows a notification when recording stops (transcription begins).
 
 When `true`, shows a notification with the transcribed text after transcription completes.
 
-**Requires:** `notify-send` (libnotify)
+**Requires:** a notification server (mako, swaync, dunst, or your desktop's own). Voxtype uses `notify-send` (libnotify) when installed and otherwise talks to the server over D-Bus directly.
 
 **Example:**
 ```toml
@@ -2776,7 +2827,7 @@ show_edits = false
 **Default:** `"normal"`
 **Required:** No
 
-Sets the urgency level passed to `notify-send` for all voxtype notifications.
+Sets the urgency level of all voxtype notifications.
 
 On GNOME, notifications with `"low"` urgency are delivered to the notification drawer without showing as a popup banner. Use `"normal"` (the default) if you want notifications to pop up on screen. Use `"critical"` if you want notifications that persist until dismissed.
 
@@ -3047,7 +3098,8 @@ command = "~/.config/voxtype/lm-studio-cleanup.sh"
 **Required:** No
 
 Maximum time in milliseconds to wait for the command to complete. If exceeded,
-the original text is used and a warning is logged.
+the original text is used, a warning is logged, and a desktop notification says
+the cleanup timed out.
 
 **Recommendations:**
 - Simple shell commands: `5000` (5 seconds)
@@ -3116,6 +3168,16 @@ If the post-processing command fails for any reason (command not found, non-zero
 exit, timeout, empty output), Voxtype gracefully falls back to the original
 transcribed text and logs a warning. This ensures voice-to-text output is never
 blocked by post-processing issues.
+
+So that you know the cleanup didn't run, Voxtype also shows a desktop
+notification after the text is delivered, naming what went wrong and the setting
+to fix: the program that wasn't found, the exit code and first line of the
+command's stderr, the timeout (and how to raise it), the empty output, or an
+`edit_list` reply that was rejected. The
+first failure of each kind always notifies; the same failure repeating is quiet
+for 5 minutes, and a successful run resets it. A failing `pre_output_command`,
+`post_output_command` or `pre_recording_command` hook gets the same kind of
+notice.
 
 **Debugging:**
 Run voxtype with `-v` or `-vv` to see detailed logs about post-processing:
@@ -3681,10 +3743,10 @@ voxtype --vad daemon
 VAD detection algorithm to use:
 
 - `auto` - Automatically select based on transcription engine:
-  - Whisper engine: uses Whisper VAD (more accurate, requires model)
-  - Parakeet engine: uses Energy VAD (fast, no model needed)
+  - Whisper engine: uses Whisper VAD (more accurate, requires model). If the Silero model is missing or fails to load, falls back to Energy VAD and logs a warning.
+  - Other engines: use Energy VAD (fast, no model needed)
 - `energy` - Simple RMS energy-based detection. Fast and works with any engine, no model download required.
-- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`.
+- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`. If the model is missing or fails to load, the daemon runs without VAD and shows a desktop notification at startup with the fix.
 
 **Example:**
 ```toml
@@ -4827,6 +4889,7 @@ Any config file setting can be overridden via environment variable. These are ap
 |----------|------|-------------------|
 | `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
 | `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
+| `VOXTYPE_KEEP_FAILED_RECORDINGS` | bool | `audio.keep_failed_recordings` |
 | `VOXTYPE_PAUSE_MEDIA` | bool | `audio.pause_media` |
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |
@@ -4844,6 +4907,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
+| `VOXTYPE_PASTE_KEYS_TERMINAL` | string | `output.paste_keys_terminal` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
 | `VOXTYPE_DOTOOL_XKB_VARIANT` | string | `output.dotool_xkb_variant` |
 | `VOXTYPE_EITYPE_XKB_LAYOUT` | string | `output.eitype_xkb_layout` |
@@ -5122,7 +5186,7 @@ frontend = "auto"           # Default. Picks the best frontend this system can r
 3. `native` when `voxtype-osd-native` is installed
 4. otherwise no OSD; the daemon logs why and keeps running
 
-The daemon logs its choice and the reason once at startup. `voxtype setup osd --status` shows the same thing without starting anything, and `voxtype status --format json --extended` reports it as `osd_frontend_active`. An explicit `gtk4`, `native` or `quickshell` is never changed: if that binary is missing, the launcher falls back to whichever frontend is installed, as before. `VOXTYPE_OSD_FRONTEND` overrides the config value. Configs written before 1.2.2 that say `frontend = "gtk4"` keep GTK4. Configs without the key now get `auto`.
+The daemon logs its choice and the reason once at startup. `voxtype setup osd --status` shows the same thing without starting anything, and `voxtype status --format json --extended` reports it as `osd_frontend_active`. An explicit `gtk4`, `native` or `quickshell` is never changed while it can run. If that binary is missing, or `quickshell` is set and Quickshell (`qs` or `quickshell`) is not on PATH, the launcher falls back to whichever frontend is installed, and the daemon sends a desktop notification saying which OSD it shows instead and why. It also notifies when an explicit frontend is set and no OSD can run at all. Both notices come once per daemon start. With `auto`, finding no OSD to run is only logged. `VOXTYPE_OSD_FRONTEND` overrides the config value. Configs written before 1.2.2 that say `frontend = "gtk4"` keep GTK4. Configs without the key now get `auto`.
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
 find it:
@@ -5143,6 +5207,67 @@ is only required for source builds or for customization, and the bridge
 symlink is what puts the sidecar on PATH where the QML expects it. Pass
 `--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
+
+### OSD placement and waveform
+
+The placement keys apply to every frontend. The waveform keys and the
+decibel scale below describe the GTK4 and native frontends; Quickshell
+styles draw their own visuals and set their own gain per recipe.
+
+```toml
+[osd]
+position = "bottom-center"   # bottom-center, top-center, bottom-left,
+                             # bottom-right, top-left, top-right
+margin_px = 24               # gap from the screen edges, logical pixels
+top_margin = 0.85            # centered positions: top edge as a fraction
+                             # of the output's height (like swayosd)
+waveform_gain = 10.0         # waveform sensitivity, 10 = neutral
+peak_decay_db_per_sec = 6.0  # how fast the level meter's held-peak tick falls
+opacity = 0.95               # GTK4/native card opacity, constant while shown
+```
+
+The OSD appears on the focused output and is placed using only that output's
+size, in its logical pixels, so monitors with different resolutions, scales
+or offsets each get the same relative placement.
+
+- **Corner positions** sit `margin_px` from both edges they are anchored to.
+- **`bottom-center`** puts the card's top edge at `top_margin` of the
+  output's height. With the default 0.85 the card sits in the same band as
+  swayosd's volume and brightness popups.
+- **`top-center`** uses `top_margin` the same way when it is 0.5 or less.
+  A larger value (such as the 0.85 default) is mirrored, so the card keeps
+  the same distance from the top edge that `bottom-center` keeps from the
+  bottom one.
+- With any position, `margin_px` is the minimum gap to the top and bottom
+  edges, so `top_margin` can never push the card off the screen.
+
+The GTK4 and native waveform shows the absolute input level on a fixed decibel scale: the
+centerline is -48 dBFS (a typical mic's noise floor sits below it, so
+silence is flat) and the card's edge is 0 dBFS, the loudest input the mic
+can produce. Normal speech lands around mid-height, louder speech draws
+taller, and only input close to clipping reaches the edge. There is no
+automatic gain, so the height always reflects how loud the mic actually is.
+
+`waveform_gain` shifts that scale. 10 is neutral; every doubling shows the
+input 6 dB louder (20 = +6 dB, 40 = +12 dB) and every halving 6 dB quieter
+(5 = -6 dB). Raise it for a quiet mic, lower it for a hot one. The waveform
+never draws outside the card at any value. Earlier versions multiplied
+the raw samples by this key, which pushed everything above -20 dBFS (most
+speech) off the card; an old config that keeps the default 10 gets the new
+scale unchanged.
+
+The waveform scrolls at a constant 100 frames per second of wall time, a
+fixed 50 ms behind the newest audio so capture batches arriving in bursts
+don't make it stutter. Each moment of audio keeps its shape as it scrolls.
+
+The level meter uses the same scale, so a loudness that reaches half the
+waveform's height fills half the meter. It moves on every display frame:
+it rises within about 15 ms of a louder sound and falls back over about
+300 ms. Its held-peak tick marks the loudest recent peak and falls at
+`peak_decay_db_per_sec`.
+
+In the GTK4 and native frontends, `opacity` sets the card's opacity, which
+stays the same for as long as the card is shown.
 
 ### Quickshell OSD customization
 
@@ -5206,10 +5331,18 @@ Decorative package roles follow the same palette: `grid` and `glow` are
 translucent accent, `core` is translucent foreground, and `amber` follows
 `warning` (which need not be yellow in the selected theme).
 
-With the Quickshell frontend, Omarchy theme switches apply live: the launcher
-watches the active theme and rewrites the resolved style, and the OSD picks up
-the new colors immediately without a restart. The GTK4 frontend reads the
-theme at startup, so it picks up a new theme the next time the OSD starts.
+With the Quickshell and native frontends, Omarchy theme switches apply live:
+Quickshell's launcher watches the active theme and rewrites the resolved
+style, and the native OSD reloads its palette, so the new colors show up
+without a restart. The GTK4 frontend reads the theme at startup, so it picks
+up a new theme the next time the OSD starts. The meter's green, yellow and
+red zones come from the theme's ANSI colors, read from `color2`, `color3` and
+`color1` or, in current Omarchy themes, from `green`, `yellow` and `red`.
+
+The native frontend renders at the output's exact scale through
+`wp_fractional_scale_v1` and `wp_viewporter`, so it stays sharp on outputs
+scaled by 1.25, 1.333 or 1.6. On compositors without those protocols it falls
+back to the nearest integer scale.
 
 Recipe layer `type` can be `shadow`, `background`, `waveform`, `line`,
 `bars`, `dots`, `pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,

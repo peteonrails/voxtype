@@ -323,7 +323,7 @@ pub const REPLACEMENTS_TABLE: &str = "text.replacements";
 
 const FILE_MODE_CHOICES: &[&str] = &["overwrite", "append"];
 const URGENCY_CHOICES: &[&str] = &["low", "normal", "critical"];
-const PASTE_KEY_CHOICES: &[&str] = &["shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
+const PASTE_KEY_CHOICES: &[&str] = &["auto", "shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
 const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
@@ -1091,6 +1091,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Safety cap in seconds; recording stops on its own at this point.",
     ),
     spec(
+        "audio.keep_failed_recordings",
+        "audio",
+        "keep_failed_recordings",
+        KeyType::Bool,
+        "Audio",
+        "Keep failed recordings",
+        "Save the audio when transcription fails so it can be retried. The 20 most recent are kept, readable only by you.",
+    ),
+    spec(
         "audio.pause_media",
         "audio",
         "pause_media",
@@ -1606,7 +1615,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 0, max: 512 },
         "OSD",
         "Edge margin",
-        "Gap from the screen edge in physical pixels. Corner anchors use this for both axes.",
+        "Gap from the screen edge in logical pixels. Corner anchors use it for both axes; centered anchors never sit closer to the top or bottom edge than this.",
     ),
     spec(
         "osd.top_margin",
@@ -1615,7 +1624,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Vertical position",
-        "Top edge as a fraction of monitor height, matching swayosd. Only used by the centered anchors.",
+        "Top edge as a fraction of the focused output's height, matching swayosd. Only used by the centered anchors; top-center mirrors values above 0.5.",
     ),
     spec(
         "osd.opacity",
@@ -1624,7 +1633,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Opacity",
-        "Background opacity of the panel.",
+        "Opacity of the GTK4 and native OSD card. It stays the same while the card is shown.",
     ),
     spec(
         "osd.waveform_window_secs",
@@ -1654,7 +1663,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.1, max: 50.0 },
         "OSD",
         "Waveform gain",
-        "Visual gain applied before drawing. Lower for hot mics, raise for quiet ones.",
+        "Waveform sensitivity on its fixed dB scale. 10 is neutral, each doubling shows input 6 dB louder. Lower for hot mics, raise for quiet ones.",
     ),
     spec(
         "osd.frame.background",
@@ -1886,7 +1895,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         open(PASTE_KEY_CHOICES),
         "Output",
         "Paste keystroke",
-        "Keystroke paste mode sends after copying, e.g. shift+insert or ctrl+shift+v for terminals.",
+        "Keystroke paste mode sends after copying. auto (the default) sends ctrl+v to GUI apps and the terminal keystroke to terminals.",
+    ),
+    spec(
+        "output.paste_keys_terminal",
+        "output",
+        "paste_keys_terminal",
+        open(PASTE_KEY_CHOICES),
+        "Output",
+        "Terminal paste keystroke",
+        "Keystroke paste mode sends when the focused window is a terminal (Hyprland, Sway, niri). Default ctrl+shift+v.",
     ),
     spec(
         "output.restore_clipboard",
@@ -3239,6 +3257,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
+        "audio.keep_failed_recordings" => json!(cfg.audio.keep_failed_recordings),
         "audio.pause_media" => json!(cfg.audio.pause_media),
         "audio.duck_media" => json!(cfg.audio.duck_media),
         "audio.duck_media_volume_percent" => json!(cfg.audio.duck_media_volume_percent),
@@ -3348,6 +3367,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.file_mode" => json!(cfg.output.file_mode),
         "output.type_delay_ms" => json!(cfg.output.type_delay_ms),
         "output.paste_keys" => opt_str(cfg.output.paste_keys.as_ref()),
+        "output.paste_keys_terminal" => opt_str(cfg.output.paste_keys_terminal.as_ref()),
         "output.restore_clipboard" => json!(cfg.output.restore_clipboard),
         "output.restore_clipboard_delay_ms" => json!(cfg.output.restore_clipboard_delay_ms),
         "output.wait_for_modifier_release" => json!(cfg.output.wait_for_modifier_release),

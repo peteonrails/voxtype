@@ -11,6 +11,26 @@ download, config-key workaround or service restart is required merely to browse.
 
 Solutions to common issues when using Voxtype.
 
+## Start Here: `voxtype doctor`
+
+Before reading further, run:
+
+```bash
+voxtype doctor
+```
+
+It checks your model files, VAD model, GPU runtime libraries, audio device,
+output tools, display environment of the systemd service, input device
+access, notifications, OSD and meeting-mode tools, and the systemd unit, and
+prints the exact fix for anything that is wrong (`✗` means broken, `!` means
+degraded). Only features enabled in your config are checked. Most of the
+problems below show up there with the fix on the next line.
+
+The daemon also runs the quick part of these checks at startup and sends one
+desktop notification listing any errors. If you got a "Voxtype: N problems
+need attention" notification, `voxtype doctor` shows the same problems in
+full.
+
 ## Ultra is missing, cannot download, or is not the current model
 
 Use `voxtype info models --json` to distinguish catalogued, supported and locally
@@ -278,6 +298,8 @@ what is wrong instead of showing an empty pane:
 
 ## Table of Contents
 
+- [Start Here: `voxtype doctor`](#start-here-voxtype-doctor)
+
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
 - [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
 - [Permission Issues](#permission-issues)
@@ -290,6 +312,8 @@ what is wrong instead of showing an empty pane:
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
   - [Edit-list post-processing keeps the original text](#edit-list-post-processing-keeps-the-original-text)
+  - [Copied to clipboard, paste manually](#copied-to-clipboard-paste-manually-notification)
+  - [Transcription not delivered](#transcription-not-delivered-notification)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
@@ -489,6 +513,15 @@ sudo usermod -aG input $USER
 groups | grep input
 ```
 
+When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: built-in hotkey unavailable" desktop notification. It is shown once, not on every start, and again only if the cause changes or the built-in hotkey breaks after having worked; the daemon log has the warning on every start. The notification names the cause:
+
+- **Not in the `input` group:** run `sudo usermod -aG input $USER`, then log out and back in.
+- **In the group, but this session started before you were added:** `/etc/group` lists you, but the running daemon does not have the group yet. Log out completely and back in, or reboot. A systemd user service keeps the old groups until every session of yours has ended.
+- **In the group and still denied:** the device nodes have unusual ownership or permissions. Check `ls -l /dev/input/event*`.
+- **No keyboard found:** nothing in `/dev/input` looks like a keyboard. Plug one in and restart voxtype.
+
+If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`. If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
+
 ### "Failed to access /dev/input/event*"
 
 **Cause:** udev rules preventing access, or input group not applied.
@@ -521,6 +554,14 @@ systemctl --user status ydotool
 ---
 
 ## Audio Problems
+
+### "Voxtype: microphone not found" or "could not open the microphone" notification
+
+The daemon posts this notification when you start a recording and the microphone can't be opened. It appears once per distinct failure (again after five minutes if the failure persists), so pressing the hotkey repeatedly doesn't stack notifications. The full error is in the log (`journalctl --user -u voxtype`).
+
+- **microphone not found:** the device named in `[audio] device` isn't connected. List what is available with `voxtype info devices`, then `voxtype config set audio.device <name>` (or `default` to follow the system default) and restart voxtype.
+- **no microphone found:** the system has no default input source. Plug in or unmute a microphone and check `wpctl status` or `pactl list sources short`.
+- **could not open the microphone:** the audio server refused the stream. Check that PipeWire or PulseAudio is running: `systemctl --user status pipewire wireplumber`.
 
 ### "No audio captured" or empty transcriptions
 
@@ -589,13 +630,40 @@ aplay test.wav
 
 ### Recording stops unexpectedly
 
-**Cause:** `max_duration_secs` limit reached.
+**Cause:** `max_duration_secs` limit reached. Voxtype shows a "Recording Limit Approaching" notification shortly before the limit (30 seconds before for limits of two minutes or more, 10 seconds before for shorter ones) and a "Recording Limit Reached" notification when it stops. What was captured up to the limit is still transcribed.
 
 **Solution:** Increase the limit:
 ```toml
 [audio]
 max_duration_secs = 120  # 2 minutes
 ```
+
+Or from the command line: `voxtype config set audio.max_duration_secs 1800`, or `voxtype --max-duration 1800` for a single daemon run.
+
+### Transcription failed and I lost my dictation
+
+A recording whose transcription fails is not thrown away. Voxtype saves it as a WAV file in `~/.local/state/voxtype/failed-audio/` (or `$XDG_STATE_HOME/voxtype/failed-audio/`), logs the path, and shows a "Transcription Failed" notification with the command to retry it:
+
+```bash
+voxtype transcribe ~/.local/state/voxtype/failed-audio/recording-20261020-143015.wav
+```
+
+The 20 most recent failed recordings are kept; older ones are removed automatically. The directory and the files in it are private to your user: other accounts on the machine can't read them.
+
+To stop Voxtype keeping these recordings:
+
+```bash
+voxtype config set audio.keep_failed_recordings false
+systemctl --user restart voxtype
+```
+
+With it off nothing is written, so a dictation whose transcription fails can't be retried, and the "Transcription Failed" notification says the recording was not kept. Recordings saved before you turned it off stay until you delete them: `rm -r ~/.local/state/voxtype/failed-audio/`.
+
+### Meeting transcript has no remote participants
+
+**Cause:** Meeting mode records other participants through a PulseAudio/PipeWire monitor source via `pactl` and `parec`. When those tools, the PulseAudio server, or a monitor source are missing, the meeting records the microphone only. The daemon shows a "Meeting started with limitations" notification saying which one.
+
+**Solution:** Install `libpulse` (Arch) or `pulseaudio-utils` (Debian, Ubuntu, Fedora); on PipeWire, make sure `pipewire-pulse` is running; or set `[meeting.audio] loopback_device` to a source from `pactl list short sources`. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for the other meeting notifications.
 
 ---
 
@@ -662,13 +730,18 @@ is installed.
 
 **Cause:** Whisper model not downloaded or wrong path.
 
+The daemon also posts a "model missing" or "model failed to load" notification naming the engine and model, for every engine, either when a recording needs the model (on-demand loading) or when the daemon fails to start because of it. Under systemd, the startup notification is posted once, not on every automatic restart.
+
 **Solution:**
 ```bash
 # Download the model
 voxtype setup --download
 
-# Or a specific model
-voxtype setup --download --model base.en
+# Download a specific model, for any engine
+voxtype setup --download --model parakeet-tdt-0.6b-v3
+
+# Pick an installed model interactively
+voxtype setup model
 ```
 
 Whisper models download from Voxtype's model mirror at `models.voxtype.io`, and
@@ -733,6 +806,28 @@ voxtype setup --download --model <model-name>
 ```
 
 Setup skips the compile when the model's cache blob already exists, so rerunning after a successful compile is cheap.
+
+### ONNX engines run on CPU despite an NVIDIA GPU (cuDNN missing)
+
+**Symptoms:** `voxtype-onnx-cuda` is installed and selected, but transcription is slow, and the journal shows:
+
+```
+Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file
+```
+
+**Cause:** ONNX Runtime's CUDA execution provider links against cuDNN 9, which is a separate package from the CUDA toolkit. Without it the provider cannot load and every ONNX engine (Parakeet, Moonshine, SenseVoice and the rest) runs on CPU.
+
+Voxtype reports this at daemon start with a "GPU unavailable, using CPU" notification, in `voxtype info accel` (state `cpu-fallback` with `fix:` lines), and in `voxtype setup gpu --status`.
+
+**Solution:** Install cuDNN 9, then restart the daemon (`systemctl --user restart voxtype`):
+
+```bash
+# Arch
+sudo pacman -S cudnn
+
+# Debian/Ubuntu/Fedora: from NVIDIA's CUDA repository, matching your variant
+sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cuda-13
+```
 
 ### Voxtype crashes during transcription (Linux)
 
@@ -862,7 +957,7 @@ min_speech_duration_ms = 50  # Accept shorter speech segments (default: 100)
 
 ### VAD model not found (Whisper VAD backend)
 
-**Symptom:** Error about missing VAD model when using `backend = "whisper"` or `backend = "auto"` with the Whisper engine.
+**Symptom:** A "Voxtype: voice activity detection is off" notification when the daemon starts, with `backend = "whisper"`. Silent recordings get transcribed, sometimes as made-up text. With `backend = "auto"` and the Whisper engine, the daemon instead logs `Whisper VAD unavailable, [vad] backend = "auto" falls back to Energy VAD` and keeps filtering silence with Energy VAD.
 
 **Solution:** Download the Silero VAD model:
 
@@ -1210,6 +1305,39 @@ systemctl --user status ydotool
 journalctl --user -u ydotool
 ```
 
+### "Copied to clipboard, paste manually" notification
+
+**Symptom:** Instead of typing, voxtype shows a notification titled "Voxtype: copied to clipboard, paste manually" (the first time) or "Copied to clipboard, paste manually" (later dictations).
+
+**Cause:** None of the typing tools in the output chain (wtype, eitype, dotool, ydotool) could be used, so voxtype put the text on the clipboard instead. The first notification after the daemon starts lists each tool and why it was skipped, with the fix, for example:
+
+```
+Voxtype could not type the text, so it is on the clipboard.
+wtype: not installed. Fix: sudo pacman -S wtype
+eitype: not installed. Fix: cargo install eitype
+dotool: not installed. Fix: install it from https://sr.ht/~geb/dotool/
+ydotool: ydotoold is not running. Fix: systemctl --user enable --now ydotool
+```
+
+**Solution:** Apply the fix for one of the listed tools, then try again. Paste the current text with Ctrl+V (Ctrl+Shift+V in most terminals). The warning is shown once per problem per daemon run; the full reason is also in `journalctl --user -u voxtype`.
+
+If you set `mode = "clipboard"` or a `driver_order` with only clipboard drivers, voxtype does not warn: the clipboard is what you asked for.
+
+### "Transcription not delivered" notification
+
+**Symptom:** A critical notification titled "Voxtype: transcription not delivered".
+
+**Cause:** Every output method failed, including the clipboard (or the clipboard fallback is off). The notification lists what failed and how to fix it, and includes the text.
+
+**Solution:** Nothing is lost. Each undelivered transcription is saved as its own file in `~/.local/state/voxtype/undelivered/` (or `$XDG_STATE_HOME/voxtype/undelivered/`), named by date and time, readable only by you, and kept across logouts and reboots. The newest 200 are kept. The notification names the exact file. To see the latest one:
+
+```bash
+ls -t ~/.local/state/voxtype/undelivered/ | head
+cat "$(ls -t ~/.local/state/voxtype/undelivered/*.txt | head -1)"
+```
+
+Then install the tool the notification names.
+
 ### Text not typed / nothing happens
 
 **Possible causes:**
@@ -1317,6 +1445,44 @@ echo "test" | wl-copy
 wl-paste
 ```
 
+### Ctrl+V pastes an image in Codex, or a ^V in a terminal
+
+**Symptom:** In paste mode, dictation into a terminal never arrives. The
+Codex CLI reports that it found no image on the clipboard, a shell prints
+nothing or a literal `^V`, or tmux waits for the rest of a key sequence.
+
+**Cause:** Paste mode sent Ctrl+V. Terminals don't treat Ctrl+V as paste:
+they pass it to the running program, and Codex uses it to paste an image,
+readline to insert the next key literally.
+
+**Solution:** Let voxtype pick the keystroke per window:
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"   # or remove paste_keys entirely
+```
+
+On Hyprland, Sway and niri, `auto` sends `paste_keys_terminal` (default
+Ctrl+Shift+V) when a terminal has focus and Ctrl+V elsewhere. If a
+terminal still gets Ctrl+V:
+
+1. Check that the terminal is detected. On Hyprland run
+   `hyprctl activewindow -j` with the terminal focused: it needs a
+   `terminal` (or `terminal*`) tag, or a class voxtype knows. For an
+   unknown terminal, add a Hyprland window rule that gives its class the
+   `terminal` tag (Omarchy's rule is in
+   `~/.local/share/omarchy/default/hypr/apps/terminals.lua`).
+2. Check which keystroke your terminal pastes the clipboard with. If it
+   isn't Ctrl+Shift+V, set it, for example
+   `paste_keys_terminal = "shift+insert"` for Omarchy's terminals.
+3. Run `voxtype -vv` and look for `Focused window terminal check` and
+   `Text pasted via clipboard + ...` in the log.
+
+On desktops without detection (GNOME, KDE, X11), pick one keystroke that
+works in both places, such as `paste_keys = "shift+insert"` if your
+terminals map it to the clipboard, or switch to type mode.
+
 ### Clipboard not restored after paste
 
 **Cause:** The restore delay may be too short for your application, or `wl-paste` is not installed.
@@ -1338,13 +1504,49 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 3. On X11, make sure `xclip` is installed for clipboard restoration support.
 
+### "Post-processing failed", "timed out", "command not found", "returned nothing" or "edit list rejected"
+
+**Cause:** The `[output.post_process]` command (or a profile's `post_process_command`) didn't produce cleaned text, so Voxtype typed the original transcription instead. The notification says which case it was.
+
+**Solution:**
+- **Command not found:** install the program, or use its full path in `command`. A daemon started by systemd may not have the same `PATH` as your shell.
+- **Exited with code N:** run the command by hand with a sample on stdin, e.g. `echo "hello world" | ollama run llama3.2:1b 'Clean up:'`, and fix what its error says (often the model isn't pulled or the server isn't running).
+- **Timed out:** raise the timeout, e.g. `voxtype config set output.post_process.timeout_ms 60000` (for a profile, `post_process_timeout_ms` in `[profiles.<name>]`), or use a smaller model. The first call to a local LLM can be slow while the model loads.
+- **Returned nothing:** make the command print the cleaned text on stdout. If empty output is intended (to drop `[BLANK_AUDIO]`, say), set `fallback_on_empty = false`.
+- **Edit list rejected:** with `edit_list = true`, the command must print only a JSON array of `find`/`replace`/`reason` edits whose targets occur once in the transcription. The notification gives the reason the list was rejected; fix the prompt or script, or set `edit_list = false` in `[output.post_process]`.
+
+The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence.
+
+Meeting mode never shows these notifications, so a failing command can't pop up over a call. During a meeting the failure is only logged, and the transcript keeps the original text.
+
+### "pre_output hook failed" or "post_output hook failed"
+
+**Cause:** `pre_output_command` or `post_output_command` exited with an error. The text was still delivered, but whatever the hook does (switching a compositor submap, for example) didn't happen.
+
+**Solution:** run the command from the notification in a terminal and fix it, or correct it in the `[output]` section of `config.toml`.
+
 ### No desktop notification
 
-**Cause:** notify-send not installed or notifications disabled.
+**Cause:** No notification server is running, the session bus is unreachable from the daemon, or notifications are disabled in `[output.notification]`.
+
+Voxtype sends notifications with `notify-send` (libnotify) and, if that is missing or fails, talks to the notification server directly over D-Bus (`org.freedesktop.Notifications`). When neither works, the daemon logs this warning once:
+
+```
+Desktop notifications cannot be delivered, so Voxtype alerts will only appear in this log (...)
+```
+
+The part in parentheses says what each route reported. `ServiceUnknown` means no notification server is running; a "No such file or directory" error means the daemon cannot reach the session bus.
 
 **Solution:**
 ```bash
-# Install libnotify
+# Check whether a notification server is running
+busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+    org.freedesktop.Notifications GetServerInformation
+
+# If not, install and start one (GNOME and KDE ship their own), e.g.
+# Arch: sudo pacman -S mako   (or swaync, dunst)
+
+# Optional: install notify-send for testing
 # Arch: sudo pacman -S libnotify
 # Debian: sudo apt install libnotify-bin
 # Fedora: sudo dnf install libnotify
@@ -1352,6 +1554,8 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 # Test
 notify-send "Test" "This is a test"
 ```
+
+If the test works in your terminal but the daemon still logs the warning, the systemd user service may not see your session bus. Run `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` from your compositor's startup and restart voxtype.
 
 ### Edit-list post-processing keeps the original text
 
@@ -1397,6 +1601,36 @@ threads = 8  # Match your CPU cores
 
 3. **Use English-only model:**
 `.en` models are faster than multilingual models.
+
+### "Whisper is running on CPU" notification (GPU build)
+
+**Cause:** The daemon is running a GPU build of Whisper (the Vulkan binary, or a CUDA/ROCm/Metal source build), but whisper.cpp found no usable GPU when it loaded the model, so it is transcribing on CPU. whisper.cpp itself only logs `no GPU found` and carries on; Voxtype notifies once per daemon start so the slowdown isn't a mystery. Transcription keeps working, just at CPU speed.
+
+The usual reason on the Vulkan build is a missing Vulkan driver (ICD): the Vulkan loader is installed, but no driver for your GPU is.
+
+**Solutions:**
+
+1. Install the Vulkan driver for your GPU and check that it lists a device:
+```bash
+# Arch: AMD / Intel / NVIDIA
+sudo pacman -S vulkan-radeon      # or vulkan-intel, or nvidia-utils
+# Debian/Ubuntu/Fedora (AMD/Intel): mesa-vulkan-drivers
+vulkaninfo --summary
+systemctl --user restart voxtype
+```
+
+2. If the notification says `gpu_device = N but only M GPU(s) were found`, `[whisper] gpu_device` points past the end of the device list. Devices are numbered from 0; pick one from `vulkaninfo --summary` or remove the setting.
+
+3. Check what the running daemon actually got:
+```bash
+voxtype info accel
+```
+
+### "OpenVINO fell back to GPU/CPU" notification
+
+**Cause:** `[openvino] device` names a device (usually `NPU`) that failed to initialize, so Voxtype fell back to the next device in the chain (GPU, then CPU). The notification names the packages for the configured device.
+
+**Solution:** Install the packages named in the notification (for NPU: `openvino-intel-npu-plugin intel-npu-driver`, then reboot), check the device with `voxtype setup npu --status`, and restart the daemon. `voxtype info accel` shows which device the running daemon is using.
 
 ### Slow transcription on multi-GPU systems (Vulkan)
 
@@ -1633,6 +1867,7 @@ voxtype setup osd --status
 - **The OSD changed look after an upgrade.** Configs without `[osd] frontend` now default to `auto`, which prefers the Quickshell OSD when it can run. To get the old look back: `voxtype config set osd.frontend gtk4`, then `systemctl --user restart voxtype`.
 - **Picking a style in Settings changes nothing.** Quickshell styles only apply to the Quickshell OSD. If `Active:` says `gtk4` or `native`, either your config names that frontend (switch with `voxtype setup osd --use-auto`) or Quickshell can't run here. The `Reason:` line says which: `voxtype-osd-quickshell is not installed`, Quickshell is not on PATH (install the `quickshell` package), or no Wayland session.
 - **`Reason:` says `gtk4 OSD installed but libgtk4-layer-shell is missing`.** Your distro doesn't package gtk4-layer-shell (Ubuntu 24.04, for example), so voxtype uses the native OSD instead. Install gtk4-layer-shell if your distro has it, or install Quickshell.
+- **A notification says "Voxtype: OSD frontend '...' unavailable".** The frontend your config names can't run, so another one is standing in. The notification and the `Reason:` line say why: its binary is not installed, or, for `quickshell`, Quickshell is not on PATH (install the `quickshell` package).
 - **`Active: none`.** No OSD frontend is installed, or none can reach a display. Install a frontend, or set `[osd] enabled = false` to silence the warning.
 - **The Settings panel keeps saying "Changes take effect after restart".** It clears after any daemon restart, including `systemctl --user restart voxtype` and `voxtype setup model`, within about five seconds while the panel is open, or the next time you open it.
 
@@ -2010,14 +2245,26 @@ journalctl --user -u voxtype -n 50
 
 ### Service starts but doesn't work
 
-**Cause:** Session environment not available.
+**Symptom:** A notification at startup titled "Voxtype: no display in its environment", or text is never typed when voxtype runs as a service but works from a terminal.
 
-**Solution:** Ensure you're running under a graphical session:
+**Cause:** The systemd user manager does not have `WAYLAND_DISPLAY` (or `DISPLAY` on X11), so the voxtype service doesn't either, and wtype, wl-copy and friends cannot reach your desktop. This happens when the compositor does not import its environment into systemd.
+
+**Solution:** `voxtype doctor` reports whether `WAYLAND_DISPLAY` or `DISPLAY` is set in the systemd user environment (your terminal's environment says nothing about the service's). If neither is, import them from a terminal in your desktop session and restart the service:
 ```bash
-# Check environment
-echo $XDG_RUNTIME_DIR
-echo $WAYLAND_DISPLAY
+systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+systemctl --user restart voxtype
 ```
+
+To make it permanent, run the import when your compositor starts, before voxtype:
+```
+# Hyprland (hyprland.conf)
+exec-once = systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+
+# Sway (config)
+exec systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+```
+
+`voxtype setup systemd` also checks the user manager's environment and prints this fix when the variables are missing.
 
 ### Service doesn't start on login
 
@@ -2121,7 +2368,7 @@ journalctl --user -u pulseaudio -n 20
 
 If you're still having issues:
 
-1. **Run setup check:** `voxtype setup`
+1. **Run the health check:** `voxtype doctor` (attach `voxtype doctor --json` to bug reports)
 2. **Gather debug logs:** `voxtype -vv 2>&1 | tee debug.log`
 3. **Check system info:**
    ```bash

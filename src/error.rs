@@ -33,13 +33,19 @@ pub enum VoxtypeError {
 /// Errors related to hotkey detection
 #[derive(Error, Debug)]
 pub enum HotkeyError {
-    #[error("Cannot open input device '{0}'. Is the user in the 'input' group?\n  Run: sudo usermod -aG input $USER\n  Then log out and back in.")]
+    #[error("Cannot open input device '{0}'. Is the user in the 'input' group?\n  Run: sudo usermod -aG input $USER\n  Then log out and back in.\n  Or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
     DeviceAccess(String),
+
+    #[error("Cannot open input device '{0}': you are in the 'input' group, but this session started before you were added.\n  Log out completely and back in (or reboot), then restart voxtype.\n  Or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
+    InputGroupInactive(String),
+
+    #[error("Permission denied opening input device '{0}', although this process is in the 'input' group.\n  Check the device permissions with: ls -l /dev/input/event*\n  Or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
+    DeviceDenied(String),
 
     #[error("Unknown key name: '{0}'. Use evtest or wev to find valid key names.")]
     UnknownKey(String),
 
-    #[error("No keyboard device found in /dev/input/")]
+    #[error("No keyboard device found in /dev/input/. Plug in a keyboard and restart voxtype, or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
     NoKeyboard,
 
     #[error("evdev error: {0}")]

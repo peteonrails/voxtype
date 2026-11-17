@@ -77,6 +77,8 @@ pub mod daemon;
 pub mod daemon_status;
 pub mod eager;
 pub mod error;
+pub mod failed_recording;
+pub mod failure_notice;
 pub mod history;
 #[cfg(target_os = "linux")]
 pub mod hotkey;

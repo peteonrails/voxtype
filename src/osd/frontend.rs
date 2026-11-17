@@ -14,7 +14,9 @@
 //! An explicit `gtk4`, `native` or `quickshell` keeps the `voxtype-osd`
 //! launcher's long-standing behavior: the configured binary when installed,
 //! otherwise the next installed one in a fixed fallback order, with no
-//! display checks.
+//! display checks. Quickshell also needs `qs` (or `quickshell`) on `PATH`,
+//! since its launcher can't start without it. [`fallback_notice`] is what
+//! the daemon tells the user when the configured frontend is substituted.
 //!
 //! All system access goes through [`OsdProbe`] so every branch is testable
 //! with a fake; [`SystemProbe`] is the real one.
@@ -312,26 +314,50 @@ fn fallback_chain(preferred: OsdFrontend) -> [OsdFrontend; 3] {
 
 fn resolve_explicit(configured: OsdFrontend, probe: &dyn OsdProbe) -> Resolution {
     let name = configured.as_str();
-    let hit = fallback_chain(configured).into_iter().find_map(|f| {
-        probe
+    // Why `f` can't be launched, or its binary when it can. The Quickshell
+    // launcher exits at once without `qs`, which used to make the
+    // supervisor give up and leave no OSD at all, so it falls back too.
+    let usable = |f: OsdFrontend| -> Result<PathBuf, String> {
+        let path = probe
             .find_voxtype_binary(f.binary_name())
-            .map(|path| (f, path))
-    });
+            .ok_or_else(|| format!("{} is not installed", f.binary_name()))?;
+        if f == OsdFrontend::Quickshell && !QUICKSHELL_PROGRAMS.iter().any(|p| probe.on_path(p)) {
+            return Err("Quickshell (qs) is not on PATH".into());
+        }
+        Ok(path)
+    };
+    let mut skipped = None;
+    let mut hit = None;
+    for f in fallback_chain(configured) {
+        match usable(f) {
+            Ok(path) => {
+                hit = Some((f, path));
+                break;
+            }
+            Err(why) if f == configured => skipped = Some(why),
+            Err(_) => {}
+        }
+    }
     let (active, path, reason) = match hit {
         Some((f, path)) if f == configured => (Some(f), Some(path), format!("configured {name}")),
         Some((f, path)) => (
             Some(f),
             Some(path),
             format!(
-                "configured {name}, but {} is not installed; using {}",
-                configured.binary_name(),
+                "configured {name}, but {}; using {}",
+                skipped.unwrap_or_default(),
                 f.as_str()
             ),
         ),
         None => (
             None,
             None,
-            format!("configured {name}, but no OSD frontend is installed"),
+            match skipped {
+                Some(why) => {
+                    format!("configured {name}, but {why}; no other OSD frontend is installed")
+                }
+                None => format!("configured {name}, but no OSD frontend is installed"),
+            },
         ),
     };
     Resolution {
@@ -340,6 +366,46 @@ fn resolve_explicit(configured: OsdFrontend, probe: &dyn OsdProbe) -> Resolution
         path,
         reason,
     }
+}
+
+/// Title and body of the desktop notification the daemon sends once at
+/// startup when the OSD the user asked for won't be the one shown: an
+/// explicit frontend that falls back to another, or to nothing.
+/// `None` when the requested frontend runs, or when the request was `auto`,
+/// since nothing the user asked for is being overridden. That includes
+/// `auto` finding nothing to run: it is the default, so installs that ship
+/// no OSD frontend (macOS, the default Nix package, minimal Linux installs)
+/// would otherwise be notified on every start. The daemon still logs it.
+pub fn fallback_notice(resolution: &Resolution) -> Option<(String, String)> {
+    let configured = resolution.configured;
+    if configured == OsdFrontend::Auto {
+        return None;
+    }
+    let Some(active) = resolution.active else {
+        return Some((
+            "Voxtype: no OSD available".to_string(),
+            format!(
+                "No on-screen display will show ({}). Run voxtype setup osd --status \
+                 for details, or set [osd] enabled = false to stop trying.",
+                resolution.reason
+            ),
+        ));
+    };
+    if active == configured {
+        return None;
+    }
+    let using = active.as_str();
+    Some((
+        format!(
+            "Voxtype: OSD frontend '{}' unavailable",
+            configured.as_str()
+        ),
+        format!(
+            "Showing the {using} OSD instead ({}). Run voxtype setup osd --status for \
+             details, or set [osd] frontend = \"{using}\" to keep {using}.",
+            resolution.reason
+        ),
+    ))
 }
 
 /// The configured frontend after the `VOXTYPE_OSD_FRONTEND` override,
@@ -699,8 +765,59 @@ mod tests {
     fn explicit_values_skip_display_checks() {
         // The launcher never checked for a display; explicit values keep
         // exactly that behavior.
-        let r = resolve(OsdFrontend::Quickshell, &Fake::with(&[QS], &[], false));
+        let r = resolve(OsdFrontend::Quickshell, &Fake::with(&[QS], &["qs"], false));
         assert_eq!(r.active, Some(OsdFrontend::Quickshell));
+    }
+
+    #[test]
+    fn explicit_quickshell_without_qs_falls_back() {
+        // Without qs the launcher exits at once and the supervisor gives
+        // up, so no OSD would show at all.
+        let r = resolve(OsdFrontend::Quickshell, &Fake::with(&ALL, &[], true));
+        assert_eq!(r.active, Some(OsdFrontend::Gtk4));
+        assert_eq!(
+            r.reason,
+            "configured quickshell, but Quickshell (qs) is not on PATH; using gtk4"
+        );
+        let r = resolve(OsdFrontend::Native, &Fake::with(&[QS], &[], true));
+        assert_eq!(r.active, None);
+    }
+
+    #[test]
+    fn fallback_notice_only_when_the_request_is_overridden() {
+        let fake = Fake::with(&ALL, &["qs"], true);
+        for f in [
+            OsdFrontend::Auto,
+            OsdFrontend::Gtk4,
+            OsdFrontend::Quickshell,
+        ] {
+            assert_eq!(fallback_notice(&resolve(f, &fake)), None);
+        }
+        // auto settling on a later choice is not an override.
+        let r = resolve(OsdFrontend::Auto, &Fake::with(&[GTK], &[], true));
+        assert_eq!(fallback_notice(&r), None);
+
+        let r = resolve(OsdFrontend::Quickshell, &Fake::with(&ALL, &[], true));
+        let (title, body) = fallback_notice(&r).unwrap();
+        assert_eq!(title, "Voxtype: OSD frontend 'quickshell' unavailable");
+        assert!(body.starts_with("Showing the gtk4 OSD instead"), "{body}");
+        assert!(body.contains("Quickshell (qs) is not on PATH"), "{body}");
+        assert!(body.contains("[osd] frontend = \"gtk4\""), "{body}");
+
+        // An explicit frontend with nothing to fall back to still notifies.
+        let r = resolve(OsdFrontend::Gtk4, &Fake::with(&[], &[], true));
+        assert_eq!(r.active, None);
+        let (title, _) = fallback_notice(&r).unwrap();
+        assert_eq!(title, "Voxtype: no OSD available");
+    }
+
+    #[test]
+    fn fallback_notice_is_silent_when_auto_finds_no_frontend() {
+        // The default config on an install with no OSD frontend at all
+        // (macOS, the default Nix package) must not notify on every start.
+        let r = resolve(OsdFrontend::Auto, &Fake::with(&[], &[], true));
+        assert_eq!(r.active, None);
+        assert_eq!(fallback_notice(&r), None);
     }
 
     #[test]
@@ -722,7 +839,16 @@ mod tests {
         assert_eq!(r.active, None);
         assert_eq!(
             r.reason,
-            "configured native, but no OSD frontend is installed"
+            "configured native, but voxtype-osd-native is not installed; \
+             no other OSD frontend is installed"
+        );
+        // The Quickshell launcher alone can't run without qs: say why.
+        let r = resolve(OsdFrontend::Quickshell, &Fake::with(&[QS], &[], true));
+        assert_eq!(r.active, None);
+        assert_eq!(
+            r.reason,
+            "configured quickshell, but Quickshell (qs) is not on PATH; \
+             no other OSD frontend is installed"
         );
     }
 

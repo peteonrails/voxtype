@@ -23,6 +23,7 @@ QUICK START:
   voxtype setup model         Interactive model selection
   voxtype setup gpu           Manage GPU acceleration
   voxtype status --follow     Watch daemon status (Waybar integration)
+  voxtype doctor              Check the setup and show how to fix problems
 
 See 'voxtype --help' for all options or 'man voxtype' for full docs.")]
 #[command(after_long_help = "\
@@ -35,6 +36,7 @@ QUICK START:
   voxtype record cancel       Cancel current recording
   voxtype status              Show daemon status
   voxtype setup               Check dependencies and download models
+  voxtype doctor              Check the setup and show how to fix problems
   voxtype config              Show current configuration
 
 EXAMPLES:
@@ -299,6 +301,28 @@ pub struct Cli {
     )]
     pub no_audio_feedback: bool,
 
+    /// Keep the audio of a recording whose transcription failed (default)
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        long_help = "Keep the audio of a recording whose transcription failed, so it can be \
+        retried with 'voxtype transcribe <file>'. This is the default. The 20 most recent \
+        are kept in ~/.local/state/voxtype/failed-audio/, readable only by you."
+    )]
+    pub keep_failed_recordings: bool,
+
+    /// Don't keep the audio of a recording whose transcription failed
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "keep_failed_recordings",
+        long_help = "Don't write the audio of a failed transcription to disk (overrides \
+        config and environment). A dictation whose transcription fails is then lost."
+    )]
+    pub no_keep_failed_recordings: bool,
+
     /// Pause MPRIS media players during recording
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub pause_media: bool,
@@ -389,7 +413,9 @@ pub struct Cli {
     )]
     pub no_fallback_to_clipboard: bool,
 
-    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
+    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v), or
+    /// "auto" (the default) for ctrl+v in GUI apps and --paste-keys-terminal in
+    /// terminals
     #[arg(
         long,
         value_name = "KEYS",
@@ -397,6 +423,16 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub paste_keys: Option<String>,
+
+    /// Keystroke for paste mode when the focused window is a terminal
+    /// (default: ctrl+shift+v; detected on Hyprland, Sway and niri)
+    #[arg(
+        long,
+        value_name = "KEYS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub paste_keys_terminal: Option<String>,
 
     /// File path for file output mode
     #[arg(long, value_name = "PATH", help_heading = "Output")]
@@ -788,6 +824,22 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn keep_failed_recordings_flags_parse_and_conflict() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.keep_failed_recordings && !cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--no-keep-failed-recordings"]);
+        assert!(cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--keep-failed-recordings"]);
+        assert!(cli.keep_failed_recordings);
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-failed-recordings",
+            "--no-keep-failed-recordings"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn test_engine_flag_whisper() {

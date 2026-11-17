@@ -52,6 +52,12 @@ sample_rate = 16000
 # Maximum recording duration in seconds (safety limit)
 max_duration_secs = 60
 
+# Keep the audio of a recording whose transcription failed, so it can be
+# retried with `voxtype transcribe <file>`. The 20 most recent are kept in
+# ~/.local/state/voxtype/failed-audio/, readable only by you. Set to false to
+# write nothing; a dictation whose transcription fails is then lost.
+# keep_failed_recordings = true
+
 # Pause MPRIS media players (Spotify, Firefox, etc.) before recording starts,
 # then resume them as soon as recording stops. Talks D-Bus directly; no external
 # playerctl binary required.
@@ -239,6 +245,14 @@ type_delay_ms = 0
 # Prefix wtype output with a Shift key press/release
 # Workaround for apps (e.g., Discord) that drop the first CJK character
 # wtype_shift_prefix = false
+
+# Keystroke for paste mode (default: "auto")
+# "auto" sends ctrl+v to GUI apps and paste_keys_terminal to terminals,
+# detected on Hyprland, Sway and niri. Terminals pass ctrl+v to the program
+# inside them (Codex CLI reads it as "paste an image"), so they need their
+# own keystroke. An explicit value such as "shift+insert" is sent everywhere.
+# paste_keys = "auto"
+# paste_keys_terminal = "ctrl+shift+v"
 
 # Restore clipboard content after paste mode (default: false)
 # Saves clipboard before transcription, restores it after paste keystroke

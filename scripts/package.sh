@@ -917,6 +917,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-recommends libgtk4-layer-shell0 \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
+        --deb-suggests "libcudnn9-cuda-12 | libcudnn9-cuda-13" \
         --package "$DEB_FILE" \
         usr etc
 

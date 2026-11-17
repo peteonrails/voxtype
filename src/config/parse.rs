@@ -291,6 +291,21 @@ key = "F13"
     }
 
     #[test]
+    fn keep_failed_recordings_is_on_unless_turned_off() {
+        assert!(Config::default().audio.keep_failed_recordings);
+
+        // A config written before the key existed behaves as on.
+        let old = "[audio]\ndevice = \"default\"\nmax_duration_secs = 30\n";
+        let cfg = parse_config_with_defaults(old).unwrap();
+        assert!(cfg.audio.keep_failed_recordings);
+        let cfg: Config = toml::from_str(old).unwrap();
+        assert!(cfg.audio.keep_failed_recordings);
+
+        let cfg = parse_config_with_defaults("[audio]\nkeep_failed_recordings = false\n").unwrap();
+        assert!(!cfg.audio.keep_failed_recordings);
+    }
+
+    #[test]
     fn user_arrays_replace_default_arrays() {
         // Arrays are replaced wholesale, not concatenated. A user-specified
         // language list overrides the default rather than appending to it.

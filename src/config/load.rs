@@ -234,6 +234,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_AUDIO_FEEDBACK") {
         config.audio.feedback.enabled = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_KEEP_FAILED_RECORDINGS") {
+        config.audio.keep_failed_recordings = parse_bool_env(&val);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_PAUSE_MEDIA") {
         config.audio.pause_media = parse_bool_env(&val);
     }
@@ -311,6 +314,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
+    }
+    if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS_TERMINAL") {
+        config.output.paste_keys_terminal = Some(keys);
     }
     if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
         config.output.dotool_xkb_layout = Some(layout);

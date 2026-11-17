@@ -347,6 +347,9 @@ voxtype setup --download
 
 # 3. Start voxtype
 voxtype
+
+# If something doesn't work, ask voxtype what is wrong
+voxtype doctor
 ```
 
 The setup command will:
@@ -413,6 +416,8 @@ voxtype --model large-v3 transcribe interview.wav  # Use specific model
 
 Supported formats: WAV (16-bit PCM, 16kHz mono recommended)
 
+If the daemon fails to transcribe a recording, it saves the audio to `~/.local/state/voxtype/failed-audio/` and its notification and log line give the exact `voxtype transcribe` command to retry it. The 20 most recent failed recordings are kept, readable only by your user. Set `[audio] keep_failed_recordings = false` to keep none.
+
 ### `voxtype setup`
 
 Check dependencies and optionally download models.
@@ -424,6 +429,62 @@ voxtype setup model        # Interactive model selection
 voxtype setup vad          # Download the Silero VAD model
 voxtype setup onnx         # Switch between Whisper and ONNX engines
 ```
+
+### `voxtype doctor`
+
+Check everything voxtype depends on and print the fix for anything that is
+wrong. Run this first whenever something doesn't work.
+
+```bash
+voxtype doctor              # Human-readable report
+voxtype doctor --json       # Machine-readable, for scripts
+voxtype -c alt.toml doctor  # Check against another config file
+```
+
+Each line is marked `✓` (fine), `!` (works but degraded) or `✗` (broken),
+and every `!` and `✗` line is followed by a `Fix:` line with the command or
+setting that resolves it:
+
+```
+Transcription:
+  ✗ whisper model 'medium.en' is not downloaded
+      Fix: Run: voxtype setup --download --model medium.en
+```
+
+Checks follow your configuration, so features you haven't enabled are not
+checked. What is covered:
+
+| Area | Checked |
+|------|---------|
+| System | CPU instruction set compatibility |
+| Configuration | Config directory, models directory, config file |
+| Binary and GPU | The installed variant supports your engine; Vulkan, CUDA or MIGraphX runtime libraries for GPU variants |
+| Transcription | The configured engine's model (every engine, including the Whisper secondary model and the Soniox API key); the Silero model when VAD uses the Whisper backend |
+| Audio | The configured input device exists |
+| Output | A typing or clipboard tool works for your output mode; `WAYLAND_DISPLAY`/`DISPLAY` are visible to the systemd service |
+| Input | `/dev/input/event*` is readable when the built-in hotkey is on |
+| Notifications | `notify-send` and a notification server |
+| OSD | The OSD frontend that `[osd] frontend` resolves to (as `voxtype setup osd --status` reports it), and Quickshell's `qs`, when the OSD is on |
+| Meeting mode | `pactl` and `parec` when meeting loopback capture is on |
+| Service | The `voxtype.service` user unit is installed, enabled and running |
+| Coding agents | Detected coding agents (Claude Code, Codex and others) have the current voxtype-setup skill |
+
+`voxtype doctor` exits 0 when nothing failed (warnings are allowed) and 1
+when at least one check failed. The JSON form is
+`{"ok", "errors", "warnings", "checks": [{"id", "severity", "message", "fix"}]}`
+with severity `ok`, `warn` or `error`.
+
+`voxtype setup check` prints the same report under its old name and always
+exits 0.
+
+**At daemon startup** voxtype runs the quick subset of these checks (model
+files, VAD model, output tools, display environment, OSD and meeting tools),
+logs every problem, and sends one desktop notification listing the errors
+with their fixes. Model and VAD model failures are left out of that
+notification because they get their own. If the daemon restarts with the
+same problems (for example in a systemd restart loop), it does not notify
+again until the set of problems changes or a start comes up clean. Warnings
+only go to the log (`journalctl --user -u voxtype`).
 
 ### `voxtype config`
 
@@ -2146,7 +2207,7 @@ mode = "paste"
 **How it works**:
 1. Copies transcribed text to clipboard via `wl-copy`
 2. Waits briefly for clipboard to settle
-3. Simulates Ctrl+V keypress via `ydotool`
+3. Simulates the paste keystroke (Ctrl+V, or Ctrl+Shift+V in terminals; see below)
 
 **Pros**:
 - Works with any keyboard layout
@@ -2155,9 +2216,20 @@ mode = "paste"
 
 **Cons**:
 - Requires both wl-copy and ydotool
-- Won't work in applications where Ctrl+V has a different meaning (e.g., Vim command mode)
+- Won't work in applications where the paste keystroke has a different meaning (e.g., Vim command mode)
 - Overwrites clipboard contents (unless clipboard restoration is enabled)
 - No fallback behavior
+
+**Pasting into terminals**: Ctrl+V doesn't paste in a terminal. The terminal hands it to the running program as a raw `^V`, and a program like the Codex CLI reads that as "paste an image", so the dictation never shows up. When `paste_keys` is unset or set to `"auto"`, voxtype checks the focused window before each paste on Hyprland, Sway and niri, and sends Ctrl+Shift+V to terminals and Ctrl+V to everything else. On Hyprland, any window with Omarchy's `terminal` tag counts as a terminal; other windows are matched by class against a list of known terminal emulators. On other desktops `auto` sends Ctrl+V.
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"                  # the default when unset
+paste_keys_terminal = "ctrl+shift+v" # the default; Omarchy users can use "shift+insert"
+```
+
+An explicit `paste_keys = "shift+insert"` (the value in the shipped `/etc/voxtype/config.toml`) keeps sending that keystroke everywhere. Both settings are also available as `--paste-keys` / `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS` / `VOXTYPE_PASTE_KEYS_TERMINAL`. See [paste_keys](CONFIGURATION.md#paste_keys).
 
 **Clipboard Restoration**: By default, paste mode overwrites your clipboard with the transcribed text. If you want to preserve your clipboard contents, enable clipboard restoration:
 
@@ -2180,6 +2252,8 @@ fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
 On Wayland, wtype is tried first (best CJK support), then eitype (libei protocol, works on GNOME/KDE), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
+
+When typing falls back to the clipboard, the transcription notification is titled "Copied to clipboard, paste manually" instead of "Transcribed", and the first time it happens after the daemon starts, a notification lists each typing tool that was skipped, why, and how to fix it. If every method fails, a critical notification shows the text and saves it as a timestamped file in `~/.local/state/voxtype/undelivered/` (`$XDG_STATE_HOME`), which survives logout and keeps the newest 200. See [Troubleshooting](TROUBLESHOOTING.md#copied-to-clipboard-paste-manually-notification).
 
 ### Custom Driver Order
 
@@ -2852,8 +2926,8 @@ voxtype --vad daemon
 ### VAD Backends
 
 - **auto** (compatibility default when omitted): Selects a backend for your transcription engine
-  - Whisper engine → Whisper VAD (requires model download)
-  - Parakeet engine → Energy VAD (no model needed)
+  - Whisper engine → Whisper VAD (requires model download; falls back to Energy VAD if the model is missing)
+  - Other engines → Energy VAD (no model needed)
 - **energy**: Fast RMS-based detection. Works with any engine, no model download required.
 - **whisper**: Silero VAD via whisper-rs. More accurate but requires downloading the model:
   ```bash
