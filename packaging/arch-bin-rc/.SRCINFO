@@ -21,6 +21,7 @@ pkgbase = voxtype-bin-rc
 	optdepends = vulkan-icd-loader: GPU acceleration via Vulkan for Whisper (enable with: voxtype setup gpu --enable)
 	optdepends = cuda: GPU acceleration via CUDA 13 for ONNX engines (NVIDIA GPUs, requires driver 580+)
 	optdepends = cuda12.6: GPU acceleration via CUDA 12 for ONNX engines (older NVIDIA setups)
+	optdepends = cudnn: required alongside cuda or cuda12.6 for the CUDA provider; without it ONNX engines run on CPU
 	optdepends = rocm-hip-runtime: GPU acceleration via MIGraphX for ONNX engines (AMD GPUs)
 	optdepends = migraphx: required alongside rocm-hip-runtime for the MIGraphX provider (#444)
 	optdepends = ollama: local AI summarization for meeting mode

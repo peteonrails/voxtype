@@ -603,6 +603,20 @@ pub fn audio_device_check(configured: &str, devices: Option<&[String]>) -> Check
     }
 }
 
+/// The advice `voxtype setup gpu` prints for an unloadable provider, on one
+/// line, so doctor and setup say the same thing.
+fn provider_fix(variant: &str, missing: &[String]) -> String {
+    let lines = super::gpu::provider_fix_lines(variant, missing);
+    if lines.is_empty() {
+        return "Install the GPU runtime this variant needs".to_string();
+    }
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// GPU runtime libraries for the variant `/usr/bin/voxtype` dispatches to.
 ///
 /// `provider_missing` is [`super::gpu::unresolved_provider_deps`] for ONNX
@@ -643,8 +657,7 @@ pub fn gpu_check(
                 "{variant}: GPU execution provider cannot load (missing {}), so ONNX Runtime falls back to CPU",
                 missing.join(", ")
             ),
-            super::gpu::provider_runtime_hint(variant)
-                .unwrap_or("Install the GPU runtime this variant needs"),
+            provider_fix(variant, &missing),
         )
     })
 }

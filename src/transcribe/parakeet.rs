@@ -287,6 +287,9 @@ fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
+            if !crate::setup::parakeet::cudnn_present_or_warn() {
+                return None;
+            }
             tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
             return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
         }
@@ -297,6 +300,9 @@ fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-tensorrt")]
     {
         if probe_cuda_runtime() {
+            if !crate::setup::parakeet::cudnn_present_or_warn() {
+                return None;
+            }
             tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
             return Some(
                 ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT),
