@@ -1171,6 +1171,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Copy the text instead of dropping it when every typing driver fails.",
     ),
     spec(
+        "output.keep_undelivered_text",
+        "output",
+        "keep_undelivered_text",
+        KeyType::Bool,
+        "Output",
+        "Keep undelivered text",
+        "Save a transcription to a file when no output method can deliver it. The 200 most recent are kept, readable only by you.",
+    ),
+    spec(
         "output.auto_submit",
         "output",
         "auto_submit",
@@ -3193,6 +3202,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "output.mode" => serde_json::to_value(cfg.output.mode.clone()).ok()?,
         "output.fallback_to_clipboard" => json!(cfg.output.fallback_to_clipboard),
+        "output.keep_undelivered_text" => json!(cfg.output.keep_undelivered_text),
         "output.auto_submit" => json!(cfg.output.auto_submit),
         "output.shift_enter_newlines" => json!(cfg.output.shift_enter_newlines),
         "output.pre_type_delay_ms" => json!(cfg.output.pre_type_delay_ms),

@@ -2164,7 +2164,7 @@ fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 
 On Wayland, wtype is tried first (best CJK support), then eitype (libei protocol, works on GNOME/KDE), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
 
-When typing falls back to the clipboard, the transcription notification is titled "Copied to clipboard, paste manually" instead of "Transcribed", and the first time it happens after the daemon starts, a notification lists each typing tool that was skipped, why, and how to fix it. If every method fails, a critical notification shows the text and saves it as a timestamped file in `~/.local/state/voxtype/undelivered/` (`$XDG_STATE_HOME`), which survives logout and keeps the newest 200. See [Troubleshooting](TROUBLESHOOTING.md#copied-to-clipboard-paste-manually-notification).
+When typing falls back to the clipboard, the transcription notification is titled "Copied to clipboard, paste manually" instead of "Transcribed", and the first time it happens after the daemon starts, a notification lists each typing tool that was skipped, why, and how to fix it. If every method fails, a critical notification shows the text and saves it as a timestamped file in `~/.local/state/voxtype/undelivered/` (`$XDG_STATE_HOME`), which survives logout and keeps the newest 200. Set `[output] keep_undelivered_text = false` to save nothing and keep the text out of that notification. See [Troubleshooting](TROUBLESHOOTING.md#copied-to-clipboard-paste-manually-notification).
 
 ### Custom Driver Order
 

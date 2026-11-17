@@ -235,14 +235,34 @@ pub fn fallback_notice(report: &OutputReport, env: &FixEnv) -> Option<Notice> {
     })
 }
 
+/// What the failure notification says in place of the text and its file when
+/// `[output] keep_undelivered_text` is off.
+const NOT_KEPT_LINE: &str = "The text was not kept, because [output] keep_undelivered_text \
+     is off. To turn saving back on: voxtype config set output.keep_undelivered_text true";
+
+/// What became of a transcription no output method could deliver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undelivered {
+    /// Saved to this file under [`undelivered_dir`].
+    Saved(PathBuf),
+    /// Saving was tried and failed, so the notification holds the only copy.
+    SaveFailed,
+    /// `[output] keep_undelivered_text` is off: nothing was written, and the
+    /// notification must not carry the text either.
+    NotKept,
+}
+
 /// The notification for a run where no method delivered the text. The text
-/// itself goes in the body so it is never lost, and `saved_to` says where the
-/// full copy is.
+/// itself goes in the body so it is never lost, with the file holding the
+/// full copy when one was saved. With keeping turned off the body has
+/// neither: notification daemons log what they show, so quoting the text
+/// would keep it around after all. It says the text was not kept and how to
+/// turn saving back on.
 pub fn failure_notice(
     report: &OutputReport,
     err: &OutputError,
     text: &str,
-    saved_to: Option<&Path>,
+    kept: &Undelivered,
     env: &FixEnv,
 ) -> Notice {
     let mut body = short_error(&err.to_string());
@@ -255,15 +275,20 @@ pub fn failure_notice(
         body.push('\n');
         body.push_str(&lines.join("\n"));
     }
-    if let Some(path) = saved_to {
-        body.push_str(&format!("\nText saved to {}", path.display()));
-    }
-    let preview = if text.chars().count() > 300 {
-        format!("{}...", text.chars().take(300).collect::<String>())
+    if *kept == Undelivered::NotKept {
+        body.push('\n');
+        body.push_str(NOT_KEPT_LINE);
     } else {
-        text.to_string()
-    };
-    body.push_str(&format!("\nText: {preview}"));
+        if let Undelivered::Saved(path) = kept {
+            body.push_str(&format!("\nText saved to {}", path.display()));
+        }
+        let preview = if text.chars().count() > 300 {
+            format!("{}...", text.chars().take(300).collect::<String>())
+        } else {
+            text.to_string()
+        };
+        body.push_str(&format!("\nText: {preview}"));
+    }
     Notice {
         key: "all-failed".to_string(),
         title: "Voxtype: transcription not delivered".to_string(),
@@ -342,22 +367,20 @@ pub fn undelivered_dir() -> PathBuf {
 }
 
 /// Every output method failed: save the text where the user can get it back
-/// and say so in a notification, along with what failed.
-pub async fn notify_failed(report: &OutputReport, err: &OutputError, text: &str) {
-    let dir = undelivered_dir();
+/// and say so in a notification, along with what failed. With `keep_text`
+/// false (`[output] keep_undelivered_text`) nothing is written, and the
+/// notification says the text was not kept instead of naming a file or
+/// quoting it.
+pub async fn notify_failed(report: &OutputReport, err: &OutputError, text: &str, keep_text: bool) {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f").to_string();
-    let saved = match save_undelivered(&dir, &stamp, text, UNDELIVERED_KEEP) {
-        Ok(path) => Some(path),
-        Err(e) => {
-            tracing::warn!(
-                "Could not save the undelivered transcription in {:?}: {}",
-                dir,
-                e
-            );
-            None
-        }
-    };
-    let notice = failure_notice(report, err, text, saved.as_deref(), &FixEnv::gather());
+    let kept = keep_undelivered(
+        keep_text,
+        &undelivered_dir(),
+        &stamp,
+        text,
+        UNDELIVERED_KEEP,
+    );
+    let notice = failure_notice(report, err, text, &kept, &FixEnv::gather());
     tracing::error!("{}: {}", notice.title, notice.body.replace('\n', " | "));
     crate::notification::send_status(
         &notice.title,
@@ -366,6 +389,31 @@ pub async fn notify_failed(report: &OutputReport, err: &OutputError, text: &str)
         crate::notification::Lifetime::Millis(15000),
     )
     .await;
+}
+
+/// Save `text` in `dir` and report what happened to it. With `enabled` false
+/// (`[output] keep_undelivered_text`), write nothing.
+fn keep_undelivered(
+    enabled: bool,
+    dir: &Path,
+    stamp: &str,
+    text: &str,
+    keep: usize,
+) -> Undelivered {
+    if !enabled {
+        return Undelivered::NotKept;
+    }
+    match save_undelivered(dir, stamp, text, keep) {
+        Ok(path) => Undelivered::Saved(path),
+        Err(e) => {
+            tracing::warn!(
+                "Could not save the undelivered transcription in {:?}: {}",
+                dir,
+                e
+            );
+            Undelivered::SaveFailed
+        }
+    }
 }
 
 /// Save `text` as `<dir>/<stamp>.txt`, readable only by the user (a
@@ -626,7 +674,7 @@ mod tests {
             &report,
             &OutputError::AllMethodsFailed,
             "hello world",
-            Some(Path::new(
+            &Undelivered::Saved(PathBuf::from(
                 "/home/u/.local/state/voxtype/undelivered/20261020-093900-123.txt",
             )),
             &env(DisplaySession::Wayland, false),
@@ -657,7 +705,7 @@ mod tests {
             &report,
             &OutputError::AllMethodsFailed,
             "hi",
-            None,
+            &Undelivered::SaveFailed,
             &env(DisplaySession::Wayland, false),
         );
         assert!(notice
@@ -665,6 +713,66 @@ mod tests {
             .contains("wl-copy: not installed. Fix: sudo pacman -S wl-clipboard"));
         assert!(!notice.body.contains("xclip:"));
         assert!(!notice.body.contains("Text saved"));
+        // The save failed, so the notification is the only copy of the text.
+        assert!(notice.body.ends_with("Text: hi"));
+    }
+
+    #[test]
+    fn turned_off_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("state/voxtype/undelivered");
+        let kept = keep_undelivered(false, &dir, "20261020-093900-001", "secret words", 2);
+        assert_eq!(kept, Undelivered::NotKept);
+        assert!(!dir.exists());
+
+        let kept = keep_undelivered(true, &dir, "20261020-093900-001", "secret words", 2);
+        let Undelivered::Saved(path) = kept else {
+            panic!("expected a saved file, got {kept:?}");
+        };
+        assert!(path.starts_with(&dir));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret words\n");
+    }
+
+    #[test]
+    fn turned_off_notice_names_no_file_and_keeps_the_text_out() {
+        let report = OutputReport {
+            delivered_by: None,
+            skipped: vec![unavailable("wtype"), unavailable("clipboard (wl-copy)")],
+            modifier_skip: false,
+        };
+        let text = "meet me at the quarry at nine";
+        let notice = failure_notice(
+            &report,
+            &OutputError::AllMethodsFailed,
+            text,
+            &Undelivered::NotKept,
+            &env(DisplaySession::Wayland, false),
+        );
+
+        // Still says plainly that output failed, and what to fix.
+        assert_eq!(notice.title, "Voxtype: transcription not delivered");
+        assert!(notice.body.starts_with("All output methods failed."));
+        assert!(notice
+            .body
+            .contains("wtype: not installed. Fix: sudo pacman -S wtype"));
+
+        // No file to point at, and none of the dictated words.
+        let body = notice.body.to_lowercase();
+        assert!(!body.contains("text saved"), "{body}");
+        assert!(
+            !body.contains("undelivered/") && !body.contains(".txt"),
+            "{body}"
+        );
+        assert!(!body.contains("text: "), "{body}");
+        for word in text.split_whitespace().filter(|w| w.len() > 3) {
+            assert!(!body.contains(word), "{word:?} leaked into: {body}");
+        }
+
+        // Says the text is gone and how to turn saving back on.
+        assert!(notice.body.contains("The text was not kept"));
+        assert!(notice
+            .body
+            .ends_with("voxtype config set output.keep_undelivered_text true"));
     }
 
     #[test]

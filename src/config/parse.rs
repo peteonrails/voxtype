@@ -306,6 +306,21 @@ key = "F13"
     }
 
     #[test]
+    fn keep_undelivered_text_is_on_unless_turned_off() {
+        assert!(Config::default().output.keep_undelivered_text);
+
+        // A config written before the key existed behaves as on.
+        let old = "[output]\nmode = \"type\"\nfallback_to_clipboard = true\n";
+        let cfg = parse_config_with_defaults(old).unwrap();
+        assert!(cfg.output.keep_undelivered_text);
+        let cfg: Config = toml::from_str(old).unwrap();
+        assert!(cfg.output.keep_undelivered_text);
+
+        let cfg = parse_config_with_defaults("[output]\nkeep_undelivered_text = false\n").unwrap();
+        assert!(!cfg.output.keep_undelivered_text);
+    }
+
+    #[test]
     fn user_arrays_replace_default_arrays() {
         // Arrays are replaced wholesale, not concatenated. A user-specified
         // language list overrides the default rather than appending to it.

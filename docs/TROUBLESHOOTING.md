@@ -1284,6 +1284,15 @@ cat "$(ls -t ~/.local/state/voxtype/undelivered/*.txt | head -1)"
 
 Then install the tool the notification names.
 
+To stop Voxtype keeping undelivered transcriptions:
+
+```bash
+voxtype config set output.keep_undelivered_text false
+systemctl --user restart voxtype
+```
+
+With it off no file is saved, and the notification no longer names a file or shows the text (notification daemons keep a log of what they display), so a dictation that can't be delivered is lost. The notification still lists what failed and how to fix it, and says the text was not kept. Files saved before you turned it off stay until you delete them: `rm -r ~/.local/state/voxtype/undelivered/`.
+
 ### Text not typed / nothing happens
 
 **Possible causes:**

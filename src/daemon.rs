@@ -5226,8 +5226,15 @@ impl Daemon {
                     if let Err(e) = result {
                         tracing::error!("Output failed: {}", e);
                         self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
-                        // Nothing typed or copied: keep the text recoverable.
-                        output::fallback::notify_failed(&report, &e, &final_text).await;
+                        // Nothing typed or copied: keep the text recoverable,
+                        // unless [output] keep_undelivered_text is off.
+                        output::fallback::notify_failed(
+                            &report,
+                            &e,
+                            &final_text,
+                            self.config.output.keep_undelivered_text,
+                        )
+                        .await;
                     } else {
                         self.publish_osd_text_outcome(&final_text);
                         self.play_feedback(SoundEvent::TranscriptionComplete);

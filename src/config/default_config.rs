@@ -212,6 +212,13 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
+# Keep the text of a transcription no output method could deliver, so it can
+# be recovered. The 200 most recent are kept in
+# ~/.local/state/voxtype/undelivered/, readable only by you, and the failure
+# notification names the file. Set to false to save no file and keep the text
+# out of the notification; an undelivered dictation is then lost.
+# keep_undelivered_text = true
+
 # Custom driver order for type mode (optional)
 # Default order: wtype -> dotool -> ydotool -> clipboard
 # Customize to prefer a specific driver or change the fallback order.
