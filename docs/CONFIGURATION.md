@@ -4547,7 +4547,14 @@ email subjects, document names and URLs. Also
 ### Privacy
 
 - The history directory is created `0700` and every file in it `0600`.
-- Dictated text is never written to the log at the default level.
+- **History is not the only place your words are written.** The daemon logs
+  each transcription at the default (info) level, so dictated text also lands
+  in the service journal (`journalctl --user -u voxtype`) and in any log file
+  you send output to. Pausing history, turning it off, excluding an app or
+  deleting an entry does not touch those logs. Run the daemon with `--quiet`,
+  or set a stricter `RUST_LOG`, to keep text out of them; warnings and errors
+  can still quote a transcript. The same goes for `output.mode = "file"` and
+  for anything a `post_output_command` saves.
 - Deleting an entry rewrites its day file and removes it from the search
   index, which runs with SQLite's `secure_delete` so the text does not linger
   in free pages. The old file blocks on disk are the filesystem's to reuse;

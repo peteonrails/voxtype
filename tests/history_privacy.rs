@@ -313,3 +313,28 @@ fn deletion_reports_a_blocked_wal_checkpoint_and_retries_after_the_reader_closes
         "retry must scrub database and WAL, not just remove search mappings"
     );
 }
+
+/// The Privacy note in the configuration guide used to say dictated text is
+/// never logged at the default level. It is: the daemon logs each
+/// transcription at info. The note and the code are checked together so a
+/// change to either one sends the author to the other.
+#[test]
+fn the_docs_do_not_promise_that_dictated_text_stays_out_of_the_logs() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let docs = std::fs::read_to_string(format!("{root}/docs/CONFIGURATION.md")).unwrap();
+    assert!(
+        !docs.contains("never written to the log"),
+        "the guide must not promise that dictated text is kept out of the logs"
+    );
+    assert!(
+        docs.contains("History is not the only place your words are written")
+            && docs.contains("journalctl --user -u voxtype"),
+        "the Privacy note must say that transcriptions are logged and where"
+    );
+    let daemon = std::fs::read_to_string(format!("{root}/src/daemon.rs")).unwrap();
+    assert!(
+        daemon.contains(r#"tracing::info!("Transcribed: {:?}", text)"#),
+        "the daemon no longer logs transcriptions at info: rewrite the Privacy note in \
+         docs/CONFIGURATION.md to match, then update this test"
+    );
+}
