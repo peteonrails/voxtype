@@ -502,6 +502,9 @@ pub enum Event {
     /// no window shows it any more. `offer_stop` is set when a meeting is
     /// recording, so `on_call_end` can stop it or offer to.
     Ended { call: Call, offer_stop: bool },
+    /// A call that had just ended is back within the grace period: the
+    /// same call, so nothing is offered again and a waiting stop is off.
+    Returned { call: Call },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,6 +515,10 @@ enum Phase {
     WaitingForDictation,
     /// Prompted, recorded, or deliberately skipped. Never prompts again.
     Done,
+    /// Over since `at`, and remembered for the grace period: if its app
+    /// takes the mic again or its window comes back in that time, it is the
+    /// same call, not a new one to prompt for.
+    Ended { at: Instant },
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +536,8 @@ struct Track {
 pub struct Detector {
     config: MeetingDetectConfig,
     debounce: Duration,
+    /// How long an ended call is remembered (`stop_grace_secs`)
+    grace: Duration,
     tracks: BTreeMap<String, Track>,
 }
 
@@ -539,9 +548,11 @@ impl Detector {
     }
 
     pub fn with_debounce(config: MeetingDetectConfig, debounce: Duration) -> Self {
+        let grace = Duration::from_secs(u64::from(config.stop_grace_secs));
         Self {
             config,
             debounce,
+            grace,
             tracks: BTreeMap::new(),
         }
     }
@@ -654,7 +665,11 @@ impl Detector {
                         call: track.call.clone(),
                         offer_stop: activity.meeting_active,
                     });
-                    ended.push(app.clone());
+                    if self.grace.is_zero() {
+                        ended.push(app.clone());
+                    } else {
+                        track.phase = Phase::Ended { at: now };
+                    }
                 }
                 Phase::Done => {
                     track.last_seen = now;
@@ -664,6 +679,18 @@ impl Detector {
                             call: track.call.clone(),
                             evidence: seen,
                         });
+                    }
+                }
+                Phase::Ended { at } => {
+                    if seen != Evidence::Gone {
+                        track.phase = Phase::Done;
+                        track.last_seen = now;
+                        track.evidence = seen;
+                        events.push(Event::Returned {
+                            call: track.call.clone(),
+                        });
+                    } else if now.duration_since(at) >= self.grace {
+                        ended.push(app.clone());
                     }
                 }
             }
@@ -731,6 +758,10 @@ pub fn describe(event: &Event) -> String {
                 format!("call ended: {} {}", call.app, gone)
             }
         }
+        Event::Returned { call } => format!(
+            "call is back: {} is seen again within the grace period; the same call, so nothing is offered again",
+            call.app
+        ),
     }
 }
 

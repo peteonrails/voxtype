@@ -42,7 +42,8 @@ pub struct MeetingDetectConfig {
     pub on_call_end: String,
 
     /// Seconds between "Call ended" and the automatic stop, for Keep
-    /// recording.
+    /// recording. A call seen again in that time is the same call: the stop
+    /// is called off and it is not offered a second time.
     #[serde(default = "default_stop_grace_secs")]
     pub stop_grace_secs: u32,
 }

@@ -838,7 +838,86 @@ fn closing_the_window_with_the_mic_released_ends_the_call() {
     );
     // Said once.
     assert!(watch(&mut d, &closed, RECORDING, t0, 614, 700).is_empty());
+    assert!(!d.is_tracking(), "forgotten once the grace period is over");
+}
+
+/// The call's window back within the grace period (20 s) is the same call:
+/// the stop is called off ([`Event::Returned`]) and nothing is offered.
+#[test]
+fn the_window_back_within_the_grace_period_is_the_same_call() {
+    let t0 = Instant::now();
+    let mut d = settled_meet_call(t0);
+    let unmuted = snap("pw-chromium-mic.json", Some("clients-meet-chromium.json"));
+    let muted = snap("pw-idle.json", Some("clients-meet-chromium.json"));
+    let closed = snap("pw-idle.json", Some("clients-browsing.json"));
+    watch(&mut d, &muted, RECORDING, t0, 8, 60);
+    let end = watch(&mut d, &closed, RECORDING, t0, 60, 68);
+    assert!(
+        matches!(end.as_slice(), [Event::Ended { .. }]),
+        "ended at 64: {end:?}"
+    );
+    // Twelve seconds into the grace period the tab is back, still muted.
+    let back = d.evaluate(&muted, RECORDING, secs(t0, 76));
+    assert!(
+        matches!(back.as_slice(), [Event::Returned { call }] if call.app == "Google Meet"),
+        "{back:?}"
+    );
+    assert_eq!(
+        describe(&back[0]),
+        "call is back: Google Meet is seen again within the grace period; the same call, \
+         so nothing is offered again"
+    );
+    // And it is a call like before: it goes on muted, and unmuted.
+    let mut rest = watch(&mut d, &muted, RECORDING, t0, 78, 600);
+    rest.extend(watch(&mut d, &unmuted, IDLE, t0, 600, 700));
+    assert!(acted(&rest).is_empty(), "{rest:?}");
+    assert_eq!(continues(&rest), vec![Evidence::Full], "{rest:?}");
+}
+
+/// The mic alone coming back within the grace period is the same call too,
+/// though a browser's mic with no call window would not start one.
+#[test]
+fn the_mic_back_within_the_grace_period_is_the_same_call() {
+    let t0 = Instant::now();
+    let mut d = settled_meet_call(t0);
+    let closed = snap("pw-idle.json", Some("clients-browsing.json"));
+    let mic_only = snap("pw-chromium-mic.json", Some("clients-browsing.json"));
+    let end = watch(&mut d, &closed, IDLE, t0, 8, 16);
+    assert!(
+        matches!(
+            end.as_slice(),
+            [Event::Ended {
+                offer_stop: false,
+                ..
+            }]
+        ),
+        "{end:?}"
+    );
+    let back = d.evaluate(&mic_only, IDLE, secs(t0, 24));
+    assert!(
+        matches!(back.as_slice(), [Event::Returned { .. }]),
+        "{back:?}"
+    );
+    assert!(watch(&mut d, &mic_only, IDLE, t0, 26, 200).is_empty());
+}
+
+/// After the grace period the call is forgotten: the same app on the mic
+/// with its window is a new call, and is offered.
+#[test]
+fn a_call_after_the_grace_period_is_a_new_call() {
+    let t0 = Instant::now();
+    let mut d = settled_meet_call(t0);
+    let call = snap("pw-chromium-mic.json", Some("clients-meet-chromium.json"));
+    let closed = snap("pw-idle.json", Some("clients-browsing.json"));
+    let mic_only = snap("pw-chromium-mic.json", Some("clients-browsing.json"));
+    let end = watch(&mut d, &closed, IDLE, t0, 8, 40);
+    assert!(matches!(end.as_slice(), [Event::Ended { .. }]), "{end:?}");
     assert!(!d.is_tracking());
+    // The browser's mic with no call window starts nothing, as ever.
+    assert!(watch(&mut d, &mic_only, IDLE, t0, 40, 60).is_empty());
+    let next = watch(&mut d, &call, IDLE, t0, 60, 70);
+    assert!(matches!(next[0], Event::Seen { .. }), "{next:?}");
+    assert_eq!(prompts(&next).len(), 1, "{next:?}");
 }
 
 /// A native client has only its mic: it ends when it releases it, with its
@@ -869,6 +948,48 @@ fn a_native_call_ends_when_its_app_releases_the_mic() {
         "call ended: Zoom released the mic while a meeting records \
          ([meeting.detect] on_call_end decides)"
     );
+}
+
+/// Its mic back within the grace period calls the stop off and asks
+/// nothing; back after it, it is a new call.
+#[test]
+fn a_native_app_back_on_the_mic_within_the_grace_period_is_the_same_call() {
+    let mut d = Detector::new(config());
+    let call = snap("pw-zoom.json", Some("clients-zoom.json"));
+    let released = snap("pw-idle.json", Some("clients-zoom.json"));
+    let t0 = Instant::now();
+    watch(&mut d, &call, IDLE, t0, 0, 10);
+    let end = watch(&mut d, &released, IDLE, t0, 10, 18);
+    assert!(matches!(end.as_slice(), [Event::Ended { .. }]), "{end:?}");
+    let back = watch(&mut d, &call, IDLE, t0, 30, 60);
+    assert!(
+        matches!(back.as_slice(), [Event::Returned { .. }]),
+        "{back:?}"
+    );
+
+    let end = watch(&mut d, &released, IDLE, t0, 60, 68);
+    assert!(matches!(end.as_slice(), [Event::Ended { .. }]), "{end:?}");
+    assert!(watch(&mut d, &released, IDLE, t0, 68, 100).is_empty());
+    let next = watch(&mut d, &call, IDLE, t0, 100, 110);
+    assert!(matches!(next[0], Event::Seen { .. }), "{next:?}");
+    assert_eq!(prompts(&next).len(), 1, "{next:?}");
+}
+
+/// With no grace period nothing is remembered, as before.
+#[test]
+fn without_a_grace_period_an_ended_call_is_forgotten_at_once() {
+    let mut cfg = config();
+    cfg.stop_grace_secs = 0;
+    let mut d = Detector::new(cfg);
+    let call = snap("pw-zoom.json", Some("clients-zoom.json"));
+    let released = snap("pw-idle.json", Some("clients-zoom.json"));
+    let t0 = Instant::now();
+    watch(&mut d, &call, IDLE, t0, 0, 10);
+    let end = watch(&mut d, &released, IDLE, t0, 10, 18);
+    assert!(matches!(end.as_slice(), [Event::Ended { .. }]), "{end:?}");
+    assert!(!d.is_tracking());
+    let next = d.evaluate(&call, IDLE, secs(t0, 18));
+    assert!(matches!(next.as_slice(), [Event::Seen { .. }]), "{next:?}");
 }
 
 /// Hyprland not answering is not the call window being closed: with the

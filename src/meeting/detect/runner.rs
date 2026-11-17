@@ -299,9 +299,9 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                     }
                 }
             }
-            Event::Seen { call, .. } => {
-                // The same app back on the mic within the grace period: the
-                // call went on after all.
+            // The same call seen again within the grace period (its app
+            // back on the mic, or its window back): it went on after all.
+            Event::Seen { call, .. } | Event::Returned { call } => {
                 if self
                     .pending_stop
                     .as_ref()
@@ -929,6 +929,30 @@ mod tests {
         assert!(!log.take().contains(&"stop".to_string()));
     }
 
+    #[tokio::test]
+    async fn the_same_call_returning_cancels_the_stop() {
+        let log = Log::default();
+        let mut c = controller(&log);
+        c.on_event(&ended("Zoom", true)).await;
+        c.on_event(&Event::Returned {
+            call: call("Microsoft Teams", "Teams call"),
+        })
+        .await;
+        assert!(
+            c.stop_due_at().is_some(),
+            "another app's call changes nothing"
+        );
+        c.on_event(&Event::Returned {
+            call: call("Zoom", "Zoom call"),
+        })
+        .await;
+        assert_eq!(c.stop_due_at(), None);
+        c.fire_due_stop(true).await;
+        let log = log.take();
+        assert!(!log.contains(&"stop".to_string()), "{log:?}");
+        assert!(log.contains(&"close 1".to_string()), "{log:?}");
+    }
+
     // The detector and the controller together, as the live loop runs
     // them, on a Zoom call in a browser shaped like the ones that were cut
     // off on 2026-11-17 (see the detector's tests).
@@ -1070,6 +1094,43 @@ mod tests {
         assert!(c.stop_due_at().is_some());
         c.fire_due_stop(true).await;
         assert_eq!(log.take(), vec!["close 2", "stop"]);
+    }
+
+    #[tokio::test]
+    async fn the_call_back_within_the_grace_period_calls_the_stop_off() {
+        for back in [
+            // The call's tab is in front again, still muted
+            look(false, Some(LAUNCHER_TAB)),
+            // Unmuted, with another tab in front
+            look(true, Some(OTHER_TAB)),
+            look(true, Some(LAUNCHER_TAB)),
+        ] {
+            let log = Log::default();
+            let t0 = Instant::now();
+            let (mut d, mut c) = recorded_zoom_call(&log, t0).await;
+            live(
+                &mut d,
+                &mut c,
+                &look(false, Some(OTHER_TAB)),
+                true,
+                t0,
+                60,
+                68,
+            )
+            .await;
+            assert!(c.stop_due_at().is_some(), "{back:?}");
+            live(&mut d, &mut c, &back, true, t0, 76, 400).await;
+            assert_eq!(c.stop_due_at(), None, "{back:?}");
+            c.fire_due_stop(true).await;
+            assert_eq!(
+                log.take(),
+                vec![
+                    "show 2 Zoom (web) released the microphone. Stopping the recording in 20 s. [keep]",
+                    "close 2",
+                ],
+                "{back:?}"
+            );
+        }
     }
 
     #[tokio::test]
