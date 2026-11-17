@@ -76,7 +76,8 @@ impl MeetingControl for CliMeetingControl {
 #[derive(Debug, Clone)]
 enum Asking {
     Record(Call),
-    Stop,
+    /// "Call ended. Stop the meeting recording?", about this app's call
+    Stop(String),
     /// "Call ended, stopping in N s": its Keep recording cancels the stop.
     AutoStop,
 }
@@ -269,7 +270,7 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                         );
                         match self.notifier.show(&stop_notice(call)).await {
                             Ok(id) => {
-                                self.open.insert(id, Asking::Stop);
+                                self.open.insert(id, Asking::Stop(call.app.clone()));
                             }
                             Err(e) => tracing::warn!("Could not show the stop prompt: {}", e),
                         }
@@ -309,6 +310,21 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                 {
                     self.cancel_stop("the call came back").await;
                 }
+                // "Stop the meeting recording?" asks about a call that is
+                // not over after all.
+                let stale: Vec<u32> = self
+                    .open
+                    .iter()
+                    .filter(|(_, a)| matches!(a, Asking::Stop(app) if *app == call.app))
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in stale {
+                    tracing::info!(
+                        "Meeting detection: not asking to stop the meeting any more: the call came back"
+                    );
+                    self.open.remove(&id);
+                    self.notifier.close(id).await;
+                }
             }
             Event::Held { .. } | Event::Brief { .. } | Event::Continues { .. } => {}
         }
@@ -328,7 +344,7 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                 }
                 self.notifier.close(id).await;
             }
-            (Asking::Stop, notify::ACTION_STOP | notify::ACTION_DEFAULT) => {
+            (Asking::Stop(_), notify::ACTION_STOP | notify::ACTION_DEFAULT) => {
                 tracing::info!("Meeting detection: stopping the meeting, as asked");
                 if let Err(e) = self.control.stop().await {
                     tracing::warn!("Could not stop the meeting: {}", e);
@@ -927,6 +943,30 @@ mod tests {
         .await;
         assert_eq!(c.stop_due_at(), None);
         assert!(!log.take().contains(&"stop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_call_coming_back_withdraws_the_question_to_stop() {
+        let log = Log::default();
+        let mut c = controller(&log).with_call_end(ask_policy());
+        c.on_event(&ended("Zoom", true)).await;
+        c.on_event(&Event::Returned {
+            call: call("Microsoft Teams", "Teams call"),
+        })
+        .await;
+        c.on_event(&Event::Returned {
+            call: call("Zoom", "Zoom call"),
+        })
+        .await;
+        // Answering a question that is gone does nothing.
+        c.on_response((1, "stop".into())).await;
+        assert_eq!(
+            log.take(),
+            vec![
+                "show 1 Zoom released the microphone. Stop the meeting recording? [stop,keep]",
+                "close 1",
+            ]
+        );
     }
 
     #[tokio::test]
