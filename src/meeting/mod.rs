@@ -49,6 +49,7 @@ pub mod retitle;
 pub mod retranscribe;
 pub mod search;
 pub mod share;
+pub mod silent_track;
 pub mod soundcheck;
 pub mod start;
 pub mod state;
