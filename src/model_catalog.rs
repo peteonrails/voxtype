@@ -505,6 +505,27 @@ pub fn override_config(
     config
 }
 
+/// Whether the text of a recording served by `route` (the route of the
+/// `--model` override `name`) counts as English for text cleanup.
+///
+/// The daemon builds one text processor, for the configured engine and
+/// model. An override recording is transcribed by another model, possibly
+/// another engine, so the language rule is asked again of the configuration
+/// that recording runs with: an English-only configured model says nothing
+/// about a multilingual override. `Active` is the configured model itself.
+pub fn override_text_is_english(base: &Config, name: &str, route: &OverrideRoute) -> bool {
+    let config = match route {
+        OverrideRoute::Active => return true,
+        OverrideRoute::WhisperManager => {
+            let mut config = base.clone();
+            config.whisper.model = name.to_string();
+            config
+        }
+        OverrideRoute::Separate { engine, model } => override_config(base, *engine, model),
+    };
+    crate::setup::lard::is_english(config.text_language())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,5 +996,96 @@ mod tests {
             missing.contains("voxtype setup --download --model moonshine-base"),
             "{missing}"
         );
+    }
+    /// English-only cleanup follows the model that made the recording, not
+    /// the configured one (#696).
+    #[test]
+    fn an_override_recording_is_english_only_if_its_own_model_says_so() {
+        use crate::config::TranscriptionEngine::{Cohere, Moonshine, Parakeet};
+        let separate = |engine, model: &str| OverrideRoute::Separate {
+            engine,
+            model: model.to_string(),
+        };
+        let english = |base: &Config, name: &str, route: OverrideRoute| {
+            override_text_is_english(base, name, &route)
+        };
+
+        // English because of the configured model: `base.en` on automatic.
+        let mut by_model = Config::default();
+        by_model.whisper.model = "base.en".into();
+        by_model.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        assert_eq!(by_model.text_language(), Some("en"));
+        assert!(english(&by_model, "base.en", OverrideRoute::Active));
+        assert!(english(
+            &by_model,
+            "small.en",
+            OverrideRoute::WhisperManager
+        ));
+        assert!(!english(
+            &by_model,
+            "large-v3-turbo",
+            OverrideRoute::WhisperManager
+        ));
+        assert!(!english(
+            &by_model,
+            "/models/ggml-custom.bin",
+            OverrideRoute::WhisperManager
+        ));
+        assert!(english(
+            &by_model,
+            "parakeet-tdt-0.6b-v2",
+            separate(Parakeet, "parakeet-tdt-0.6b-v2")
+        ));
+        assert!(!english(
+            &by_model,
+            "parakeet-tdt-0.6b-v3",
+            separate(Parakeet, "parakeet-tdt-0.6b-v3")
+        ));
+        assert!(!english(
+            &by_model,
+            "moonshine-base-ja",
+            separate(Moonshine, "base-ja")
+        ));
+
+        // English because the engine was told so: another Whisper model
+        // gets the same language, another engine is asked for its own.
+        let mut by_engine = Config::default();
+        by_engine.whisper.model = "large-v3-turbo".into();
+        assert_eq!(by_engine.text_language(), Some("en"));
+        assert!(english(
+            &by_engine,
+            "large-v3",
+            OverrideRoute::WhisperManager
+        ));
+        assert!(!english(
+            &by_engine,
+            "parakeet-tdt-0.6b-v3",
+            separate(Parakeet, "parakeet-tdt-0.6b-v3")
+        ));
+        let mut french_cohere = by_engine.clone();
+        french_cohere.cohere = Some(crate::config::CohereConfig {
+            language: "fr".into(),
+            ..Default::default()
+        });
+        assert!(!english(
+            &french_cohere,
+            "cohere-transcribe-03-2026-Q4_K_M.gguf",
+            separate(Cohere, "cohere-transcribe-03-2026-Q4_K_M.gguf")
+        ));
+
+        // English because the user declared it: that covers a multilingual
+        // override, and still yields to a model that only writes Japanese.
+        let mut declared = parakeet_config("parakeet-tdt-0.6b-v3");
+        declared.text.language = "en".into();
+        assert!(english(
+            &declared,
+            "parakeet-ultra-Q8_0.gguf",
+            separate(Parakeet, "parakeet-ultra-Q8_0.gguf")
+        ));
+        assert!(!english(
+            &declared,
+            "moonshine-base-ja",
+            separate(Moonshine, "base-ja")
+        ));
     }
 }

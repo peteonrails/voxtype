@@ -284,6 +284,22 @@ impl TextProcessor {
 
     /// Process text with the vocabulary selected by the active profile.
     pub fn process_with_vocabulary(&self, text: &str, vocabulary: Option<&Vocabulary>) -> String {
+        self.process_recording(text, vocabulary, true)
+    }
+
+    /// Process the text of one recording. `english` is false when this
+    /// recording came from a model other than the configured one (a
+    /// `--model` override) and that model's text is not known to be English:
+    /// the English-only LARD stage is then skipped for it, whatever language
+    /// this processor was built for. It deletes words, so it must never run
+    /// on text that may not be English (#696). Every other stage runs as
+    /// configured.
+    pub fn process_recording(
+        &self,
+        text: &str,
+        vocabulary: Option<&Vocabulary>,
+        english: bool,
+    ) -> String {
         let mut result = text.to_string();
 
         // Vocabulary is the first cleanup stage so every later stage sees the
@@ -317,7 +333,7 @@ impl TextProcessor {
         // anyone using spoken_punctuation. Filler removal has already gone,
         // so a filler mid-stutter ("the uh the point") cannot hide the repeat
         // either, and the replacements pass below still gets the last word.
-        if let Some(tagger) = &self.disfluency_tagger {
+        if let Some(tagger) = self.disfluency_tagger.as_ref().filter(|_| english) {
             let tokens = tagger.tag(&result);
             let mut cleaned = String::with_capacity(result.len());
             let mut cursor = 0;
@@ -952,6 +968,30 @@ mod tests {
         let mut japanese = engine_config(Moonshine, "base-ja");
         japanese.text.language = "en".into();
         assert_eq!(lard_processor_for(japanese).process(DISFLUENT), DISFLUENT);
+    }
+
+    /// A `--model` override recording whose model is not known to write
+    /// English skips LARD and nothing else.
+    #[test]
+    fn a_recording_that_is_not_english_skips_lard_only() {
+        let mut config = engine_config(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v2",
+        );
+        config
+            .text
+            .replacements
+            .insert("hotel".into(), "Hotel".into());
+        let processor = lard_processor_for(config);
+        assert_eq!(processor.process(DISFLUENT), "I need a Hotel");
+        assert_eq!(
+            processor.process_recording(DISFLUENT, None, true),
+            "I need a Hotel"
+        );
+        assert_eq!(
+            processor.process_recording(DISFLUENT, None, false),
+            "I need a flight no I need a Hotel"
+        );
     }
 
     #[test]
