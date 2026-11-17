@@ -20,9 +20,9 @@ pub struct MeetingDetectConfig {
     #[serde(default, deserialize_with = "string_list")]
     pub auto_record_apps: Vec<String>,
 
-    /// Seconds a call app must hold the mic before voxtype prompts, and
-    /// must be gone before the call counts as over. Filters out brief mic
-    /// opens such as a permission check.
+    /// Seconds a call app must hold the mic before voxtype prompts, and a
+    /// call must show no sign of itself before it counts as over. Filters
+    /// out brief mic opens such as a permission check.
     #[serde(default = "default_debounce_secs")]
     pub debounce_secs: u32,
 
@@ -34,6 +34,10 @@ pub struct MeetingDetectConfig {
     /// "stop" stops it after `stop_grace_secs` (with a Keep recording
     /// button), "ask" offers to stop it, "keep" leaves it running. A meeting
     /// started by hand with no detected call is never stopped.
+    ///
+    /// A browser call (an app with `titles`) has ended when the browser has
+    /// released the mic and no window title shows the call; a native
+    /// client's when it releases the mic.
     #[serde(default = "default_on_call_end")]
     pub on_call_end: String,
 

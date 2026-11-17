@@ -310,7 +310,7 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                     self.cancel_stop("the call came back").await;
                 }
             }
-            Event::Held { .. } | Event::Brief { .. } => {}
+            Event::Held { .. } | Event::Brief { .. } | Event::Continues { .. } => {}
         }
     }
 
@@ -696,6 +696,7 @@ pub fn spawn_in_daemon(config: &Config, config_path: Option<PathBuf>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting::detect::{MicStream, Window};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default, Clone)]
@@ -753,6 +754,7 @@ mod tests {
             title: title.into(),
             reason: String::new(),
             auto_record: false,
+            by_window: false,
         }
     }
 
@@ -925,6 +927,149 @@ mod tests {
         .await;
         assert_eq!(c.stop_due_at(), None);
         assert!(!log.take().contains(&"stop".to_string()));
+    }
+
+    // The detector and the controller together, as the live loop runs
+    // them, on a Zoom call in a browser shaped like the ones that were cut
+    // off on 2026-11-17 (see the detector's tests).
+
+    const LAUNCHER_TAB: &str = "Join from Zoom Workplace app - Zoom - Chromium";
+    const OTHER_TAB: &str = "Pull requests - Chromium";
+
+    /// What the system shows: whether Chromium has the mic, and the title
+    /// of its front tab, if it has a window at all.
+    fn look(mic: bool, front_tab: Option<&str>) -> Snapshot {
+        let streams = if mic {
+            vec![MicStream {
+                id: 115,
+                app_name: "Chromium input".into(),
+                binary: "chromium".into(),
+                node_name: "Chromium input".into(),
+                media_name: "RecordStream".into(),
+                pid: Some(42010),
+            }]
+        } else {
+            Vec::new()
+        };
+        let windows = front_tab
+            .map(|title| Window {
+                class: "chromium".into(),
+                title: title.into(),
+                pid: Some(42000),
+            })
+            .into_iter()
+            .collect();
+        Snapshot {
+            streams,
+            windows: Some(windows),
+        }
+    }
+
+    /// The live loop's part between two looks: evaluate every two seconds
+    /// from `from` up to `to` (seconds after `t0`) and act on each event.
+    async fn live(
+        d: &mut Detector,
+        c: &mut Controller<FakeNotifier, FakeControl>,
+        snapshot: &Snapshot,
+        meeting_active: bool,
+        t0: Instant,
+        from: u64,
+        to: u64,
+    ) {
+        let activity = Activity {
+            meeting_active,
+            dictating: false,
+        };
+        for at in (from..to).step_by(2) {
+            let now = t0 + Duration::from_secs(at);
+            for event in d.evaluate(snapshot, activity, now) {
+                c.on_event(&event).await;
+            }
+        }
+    }
+
+    /// A Zoom call in Chromium recorded from the prompt: the detector and
+    /// the controller a minute into it, with the prompt's lines taken.
+    async fn recorded_zoom_call(
+        log: &Log,
+        t0: Instant,
+    ) -> (Detector, Controller<FakeNotifier, FakeControl>) {
+        let mut d = Detector::new(crate::config::MeetingDetectConfig::default());
+        let mut c = controller(log);
+        let joined = look(true, Some(LAUNCHER_TAB));
+        live(&mut d, &mut c, &joined, false, t0, 0, 10).await;
+        c.on_response((1, "record".into())).await;
+        assert_eq!(
+            log.take(),
+            vec![
+                "show 1 Record \"Zoom call\" as a meeting?\nLet the others know you're transcribing. [default,record,dismiss]",
+                "start Zoom call",
+                "close 1",
+            ]
+        );
+        live(&mut d, &mut c, &joined, true, t0, 10, 60).await;
+        (d, c)
+    }
+
+    #[tokio::test]
+    async fn another_tab_in_front_of_the_call_stops_nothing() {
+        let log = Log::default();
+        let t0 = Instant::now();
+        let (mut d, mut c) = recorded_zoom_call(&log, t0).await;
+        assert_eq!(c.call_end.mode, CallEnd::Stop);
+        // The launcher tab goes behind another one; the call has the mic.
+        let behind = look(true, Some(OTHER_TAB));
+        live(&mut d, &mut c, &behind, true, t0, 60, 1860).await;
+        assert!(log.take().is_empty(), "no notice, no stop");
+        assert_eq!(c.stop_due_at(), None);
+    }
+
+    #[tokio::test]
+    async fn a_released_mic_with_the_call_window_open_stops_nothing() {
+        let log = Log::default();
+        let t0 = Instant::now();
+        let (mut d, mut c) = recorded_zoom_call(&log, t0).await;
+        let muted = look(false, Some(LAUNCHER_TAB));
+        let unmuted = look(true, Some(LAUNCHER_TAB));
+        live(&mut d, &mut c, &muted, true, t0, 60, 660).await;
+        live(&mut d, &mut c, &unmuted, true, t0, 660, 720).await;
+        live(&mut d, &mut c, &muted, true, t0, 720, 1320).await;
+        assert!(
+            log.take().is_empty(),
+            "no notice, no stop, no second prompt"
+        );
+        assert_eq!(c.stop_due_at(), None);
+    }
+
+    #[tokio::test]
+    async fn leaving_the_call_stops_the_meeting_after_the_grace_period() {
+        let log = Log::default();
+        let t0 = Instant::now();
+        let (mut d, mut c) = recorded_zoom_call(&log, t0).await;
+        // Muted for a while, then the browser window is closed.
+        live(
+            &mut d,
+            &mut c,
+            &look(false, Some(LAUNCHER_TAB)),
+            true,
+            t0,
+            60,
+            300,
+        )
+        .await;
+        assert_eq!(c.stop_due_at(), None);
+        live(&mut d, &mut c, &look(false, None), true, t0, 300, 304).await;
+        assert_eq!(c.stop_due_at(), None, "not before the debounce");
+        live(&mut d, &mut c, &look(false, None), true, t0, 304, 310).await;
+        assert_eq!(
+            log.take(),
+            vec![
+                "show 2 Zoom (web) released the microphone. Stopping the recording in 20 s. [keep]"
+            ]
+        );
+        assert!(c.stop_due_at().is_some());
+        c.fire_due_stop(true).await;
+        assert_eq!(log.take(), vec!["close 2", "stop"]);
     }
 
     #[tokio::test]
