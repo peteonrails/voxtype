@@ -489,14 +489,24 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
 
 /// Make everything outside the card transparent: the window spans the full
 /// height of its output, and only the drawing area paints anything.
+///
+/// A user's `~/.config/gtk-4.0/gtk.css` must not be able to undo this, or a
+/// full theme installed there paints an opaque column down the screen. Two
+/// things keep it out. GTK gives every window the `background` style class,
+/// which is what themes hang the window color on, so that class is removed
+/// (GTK adds it once, when the window is created). And the rule below is
+/// registered above the user priority, since GTK's cascade puts provider
+/// priority before selector specificity and a user rule on the bare `window`
+/// node would otherwise still win. The rule only matches this window.
 fn install_transparent_background(window: &ApplicationWindow) {
+    window.remove_css_class("background");
     window.add_css_class("voxtype-osd");
     let provider = gtk4::CssProvider::new();
     provider.load_from_data("window.voxtype-osd { background: none; box-shadow: none; }");
     gtk4::style_context_add_provider_for_display(
         &WidgetExt::display(window),
         &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        gtk4::STYLE_PROVIDER_PRIORITY_USER + 1,
     );
 }
 
