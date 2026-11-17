@@ -239,15 +239,7 @@ impl Transcriber for DolphinTranscriber {
         // Filter language/region tokens from output (e.g., <zh>, <CN>, <ja>, <JP>)
         let result = filter_language_tokens(&raw_text);
 
-        tracing::info!(
-            "Dolphin transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if result.chars().count() > 50 {
-                format!("{}...", result.chars().take(50).collect::<String>())
-            } else {
-                result.clone()
-            }
-        );
+        super::log_transcription("Dolphin transcription", start, &result);
 
         Ok(result)
     }

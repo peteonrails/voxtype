@@ -115,6 +115,25 @@ pub struct TimedSegment {
     pub end_secs: f32,
 }
 
+/// Log a finished transcription: how long `what` took and how long the text
+/// is at info, the text itself only at debug.
+///
+/// The service logs to the journal at info, and the journal keeps what it is
+/// given, so a line carrying the words would hold everything a user dictates
+/// whatever they set for history, failed recordings and undelivered text.
+/// Every engine reports its result through here so none of them can log the
+/// words at the default level. `-v` or `RUST_LOG=voxtype=debug` brings the
+/// text back for a recognition report.
+pub(crate) fn log_transcription(what: &str, started: std::time::Instant, text: &str) {
+    tracing::info!(
+        "{} completed in {:.2}s ({} chars)",
+        what,
+        started.elapsed().as_secs_f32(),
+        text.chars().count()
+    );
+    tracing::debug!("{} text: {:?}", what, text);
+}
+
 /// Trait for speech-to-text implementations
 pub trait Transcriber: Send + Sync {
     /// Transcribe audio samples to text
@@ -557,6 +576,37 @@ pub fn create_transcriber_with_config_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every engine reports its result through `log_transcription`: the
+    /// timing and the length at info, the words only at debug.
+    #[test]
+    fn a_finished_transcription_is_logged_without_its_text_at_info() {
+        use crate::test_support::{own_process, LogCapture};
+        if !own_process(
+            "transcribe::tests::a_finished_transcription_is_logged_without_its_text_at_info",
+            |_| {},
+        ) {
+            return;
+        }
+        let text = "meet me at the quarry at nine";
+
+        let capture = LogCapture::at(tracing::Level::INFO);
+        log_transcription("Whisper transcription", std::time::Instant::now(), text);
+        let logged = capture.text();
+        drop(capture);
+        assert!(
+            logged.contains("Whisper transcription completed in ")
+                && logged.contains("s (29 chars)"),
+            "{logged}"
+        );
+        for word in ["meet", "quarry", "nine"] {
+            assert!(!logged.contains(word), "{logged}");
+        }
+
+        let capture = LogCapture::at(tracing::Level::DEBUG);
+        log_transcription("Whisper transcription", std::time::Instant::now(), text);
+        assert!(capture.text().contains(text), "{}", capture.text());
+    }
 
     #[test]
     fn gguf_is_chosen_by_extension_in_any_case() {

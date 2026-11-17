@@ -237,10 +237,14 @@ impl PostProcessor {
                     match apply_edit_list(text, &command_output) {
                         Ok(processed) => processed,
                         Err(e) => {
+                            // The reason can quote the dictation (a `find`
+                            // target, or the command's output inside a JSON
+                            // error), so it is logged only at debug. The
+                            // notification below still gives it.
                             tracing::warn!(
-                                "Post-process command returned an invalid edit list: {}, using original text",
-                                e
+                                "Post-process command returned an invalid edit list, using original text"
                             );
+                            tracing::debug!("Edit list rejected: {}", e);
                             let (kind, notice) = self.failure_notice(&e);
                             self.report(kind, notice);
                             return text.to_string();
@@ -662,6 +666,44 @@ mod tests {
         let processor = PostProcessor::new(&config);
 
         assert_eq!(processor.process("It are ready.").await, "It is ready.");
+    }
+
+    /// A rejected edit list names the `find` target it could not place,
+    /// and that target is the user's words. The notification says so; the
+    /// log at the default level only says the list was rejected.
+    #[tokio::test]
+    async fn a_rejected_edit_list_is_logged_without_the_dictation() {
+        use crate::test_support::{own_process, LogCapture};
+        if !own_process(
+            "output::post_process::tests::a_rejected_edit_list_is_logged_without_the_dictation",
+            |_| {},
+        ) {
+            return;
+        }
+        let mut config = make_config(
+            r#"printf '%s' '[{"find":"quarry","replace":"Quarry","reason":"name"}]'"#,
+            5000,
+        );
+        config.edit_list = true;
+        let processor = PostProcessor::new(&config).without_notices();
+        let spoken = "the quarry road past the old quarry";
+
+        let capture = LogCapture::at(tracing::Level::INFO);
+        assert_eq!(processor.process(spoken).await, spoken);
+        let logged = capture.text();
+        drop(capture);
+        assert!(logged.contains("invalid edit list"), "{logged}");
+        assert!(!logged.contains("quarry"), "{logged}");
+
+        let capture = LogCapture::at(tracing::Level::DEBUG);
+        assert_eq!(processor.process(spoken).await, spoken);
+        assert!(
+            capture
+                .text()
+                .contains(r#"find target "quarry" is ambiguous"#),
+            "{}",
+            capture.text()
+        );
     }
 
     #[tokio::test]

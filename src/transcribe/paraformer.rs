@@ -210,15 +210,7 @@ impl Transcriber for ParaformerTranscriber {
         // Paraformer outputs token IDs directly (not CTC logits)
         let result = decode_paraformer_output(&outputs, &self.tokens)?;
 
-        tracing::info!(
-            "Paraformer transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if result.chars().count() > 50 {
-                format!("{}...", result.chars().take(50).collect::<String>())
-            } else {
-                result.clone()
-            }
-        );
+        super::log_transcription("Paraformer transcription", start, &result);
 
         Ok(result)
     }

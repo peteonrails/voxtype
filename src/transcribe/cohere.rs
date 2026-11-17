@@ -540,11 +540,7 @@ impl Transcriber for CohereTranscriber {
         let text = self
             .chunking
             .transcribe(samples, |chunk| self.transcribe_samples(chunk))?;
-        tracing::info!(
-            "Cohere transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            text.chars().take(80).collect::<String>(),
-        );
+        super::log_transcription("Cohere transcription", start, &text);
         Ok(text)
     }
 }

@@ -1224,7 +1224,13 @@ async fn run_streaming_session(
                 let parsed: ServerMessage = match serde_json::from_str(&text) {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::warn!("Soniox: unparseable message ({}): {}", e, text);
+                        // The message itself is on the wire trace above:
+                        // it can carry transcribed words.
+                        tracing::warn!(
+                            "Soniox: unparseable message ({}), {} bytes",
+                            e,
+                            text.len()
+                        );
                         continue;
                     }
                 };
