@@ -87,6 +87,12 @@ build() {
     export RUSTFLAGS="${RUSTFLAGS} --remap-path-prefix=$srcdir/="
     export CFLAGS="${CFLAGS} -ffile-prefix-map=$srcdir/="
     export CXXFLAGS="${CXXFLAGS} -ffile-prefix-map=$srcdir/="
+    # makepkg exports SOURCE_DATE_EPOCH, and ggml turns its native tuning off
+    # when that is set without enabling any other instruction set, so
+    # whisper.cpp would be compiled for plain x86-64. Ask for the build
+    # machine's CPU explicitly. To build a package for other machines, set
+    # GGML_NATIVE=OFF and the GGML_* instruction sets they share.
+    export GGML_NATIVE="${GGML_NATIVE:-ON}"
 
     # Keep the source package's native CPU and Vulkan layout. Save each
     # daemon before the next feature set overwrites target/release/voxtype;
