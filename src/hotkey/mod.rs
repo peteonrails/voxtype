@@ -6,6 +6,7 @@
 //!
 //! Requires the user to be in the 'input' group.
 
+pub mod access;
 pub mod evdev_listener;
 
 use crate::config::HotkeyConfig;
