@@ -547,8 +547,12 @@ rolled back, Restore original, `segment_updated` from elsewhere), editing after
 the meeting ends, pause/resume/stop through finalizing, opening on a start
 (on, off, an older CLI, an open Settings panel), reconnecting after a drop, a
 socket that goes away and a daemon restart, the idle state and a refused start,
-no daemon at all, and auto-scroll. `--evidence` also saves a screenshot of the
-view in each state.
+no daemon at all, and auto-scroll. `follow` and `follow-live` cover the
+transcript following the audio (a click and a drag on the waveform, playback
+reaching a line that is off screen, a scroll by hand letting go, a recording
+meeting staying on its newest line) and the speaker colours on the waveform,
+the chips and the lines. `--evidence` also saves a screenshot of the view in
+each state.
 
 ```bash
 python3 omarchy-plugin/tests/test-meeting-speakers.py [--evidence DIR]

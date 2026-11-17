@@ -98,6 +98,7 @@ an older voxtype does: "unrecognized subcommand", exit 2. `status --format
 json` exits 0 only with state["daemon_running"].
 """
 import json
+import math
 import os
 import re
 import sys
@@ -914,8 +915,9 @@ def delete_meeting(state, args):
 def waveform(state, args):
     """meeting waveform M --buckets N --json: PROPOSED, not in a released
     voxtype. Peaks per bucket from the meeting's lines (loud where someone
-    speaks, -100 between). state["waveform_missing"] answers as a voxtype
-    without it; a meeting without kept audio is refused like play."""
+    speaks, rising and falling as speech does; -100 between).
+    state["waveform_missing"] answers as a voxtype without it; a meeting
+    without kept audio is refused like play."""
     if state.get("waveform_missing"):
         print("error: unrecognized subcommand 'waveform'", file=sys.stderr)
         return 2
@@ -934,8 +936,9 @@ def waveform(state, args):
     for i in range(n):
         t = i * bucket
         live = [s for s in segs if s["start_ms"] <= t < s["end_ms"] + 2000]
-        mic.append(-12.0 if any(s["source"] == "microphone" for s in live) else -100.0)
-        loop.append(-15.0 if any(s["source"] == "loopback" for s in live) else -100.0)
+        dip = 18 * abs(math.sin(i * 1.3))
+        mic.append(round(-6.0 - dip, 1) if any(s["source"] == "microphone" for s in live) else -100.0)
+        loop.append(round(-9.0 - dip, 1) if any(s["source"] == "loopback" for s in live) else -100.0)
     print(json.dumps({"meeting_id": meeting, "duration_ms": int(duration), "bucket_ms": int(bucket),
                       "mic": mic, "loopback": loop}))
     return 0

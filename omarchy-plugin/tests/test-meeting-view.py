@@ -140,6 +140,18 @@ Scenarios:
               proposed `meeting waveform`); a click plays from that point
               (`play --at`), the playhead follows, Stop audio
   waveform-missing  a voxtype without `meeting waveform`: no strip, no error
+  follow      the transcript follows the audio: a click on the waveform
+              shows and flashes the line at that time; playback reaching a
+              line that is off screen brings it into view; a wheel scroll
+              stops that and the next seek resumes it; a drag takes the
+              transcript along and plays from where it is let go; a line's
+              own time plays without moving the view. Speaker colours: each
+              call-side bar in its speaker's colour, the same as the mark on
+              that speaker's lines, neutral where no line is; the hover
+              label names the speaker; a rename, a merge and moved lines
+              keep everyone's colour
+  follow-live a recording meeting stays on its newest line while audio
+              plays from an earlier one; scrolled up, it follows the audio
   recovery-real  `meeting recover` answered by a real voxtype (REAL_VOXTYPE,
               run only when set) over a store seeded with two interrupted
               meetings: both cards, Finish and Discard for real
@@ -248,7 +260,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "recovery-real", "share", "share-unavailable", "share-old",
              "share-real", "share-real-unavailable",
              "actions", "actions-connect", "actions-old", "actions-real", "waveform-real", "waveform-real-mixed",
-             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing",
+             "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing", "follow", "follow-live",
              "title", "title-external", "title-past", "title-fail", "title-labelled", "title-real")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
@@ -459,6 +471,21 @@ def scroll_meeting():
     return m
 
 
+def follow_meeting():
+    """Forty lines, five seconds apart and four long: you, then three people
+    on the call in turn. Invented, like every line in these tests."""
+    said = ["Shall we start with the harbour survey?", "The tide tables came in on Tuesday.",
+            "Two of the buoys need new lamps.", "I can order them this week."]
+    who = [("microphone", "You"), ("loopback", "Remote 1"), ("loopback", "Remote 2"), ("loopback", "Remote 3")]
+    m = running_meeting(seconds_ago=205)
+    m["segments"] = []
+    for i in range(40):
+        s = seg(i + 1, i * 5, said[i % 4], who[i % 4][0], who[i % 4][1], i // 6)
+        s["end_ms"] = s["start_ms"] + 4000
+        m["segments"].append(s)
+    return m
+
+
 # Built per run, so a meeting's start time is relative to its own scenario.
 INITIAL = {
     "live": lambda: [running_meeting()],
@@ -520,6 +547,8 @@ INITIAL = {
     "undo-reassign": lambda: [running_meeting()],
     "seek": lambda: [running_meeting()],
     "waveform": lambda: [running_meeting()],
+    "follow": lambda: [follow_meeting()],
+    "follow-live": lambda: [scroll_meeting()],
     "waveform-missing": lambda: [running_meeting()],
     "summary-local-error": lambda: [running_meeting()],
     "summary-error-cli": lambda: [running_meeting()],
@@ -584,6 +613,9 @@ STATE = {
          "has_audio": False, "untranscribed_chunks": 1}]},
     "seek": {"play_speed": 10},
     "waveform": {"play_speed": 10},
+    # A line a second, and a line every second and a half.
+    "follow": {"play_speed": 5},
+    "follow-live": {"play_speed": 2},
     "waveform-real": {"play_speed": 10},
     "waveform-real-mixed": {"play_speed": 10},
     "waveform-missing": {"waveform_missing": True},
@@ -1133,6 +1165,23 @@ def check_calls(scenario, calls, runtime_notes=""):
             problems.append("waveform calls: " + json.dumps(waves))
     elif scenario == "waveform-missing":
         expect(meeting, [["meeting", "stop"]], "meeting commands")
+    elif scenario == "follow":
+        def play_at(secs):
+            return ["meeting", "play", MEETING_ID, "--at", secs, "--track", "mixed", "--json"]
+        def label(key, name):
+            return ["meeting", "label", MEETING_ID, key, name]
+        # Two clicks, one drag (which plays once, where it was let go), a
+        # line's own time, Stop, then the renames.
+        expect(meeting, [["meeting", "stop"], play_at("62"), play_at("152"), play_at("102"),
+                         ["meeting", "play", MEETING_ID, "--segment", "26", "--track", "mixed", "--json"],
+                         ["meeting", "play", "--stop", "--json"],
+                         label("Remote 1", "Dana"), label("Remote 2", "Priya"), label("Remote 3", "Tomas"),
+                         label("Remote 3", "Dana")], "meeting commands")
+    elif scenario == "follow-live":
+        plays = [c for c in meeting if c[:2] == ["meeting", "play"]]
+        if len(meeting) != 3 or len(plays) != 3 or plays[2] != ["meeting", "play", "--stop", "--json"] \
+                or any("--segment" not in c for c in plays[:2]):
+            problems.append("meeting commands: " + json.dumps(meeting))
     elif scenario == "seek":
         def play_from(seg):
             return ["meeting", "play", MEETING_ID, "--segment", seg, "--track", "mixed", "--json"]

@@ -154,6 +154,8 @@ Item {
           else if (s === "seek") tc.driveSeek()
           else if (s === "waveform") tc.driveWaveform()
           else if (s === "waveform-missing") tc.driveWaveformMissing()
+          else if (s === "follow") tc.driveFollow()
+          else if (s === "follow-live") tc.driveFollowLive()
           else if (s === "waveform-real") tc.driveWaveformReal()
           else if (s === "waveform-real-mixed") tc.driveWaveformRealMixed()
           else if (s === "recovery-old") tc.driveRecoveryOld()
@@ -2426,6 +2428,303 @@ Item {
       click(find(lineItem(0), "lineSeek"), "line 1's time")
       waitFor(function() { return playing(0) && !playing(2) }, "moved to line 1", 5000)
       click(find(view(), "transportStop"), "Stop")
+      waitFor(function() { return !shown(find(view(), "transportStop")) }, "stopped")
+    }
+
+    // All of line i is inside the transcript's viewport.
+    function lineInView(i) {
+      var lv = find(view(), "transcriptList")
+      var item = lv.itemAtIndex(i)
+      if (!item) return false
+      var top = item.y - lv.contentY
+      return top >= 0 && top + item.height <= lv.height
+    }
+
+    // The row being heard, or -1.
+    function playingRow() { var id = view().playingSegId; return id < 0 ? -1 : feed().rowIndex(id) }
+
+    // A whole pixel of the strip inside the second that starts at `seconds`.
+    function stripX(seconds) {
+      var strip = find(view(), "waveformArea")
+      return Math.ceil((seconds + 0.2) * 1000 / view().waveform.durationMs * strip.width)
+    }
+
+    function findAll(item, name, out) {
+      out = out || []
+      if (!item) return out
+      if (item.objectName === name) out.push(item)
+      var kids = item.children || []
+      for (var i = 0; i < kids.length; i++) findAll(kids[i], name, out)
+      return out
+    }
+
+    // The colour mark on a line of `speaker` that is on screen now, as
+    // "#rrggbb": a colour read from an item is a live view of its property,
+    // and these are kept to compare with later.
+    function markColor(speaker) {
+      var lv = find(view(), "transcriptList")
+      for (var i = 0; i < lv.count; i++) {
+        var item = lv.itemAtIndex(i)
+        if (item && feed().segments.get(i).speaker === speaker) return String(find(item, "lineSpeakerMark").color)
+      }
+      check(false, "no line of " + speaker + " on screen")
+    }
+
+    // As drawn: compared at eight bits a channel.
+    function sameColor(a, b) { return String(a) === String(b) }
+
+    function hoverStrip(x, y) {
+      var strip = find(view(), "waveformArea")
+      mouseMove(strip, Math.max(1, x - 6), y)
+      wait(80)
+      mouseMove(strip, x, y)
+      waitFor(function() { return shown(find(view(), "waveformHoverTime")) }, "hover label")
+      wait(60)
+    }
+
+    function wheelToTop(lv) {
+      for (var i = 0; i < 300 && !lv.atYBeginning; i++) {
+        mouseWheel(lv, lv.width / 2, lv.height / 2, 0, 240)
+        wait(30)
+      }
+      waitFor(function() { return !lv.moving && !lv.flicking }, "wheel settled")
+      wait(200)
+      check(lv.atYBeginning, "wheeled to the top")
+    }
+
+    // A dark theme and a light one with a blue accent, whatever the host's.
+    function paint(dark) {
+      var theme = view().theme
+      theme.bg = dark ? "#1a1b26" : "#faf4ed"
+      theme.fg = dark ? "#c0caf5" : "#575279"
+      theme.accent = theme.border = dark ? "#7aa2f7" : "#286983"
+      wait(100)
+    }
+
+    function driveFollow() {
+      openView()
+      var lv = null
+      waitFor(function() { lv = find(view(), "transcriptList"); return lv && lv.count === 40 }, "40 lines")
+      paint(true)
+      click(find(view(), "stopButton"), "Stop")
+      waitFor(function() { return txt("meetingState") === "Ended" }, "Ended", 5000)
+      waitFor(function() { return shown(find(view(), "waveform")) }, "the waveform", 6000)
+      var strip = find(view(), "waveformArea")
+      waitFor(function() { return strip.width > 100 }, "the strip laid out")
+      wait(200)
+      var pane = find(view(), "transcriptPane")
+      var wf = find(view(), "waveform")
+      var mid = strip.height / 2
+      waitFor(function() { return lv.atYEnd }, "opens on the last line")
+      check(!lineInView(12), "line 13 starts off screen")
+
+      // A click on the waveform: the line at that time, centred and flashed.
+      hoverStrip(stripX(62), mid)
+      mouseClick(strip, stripX(62), mid)
+      waitFor(function() { return lineInView(12) }, "the click shows line 13")
+      check(pane.flashSegId === 13, "and flashes it: " + pane.flashSegId)
+      var item = lv.itemAtIndex(12)
+      var off = Math.abs(item.y + item.height / 2 - lv.contentY - lv.height / 2)
+      check(off < item.height, "centred: " + off + " px from the middle")
+      var y0 = lv.contentY
+      check(lineInView(15) && !lineInView(22), "lines 15 and 16 on screen, line 23 not")
+      waitFor(function() { return shown(find(view(), "transportStop")) && playingRow() >= 12 }, "and plays from there")
+      shot("clicked")
+
+      // The lines after it are on screen already: nothing moves for them.
+      waitFor(function() { return playingRow() >= 14 }, "on to line 15", 4000)
+      check(playingRow() > 14 || Math.abs(lv.contentY - y0) < 1, "a line in view, with the next, moves nothing: " + y0 + " -> " + lv.contentY)
+
+      // A line a second at this speed. One that is off screen when playback
+      // reaches it is brought into view.
+      waitFor(function() { var r = playingRow(); return r >= 22 && lineInView(r) && lineInView(r + 1) },
+              "followed to line 23, the next line showing too", 15000)
+      check(lv.contentY > y0 + 1, "the list moved: " + y0 + " -> " + lv.contentY)
+      check(!shown(find(view(), "jumpToLatest")), "no Jump to latest over the lines being read along")
+      mouseMove(find(view(), "transportStop"), 4, 4)
+      shot("followed")
+
+      // Scrolling by hand lets go of the audio.
+      wheelToTop(lv)
+      check(!pane.followAudio, "a wheel scroll stops the following")
+      check(shown(find(view(), "jumpToLatest")), "Jump to latest is back once the user scrolls")
+      var y = lv.contentY
+      var at = playingRow()
+      waitFor(function() { return playingRow() >= at + 3 }, "playback goes on", 8000)
+      check(Math.abs(lv.contentY - y) < 1, "the list stays where the user put it: " + y + " -> " + lv.contentY)
+      check(!lineInView(playingRow()), "though the line being heard is off screen")
+
+      // A new seek takes it up again.
+      mouseClick(strip, stripX(152), mid)
+      waitFor(function() { return lineInView(30) && pane.followAudio }, "a seek shows its line and follows again")
+      check(pane.flashSegId === 31, "flashed: " + pane.flashSegId)
+      check(!lineInView(36), "line 37 is off screen for now")
+      waitFor(function() { var r = playingRow(); return r >= 36 && lineInView(r) }, "followed to line 37", 15000)
+
+      // A drag: the transcript goes along, and nothing plays until it is let go.
+      mousePress(strip, stripX(22), mid)
+      waitFor(function() { return lineInView(4) && pane.flashSegId === 5 }, "the press shows line 5")
+      // Held there for longer than a line lasts: the audio does not pull
+      // the list back while the user is steering it.
+      var before = playingRow()
+      waitFor(function() { return playingRow() > before }, "playback goes on meanwhile", 4000)
+      check(lineInView(4), "the list stays on the pressed line")
+      mouseMove(strip, stripX(50), mid, -1, Qt.LeftButton)
+      mouseMove(strip, stripX(102), mid, -1, Qt.LeftButton)
+      waitFor(function() { return lineInView(20) && pane.flashSegId === 21 }, "the drag shows line 21")
+      check(playingRow() > 30, "still playing where it was: row " + playingRow())
+      mouseRelease(strip, stripX(102), mid)
+      waitFor(function() { var r = playingRow(); return r >= 20 && r <= 22 }, "let go: plays from there", 4000)
+
+      // A line's own time plays from it and leaves the view alone, even
+      // for a line only partly on screen.
+      lv.positionViewAtIndex(25, ListView.End)
+      wait(60)
+      lv.contentY -= lv.itemAtIndex(25).height - 12
+      wait(60)
+      check(!lineInView(25) && lineInView(24), "line 26 is cut off at the bottom edge")
+      var y2 = lv.contentY
+      mouseClick(find(lv.itemAtIndex(25), "lineSeek"), 6, 6)
+      waitFor(function() { return playingRow() === 25 }, "plays from line 26", 4000)
+      wait(200)
+      check(Math.abs(lv.contentY - y2) < 1, "the list stays where it is: " + y2 + " -> " + lv.contentY)
+      check(pane.followAudio, "and the audio is followed from there")
+      waitFor(function() { var r = playingRow(); return r > 25 && lineInView(r) }, "on to the next line, into view", 6000)
+      check(lv.contentY > y2 + 1, "which moved the list")
+
+      click(find(view(), "transportStop"), "Stop audio")
+      waitFor(function() { return !shown(find(view(), "waveformPlayhead")) }, "stopped")
+
+      // ---- speaker colours
+      var theme = view().theme
+      var bars = findAll(wf, "waveformCallBar")
+      check(bars.length === 160 && wf.callSpeakers.length === 160, "a speaker per bar: " + bars.length + " " + wf.callSpeakers.length)
+      // Line 6 (0:25 to 0:29) is Remote 1, line 7 Remote 2, line 8 Remote 3.
+      var b1 = wf.bucketAt(stripX(26)), b2 = wf.bucketAt(stripX(31)), b3 = wf.bucketAt(stripX(36))
+      check(wf.callSpeakers[b1] === "Remote 1" && wf.callSpeakers[b2] === "Remote 2" && wf.callSpeakers[b3] === "Remote 3",
+            "whose bar: " + wf.callSpeakers[b1] + ", " + wf.callSpeakers[b2] + ", " + wf.callSpeakers[b3])
+      lv.positionViewAtIndex(6, ListView.Center)
+      wait(100)
+      var c1 = markColor("Remote 1"), c2 = markColor("Remote 2"), c3 = markColor("Remote 3")
+      check(sameColor(bars[b1].color, c1) && sameColor(bars[b2].color, c2) && sameColor(bars[b3].color, c3),
+            "a bar has the colour of its speaker's lines")
+      check(!sameColor(c1, c2) && !sameColor(c2, c3) && !sameColor(c1, c3), "three colours for three speakers")
+      check(sameColor(markColor("You"), theme.accent), "you are the accent")
+      check(!sameColor(c1, theme.accent) && !sameColor(c2, theme.accent) && !sameColor(c3, theme.accent), "and nobody else is")
+      check(sameColor(findAll(wf, "waveformMicBar")[b1].color, theme.accent), "your side stays the accent")
+      // Only you speak in the first four seconds: the call is neutral there.
+      var b0 = wf.bucketAt(stripX(2))
+      check(wf.callSpeakers[b0] === "" && sameColor(bars[b0].color, theme.fg), "no line, the neutral colour")
+      check(wf.micSpeakers[b0] === "You", "your line on your side")
+      // The chip, the name and the mark agree.
+      check(sameColor(find(view(), "speakerChip_1").tint, c1), "the chip has it too")
+
+      // The hover label: the time and, below the middle, who is on the call.
+      hoverStrip(stripX(26), strip.height - 4)
+      check(txt("waveformHoverTime") === "0:26", "hover time: " + txt("waveformHoverTime"))
+      check(shown(find(view(), "waveformHoverSpeaker")) && txt("waveformHoverSpeaker") === "Remote 1", "hover speaker: " + txt("waveformHoverSpeaker"))
+      hoverStrip(stripX(26), 4)
+      check(!shown(find(view(), "waveformHoverSpeaker")), "nobody on your side then")
+      hoverStrip(stripX(21), 4)
+      check(txt("waveformHoverSpeaker") === "You", "above the middle, you: " + txt("waveformHoverSpeaker"))
+      hoverStrip(stripX(2), strip.height - 4)
+      check(!shown(find(view(), "waveformHoverSpeaker")), "no line, no speaker")
+      mouseMove(view(), -40, -40)
+
+      // A rename keeps the colour everywhere.
+      rename(1, "Dana")
+      waitFor(function() { return String(feed().displayName("Remote 1")) === "Dana" }, "renamed")
+      rename(2, "Priya")
+      waitFor(function() { return String(feed().displayName("Remote 2")) === "Priya" }, "renamed")
+      rename(3, "Tomas")
+      waitFor(function() { return String(feed().displayName("Remote 3")) === "Tomas" }, "renamed")
+      wait(200)
+      check(sameColor(markColor("Remote 1"), c1) && sameColor(bars[b1].color, c1), "Dana keeps Remote 1's colour")
+      check(sameColor(markColor("Remote 3"), c3) && sameColor(bars[b3].color, c3), "Tomas keeps Remote 3's")
+      lv.positionViewAtBeginning()
+      hoverStrip(stripX(26), strip.height - 4)
+      check(txt("waveformHoverSpeaker") === "Dana", "the hover has the new name: " + txt("waveformHoverSpeaker"))
+      shot("hover")
+      mouseMove(view(), -40, -40)
+      shot("dark")
+
+      // A light theme: other colours, made from it, and still one each.
+      paint(false)
+      var light = markColor("Remote 1")
+      check(!sameColor(light, c1) && sameColor(bars[b1].color, light), "the colours follow the theme")
+      check(sameColor(markColor("You"), theme.accent), "you are the new accent")
+      shot("light")
+      hoverStrip(stripX(31), strip.height - 4)
+      check(txt("waveformHoverSpeaker") === "Priya", "hover: " + txt("waveformHoverSpeaker"))
+      shot("light-hover")
+      mouseMove(view(), -40, -40)
+      c1 = light
+      lv.positionViewAtIndex(6, ListView.Center)
+      wait(100)
+
+      // Moved lines: nobody's colour changes, even with a speaker emptied.
+      var slot2 = feed().speakerSlot("Remote 2"), slot3 = feed().speakerSlot("Remote 3")
+      for (var i = 0; i < 40; i++) if (i % 4 === 2) feed().applyReassign(i + 1, "Remote 3")
+      check(chips().join() === "You,Dana,Tomas", "Priya has no lines left: " + chips().join())
+      check(feed().speakerSlot("Remote 3") === slot3, "Tomas keeps his slot")
+      feed().applyReassign(4, "Guest")
+      check(feed().speakerSlot("Guest") !== slot2 && feed().speakerSlot("Guest") !== slot3 && feed().speakerSlot("Guest") >= 0,
+            "a new speaker does not take Priya's colour: " + feed().speakerSlot("Guest"))
+      feed().applyReassign(3, "Remote 2")
+      check(feed().speakerSlot("Remote 2") === slot2, "and Priya comes back in her own")
+      waitFor(function() { return wf.callSpeakers[b2] === "Remote 3" }, "the waveform follows the move")
+      check(sameColor(bars[b2].color, markColor("Remote 3")), "in the colour of the speaker the line went to")
+
+      // Two speakers given one name are one speaker, in the first one's colour.
+      rename(chips().indexOf("Tomas"), "Dana")
+      waitFor(function() { return chips().indexOf("Tomas") === -1 }, "merged: " + chips().join())
+      wait(200)
+      check(sameColor(bars[b3].color, c1) && sameColor(bars[b1].color, c1), "merged speakers share the first one's colour")
+      check(sameColor(markColor("Remote 3"), c1), "on the lines too")
+    }
+
+    function driveFollowLive() {
+      openView()
+      var lv = null
+      waitFor(function() { lv = find(view(), "transcriptList"); return lv && lv.count === 40 }, "40 lines")
+      waitFor(function() { return lv.atYEnd }, "on the newest line")
+      wait(200)
+      var pane = find(view(), "transcriptPane")
+      var first = 0
+      while (first < 40 && !lineInView(first)) first++
+      check(first > 0 && first < 39, "the first line on screen: " + first)
+      mouseClick(find(lv.itemAtIndex(first), "lineSeek"), 6, 6)
+      waitFor(function() { return playingRow() === first }, "playing from a line on screen")
+
+      // New lines push the line being heard off the top. The list stays on
+      // the newest line: a recording meeting is not pulled back to the audio.
+      var more = []
+      for (var n = 0; n < 6; n++)
+        more.push(seg(41 + n, 125 + n * 3, "Another line, long enough to wrap onto a second line in the narrow view.",
+                      n % 2 === 0 ? "microphone" : "loopback", n % 2 === 0 ? "You" : "Remote", 4))
+      ctl({ cmd: "segments", chunk_id: 4, segments: more })
+      waitFor(function() { return lv.count === 46 && lv.atYEnd }, "on the newest line still")
+      waitFor(function() { var r = playingRow(); return r > first && !lineInView(r) }, "playback moves on, off screen", 12000)
+      wait(300)
+      check(lv.atYEnd && lv.follow, "stays on the newest line: follow " + lv.follow)
+      check(!shown(find(view(), "jumpToLatest")), "nothing to jump to")
+      ctl({ cmd: "segments", chunk_id: 5, segments: [seg(47, 144, "And one more.", "microphone", "You", 5)] })
+      waitFor(function() { return lv.count === 47 && lv.atYEnd }, "and keeps following new lines")
+      shot("live")
+
+      // Scrolled up, the newest line is let go of, and so is the audio,
+      // until a line is played from: then the audio is followed.
+      wheelToTop(lv)
+      check(!lv.follow && !pane.followAudio, "scrolled up: nothing is followed")
+      mouseClick(find(lv.itemAtIndex(1), "lineSeek"), 6, 6)
+      waitFor(function() { return playingRow() === 1 }, "playing from line 2")
+      check(pane.followAudio, "the audio is followed again")
+      var y = lv.contentY
+      var below = 2
+      while (lineInView(below)) below++
+      waitFor(function() { var r = playingRow(); return r >= below && lineInView(r) }, "followed below the fold", 25000)
+      check(lv.contentY > y + 1 && !lv.atYEnd && !lv.follow, "by moving to that line, not to the newest")
+      click(find(view(), "transportStop"), "Stop audio")
       waitFor(function() { return !shown(find(view(), "transportStop")) }, "stopped")
     }
 
