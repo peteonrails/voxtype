@@ -6,6 +6,8 @@
 //! group" apart from "in the group, but this session predates it" matters:
 //! the second user already ran `usermod` and only needs to log out.
 
+use std::path::{Path, PathBuf};
+
 use crate::error::HotkeyError;
 
 /// Where the user stands with respect to the `input` group.
@@ -84,11 +86,16 @@ pub fn no_keyboard_error(denied: Option<&str>, status: InputGroupStatus) -> Hotk
 }
 
 /// Title and body for the desktop notification that tells the user the
-/// built-in hotkey is not working and how to fix it. `None` for errors that
+/// built-in hotkey could not start and how to fix it. `None` for errors that
 /// already stop the daemon or are configuration mistakes reported elsewhere.
+///
+/// The title says "built-in": someone who binds `voxtype record toggle` in
+/// their compositor and is not in the `input` group has a working hotkey,
+/// and the body tells them how to turn this one off.
 pub fn startup_failure_notification(err: &HotkeyError) -> Option<(&'static str, String)> {
-    const ALTERNATIVE: &str = "Or bind `voxtype record toggle` in your compositor \
-                               and set [hotkey] enabled = false.";
+    const ALTERNATIVE: &str = "If you bind `voxtype record toggle` in your compositor \
+                               instead, set [hotkey] enabled = false (or start with \
+                               --no-hotkey) to turn the built-in hotkey off and silence this.";
     let body = match err {
         HotkeyError::DeviceAccess(_) => format!(
             "Permission denied reading keyboards in /dev/input. \
@@ -111,7 +118,52 @@ pub fn startup_failure_notification(err: &HotkeyError) -> Option<(&'static str, 
         ),
         HotkeyError::UnknownKey(_) | HotkeyError::Evdev(_) => return None,
     };
-    Some(("Voxtype: hotkey not working", body))
+    Some(("Voxtype: built-in hotkey unavailable", body))
+}
+
+/// Marker under the state directory holding the cause last notified, so the
+/// notice is shown once per install rather than on every daemon start. The
+/// same scheme as the doctor's startup summary, kept across reboots.
+pub fn notice_marker_path() -> PathBuf {
+    crate::config::Config::state_dir().join("hotkey-unavailable-notified")
+}
+
+/// The cause of `err` as stored in the marker. A different cause (not in
+/// the group, then in it but not logged out) has a different fix, so it
+/// notifies again.
+fn failure_key(err: &HotkeyError) -> &'static str {
+    match err {
+        HotkeyError::DeviceAccess(_) => "not-in-input-group",
+        HotkeyError::InputGroupInactive(_) => "input-group-inactive",
+        HotkeyError::DeviceDenied(_) => "device-denied",
+        HotkeyError::NoKeyboard => "no-keyboard",
+        HotkeyError::UnknownKey(_) | HotkeyError::Evdev(_) => "other",
+    }
+}
+
+/// [`startup_failure_notification`] for a listener that failed to start,
+/// unless `marker` says this cause was already notified. Records the cause
+/// when it returns a notice.
+pub fn notify_once(err: &HotkeyError, marker: &Path) -> Option<(&'static str, String)> {
+    let notice = startup_failure_notification(err)?;
+    let key = failure_key(err);
+    let previous = std::fs::read_to_string(marker).ok();
+    if previous.as_deref().map(str::trim) == Some(key) {
+        return None;
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(marker, key) {
+        tracing::debug!("Could not write {:?}: {}", marker, e);
+    }
+    Some(notice)
+}
+
+/// The listener opened a keyboard: forget the notice, so a later breakage
+/// is reported again.
+pub fn clear_notice(marker: &Path) {
+    let _ = std::fs::remove_file(marker);
 }
 
 #[cfg(test)]
@@ -198,6 +250,8 @@ mod tests {
         assert!(body.contains("log out"));
         assert!(body.contains("voxtype record toggle"));
         assert!(body.contains("[hotkey] enabled = false"));
+        assert!(body.contains("--no-hotkey"));
+        assert!(body.contains("silence this"));
 
         let (_, body) =
             startup_failure_notification(&HotkeyError::InputGroupInactive("x".into())).unwrap();
@@ -205,5 +259,63 @@ mod tests {
         assert!(!body.contains("usermod"));
 
         assert!(startup_failure_notification(&HotkeyError::UnknownKey("x".into())).is_none());
+    }
+
+    #[test]
+    fn title_does_not_claim_a_compositor_hotkey_is_broken() {
+        for err in [
+            HotkeyError::DeviceAccess("x".into()),
+            HotkeyError::InputGroupInactive("x".into()),
+            HotkeyError::DeviceDenied("x".into()),
+            HotkeyError::NoKeyboard,
+        ] {
+            let (title, _) = startup_failure_notification(&err).unwrap();
+            assert_eq!(title, "Voxtype: built-in hotkey unavailable");
+        }
+    }
+
+    #[test]
+    fn notice_is_shown_once_until_the_hotkey_works_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir
+            .path()
+            .join("voxtype")
+            .join("hotkey-unavailable-notified");
+        let denied = HotkeyError::DeviceAccess("/dev/input/event3".into());
+
+        // First failed start notifies and writes the marker.
+        assert!(notify_once(&denied, &marker).is_some());
+        assert!(marker.exists());
+        // Later starts with the same cause stay quiet.
+        assert!(notify_once(&denied, &marker).is_none());
+        assert!(notify_once(&denied, &marker).is_none());
+
+        // A successful start clears it, so a new breakage is reported.
+        clear_notice(&marker);
+        assert!(!marker.exists());
+        assert!(notify_once(&denied, &marker).is_some());
+
+        // Clearing an absent marker is fine.
+        clear_notice(&marker);
+        clear_notice(&marker);
+    }
+
+    #[test]
+    fn a_different_cause_notifies_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("hotkey-unavailable-notified");
+        assert!(notify_once(&HotkeyError::DeviceAccess("x".into()), &marker).is_some());
+        // After `usermod`, the fix changes to "log out": worth one more notice.
+        let relogin = HotkeyError::InputGroupInactive("x".into());
+        assert!(notify_once(&relogin, &marker).is_some());
+        assert!(notify_once(&relogin, &marker).is_none());
+    }
+
+    #[test]
+    fn errors_without_a_notice_leave_the_marker_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("hotkey-unavailable-notified");
+        assert!(notify_once(&HotkeyError::UnknownKey("x".into()), &marker).is_none());
+        assert!(!marker.exists());
     }
 }

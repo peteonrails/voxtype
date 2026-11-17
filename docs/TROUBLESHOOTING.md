@@ -459,14 +459,14 @@ sudo usermod -aG input $USER
 groups | grep input
 ```
 
-When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: hotkey not working" desktop notification once at startup. The notification names the cause:
+When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: built-in hotkey unavailable" desktop notification. It is shown once, not on every start, and again only if the cause changes or the built-in hotkey breaks after having worked; the daemon log has the warning on every start. The notification names the cause:
 
 - **Not in the `input` group:** run `sudo usermod -aG input $USER`, then log out and back in.
 - **In the group, but this session started before you were added:** `/etc/group` lists you, but the running daemon does not have the group yet. Log out completely and back in, or reboot. A systemd user service keeps the old groups until every session of yours has ended.
 - **In the group and still denied:** the device nodes have unusual ownership or permissions. Check `ls -l /dev/input/event*`.
 - **No keyboard found:** nothing in `/dev/input` looks like a keyboard. Plug one in and restart voxtype.
 
-If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`.
+If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`. If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
 
 ### "Failed to access /dev/input/event*"
 

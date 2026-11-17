@@ -5738,13 +5738,23 @@ impl Daemon {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
             match listener.start() {
-                Ok(rx) => Some(rx),
+                Ok(rx) => {
+                    // A keyboard opened: a later failure is news again.
+                    #[cfg(target_os = "linux")]
+                    hotkey::access::clear_notice(&hotkey::access::notice_marker_path());
+                    Some(rx)
+                }
                 Err(e) => {
                     tracing::warn!("Failed to start hotkey listener: {}\n  Until then, use 'voxtype record' commands.", e);
                     // The daemon keeps running for `voxtype record`, so
-                    // without this the hotkey just does nothing.
+                    // without this the built-in hotkey just does nothing.
+                    // Notified once per install, not on every start: people
+                    // who use compositor keybindings never needed it. The
+                    // warning above is logged every time.
                     #[cfg(target_os = "linux")]
-                    if let Some((title, body)) = hotkey::access::startup_failure_notification(&e) {
+                    if let Some((title, body)) =
+                        hotkey::access::notify_once(&e, &hotkey::access::notice_marker_path())
+                    {
                         notification::send_status(title, &body, "normal", Lifetime::Millis(15000))
                             .await;
                     }
