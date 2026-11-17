@@ -12,7 +12,9 @@ use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
@@ -36,6 +38,9 @@ pub struct WhisperTranscriber {
     /// (since whisper-rs does not currently expose the chosen language
     /// from the full() pipeline). Read via [`Transcriber::last_detected_language`].
     last_language: Mutex<Option<String>>,
+    /// Kept between transcriptions, since creating one allocates the KV
+    /// caches and compute buffers again.
+    state: Mutex<Option<WhisperState>>,
 }
 
 impl WhisperTranscriber {
@@ -104,6 +109,7 @@ impl WhisperTranscriber {
             initial_prompt: config.initial_prompt.clone(),
             active_vocabulary: Mutex::new(Vec::new()),
             last_language: Mutex::new(None),
+            state: Mutex::new(None),
         })
     }
 
@@ -180,10 +186,6 @@ impl WhisperTranscriber {
         duration_secs: f32,
         retry: bool,
     ) -> Result<String, TranscribeError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
         let vocabulary = self
             .active_vocabulary
             .lock()
@@ -192,20 +194,37 @@ impl WhisperTranscriber {
         let prompt = super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary);
         let params = self.build_params(selected_language, duration_secs, retry, prompt.as_deref());
 
-        state
-            .full(params, samples)
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        self.with_state(|state| {
+            state
+                .full(params, samples)
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
 
-        let mut text = String::new();
-        for segment in state.as_iter() {
-            text.push_str(
-                segment
-                    .to_str()
-                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
-            );
-        }
+            let mut text = String::new();
+            for segment in state.as_iter() {
+                text.push_str(
+                    segment
+                        .to_str()
+                        .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
+                );
+            }
 
-        Ok(text.trim().to_string())
+            Ok(text.trim().to_string())
+        })
+    }
+
+    fn with_state<R>(
+        &self,
+        f: impl FnOnce(&mut WhisperState) -> Result<R, TranscribeError>,
+    ) -> Result<R, TranscribeError> {
+        with_cached(
+            &self.state,
+            || {
+                self.ctx
+                    .create_state()
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))
+            },
+            f,
+        )
     }
 
     /// Select the best language from allowed languages using Whisper's language detection.
@@ -299,18 +318,12 @@ impl Transcriber for WhisperTranscriber {
             tracing::debug!("Using unconstrained language auto-detection");
             None
         } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only.
-            // The detection state is scoped to this branch so it is freed
-            // before run_full() allocates its own. Each state carries its own
-            // GPU compute buffers, so creating one up front for every request
-            // doubled per-request GPU allocations for no use (#814).
+            // Constrained auto-detection: detect from allowed set only
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
-            let mut state = self
-                .ctx
-                .create_state()
-                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+            let lang = self
+                .with_state(|state| self.select_language_from_allowed(state, samples, &allowed))?;
+            Some(lang)
         } else {
             // Single language: use it directly
             let lang = self.language.primary().to_string();
@@ -366,6 +379,28 @@ impl Transcriber for WhisperTranscriber {
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
     }
+}
+
+/// Runs `f` on the value in `slot`, creating it first if the slot is empty.
+/// A caller that finds the slot in use, as parallel eager chunks do, gets a
+/// fresh value instead of waiting. The value is dropped if `f` fails, since a
+/// failed run can leave it half-updated.
+fn with_cached<T, R>(
+    slot: &Mutex<Option<T>>,
+    create: impl FnOnce() -> Result<T, TranscribeError>,
+    f: impl FnOnce(&mut T) -> Result<R, TranscribeError>,
+) -> Result<R, TranscribeError> {
+    let Ok(mut cached) = slot.try_lock() else {
+        return f(&mut create()?);
+    };
+    if cached.is_none() {
+        *cached = Some(create()?);
+    }
+    let result = f(cached.as_mut().unwrap());
+    if result.is_err() {
+        *cached = None;
+    }
+    result
 }
 
 fn is_degenerate_transcript(text: &str) -> bool {
@@ -504,6 +539,48 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_cached_reuses_the_value() {
+        let slot = Mutex::new(None);
+        let mut created = 0;
+        for _ in 0..3 {
+            with_cached(
+                &slot,
+                || {
+                    created += 1;
+                    Ok(0)
+                },
+                |n: &mut i32| {
+                    *n += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(created, 1);
+        assert_eq!(*slot.lock().unwrap(), Some(3));
+    }
+
+    #[test]
+    fn with_cached_drops_the_value_after_an_error() {
+        let slot = Mutex::new(Some(1));
+        let result: Result<(), _> = with_cached(
+            &slot,
+            || Ok(0),
+            |_| Err(TranscribeError::InferenceFailed("failed".into())),
+        );
+        assert!(result.is_err());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn with_cached_uses_a_fresh_value_while_the_slot_is_busy() {
+        let slot = Mutex::new(Some(1));
+        let _busy = slot.lock().unwrap();
+        let value = with_cached(&slot, || Ok(7), |n: &mut i32| Ok(*n)).unwrap();
+        assert_eq!(value, 7);
+    }
 
     #[test]
     fn test_model_url() {
