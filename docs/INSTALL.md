@@ -165,6 +165,26 @@ The deb, rpm and AUR packages also install the Omarchy Settings panel at
 links it into `~/.config/omarchy/plugins` on first start, or run
 `voxtype setup omarchy`. See the user manual's "Omarchy Settings panel" section.
 
+#### Development source package
+
+For unreleased fixes, the repository includes a [`voxtype-git` PKGBUILD](https://github.com/peteonrails/voxtype/blob/dev/packaging/arch-git/README.md)
+that builds the latest `dev` branch: the Whisper CPU and Vulkan builds, an ONNX
+build that uses the system ONNX Runtime, the GGUF workers, the OSD frontends
+and, from 1.3.0, the GTK4 meetings window. It is prepared for AUR publication
+by the upstream maintainer; until it is published, build it locally from a
+repository checkout:
+
+```bash
+cd packaging/arch-git
+makepkg -si
+```
+
+This replaces the installed stable package. Development builds may contain
+regressions and require compilation on each update. The package is tuned for
+the CPU it is built on, so build it on the machine that will run it. See the
+packaging README for included engines, optional runtime dependencies, CPU
+tuning, and rebuild instructions.
+
 ### Debian / Ubuntu
 
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
