@@ -850,8 +850,8 @@ Item {
       }
 
       // A finished meeting with its audio kept: the whole meeting as a
-      // waveform, the call in its speakers' colours; a click plays from
-      // there.
+      // waveform, the call in its speakers' colours. A click plays from
+      // there, and the transcript goes to that line (and with a drag).
       WaveformPlayer {
         objectName: "waveform"
         Layout.fillWidth: true
@@ -860,7 +860,11 @@ Item {
         wave: root.waveform
         positionMs: root.playPositionMs
         feed: root.feed
-        onSeekRequested: function(ms) { root.playAtRequested(ms) }
+        onScrubbed: function(ms) { transcriptPane.scrubTo(ms) }
+        onSeekRequested: function(ms) {
+          transcriptPane.seekTo(ms)
+          root.playAtRequested(ms)
+        }
       }
 
       // Listening, paused or finalizing, between chunks.

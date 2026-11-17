@@ -10,6 +10,9 @@ import QtQuick.Controls.Basic as C
 //
 // Each speaker has one colour, on its chip, by its name on every line and on
 // the waveform (MeetingFeed.speakerSlot, MeetingTheme.speakerColor).
+//
+// While the meeting's audio plays, the list keeps the line being heard in
+// view (see followPlayback).
 Item {
   id: root
 
@@ -59,28 +62,107 @@ Item {
 
   readonly property alias list: transcript
 
-  // Show the line at `ms` (a citation or a chapter) and flash it.
+  // Show the line at `ms` (a citation or a chapter) and flash it. Someone
+  // who asks for a line wants to stay on it: the audio stops being followed.
   function jumpTo(ms) {
     var row = root.feed ? root.feed.rowAt(ms) : -1
     if (row < 0) return
-    transcript.follow = false
-    transcript.positionViewAtIndex(row, ListView.Center)
-    root.flashSegId = root.feed.segments.get(row).segId
-    flashTimer.restart()
+    root.followAudio = false
+    root.showRow(row)
   }
 
   // To one line by its id (a search result), or by time if it is gone.
   function jumpToSegment(segId, ms) {
     var row = root.feed ? root.feed.rowIndex(segId) : -1
     if (row < 0) { root.jumpTo(ms); return }
+    root.followAudio = false
+    root.showRow(row)
+  }
+
+  // The waveform pressed or dragged to `ms`: show that line. The user is
+  // steering, so the audio is not followed until the waveform is let go.
+  function scrubTo(ms) {
+    var row = root.feed ? root.feed.rowAt(ms) : -1
+    if (row < 0) return
+    root.followAudio = false
+    root.showRow(row)
+  }
+
+  // The waveform let go at `ms`, where the audio now plays from: show that
+  // line, and follow the audio from there.
+  function seekTo(ms) {
+    var row = root.feed ? root.feed.rowAt(ms) : -1
+    if (row < 0) return
+    root.hold(root.feed.segments.get(row).segId)
+    root.showRow(row)
+  }
+
+  function showRow(row) {
     transcript.follow = false
     transcript.positionViewAtIndex(row, ListView.Center)
-    root.flashSegId = segId
+    root.flashSegId = root.feed.segments.get(row).segId
     flashTimer.restart()
   }
 
   property int flashSegId: -1
   Timer { id: flashTimer; interval: 1600; onTriggered: root.flashSegId = -1 }
+
+  // ------------------------------------------------------------ following the audio
+
+  // Off once the user scrolls (or asks for a line) while audio plays; on
+  // again at the next seek and each time playback starts.
+  property bool followAudio: true
+  // The line a seek was made to. It is on screen, and the view stays where
+  // it is until playback is on that line (or the play has had time to
+  // fail): what was playing a moment before the seek is not chased.
+  property int heldSegId: -1
+  Timer { id: heldTimer; interval: 2000; onTriggered: root.heldSegId = -1 }
+  property int heardSegId: -1
+
+  function hold(segId) {
+    root.followAudio = true
+    root.heldSegId = segId
+    heldTimer.restart()
+  }
+
+  // A line's own time or ▶: it is on screen already, so nothing moves.
+  function playFrom(segId) {
+    root.hold(segId)
+    root.playRequested(segId)
+  }
+
+  // All of a row is on screen.
+  function rowInView(row) {
+    var item = transcript.itemAtIndex(row)
+    if (!item) return false
+    var top = item.y - transcript.contentY
+    return top >= 0 && top + item.height <= transcript.height
+  }
+
+  // Playback moved to another line: centre it, unless it and the line after
+  // it are all on screen already. So the list moves about once per half
+  // screen, not once per line, and what comes next can always be read.
+  function followPlayback() {
+    var was = root.heardSegId
+    root.heardSegId = root.playingSegId
+    if (root.playingSegId < 0) return
+    if (was < 0) root.followAudio = true
+    if (!root.followAudio || !root.feed) return
+    if (root.heldSegId >= 0) {
+      if (root.playingSegId === root.heldSegId) { heldTimer.stop(); return }
+      if (heldTimer.running) return
+      root.heldSegId = -1
+    }
+    // A meeting still recording stays on its newest line while it is there.
+    if (!root.ended && transcript.follow) return
+    var row = root.feed.rowIndex(root.playingSegId)
+    if (row < 0) return
+    if (root.rowInView(row) && (row + 1 >= transcript.count || root.rowInView(row + 1))) return
+    transcript.follow = false
+    transcript.positionViewAtIndex(row, ListView.Center)
+  }
+
+  onPlayingSegIdChanged: root.followPlayback()
 
   // A speaker's colour: the same on its chip, its lines and the waveform.
   function speakerColor(key) { return root.theme.speakerColor(root.feed ? root.feed.speakerSlot(key) : -2) }
@@ -279,6 +361,9 @@ Item {
         // bottom (or Jump to latest) resumes following.
         property bool follow: true
         onMovementEnded: transcript.follow = transcript.atYEnd
+        // Scrolled by hand (a wheel, a drag, a flick; never a jump made
+        // here): the audio is no longer followed.
+        onMovementStarted: root.followAudio = false
         onCountChanged: if (transcript.follow) Qt.callLater(transcript.positionViewAtEnd)
         onHeightChanged: if (transcript.follow && transcript.visible) Qt.callLater(transcript.positionViewAtEnd)
 
@@ -382,7 +467,7 @@ Item {
               anchors.fill: parent
               enabled: root.canPlay
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.playRequested(line.segId)
+              onClicked: root.playFrom(line.segId)
             }
           }
 
@@ -460,7 +545,7 @@ Item {
                   objectName: "linePlayButton"
                   visible: root.canPlay
                   text: "▶"
-                  onActivated: root.playRequested(line.segId)
+                  onActivated: root.playFrom(line.segId)
                 }
 
                 // These open a text field, so they ask for the keyboard on
@@ -579,11 +664,16 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: root.theme.lg
-        visible: !transcript.follow && transcript.count > 0
+        // Not at the end already (a jump to a late line leaves nothing to
+        // jump to), and not over the lines of a finished meeting while they
+        // are being read along with its audio.
+        visible: !transcript.follow && transcript.count > 0 && !transcript.atYEnd
+          && !(root.ended && root.followAudio && root.playingSegId >= 0)
         text: "Jump to latest"
         bordered: true
         background: root.theme.bg
         onClicked: {
+          root.followAudio = false
           transcript.follow = true
           transcript.positionViewAtEnd()
         }

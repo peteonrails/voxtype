@@ -4,7 +4,8 @@ import "MeetingSpeakers.js" as MS
 
 // The kept audio of a finished meeting as a strip: you above the middle,
 // the call below, a playhead while it plays here. Clicking plays from that
-// point (`meeting play --at`), or moves a playback already running.
+// point (`meeting play --at`), or moves a playback already running; pressing
+// and dragging says where the pointer is (`scrubbed`) on the way.
 //
 // With the transcript (`feed`), each bar of the call is in the colour of
 // whoever was speaking then, the colour that speaker has on the chips and
@@ -20,6 +21,7 @@ Item {
   // MeetingFeed, for the speakers; without it the call is one colour.
   property var feed: null
   signal seekRequested(real ms)
+  signal scrubbed(real ms)
 
   readonly property int count: root.wave ? root.wave.mic.length : 0
   readonly property real duration: root.wave ? root.wave.durationMs : 0
@@ -204,6 +206,9 @@ Item {
     anchors.fill: parent
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
-    onClicked: function(mouse) { root.seekRequested(root.msAt(mouse.x)) }
+    // Pressed or dragged: the transcript goes there. Let go: it plays.
+    onPressed: function(mouse) { root.scrubbed(root.msAt(mouse.x)) }
+    onPositionChanged: function(mouse) { if (waveMouse.pressed) root.scrubbed(root.msAt(mouse.x)) }
+    onReleased: function(mouse) { root.seekRequested(root.msAt(mouse.x)) }
   }
 }
