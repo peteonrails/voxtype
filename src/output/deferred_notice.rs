@@ -111,6 +111,19 @@ pub async fn flush() {
     crate::notification::send(&notice.title, &notice.body).await;
 }
 
+/// Whether `key` is held by the rate limiter, meaning it was reported and
+/// has not succeeded since.
+#[cfg(test)]
+pub(crate) fn reported(key: &str) -> bool {
+    with_state(|state| state.gate.last.contains_key(key))
+}
+
+/// The notices waiting for the next [`flush`].
+#[cfg(test)]
+pub(crate) fn queued() -> Vec<Notice> {
+    with_state(|state| state.pending.clone())
+}
+
 fn merge(mut notices: Vec<Notice>) -> Option<Notice> {
     match notices.len() {
         0 => None,

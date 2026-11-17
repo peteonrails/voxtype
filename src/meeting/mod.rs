@@ -267,7 +267,8 @@ impl MeetingDaemon {
                 cfg.command,
                 cfg.timeout_ms
             );
-            PostProcessor::new(cfg)
+            // No desktop notices from meeting chunks: see `without_notices`.
+            PostProcessor::new(cfg).without_notices()
         });
 
         // Create diarizer if configured
@@ -1069,7 +1070,6 @@ impl MeetingDaemon {
                         .await;
                 }
             }
-            crate::output::deferred_notice::flush().await;
             // Update context for next chunk (per source), using the last non-empty
             // segment to avoid losing useful context when a chunk ends with silence
             if let Some(last_seg) = result.segments.iter().rfind(|s| !s.text.is_empty()) {

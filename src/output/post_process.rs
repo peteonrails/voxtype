@@ -33,6 +33,8 @@ pub struct PostProcessor {
     fallback_on_empty: bool,
     edit_list: bool,
     origin: Origin,
+    /// Whether a failure queues a desktop notice. Failures are always logged.
+    notices: bool,
 }
 
 /// Where the command came from, so a notice names the setting to change.
@@ -86,6 +88,7 @@ impl PostProcessor {
             fallback_on_empty: config.fallback_on_empty,
             edit_list: config.edit_list,
             origin: Origin::Output,
+            notices: true,
         }
     }
 
@@ -96,8 +99,26 @@ impl PostProcessor {
         self
     }
 
+    /// Log failures without queuing a desktop notice for them. Meeting mode
+    /// uses this: it runs the command on every segment of every chunk, so a
+    /// failing command would notify over and over during a call, and a
+    /// notice left in the shared queue would surface on a later dictation.
+    /// Such a processor leaves the dictation rate limiter alone too.
+    pub fn without_notices(mut self) -> Self {
+        self.notices = false;
+        self
+    }
+
     fn report(&self, kind: &str, notice: Notice) {
-        deferred_notice::report(&format!("{}{kind}", self.origin.notice_source()), notice);
+        if self.notices {
+            deferred_notice::report(&format!("{}{kind}", self.origin.notice_source()), notice);
+        }
+    }
+
+    fn succeeded(&self) {
+        if self.notices {
+            deferred_notice::succeeded(&self.origin.notice_source());
+        }
     }
 
     /// The notice for a failed run, with the failure kind it is rate-limited by.
@@ -236,10 +257,10 @@ impl PostProcessor {
                     text.to_string()
                 } else if processed.is_empty() {
                     tracing::debug!("Post-process command returned empty output");
-                    deferred_notice::succeeded(&self.origin.notice_source());
+                    self.succeeded();
                     String::new()
                 } else {
-                    deferred_notice::succeeded(&self.origin.notice_source());
+                    self.succeeded();
                     tracing::debug!(
                         "Post-processed ({} -> {} chars)",
                         text.len(),
@@ -597,6 +618,30 @@ mod tests {
         assert!(n
             .body
             .contains("`edit_list = false` in [output.post_process]"));
+    }
+
+    #[tokio::test]
+    async fn without_notices_logs_but_queues_nothing() {
+        // The gate and the queue are process-wide, so each processor gets a
+        // profile name no other test uses.
+        let config = make_config("echo boom >&2; exit 3", 5000);
+        let loud = PostProcessor::new(&config).for_profile("notice-test-loud");
+        let quiet = PostProcessor::new(&config)
+            .for_profile("notice-test-quiet")
+            .without_notices();
+
+        assert_eq!(loud.process("hello").await, "hello");
+        assert_eq!(quiet.process("hello").await, "hello");
+
+        assert!(deferred_notice::reported(
+            "post_process:profile:notice-test-loud:exit"
+        ));
+        assert!(!deferred_notice::reported(
+            "post_process:profile:notice-test-quiet:exit"
+        ));
+        assert!(!deferred_notice::queued()
+            .iter()
+            .any(|n| n.body.contains("notice-test-quiet")));
     }
 
     #[tokio::test]

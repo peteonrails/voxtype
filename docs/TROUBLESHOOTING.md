@@ -1454,6 +1454,8 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence.
 
+Meeting mode never shows these notifications, so a failing command can't pop up over a call. During a meeting the failure is only logged, and the transcript keeps the original text.
+
 ### "pre_output hook failed" or "post_output hook failed"
 
 **Cause:** `pre_output_command` or `post_output_command` exited with an error. The text was still delivered, but whatever the hook does (switching a compositor submap, for example) didn't happen.
