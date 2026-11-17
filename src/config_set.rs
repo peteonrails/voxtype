@@ -346,6 +346,31 @@ pub struct SetOutcome {
     pub value: TypedValue,
     pub path: PathBuf,
     pub restart_required: bool,
+    /// Set when the write succeeded but left a feature switched on that
+    /// cannot run, with the fix. The value is still written: refusing it
+    /// would break scripts that set the key before installing the model.
+    pub warning: Option<String>,
+}
+
+/// The LARD problem a write should be warned about, if any.
+///
+/// `before` is the problem the config had before the edit. A write to one of
+/// the LARD keys always reports what is wrong. Any other write reports it only
+/// when it changed the answer (turning an engine's language to `auto`, say),
+/// so unrelated settings do not nag about it.
+fn lard_warning(
+    key: &str,
+    before: Option<crate::setup::lard::Problem>,
+    editor: &ConfigEditor,
+) -> Option<String> {
+    let after = crate::setup::lard::problem(&editor.candidate_config().ok()?)?;
+    let lard_key = matches!(key, "text.lard_disfluency" | "text.lard_model_path");
+    (lard_key || before.as_ref() != Some(&after)).then(|| after.summary())
+}
+
+/// The LARD problem of the config an editor holds, before it is edited.
+fn lard_problem(editor: &ConfigEditor) -> Option<crate::setup::lard::Problem> {
+    crate::setup::lard::problem(&editor.candidate_config().ok()?)
 }
 
 /// Look up `key` in the allowlist and reject it if its engine feature is
@@ -376,6 +401,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
             value: TypedValue::Str(raw.to_string()),
             path: written,
             restart_required: true,
+            warning: None,
         });
     }
 
@@ -392,6 +418,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
     }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
+    let lard_before = lard_problem(&editor);
     schema::apply(&mut editor, &found, &value);
     if key == "gguf.model" {
         if let Some(metadata) =
@@ -438,6 +465,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
         value,
         path: editor.path().to_path_buf(),
         restart_required: spec.restart_required,
+        warning: lard_warning(spec.key, lard_before, &editor),
     })
 }
 
@@ -449,6 +477,7 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
     let (table, field) = found.target();
 
     let mut editor = ConfigEditor::load_from_path(path)?;
+    let lard_before = lard_problem(&editor);
     editor.unset(table, field);
     editor.save()?;
 
@@ -457,6 +486,7 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
         value: TypedValue::Str(String::new()),
         path: editor.path().to_path_buf(),
         restart_required: spec.restart_required,
+        warning: lard_warning(spec.key, lard_before, &editor),
     })
 }
 
@@ -996,6 +1026,71 @@ gguf_backend = "cpu"
         let err = set_key(path.clone(), "engine", "fakeengine").unwrap_err();
         assert!(matches!(err, ConfigSetError::UnknownEngine(_)));
         assert_eq!(err.exit_code(), 2);
+    }
+
+    /// Turning LARD on with no model still writes the key (scripts set it
+    /// before installing the model) but says what is wrong and how to fix it.
+    #[test]
+    fn enabling_lard_without_a_model_warns_and_still_writes() {
+        let (_dir, path) = full_config();
+        set_key(path.clone(), "whisper.language", "en").unwrap();
+
+        // A path alone asks for nothing while the stage is off.
+        let out = set_key(
+            path.clone(),
+            "text.lard_model_path",
+            "/nonexistent/voxtype-test/lard.vxdf",
+        )
+        .unwrap();
+        assert_eq!(out.warning, None);
+
+        let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
+        assert!(reload(&path).text.lard_disfluency);
+        let warning = out.warning.expect("a missing model must be reported");
+        assert!(warning.contains("/nonexistent/voxtype-test/lard.vxdf"));
+        assert!(warning.contains("voxtype config set text.lard_disfluency false"));
+
+        // Unrelated writes do not repeat it.
+        let out = set_key(path.clone(), "hotkey.mode", "toggle").unwrap();
+        assert_eq!(out.warning, None);
+
+        // Asking again does.
+        let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
+        assert!(out.warning.is_some());
+
+        let out = set_key(path.clone(), "text.lard_disfluency", "false").unwrap();
+        assert_eq!(out.warning, None);
+    }
+
+    #[test]
+    fn lard_warning_follows_the_model_and_the_language() {
+        let (_dir, path) = full_config();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::setup::lard::SOURCE_TREE_PATH);
+        set_key(path.clone(), "whisper.language", "en").unwrap();
+        set_key(
+            path.clone(),
+            "text.lard_model_path",
+            model.to_str().unwrap(),
+        )
+        .unwrap();
+
+        // Model present, explicit English: nothing to say.
+        let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
+        assert_eq!(out.warning, None);
+
+        // A write to another key that stops the stage running is reported
+        // once, where it happens.
+        let out = set_key(path.clone(), "whisper.language", "auto").unwrap();
+        assert!(out.warning.expect("language change").contains("English"));
+        let out = set_key(path.clone(), "hotkey.mode", "toggle").unwrap();
+        assert_eq!(out.warning, None);
+
+        // Unsetting goes through the same check.
+        let out = unset_key(path.clone(), "hotkey.mode").unwrap();
+        assert_eq!(out.warning, None);
+        let out = unset_key(path.clone(), "text.lard_model_path").unwrap();
+        assert!(out.warning.expect("still not English").contains("English"));
     }
 
     #[test]
