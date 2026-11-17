@@ -242,6 +242,10 @@ impl SlidingWindowStreamingTranscriber {
 }
 
 impl Transcriber for SlidingWindowStreamingTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        self.base.set_vocabulary(terms);
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         self.base.transcribe(samples)
     }

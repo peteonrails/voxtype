@@ -10,7 +10,7 @@
 #      by a dot. AUR forbids hyphens in pkgver (they delimit pkgrel), so
 #      "v0.7.3-rc1" becomes pkgver=0.7.3.rc1. The `_upstream_ver` line below
 #      reverses the substitution for the GitHub download URLs.
-#   2. Reset `pkgrel=1`. Per CLAUDE.md, new binaries always need a fresh
+#   2. Reset `pkgrel=1`. Per AGENTS.md, new binaries always need a fresh
 #      pkgver so AUR helpers re-download instead of trusting their cache.
 #   3. Fill in `sha256sums` from the uploaded release artifacts.
 #   4. Run `makepkg --printsrcinfo > .SRCINFO`.

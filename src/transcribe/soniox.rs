@@ -89,6 +89,8 @@ pub struct SonioxTranscriber {
     /// Merged vocabulary-boost terms from `config.terms` + `config.terms_file`.
     /// Loaded once at construction so we don't hit disk per session.
     context_terms: Vec<String>,
+    /// Profile vocabulary selected for the current recording.
+    active_vocabulary: std::sync::Mutex<Vec<String>>,
     /// Lazy reqwest client for the async REST path. Built on first use
     /// via `OnceLock` so we don't pay TLS/DNS-pool init per dictation
     /// and don't allocate one for users who only use the WS realtime path.
@@ -182,6 +184,7 @@ impl SonioxTranscriber {
             config,
             api_key,
             context_terms,
+            active_vocabulary: std::sync::Mutex::new(Vec::new()),
             async_client: std::sync::OnceLock::new(),
         })
     }
@@ -200,6 +203,23 @@ impl SonioxTranscriber {
         // race with another thread is fine — we'd just drop one extra client.
         let _ = self.async_client.set(client);
         Ok(self.async_client.get().expect("just initialized"))
+    }
+
+    fn merged_context_terms(&self) -> Vec<String> {
+        let mut terms = self.context_terms.clone();
+        let mut seen: std::collections::HashSet<String> = terms.iter().cloned().collect();
+        if let Ok(active) = self.active_vocabulary.lock() {
+            for term in active
+                .iter()
+                .map(|term| term.trim())
+                .filter(|term| !term.is_empty())
+            {
+                if seen.insert(term.to_string()) {
+                    terms.push(term.to_string());
+                }
+            }
+        }
+        terms
     }
 
     fn init_frame(&self) -> String {
@@ -231,11 +251,12 @@ impl SonioxTranscriber {
         {
             ctx_obj.insert("text".to_string(), serde_json::Value::String(text.clone()));
         }
-        if !self.context_terms.is_empty() {
+        let context_terms = self.merged_context_terms();
+        if !context_terms.is_empty() {
             ctx_obj.insert(
                 "terms".to_string(),
                 serde_json::Value::Array(
-                    self.context_terms
+                    context_terms
                         .iter()
                         .map(|t| serde_json::Value::String(t.clone()))
                         .collect(),
@@ -414,6 +435,15 @@ impl Reconciler {
                         text: delta,
                         segment_id: SEGMENT_ID,
                     });
+                } else if !self.typed_partial.is_empty() {
+                    // The provisional tail is now final even though Soniox
+                    // supplied no new characters. Emit an empty Final so the
+                    // output pipeline can apply final-only vocabulary
+                    // correction without touching provisional text earlier.
+                    out.events.push(StreamingEvent::Final {
+                        text: String::new(),
+                        segment_id: SEGMENT_ID,
+                    });
                 }
                 self.typed_partial.clear();
             } else if self.typed_partial.starts_with(&final_text) {
@@ -473,6 +503,13 @@ impl Reconciler {
 }
 
 impl Transcriber for SonioxTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     /// Run a one-shot transcription.
     ///
     /// **Runtime requirement:** when called from inside an existing tokio
@@ -755,11 +792,12 @@ impl SonioxTranscriber {
         {
             ctx_obj.insert("text".to_string(), serde_json::Value::String(text.clone()));
         }
-        if !self.context_terms.is_empty() {
+        let context_terms = self.merged_context_terms();
+        if !context_terms.is_empty() {
             ctx_obj.insert(
                 "terms".to_string(),
                 serde_json::Value::Array(
-                    self.context_terms
+                    context_terms
                         .iter()
                         .map(|t| serde_json::Value::String(t.clone()))
                         .collect(),
@@ -1272,6 +1310,20 @@ mod tests {
     }
 
     #[test]
+    fn init_frame_merges_profile_vocabulary_with_configured_terms() {
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.terms = Some(vec!["Configured".into(), "Voxtype".into()]);
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        t.set_vocabulary(&["Voxtype".into(), "PipeWire".into()]);
+
+        let frame: serde_json::Value = serde_json::from_str(&t.init_frame()).unwrap();
+        assert_eq!(
+            frame["context"]["terms"],
+            serde_json::json!(["Configured", "Voxtype", "PipeWire"])
+        );
+    }
+
+    #[test]
     fn init_frame_omits_context_when_no_text_or_terms() {
         let cfg = cfg_with_key(Some("k"));
         let t = SonioxTranscriber::new(cfg).unwrap();
@@ -1440,6 +1492,46 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn reconciler_final_deltas_keep_separators_through_default_cleanup() {
+        use crate::output::streaming::StreamingSession;
+        use crate::output::TextOutput;
+        struct Sink;
+        #[async_trait::async_trait]
+        impl TextOutput for Sink {
+            async fn output(&self, _: &str) -> Result<(), crate::error::OutputError> {
+                Ok(())
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &'static str {
+                "soniox-contract-test"
+            }
+        }
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(Sink)];
+        let tp = crate::text::TextProcessor::new(&crate::config::TextConfig::default());
+        let mut reconciler = Reconciler::default();
+        let mut session = StreamingSession::new();
+        for raw in [
+            r#"{"tokens":[{"text":"hello","is_final":true}]}"#,
+            r#"{"tokens":[{"text":" world","is_final":true}]}"#,
+        ] {
+            let message: ServerMessage = serde_json::from_str(raw).unwrap();
+            for event in reconciler.process(&message, false).events {
+                match event {
+                    StreamingEvent::Final { text, .. } => session
+                        .commit_segment(&chain, &text, Some((&tp, None)), None, None)
+                        .await
+                        .unwrap(),
+                    other => panic!("expected final delta, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(session.finalized_text(), "hello world");
+        assert_eq!(session.typed_chars(), 11);
+    }
+
     #[test]
     fn reconciler_initial_partial_emits_full_delta() {
         let mut r = Reconciler::default();
@@ -1485,12 +1577,13 @@ mod tests {
     }
 
     #[test]
-    fn reconciler_final_equals_typed_partial_emits_nothing() {
+    fn reconciler_final_equals_typed_partial_emits_empty_final() {
         let mut r = Reconciler::default();
         r.process(&msg(vec![("hello", false)], false), true);
-        // Server finalizes exactly what was typed: no delta to type.
+        // Server finalizes exactly what was typed: no delta to type, but the
+        // output pipeline still needs a finalization boundary for cleanup.
         let out = r.process(&msg(vec![("hello", true)], false), true);
-        assert!(out.events.is_empty());
+        assert_eq!(extract(&out.events), vec![("Final", String::new())]);
         assert_eq!(r.typed_partial, "");
     }
 

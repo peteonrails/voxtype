@@ -77,6 +77,215 @@
 
             <!-- v0.7.x Era Posts -->
 
+            <article class="news-article" id="v121">
+                <div class="article-meta">
+                    <time datetime="2026-11-10">November 10, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.2.1: Omarchy Settings Panel in the Packages, Smaller AUR Downloads</h2>
+                <div class="article-body">
+                    <p>Voxtype 1.2.1 packages the Omarchy Settings panel, cuts the AUR <code>voxtype-bin</code> download to the variants your machine uses, and replaces "rebuild with --features" with install hints that fit how you installed voxtype. AUR <code>voxtype-bin</code> users move straight from 1.1.1 to 1.2.1, so the <a href="#v120">1.2.0 changes</a> arrive with this release too.</p>
+
+                    <h3>Omarchy Settings panel ships with voxtype</h3>
+                    <p>The deb, rpm and AUR packages now install the Settings panel at <code>/usr/share/voxtype/omarchy-plugin/io.voxtype.settings</code>. On Omarchy, the daemon links it into <code>~/.config/omarchy/plugins</code> the first time it starts and enables it. The link points at the packaged copy, so the panel upgrades with voxtype, and the QML lives under a versioned path so Omarchy loads the new panel instead of a cached one.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup omarchy            # link it now
+voxtype setup omarchy --status   # linked, copy, linked-stale, ...
+voxtype setup omarchy --replace  # swap a hand-installed copy for the packaged one</code></pre>
+                    </div>
+                    <p>Voxtype never replaces a copy you installed with <code>omarchy plugin add</code> and never re-adds a panel you removed. If you installed the panel by hand before 1.2.1, the daemon tells you once, with a desktop notification, how to switch. Newer copies show a Switch banner with a <strong>Not now</strong> that is remembered. Opt out of the automatic link with:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[omarchy]
+link_settings_plugin = false</code></pre>
+                    </div>
+                    <p><strong>Why use it:</strong> the panel now arrives with the package and stays in step with the daemon it configures.</p>
+
+                    <h3>The panel tells you when it cannot run voxtype</h3>
+                    <p>If the panel cannot start the voxtype binary, it now says which binary and why, instead of showing settings from the last time it worked. Opening it from the tray's "Model update available" item re-reads everything. The tray's <strong>Settings</strong> item opens the panel when it is installed.</p>
+
+                    <h3>AUR voxtype-bin downloads only what you use</h3>
+                    <p><code>voxtype-bin</code> picks variants when it builds: the CPU build for your processor, the baseline build, Vulkan, and whatever <code>/usr/bin/voxtype</code> runs now. That is about 170 MB instead of 914 MB. Add a variant with:</p>
+                    <div class="code-block">
+                        <pre><code>VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin</code></pre>
+                    </div>
+                    <p><code>VOXTYPE_VARIANTS=all</code> gets the old full set. If an upgrade cannot keep your backend (a clean-chroot build, for example), it says so loudly instead of switching you to the CPU quietly.</p>
+
+                    <h3>Install hints that match your install</h3>
+                    <p><code>voxtype setup model</code>, <code>setup onnx --enable</code> and the daemon's engine warning used to tell package users to rebuild with <code>--features</code>. They now print the fix for your install: <code>sudo voxtype setup onnx --enable</code>, a <code>VOXTYPE_VARIANTS</code> rebuild, or a reinstall. On a Whisper package, the Parakeet section lists the GGUF Parakeet models that binary already runs.</p>
+                    <p>GGUF upgrade offers only appear when the GGUF worker is installed, so a package without the worker no longer offers an upgrade that cannot work.</p>
+
+                    <h3>Bug fixes</h3>
+                    <ul>
+                        <li>Remote Whisper: a base URL ending in <code>/v1</code>, such as <code>https://openrouter.ai/api/v1</code>, no longer produces <code>/v1/v1/audio/transcriptions</code> (#603). Thanks to software-atelier.</li>
+                        <li>The install guide and README no longer give download commands for AppImages that are not published (#622).</li>
+                        <li>"Decoder type" is hidden for GGUF Parakeet models, which do not use it.</li>
+                        <li>Docker and CI builds retry apt during Ubuntu mirror syncs, which broke three 1.2.0 release builds.</li>
+                    </ul>
+
+                    <h3>Upgrading</h3>
+                    <p>AUR <code>voxtype-bin</code> 1.2.1 depends on <code>vulkan-icd-loader</code>, because the GGUF workers link the Vulkan loader. Downgrading to 1.1.1 removes the packaged panel; the link in <code>~/.config/omarchy/plugins</code> then points at nothing and Omarchy skips it.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="v120">
+                <div class="article-meta">
+                    <time datetime="2026-11-09">November 9, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.2.0: GGUF Models in Every Build, Model Upgrades, Text Cleanup</h2>
+                <div class="article-body">
+                    <p>Voxtype 1.2.0 runs GGUF models in every release binary: Cohere, Parakeet, Parakeet Ultra, Qwen3-ASR, GigaAM, Moonshine, SenseVoice and Nemotron. It also adds model upgrade offers for ONNX users, a rule-based dictation cleanup pipeline, a native tray with language selection, modern OSD styles, mouse-button hotkeys, and fixes for long recordings, output drivers, packaging, Settings, and macOS.</p>
+
+                    <h3>More offline GGUF speech models</h3>
+                    <p>The shared GGUF worker now supports more model architectures and keeps the selected model, backend and language consistent across the CLI, TUI and graphical Settings. Curated downloads include Qwen3-ASR 0.6B and 1.7B for multilingual dictation, GigaAM v3 for Russian, Moonshine Streaming Small for offline English inference, Moonshine Base Japanese, SenseVoice Small for Chinese, Cantonese, English, Japanese and Korean, and Nemotron 3.5 ASR for multilingual offline inference. Native streaming is not enabled in this release.</p>
+                    <p>Every GGUF in the catalog downloads from <code>models.voxtype.io</code>, and each model row in Settings links to that model's license.</p>
+                    <p><strong>Why use it:</strong> You can choose a local model that better matches your language and hardware while keeping the same Voxtype setup and configuration surfaces.</p>
+                    <p>Parakeet Ultra is also available in F16, Q8_0 and Q4_K_M. New Parakeet selections default to <code>parakeet-ultra-Q8_0.gguf</code> in every build. Existing explicit model, backend and language choices remain unchanged.</p>
+
+                    <h3>Model upgrade offers</h3>
+                    <p>Still on an ONNX Parakeet or Cohere model? Voxtype offers the GGUF version of your model, and Parakeet users also get Parakeet Ultra. Offers show up in the tray menu, the Settings panel, the Waybar tooltip, the TUI and <code>voxtype setup migrate</code>. Nothing changes until you accept.</p>
+                    <p>Accepting downloads the model, checks its sha256, switches engine and model in one validated write and restarts the daemon. If the download, switch or restart fails, <code>config.toml</code> is left exactly as it was.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup migrate
+voxtype setup migrate --accept parakeet-ultra
+voxtype setup migrate --decline
+voxtype setup migrate --cleanup</code></pre>
+                    </div>
+                    <p><strong>Why use it:</strong> GGUF models run on your GPU through Vulkan. On my RX 7800 XT, Parakeet Ultra transcribes 12 seconds of audio in 0.08 seconds.</p>
+                    <p>If you transcribe on CPU only, measure before you switch. In my tests transcribe.cpp on the CPU was slower than ONNX.</p>
+                    <p>Moving to GGUF is one way. Once you're on a GGUF model, Settings and the TUI stop listing that engine's ONNX models, and after your first successful dictation <code>voxtype setup migrate --cleanup</code> removes them. On my machine that freed 8.9 GB. The command line still accepts ONNX model names until 2.0.</p>
+                    <p>Keeping an ONNX model is fine. Voxtype 2.0 removes ONNX Runtime, so "Keep current model" tells you how to pin voxtype to the 1.x line. Your answer is stored outside <code>config.toml</code>.</p>
+
+                    <h3>Cohere GGUF on Vulkan</h3>
+                    <p>Cohere <code>.gguf</code> models can now run through <a href="https://github.com/handy-computer/transcribe.cpp">transcribe.cpp</a>. The model stays loaded between recordings when <code>on_demand_loading = false</code>, and setup offers pinned Q4_K_M and Q8_0 downloads with size, header, and SHA-256 verification.</p>
+                    <p><strong>Why use it:</strong> Intel and AMD GPU users can run Cohere through Vulkan without routing inference through ONNX Runtime.</p>
+                    <p>Download and select the tested Q4_K_M model:</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup --download --model cohere-transcribe-03-2026-Q4_K_M.gguf</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>engine = "cohere"
+
+[cohere]
+model = "cohere-transcribe-03-2026-Q4_K_M.gguf"
+gguf_backend = "vulkan"
+language = "en"
+on_demand_loading = false</code></pre>
+                    </div>
+                    <p>Both ONNX and GGUF Cohere recordings longer than 35 seconds are split near quiet boundaries before inference. Every sample is retained.</p>
+
+                    <h3>Parakeet GGUF on Vulkan</h3>
+                    <p>Parakeet TDT GGUF models now use the same isolated worker process as Cohere. Setup offers pinned F16 and Q8_0 downloads.</p>
+                    <p><strong>Why use it:</strong> You can run Parakeet TDT on a Vulkan GPU without installing the ONNX Runtime build.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup --download --model parakeet-tdt-0.6b-v3-Q8_0.gguf</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3-Q8_0.gguf"
+gguf_backend = "vulkan"</code></pre>
+                    </div>
+                    <p>The worker keeps the model loaded across recordings and restarts after a child-process failure.</p>
+                    <p>Every Linux release binary includes the GGUF client and ships with a matching worker. The Vulkan and x86_64 ONNX binaries get a Vulkan worker that falls back to the CPU when no GPU initializes. The baseline, avx2, avx512 and aarch64 binaries get a CPU worker. The deb, rpm and AUR packages now require the Vulkan loader on x86_64.</p>
+
+                    <h3>Text Cleanup</h3>
+                    <p>The cleanup pipeline can collapse phrase restarts and stutters, remove held fillers such as <code>uhhhh</code>, repair sentence breaks placed at pauses, and turn dictated quantities into forms such as <code>$25</code> and <code>3:30 p.m.</code>. Cleanup edits can be shown in the transcription notification, with deletions and replacements made visible.</p>
+                    <p><strong>Why use it:</strong> You can remove common dictation artifacts with local rules that do not generate words you did not say.</p>
+                    <p>Already have a working config? The destructive cleanup rules remain opt-in:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[text]
+collapse_restarts = true
+repair_sentence_breaks = true
+format_numbers = true</code></pre>
+                    </div>
+                    <p>Punctuation spacing now respects the language, preserves spaces before brackets in prose, and no longer glues an engine's own <code>$</code>, <code>#</code>, or <code>@</code> to the previous word.</p>
+                    <p>The TUI and graphical Settings panel expose the cleanup controls. An optional compact local disfluency model can identify additional restarts and fillers without sending dictated text to a remote service.</p>
+
+                    <h3>Native tray and language selection</h3>
+                    <p>Voxtype now provides a native StatusNotifierItem tray menu with recording controls, engine and model information, and a Language submenu. A language chosen while dictation is active is applied to the next recording rather than interrupting the current one.</p>
+                    <p><strong>Why use it:</strong> You can switch dictation languages from the desktop tray and see the active choice without opening the full settings interface.</p>
+                    <p>The tray and Quickshell surfaces use the same language and model-selection rules, so a saved choice behaves consistently across both interfaces.</p>
+
+                    <h3>Mouse-button hotkeys</h3>
+                    <p>Spare mouse buttons can be used as the evdev push-to-talk key. <code>BTN_SIDE</code>, <code>BTN_EXTRA</code>, <code>BTN_FORWARD</code>, <code>BTN_BACK</code>, <code>BTN_TASK</code>, and <code>BTN_MIDDLE</code> are supported. Primary and secondary click remain unavailable as hotkeys.</p>
+                    <p><strong>Why use it:</strong> Push-to-talk can sit under your thumb without taking a keyboard key.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[hotkey]
+key = "BTN_SIDE"</code></pre>
+                    </div>
+
+                    <h3>Long recordings</h3>
+                    <p>Parakeet now windows long audio instead of losing the transcription. Cohere splits long recordings into balanced segments and searches near each split for a quiet boundary.</p>
+                    <p><strong>Why use it:</strong> Long files complete without sending an oversized clip through a single model pass.</p>
+                    <p>Parakeet also accepts a thread count for ONNX Runtime, so you can tune longer batch transcriptions for your CPU.</p>
+
+                    <h3>Broader CPU and OpenVINO setup support</h3>
+                    <p>Linux downloads include a baseline build for older x86-64 CPUs, with runtime CPU checks that select a compatible binary and explain instruction-set failures. Packaging also checks that the baseline artifact stays inside its advertised CPU floor.</p>
+                    <p><strong>Why use it:</strong> Voxtype can run on more older Linux systems without failing at startup on an unsupported instruction.</p>
+                    <p>OpenVINO model setup can compile the downloaded model for the selected device and reports device-specific setup guidance when the required runtime library is missing.</p>
+
+                    <h3>Modern OSD styles and daemon status</h3>
+                    <p>The Quickshell OSD follows supported theme changes while it is running and adds packaged Aura, Capsule, Halo, Shell Dots and Shell Line styles alongside the expanded recipe renderer. The TUI and graphical Settings panel also show the version reported by the running daemon, which makes a stale service easier to spot after an upgrade.</p>
+                    <p><strong>Why use it:</strong> You can choose an OSD that fits your desktop, see theme changes without restarting it, and confirm that the daemon is running the version you installed.</p>
+
+                    <h3>Output, setup, and Settings fixes</h3>
+                    <ul>
+                        <li>dotool types every line of multiline text.</li>
+                        <li>ydotool is paced on KDE so modifier keys do not remain stuck.</li>
+                        <li>Setup reports the same wtype, dotool, ydotool, and clipboard chain used at runtime.</li>
+                        <li>wtype is no longer selected on KDE or GNOME Wayland, where the required protocol is unavailable.</li>
+                        <li>ModifierGuard opens input devices in parallel, reducing the pause before guarded output on systems with many devices.</li>
+                        <li>Debian and RPM packages include the man pages and <code>voxtype-configure</code> launcher.</li>
+                        <li>Settings keeps every schema section and engine choice after data crosses a QML signal boundary.</li>
+                        <li>Settings can download a GGUF model before activating it, and applies the engine, model, backend, and language together only after validation succeeds.</li>
+                    </ul>
+
+                    <h3>macOS fixes</h3>
+                    <ul>
+                        <li>F13 through F20, PrintScreen, ScrollLock, and Pause work as hotkeys.</li>
+                        <li>Typed output is retained after Fn-range hotkeys.</li>
+                        <li>Menu bar output-mode changes go through the validating config writer and no longer leave <code>config.toml</code> unreadable.</li>
+                        <li>The deployment target is pinned to the oldest advertised macOS version.</li>
+                        <li>CI uses the supported macOS 15 runner.</li>
+                    </ul>
+
+                    <h3>Other fixes</h3>
+                    <ul>
+                        <li><code>voxtype status</code> reports the backend the GGUF worker actually loaded, for example "GGUF Vulkan (transcribe.cpp)", instead of the binary's ONNX backend.</li>
+                        <li>Whisper no longer allocates an unused second GPU state for normal requests, avoiding the affected Vulkan cleanup crash.</li>
+                        <li>The Vulkan package rejects binaries containing instructions above the supported x86-64 floor.</li>
+                        <li>Linux CI clears runner disk before the largest ONNX build.</li>
+                        <li>The running daemon version is visible in the TUI and Settings panel.</li>
+                        <li>Streaming warnings only mention text processing that streaming actually bypasses.</li>
+                        <li>State-file updates are atomic.</li>
+                        <li>Release packaging stops if the baseline binary fails its instruction checks.</li>
+                        <li>Release-candidate packaging validates the exact candidate version without assuming that every candidate is RC1.</li>
+                        <li>macOS notifications cover the generic GGUF engine, and Nix tray tests use a self-contained D-Bus session configuration.</li>
+                    </ul>
+
+                    <h3>Known issues</h3>
+                    <ul>
+                        <li>Moonshine Base Japanese fails with "decode hit the context/generation cap" when it hears non-Japanese audio.</li>
+                        <li>With <code>on_demand_loading = true</code>, a broken new model surfaces at the first dictation, not at restart.</li>
+                        <li>After updating the Omarchy Settings plugin, run <code>omarchy-restart-shell</code>. A plugin rescan keeps the old panel in memory.</li>
+                    </ul>
+
+                    <h3>Contributors</h3>
+                    <p><a href="https://github.com/jacob-vincent-mink">Jacob Mink</a> built the Cohere GGUF path, including Vulkan inference, quiet-boundary splitting, resident sessions, and curated model downloads. <a href="https://github.com/crmne">Carmine Paolino</a> separated transcribe.cpp session loading from Cohere, added Parakeet GGUF and its curated downloads, and contributed matching worker packaging, package safeguards, man pages, Parakeet thread control, faster ModifierGuard discovery, and toolchain fixes. <a href="https://github.com/nick-tgcs">N</a> contributed the native tray work that became the release tray and language menu. <a href="https://github.com/OldJobobo">OldJobobo</a> contributed the OSD modernization and style work. <a href="https://github.com/peteonrails/voxtype/commit/16d83d5">Jared</a> added the extended macOS hotkeys and fixed output after Fn-range keys. <a href="https://github.com/juddey">juddey</a> co-authored the compositor-aware output setup checks.</p>
+                    <p>Models: Parakeet Ultra is <a href="https://huggingface.co/moondream/parakeet-ultra">Moondream</a>'s post-trained <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3">NVIDIA Parakeet TDT 0.6B v3</a>, CC-BY-4.0. <a href="https://huggingface.co/FunAudioLLM/SenseVoiceSmall">SenseVoice Small</a> is by FunAudioLLM under the <a href="https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE">FunASR Model License</a>. <a href="https://huggingface.co/UsefulSensors/moonshine-base-ja">Moonshine Base Japanese</a> is licensed under the <a href="https://github.com/moonshine-ai/moonshine/blob/main/LICENSE">Moonshine AI Community License</a>. Powered by Moonshine AI. GGUF conversions are by <a href="https://huggingface.co/handy-computer">handy-computer</a>.</p>
+
+                    <h3>Downloads and checksums</h3>
+                    <p>Binaries, packages, signatures and <code>SHA256SUMS.txt</code> are on the <a href="https://github.com/peteonrails/voxtype/releases/tag/v1.2.0">v1.2.0 release page</a>.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v111">
                 <div class="article-meta">
                     <time datetime="2026-10-14">October 14, 2026</time>

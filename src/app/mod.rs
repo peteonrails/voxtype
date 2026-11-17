@@ -25,6 +25,7 @@ mod info;
 #[cfg(target_os = "macos")]
 mod macos;
 mod meeting;
+mod migrate;
 mod overrides;
 mod record;
 pub(crate) mod sigpipe;

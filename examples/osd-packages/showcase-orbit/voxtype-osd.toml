@@ -1,0 +1,94 @@
+name = "showcase-orbit"
+version = "0.1.0"
+description = "Orbit frame showcase."
+palette = "omarchy"
+layout = "orb"
+
+[frame]
+background = "none"
+border = "none"
+glow = true
+halo = true
+
+[[visual.layers]]
+type = "shadow"
+source = "peak"
+color = "background"
+order = -20
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.55
+opacity = 0.92
+radius = 0.70
+
+[[visual.layers]]
+type = "background"
+source = "vad"
+color = "accent"
+order = 0
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 0.18
+radius = 84
+
+# Kept soft so loud moments tint the disc without filling it solid,
+# which would hide the ring separation.
+[[visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 2.0
+opacity = 0.22
+radius = 84
+speed = 0.8
+
+# Hero ring: thick accent stroke, breathes at rest, expands with peaks.
+[[visual.layers]]
+type = "ring"
+source = "peak"
+color = "accent"
+order = 20
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 2.6
+opacity = 1.0
+radius = 6
+base_scale = 0.25
+response_scale = 0.13
+response_curve = 0.55
+breath_scale = 0.02
+max_scale = 0.40
+speed = 1.0
+
+# Inner tracker: thin, more reactive relative to its size, and breathing
+# at a different speed so the two rings drift out of phase at rest.
+[[visual.layers]]
+type = "ring"
+source = "peak"
+color = "foreground"
+order = 30
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.8
+opacity = 0.58
+radius = 2
+base_scale = 0.17
+response_scale = 0.15
+response_curve = 0.6
+breath_scale = 0.015
+max_scale = 0.35
+speed = 1.45

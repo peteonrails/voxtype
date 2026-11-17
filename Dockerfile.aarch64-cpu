@@ -21,10 +21,15 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Make VERSION available at runtime (ARG only works during build)
 ENV VERSION=${VERSION}
 
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
 # Install build dependencies. Identical package names to the x86_64 image:
 # Ubuntu publishes the same source packages for arm64.
 # X11 and GTK deps required for rdev (hotkeys) and tray-icon crates.
-RUN apt-get update && apt-get install -y \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -39,7 +44,11 @@ RUN apt-get update && apt-get install -y \
     libappindicator3-dev \
     git \
     binutils \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup. Default target on an arm64 host is
 # aarch64-unknown-linux-gnu, which is what we want.
@@ -61,8 +70,16 @@ ENV RUSTFLAGS="-C target-cpu=neoverse-n1"
 ENV GGML_NATIVE=OFF
 
 # Build CPU-only Whisper binary
-RUN cargo build --release \
-    && cp target/release/voxtype /tmp/voxtype-aarch64-cpu
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker: aarch64 has no Vulkan worker.
+RUN cargo build --release --features gguf,cohere-gguf,parakeet-gguf \
+    && cp target/release/voxtype /tmp/voxtype-aarch64-cpu \
+    && cargo build --release -p voxtype-gguf-worker \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --run \
+        /tmp/voxtype-aarch64-cpu /tmp/voxtype-gguf-worker
 
 # Sanity check: the binary should report its version.
 RUN /tmp/voxtype-aarch64-cpu --version
@@ -70,6 +87,7 @@ RUN /tmp/voxtype-aarch64-cpu --version
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-aarch64-cpu /output/voxtype-${VERSION}-linux-aarch64-cpu \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-aarch64-cpu.gguf-worker \
     && chmod 755 /output/voxtype-${VERSION}-linux-aarch64-cpu \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

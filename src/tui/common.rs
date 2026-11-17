@@ -460,7 +460,28 @@ fn render_settings_panel(f: &mut Frame, area: Rect, rows: &[FormRowSpec]) {
         .iter()
         .map(|r| form_row_dimmed(r.focused, r.dimmed, &r.label, &r.value))
         .collect();
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Use the widget's actual wrapped heights, not logical row indices: long
+    // paths and narrow terminals can consume several terminal lines per row.
+    let mut scroll = 0;
+    if let Some(focused) = rows.iter().position(|r| r.focused) {
+        let before = Paragraph::new(lines[..focused].to_vec())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        let height = Paragraph::new(lines[focused].clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        if before + height > inner.height as usize {
+            scroll = (before + height)
+                .saturating_sub(inner.height as usize)
+                .min(before);
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 }
 
 fn render_guidance_panel(f: &mut Frame, area: Rect, lines: Vec<Line<'_>>) {

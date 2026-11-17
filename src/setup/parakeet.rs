@@ -229,7 +229,10 @@ pub fn show_status() {
 
     if available.is_empty() {
         println!("  No ONNX binaries installed.");
-        println!("\n  Install an ONNX-enabled voxtype package to use this feature.");
+        println!(
+            "\n  To use ONNX engines, {}.",
+            super::install_hint::onnx_variant_hint()
+        );
     } else {
         for backend in [
             ParakeetBackend::Avx2,
@@ -287,7 +290,8 @@ pub fn enable() -> anyhow::Result<()> {
     if available.is_empty() {
         anyhow::bail!(
             "No ONNX binaries installed.\n\
-             Install an ONNX-enabled voxtype package first."
+             To fix this, {}.",
+            super::install_hint::onnx_variant_hint()
         );
     }
 

@@ -31,11 +31,16 @@ ENV VERSION=${VERSION}
 ENV ROCM_PATH=/opt/rocm
 ENV PATH="/opt/rocm/bin:${PATH}"
 
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
 # Install build dependencies for both ORT and voxtype.
 # migraphx-dev is required so ORT's CMake find_package(migraphx) succeeds;
 # it's not pulled in by the rocm/dev-ubuntu-24.04 base image even though
 # rocm-hip-sdk and the runtime libs are.
-RUN apt-get update && apt-get install -y \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -54,6 +59,11 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     git \
     binutils \
+    libvulkan-dev \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
     python3 \
     python3-pip \
     python3-numpy \
@@ -61,7 +71,11 @@ RUN apt-get update && apt-get install -y \
     python3-flatbuffers \
     python3-packaging \
     migraphx-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -106,10 +120,20 @@ WORKDIR /build/voxtype
 # can't compile their graphs (per-engine notes in src/transcribe/*.rs and
 # Cargo.toml). Cohere is held back until an int4/FP16 model variant ships.
 RUN cargo build --release \
-        --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
+        --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization,gguf,cohere-gguf,parakeet-gguf \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-onnx-migraphx
+    && cp target/release/voxtype /tmp/voxtype-onnx-migraphx \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+# Every release binary carries the GGUF client, and every x86_64 ONNX variant
+# ships a Vulkan-capable worker (gguf_backend = "auto" falls back to the CPU
+# when no Vulkan device initializes). See scripts/verify-gguf-companion.sh.
+RUN scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-onnx-migraphx /tmp/voxtype-gguf-worker
 
 # Copy companion provider .so files. ORT computes the .so search path from
 # argv[0]'s dirname (NOT /proc/self/exe), so package.sh installs the binary
@@ -131,6 +155,7 @@ RUN echo "=== Verifying ONNX MIGraphX binary ===" \
 # Output stage: copy binary and companion .so files
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-migraphx /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx.gguf-worker \
     && cp /tmp/onnx-migraphx-libs/libonnxruntime_providers_migraphx.so /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx.libonnxruntime_providers_migraphx.so \
     && cp /tmp/onnx-migraphx-libs/libonnxruntime_providers_shared.so /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx.libonnxruntime_providers_shared.so \
     && echo "Output:" \

@@ -486,7 +486,11 @@ mod tests {
         let writer_state = state.clone();
         let daemon = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
-            std::fs::write(&writer_state, "idle\n").unwrap();
+            // Mirror the daemon's atomic write; a plain fs::write truncates
+            // first and this reader can catch the empty window.
+            let tmp = writer_state.with_extension("tmp");
+            std::fs::write(&tmp, "idle\n").unwrap();
+            std::fs::rename(&tmp, &writer_state).unwrap();
         });
 
         let cancel = dir.path().join("cancel");

@@ -26,7 +26,12 @@ ARG VERSION=1.1.0
 ARG DEBIAN_FRONTEND=noninteractive
 ENV VERSION=${VERSION}
 
-RUN apt-get update && apt-get install -y \
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -41,7 +46,11 @@ RUN apt-get update && apt-get install -y \
     libappindicator3-dev \
     git \
     binutils \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -65,12 +74,24 @@ ENV RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx51
 ENV CFLAGS="-march=x86-64-v2"
 ENV CXXFLAGS="-march=x86-64-v2"
 ENV CMAKE_TOOLCHAIN_FILE=/build/cmake/x86-64-v2-toolchain.cmake
+# transcribe-cpp-sys does not consume the whisper/ggml toolchain variables
+# above. Override the workspace's v3 default so the worker keeps this
+# variant's x86-64-v2 floor too.
+ENV TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON"
 # Lets the SIGILL banner know it is the baseline build, so it never advises
 # switching to itself.
 ENV VOXTYPE_VARIANT=baseline
 
-RUN cargo build --release \
-    && cp target/release/voxtype /tmp/voxtype-baseline
+# Every release binary carries the GGUF client (gguf, cohere-gguf,
+# parakeet-gguf) so `.gguf` catalog models route to the worker. This variant
+# ships a CPU worker; GPU GGUF on Whisper builds comes from the vulkan variant.
+RUN cargo build --release --features gguf,cohere-gguf,parakeet-gguf \
+    && cp target/release/voxtype /tmp/voxtype-baseline \
+    && cargo build --release -p voxtype-gguf-worker \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
+
+RUN scripts/verify-gguf-companion.sh --cpu-only --run \
+        /tmp/voxtype-baseline /tmp/voxtype-gguf-worker
 
 # What this can and cannot prove.
 #
@@ -91,6 +112,7 @@ RUN cargo build --release \
 # Bridge; the fixed build transcribes).
 RUN echo "=== Verifying baseline binary ===" \
     && objdump -d /tmp/voxtype-baseline > /tmp/baseline.dis \
+    && objdump -d /tmp/voxtype-gguf-worker >> /tmp/baseline.dis \
     && zmm=$(grep -c zmm /tmp/baseline.dis || true) \
     && bmi2=$(grep -cP '\t(shrx|sarx|shlx|mulx|pdep|pext|bzhi|rorx)[ \t]' /tmp/baseline.dis || true) \
     && ymm=$(grep -c ymm /tmp/baseline.dis || true) \
@@ -111,14 +133,21 @@ RUN echo "=== Verifying baseline binary ===" \
 # v3 instruction on any startup path dies here instead of on a user's
 # machine. Inference is exercised separately in CI, where a model is
 # available - this catches the load-and-dispatch paths.
-RUN apt-get update && apt-get install -y qemu-user-static && rm -rf /var/lib/apt/lists/* \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y qemu-user-static && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/* \
     && echo "=== QEMU Nehalem floor check ===" \
     && qemu-x86_64-static -cpu Nehalem /tmp/voxtype-baseline --version \
     && qemu-x86_64-static -cpu Nehalem /tmp/voxtype-baseline --help > /dev/null \
+    && qemu-x86_64-static -cpu Nehalem /tmp/voxtype-gguf-worker 2>&1 | grep -q usage \
     && echo "✓ starts on a v2-floor CPU model."
 
 CMD mkdir -p /output \
     && cp /tmp/voxtype-baseline /output/voxtype-${VERSION}-linux-x86_64-baseline \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker \
     && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-baseline \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

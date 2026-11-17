@@ -90,7 +90,7 @@ If the reported issue is actually documented expected behavior or a setup mistak
 
 ### 5. Project Fit Assessment
 
-Read `CLAUDE.md` sections on Project Principles and Non-Goals.
+Read `AGENTS.md` sections on Project Principles and Non-Goals.
 
 **Project Principles** (all work should align with these):
 1. Dead simple user experience
@@ -106,7 +106,7 @@ Read `CLAUDE.md` sections on Project Principles and Non-Goals.
 
 Also check:
 - Issues/discussions closed with decisions against similar features
-- CLAUDE.md roadmap for what's planned vs out of scope
+- AGENTS.md roadmap for what's planned vs out of scope
 
 ### 6. PR Quality Assessment (PRs only)
 
@@ -114,7 +114,7 @@ For pull requests, additionally assess:
 
 - **Linked issue**: Does it reference an issue? Is that issue valid?
 - **Scope**: Does it do exactly what the linked issue asks, or does it include scope creep?
-- **Code style**: Does it follow conventions in CLAUDE.md?
+- **Code style**: Does it follow conventions in AGENTS.md?
 - **Tests**: Are there tests for new functionality?
 - **Documentation**: Are user-facing changes documented?
 - **Breaking changes**: Does it break backwards compatibility?

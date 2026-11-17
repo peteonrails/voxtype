@@ -269,6 +269,7 @@ impl ModelManager {
     pub fn prepare_model(
         &mut self,
         model: Option<&str>,
+        vocabulary: &[String],
     ) -> Result<Option<tokio::task::JoinHandle<()>>, TranscribeError> {
         let model_name = model
             .map(|s| s.to_string())
@@ -286,6 +287,7 @@ impl ModelManager {
         // For GPU isolation, spawn subprocess early
         if self.config.gpu_isolation && self.config.effective_mode() == WhisperMode::Local {
             let transcriber = self.create_subprocess_transcriber(&model_name)?;
+            transcriber.set_vocabulary(vocabulary);
             // Store the Arc immediately so get_prepared_transcriber can retrieve it.
             // The worker spawn happens on a blocking thread; the prepared_worker
             // mutex inside SubprocessTranscriber is populated when ready.

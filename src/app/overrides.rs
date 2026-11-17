@@ -54,6 +54,12 @@ fn apply_transcribe_model(config: &mut config::Config, model: &str) {
 /// the global flag when the subcommand didn't set its own.
 pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Option<String> {
     let top_level_model = cli.model.clone();
+    if let Some(enabled) = cli.tray {
+        config.tray.enabled = enabled;
+    }
+    if let Some(enabled) = cli.omarchy_link_settings_plugin {
+        config.omarchy.link_settings_plugin = enabled;
+    }
 
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;
@@ -119,6 +125,38 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             }
         }
     }
+    if cli.gguf_model.is_some()
+        || cli.gguf_architecture.is_some()
+        || cli.gguf_language.is_some()
+        || cli.gguf_backend.is_some()
+        || cli.gguf_streaming
+    {
+        let gguf = config.gguf.get_or_insert_with(config::GgufConfig::default);
+        if let Some(model) = &cli.gguf_model {
+            gguf.model = model.clone();
+        }
+        if let Some(architecture) = &cli.gguf_architecture {
+            gguf.architecture = architecture.clone();
+        }
+        if let Some(language) = &cli.gguf_language {
+            gguf.language = language.clone();
+        }
+        if let Some(backend) = &cli.gguf_backend {
+            gguf.gguf_backend = backend.clone();
+        }
+        if cli.gguf_streaming {
+            gguf.streaming = true;
+        }
+        if let Err(message) = voxtype::model_selection::validate_gguf_choice(
+            &gguf.model,
+            &gguf.architecture,
+            &gguf.language,
+            gguf.streaming,
+        ) {
+            eprintln!("Error: {message}");
+            std::process::exit(1);
+        }
+    }
 
     // Hotkey overrides
     if let Some(ref hotkey) = cli.hotkey {
@@ -152,13 +190,21 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.initial_prompt = Some(prompt.clone());
     }
     if let Some(ref lang) = cli.language {
-        config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config.gguf.get_or_insert_with(Default::default).language = lang.clone();
+        } else {
+            config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        }
     }
     if cli.translate {
         config.whisper.translate = true;
     }
     if let Some(threads) = cli.threads {
-        config.whisper.threads = Some(threads);
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config.gguf.get_or_insert_with(Default::default).threads = Some(threads);
+        } else {
+            config.whisper.threads = Some(threads);
+        }
     }
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
@@ -170,7 +216,14 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.flash_attention = true;
     }
     if cli.on_demand_loading {
-        config.whisper.on_demand_loading = true;
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config
+                .gguf
+                .get_or_insert_with(Default::default)
+                .on_demand_loading = true;
+        } else {
+            config.whisper.on_demand_loading = true;
+        }
     }
     if let Some(ref mode) = cli.whisper_mode {
         match mode.to_lowercase().as_str() {
@@ -276,9 +329,39 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.fallback_to_clipboard,
         cli.no_fallback_to_clipboard,
     );
-    if cli.spoken_punctuation {
-        config.text.spoken_punctuation = true;
+    apply_bool_override(
+        &mut config.text.lard_disfluency,
+        cli.lard_disfluency,
+        cli.no_lard_disfluency,
+    );
+    if let Some(path) = &cli.lard_model_path {
+        config.text.lard_model_path = Some(path.clone());
     }
+    apply_bool_override(
+        &mut config.text.punctuation_casing,
+        cli.punctuation_casing,
+        cli.no_punctuation_casing,
+    );
+    apply_bool_override(
+        &mut config.text.spoken_punctuation,
+        cli.spoken_punctuation,
+        cli.no_spoken_punctuation,
+    );
+    apply_bool_override(
+        &mut config.text.collapse_restarts,
+        cli.collapse_restarts,
+        cli.no_collapse_restarts,
+    );
+    apply_bool_override(
+        &mut config.text.repair_sentence_breaks,
+        cli.repair_sentence_breaks,
+        cli.no_repair_sentence_breaks,
+    );
+    apply_bool_override(
+        &mut config.text.format_numbers,
+        cli.format_numbers,
+        cli.no_format_numbers,
+    );
     apply_bool_override(
         &mut config.text.filter_filler_words,
         cli.filter_fillers,

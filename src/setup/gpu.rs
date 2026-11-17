@@ -689,11 +689,18 @@ fn switch_backend_tiered(backend: Backend) -> anyhow::Result<()> {
     let active_bin = get_active_binary_path();
 
     if !binary_path.exists() {
+        let fix = match crate::setup::binary::Variant::from_binary_name(backend.binary_name()) {
+            Some(variant) => {
+                super::install_hint::hint(super::install_hint::Need::Variant(variant)).to_string()
+            }
+            None => "reinstall the voxtype package".to_string(),
+        };
         anyhow::bail!(
             "Backend binary not found: {}\n\
-             This package may not include the {} backend.",
+             This install does not include the {} backend. To fix this, {}.",
             binary_path.display(),
-            backend.display_name()
+            backend.display_name(),
+            fix
         );
     }
 
@@ -1379,10 +1386,17 @@ fn switch_backend_tiered_parakeet(binary_name: &str, retry_hint: &str) -> anyhow
     let active_bin = get_active_binary_path();
 
     if !binary_path.exists() {
+        let fix = match crate::setup::binary::Variant::from_binary_name(binary_name) {
+            Some(variant) => {
+                super::install_hint::hint(super::install_hint::Need::Variant(variant)).to_string()
+            }
+            None => "reinstall the voxtype package".to_string(),
+        };
         anyhow::bail!(
             "ONNX backend not found: {}\n\
-             Install the appropriate voxtype-onnx package.",
-            binary_path.display()
+             To fix this, {}.",
+            binary_path.display(),
+            fix
         );
     }
 

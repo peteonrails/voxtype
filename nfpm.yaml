@@ -15,6 +15,11 @@ contents:
     file_info:
       mode: 0755
 
+  - src: target/release/voxtype-gguf-worker
+    dst: /usr/bin/voxtype-gguf-worker
+    file_info:
+      mode: 0755
+
   - src: config/default.toml
     dst: /etc/voxtype/config.toml
     type: config|noreplace

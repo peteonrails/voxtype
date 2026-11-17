@@ -3,9 +3,7 @@
 //! Generates man pages from CLI definitions using clap_mangen.
 
 use clap::CommandFactory;
-use clap_mangen::Man;
 use std::env;
-use std::fs::{self, File};
 use std::io::Error;
 use std::path::PathBuf;
 
@@ -22,6 +20,11 @@ use std::path::PathBuf;
 mod cli;
 use cli::Cli;
 
+// Shared with `cargo xtask man`, which packaging uses to render the same
+// pages without compiling voxtype.
+#[path = "xtask/src/man.rs"]
+mod man;
+
 fn main() -> Result<(), Error> {
     // Before the man-page early return: the version must be stamped for
     // every build, not just release builds.
@@ -37,42 +40,11 @@ fn main() -> Result<(), Error> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|_| "target".to_string()));
     let man_dir = out_dir.join("man");
-    fs::create_dir_all(&man_dir)?;
-
-    let cmd = Cli::command();
-
-    // Generate main man page (voxtype.1)
-    let man = Man::new(cmd.clone());
-    let mut file = File::create(man_dir.join("voxtype.1"))?;
-    man.render(&mut file)?;
-
-    // Generate man pages for subcommands
-    for subcommand in cmd.get_subcommands() {
-        let name = subcommand.get_name();
-        if name == "help" {
-            continue;
-        }
-
-        let man = Man::new(subcommand.clone());
-        let mut file = File::create(man_dir.join(format!("voxtype-{}.1", name)))?;
-        man.render(&mut file)?;
-
-        // Generate man pages for nested subcommands (e.g., voxtype-setup-gpu)
-        for nested in subcommand.get_subcommands() {
-            let nested_name = nested.get_name();
-            if nested_name == "help" {
-                continue;
-            }
-
-            let man = Man::new(nested.clone());
-            let mut file =
-                File::create(man_dir.join(format!("voxtype-{}-{}.1", name, nested_name)))?;
-            man.render(&mut file)?;
-        }
-    }
+    man::write_man_pages(&Cli::command(), &man_dir)?;
 
     // Tell cargo to rerun if CLI definitions change
     println!("cargo:rerun-if-changed=src/cli");
+    println!("cargo:rerun-if-changed=xtask/src/man.rs");
 
     // Print location of generated man pages
     println!(

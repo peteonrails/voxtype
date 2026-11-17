@@ -1,0 +1,83 @@
+name = "showcase-bars"
+version = "0.1.0"
+description = "Wide bar-meter showcase."
+palette = "omarchy"
+layout = "wide"
+
+[frame]
+background = "background"
+border = "none"
+glow = true
+halo = false
+
+# Stable surface panel.
+[[visual.layers]]
+type = "background"
+source = "state"
+color = "surface"
+order = -10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 0.62
+radius = 12
+
+# Faint full-panel ambience that brightens with the signal.
+[[visual.layers]]
+type = "background"
+source = "rms"
+color = "accent"
+order = 0
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.25
+opacity = 0.12
+radius = 12
+
+# Focused pulse behind the bar zone only, so the flash tracks the
+# signal instead of flattening contrast across the whole panel.
+[[visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 5
+x = 0.03
+y = 0.06
+width = 0.94
+height = 0.70
+gain = 1.4
+opacity = 0.26
+radius = 10
+
+[[visual.layers]]
+type = "bars"
+source = "peak"
+color = "accent"
+order = 20
+x = 0.03
+y = 0.06
+width = 0.94
+height = 0.70
+gain = 0.9
+opacity = 1.0
+radius = 2
+mirror = true
+
+# Inset from the edges: the held-peak tick draws slightly taller than
+# the meter rail, so a flush-bottom meter would clip it.
+[[visual.layers]]
+type = "meter"
+source = "peak"
+color = "success"
+secondary_color = "foreground"
+order = 30
+x = 0.03
+y = 0.82
+width = 0.94
+height = 0.11
+opacity = 1.0
+radius = 2

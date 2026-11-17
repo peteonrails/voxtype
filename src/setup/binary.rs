@@ -867,7 +867,7 @@ pub fn compiled_features() -> Vec<&'static str> {
     let mut f = Vec::new();
     // ASR engines. Whisper is unconditional and not a Cargo feature, so
     // it never appears here; only optional engines are listed.
-    if cfg!(feature = "parakeet") {
+    if cfg!(any(feature = "parakeet", feature = "parakeet-gguf")) {
         f.push("parakeet");
     }
     if cfg!(feature = "moonshine") {
@@ -885,8 +885,11 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "omnilingual") {
         f.push("omnilingual");
     }
-    if cfg!(feature = "cohere") {
+    if cfg!(any(feature = "cohere", feature = "cohere-gguf")) {
         f.push("cohere");
+    }
+    if cfg!(feature = "gguf") {
+        f.push("gguf");
     }
     if cfg!(feature = "openvino-whisper") {
         f.push("openvino");
@@ -967,8 +970,9 @@ pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
     if !binary_path.exists() {
         anyhow::bail!(
             "Binary not found: {}\n\
-             Install the appropriate voxtype package variant.",
-            binary_path.display()
+             To fix this, {}.",
+            binary_path.display(),
+            super::install_hint::hint(super::install_hint::Need::Variant(variant))
         );
     }
 
@@ -1393,6 +1397,8 @@ mod tests {
     }
 
     #[test]
+    // running_binary_path reads /proc, which only exists on Linux.
+    #[cfg(target_os = "linux")]
     fn running_variant_reads_the_live_process_not_the_symlink() {
         // Our own pid: /proc/self/exe is the test harness, which is not a
         // packaged variant, so this must be None rather than falling back to

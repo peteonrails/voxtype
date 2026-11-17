@@ -17,6 +17,32 @@ use std::time::Duration;
 use tokio::process::Command;
 
 /// ydotool-based text output
+/// Smallest delay that keeps KWin from dropping modifier key-up events.
+const KDE_MIN_TYPE_DELAY_MS: u32 = 1;
+
+/// KDE pacing rule, matching the one eitype uses (#552).
+///
+/// With `type_delay_ms = 0`, ydotool blasts press/release pairs through
+/// uinput and KWin coalesces or drops the KEY_UP for modifiers. A stuck
+/// Shift or Super then combines with every physical keypress until ydotoold
+/// is restarted — the desktop becomes unusable, which is a far worse outcome
+/// than one millisecond per key (#538).
+///
+/// An explicit non-zero delay is the user's choice and is left alone.
+fn effective_type_delay_ms(configured_delay_ms: u32, current_desktop: Option<&str>) -> u32 {
+    let is_kde = current_desktop.is_some_and(|desktop| {
+        desktop
+            .split(':')
+            .any(|component| component.eq_ignore_ascii_case("kde"))
+    });
+
+    if is_kde && configured_delay_ms == 0 {
+        KDE_MIN_TYPE_DELAY_MS
+    } else {
+        configured_delay_ms
+    }
+}
+
 pub struct YdotoolOutput {
     /// Delay between keypresses in milliseconds
     type_delay_ms: u32,
@@ -103,12 +129,25 @@ impl TextOutput for YdotoolOutput {
         self.apply_socket_env(&mut cmd);
         cmd.arg("type");
 
-        // Always set delay explicitly (ydotool defaults to 12ms if not specified)
-        cmd.arg("--key-delay").arg(self.type_delay_ms.to_string());
+        // Always set delay explicitly (ydotool defaults to 12ms if not specified).
+        // On KDE a configured zero is raised to 1ms so KWin does not drop
+        // modifier key-up events and leave Shift or Super stuck (#538).
+        let delay = effective_type_delay_ms(
+            self.type_delay_ms,
+            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+        );
+        if delay != self.type_delay_ms {
+            tracing::debug!(
+                "ydotool: raising key delay from {}ms to {}ms on KDE to avoid stuck modifiers",
+                self.type_delay_ms,
+                delay
+            );
+        }
+        cmd.arg("--key-delay").arg(delay.to_string());
 
         // Use --key-hold only if supported (older versions silently ignore unknown flags)
         if self.supports_key_hold {
-            cmd.arg("--key-hold").arg(self.type_delay_ms.to_string());
+            cmd.arg("--key-hold").arg(delay.to_string());
         }
 
         // The -- ensures text starting with - isn't treated as an option
@@ -238,6 +277,30 @@ impl TextOutput for YdotoolOutput {
 
 #[cfg(test)]
 mod tests {
+
+    /// #538: a configured zero on KDE leaves Shift or Super stuck, which
+    /// takes the whole desktop with it until ydotoold is restarted.
+    #[test]
+    fn kde_zero_delay_is_raised() {
+        assert_eq!(effective_type_delay_ms(0, Some("KDE")), 1);
+        assert_eq!(effective_type_delay_ms(0, Some("ubuntu:KDE")), 1);
+        assert_eq!(effective_type_delay_ms(0, Some("kde")), 1);
+    }
+
+    /// An explicit delay is the user's choice, including on KDE.
+    #[test]
+    fn explicit_delay_is_never_overridden() {
+        assert_eq!(effective_type_delay_ms(5, Some("KDE")), 5);
+        assert_eq!(effective_type_delay_ms(12, Some("KDE")), 12);
+    }
+
+    /// Everywhere else keeps zero, which is faster and causes no trouble.
+    #[test]
+    fn other_desktops_keep_zero() {
+        assert_eq!(effective_type_delay_ms(0, Some("Hyprland")), 0);
+        assert_eq!(effective_type_delay_ms(0, Some("GNOME")), 0);
+        assert_eq!(effective_type_delay_ms(0, None), 0);
+    }
     use super::*;
 
     #[test]

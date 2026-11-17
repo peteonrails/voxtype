@@ -275,6 +275,10 @@ impl App {
         match self.current_section {
             Section::Engine => self.engine.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Text => self
+                .text
+                .as_ref()
+                .is_some_and(|s| s.editing.is_some() || s.model_edit.is_some()),
             Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
@@ -515,6 +519,7 @@ fn detect_missing_model() -> Option<MissingModel> {
         // Whistle's model isn't managed by voxtype's model catalog; return
         // None to avoid false "missing model" warnings in the TUI.
         config::TranscriptionEngine::Whistle => return None,
+        config::TranscriptionEngine::Gguf => return None,
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
         // OpenVINO models are stored as multi-file IR directories; skip the

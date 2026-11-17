@@ -16,8 +16,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Make VERSION available at runtime
 ENV VERSION=${VERSION}
 
+# Retry apt. Acquire::Retries covers connection errors; the loop covers a 404
+# or a size mismatch while an Ubuntu mirror is mid-sync.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-voxtype-retries
+
 # Install build dependencies including Vulkan SDK (24.04 has glslc in repos)
-RUN apt-get update && apt-get install -y \
+RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     curl \
     build-essential \
     clang \
@@ -38,7 +43,11 @@ RUN apt-get update && apt-get install -y \
     spirv-tools \
     libshaderc-dev \
     glslc \
-    && rm -rf /var/lib/apt/lists/*
+    && break; \
+    [ "$attempt" = 4 ] && exit 1; \
+    echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    rm -rf /var/lib/apt/lists/*; sleep 90; \
+    done && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -78,7 +87,11 @@ RUN cargo build --release --features gpu-vulkan \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     -vv 2>&1 | tee /tmp/build.log \
-    && cp target/release/voxtype /tmp/voxtype-vulkan
+    && cp target/release/voxtype /tmp/voxtype-vulkan \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Verify no out-of-floor instructions leaked in. The ISA floor is x86_64-v3
 # (Haswell): AVX2 + BMI1/2 + FMA, no AVX-512, no GFNI, no AVX-VNNI, and no
@@ -90,7 +103,7 @@ RUN cargo build --release --features gpu-vulkan \
 # Rust compiler's own emission via target-cpu=haswell + target-feature
 # disables above, which is what stops issue-#393-style leaks.
 RUN echo "=== Verifying Vulkan binary ISA floor (x86_64-v3 / Haswell, no SSE4a) ===" \
-    && DUMP=$(objdump -d /tmp/voxtype-vulkan) \
+    && DUMP=$(objdump -d /tmp/voxtype-vulkan; objdump -d /tmp/voxtype-gguf-worker) \
     && zmm_count=$(echo "$DUMP" | grep -c zmm || true) \
     && avx512_count=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpermi2|vpblendm|valign[dq]|vpcompress|vpexpand' || true) \
     && broadcast_count=$(echo "$DUMP" | grep -c '{1to' || true) \
@@ -111,9 +124,15 @@ RUN echo "=== Verifying Vulkan binary ISA floor (x86_64-v3 / Haswell, no SSE4a) 
        fi \
     && echo "✓ Vulkan binary is clean"
 
+# gpu-vulkan implies the GGUF client features; prove the shipped pair agrees.
+RUN scripts/verify-gguf-companion.sh --vulkan --haswell-floor --run \
+        /tmp/voxtype-vulkan /tmp/voxtype-gguf-worker
+
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-vulkan /output/voxtype-${VERSION}-linux-x86_64-vulkan \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker \
     && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-vulkan \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*-vulkan

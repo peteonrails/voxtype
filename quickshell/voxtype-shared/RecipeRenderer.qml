@@ -1,11 +1,24 @@
-// High-polish declarative voice-meter renderer for VoxType Quickshell OSD recipes.
+// Declarative voice-meter renderer for VoxType Quickshell OSD recipes.
+//
+// Each recipe layer becomes its own scene-graph item (Rectangles, Text,
+// and QtQuick.Shapes paths) instead of strokes on a software Canvas, so
+// the GPU does the drawing and a frame only updates a few numbers.
+// Static geometry (gradients, the shadow ellipse, ring circles) is never
+// re-rasterized; only the waveform and meter paths change per frame.
+//
+// One animation tick drives everything. It reads the newest audio values,
+// smooths them, and bumps `_frame`, which the layer items bind to.
 
 import QtQuick
+import QtQuick.Shapes
 
 Item {
     id: root
 
     property var style: null
+    /// False while the host window is hidden. Item.visible can't be used
+    /// for this: it stays true inside an unmapped window.
+    property bool active: true
     property var ring: []
     property string daemonState: "idle"
     property bool vad: false
@@ -14,20 +27,58 @@ Item {
     property real rms: 0.0
     property real peak: 0.0
     property int waveformColumns: 300
+    /// Unused since levels moved to a decibel scale; kept so hosts that
+    /// still set it don't fail to load.
     property real waveformGain: 10.0
     property real meterFloorDbfs: -60.0
+
+    /// Optional live meter, read once per tick instead of through the
+    /// properties above: { peak, rms, vad, peakDbfs, heldDbfs, ring }.
+    /// A host that receives audio at 100 Hz can mutate this object in
+    /// place, so frames cost no binding updates between ticks.
+    property var meter: null
+
+    /// Smoothed voice energy (0..1) for host decorations such as glows
+    /// and halos, updated on the same tick as the layers.
+    property real voiceEnergy: 0.0
+    /// A hotter mix of the same signal, used by the orb halo rings.
+    property real haloEnergy: 0.0
+    /// Voice activity eased toward 0 or 1 over about 120 ms.
+    property real voiceActivity: 0.0
+    /// Animation time in seconds, for host decorations that should move
+    /// in step with the layers (e.g. StateIcon's spinner).
+    readonly property alias phase: root._phase
+    /// Rotation in degrees for decorations that turn with the voice (the
+    /// aura frame). Integrated on the tick, so a speed change never jumps
+    /// the angle the way `phase * speed` would.
+    readonly property alias spin: root._spin
 
     property real _peak: 0.0
     property real _rms: 0.0
     property real _vad: 0.0
     property real _energy: 0.0
     property real _phase: 0.0
+    property real _spin: 0.0
+    property real _spinSpeed: 0.0
+    property real _liveFill: 0.0
+    property real _heldFill: 0.0
     property real _lastTick: Date.now()
+    /// Incremented once per tick. Bindings that read the level arrays
+    /// (mutated in place) depend on this to refresh.
+    property int _frame: 0
     property var _barLevels: []
     property var _waveLevels: []
-    // Layers sorted by order, cached so the per-frame paint loop doesn't
-    // re-slice and re-sort the recipe on every frame.
+    // Line strands: amplitude per strand, each eased at its own rate so
+    // the strands drift apart instead of moving in lockstep.
+    property var _lineLevels: [0, 0, 0]
+    // Dot slots, center-out: slot 0 is now, outer slots are slightly older.
+    property var _dotLevels: []
+    // Layers sorted by order, cached so the tick doesn't re-sort.
     property var _sortedLayers: []
+    property bool _wantsBars: false
+    property bool _wantsWave: false
+    property bool _wantsLine: false
+    property bool _wantsDots: false
 
     onStyleChanged: _rebuildLayers()
     Component.onCompleted: _rebuildLayers()
@@ -42,9 +93,25 @@ Item {
         const cfg = style && style.config ? style.config : null;
         const visual = cfg && cfg.visual ? cfg.visual : null;
         const layers = visual && visual.layers ? visual.layers : [];
-        _sortedLayers = layers.slice().sort(function(a, b) {
+        const sorted = layers.slice().sort(function(a, b) {
             return (a.order || 0) - (b.order || 0);
         });
+        let bars = false;
+        let wave = false;
+        let line = false;
+        let dots = false;
+        for (let i = 0; i < sorted.length; i++) {
+            const kind = sorted[i].type || "waveform";
+            if (kind === "bars") bars = true;
+            if (kind === "waveform") wave = true;
+            if (kind === "line") line = true;
+            if (kind === "dots") dots = true;
+        }
+        _wantsBars = bars;
+        _wantsWave = wave;
+        _wantsLine = line;
+        _wantsDots = dots;
+        _sortedLayers = sorted;
     }
 
     // Numeric layer field with an explicit-unset check. Unset tunables are
@@ -54,79 +121,15 @@ Item {
         return value === undefined || value === null ? fallback : Number(value);
     }
 
+    // StyleLoader resolves roles to QML colors (#AARRGGBB for rgba()), so
+    // the result binds straight into color properties.
     function _color(role, fallback) {
-        const value = style && style.color ? style.color(role, fallback) : (fallback || "#ffffff");
-        return _canvasColor(value);
+        if (style && style.color) return style.color(role, fallback);
+        return fallback;
     }
 
-    // StyleLoader returns QML-compatible #AARRGGBB for rgba() values so
-    // Rectangle.color bindings work. Canvas color stops/fills are CSS-like,
-    // so convert that form back before painting recipe layers.
-    function _canvasColor(value) {
-        if (typeof value !== "string") return value;
-        const str = String(value);
-        if (/^#[0-9a-fA-F]{8}$/.test(str)) {
-            const a = parseInt(str.slice(1, 3), 16) / 255;
-            const r = parseInt(str.slice(3, 5), 16);
-            const g = parseInt(str.slice(5, 7), 16);
-            const b = parseInt(str.slice(7, 9), 16);
-            return "rgba(" + r + ", " + g + ", " + b + ", " + a + ")";
-        }
-        return str;
-    }
-
-    // Parse a resolved color string into {r, g, b, a} components (0..1)
-    // for draws that need to rebuild alpha gradients (shadow). Handles
-    // #RGB, #RRGGBB, #AARRGGBB, and rgb()/rgba() strings.
-    function _colorComponents(value) {
-        const str = String(value);
-        if (str[0] === "#") {
-            const hex = str.slice(1);
-            if (hex.length === 3) {
-                return {
-                    r: parseInt(hex[0] + hex[0], 16) / 255,
-                    g: parseInt(hex[1] + hex[1], 16) / 255,
-                    b: parseInt(hex[2] + hex[2], 16) / 255,
-                    a: 1.0
-                };
-            }
-            const hasAlpha = hex.length === 8;
-            const off = hasAlpha ? 2 : 0;
-            return {
-                r: parseInt(hex.slice(off, off + 2), 16) / 255,
-                g: parseInt(hex.slice(off + 2, off + 4), 16) / 255,
-                b: parseInt(hex.slice(off + 4, off + 6), 16) / 255,
-                a: hasAlpha ? parseInt(hex.slice(0, 2), 16) / 255 : 1.0
-            };
-        }
-        const m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(str);
-        if (m) {
-            return {
-                r: Number(m[1]) / 255,
-                g: Number(m[2]) / 255,
-                b: Number(m[3]) / 255,
-                a: m[4] === undefined ? 1.0 : Number(m[4])
-            };
-        }
-        return { r: 0, g: 0, b: 0, a: 1.0 };
-    }
-
-    function _rgbaString(c, alpha) {
-        return "rgba(" + Math.round(c.r * 255) + ", " + Math.round(c.g * 255) + ", "
-            + Math.round(c.b * 255) + ", " + (c.a * alpha) + ")";
-    }
-
-    function _layerRect(layer, width, height) {
-        const lx = _num(layer.x, 0);
-        const ly = _num(layer.y, 0);
-        const lw = _num(layer.width, 1);
-        const lh = _num(layer.height, 1);
-        return {
-            x: lx <= 1 ? lx * width : lx,
-            y: ly <= 1 ? ly * height : ly,
-            w: lw <= 1 ? lw * width : lw,
-            h: lh <= 1 ? lh * height : lh
-        };
+    function _alpha(c, a) {
+        return Qt.rgba(c.r, c.g, c.b, c.a * a);
     }
 
     function _clamp(v, lo, hi) {
@@ -143,8 +146,8 @@ Item {
         return current + (target - current) * amount;
     }
 
-    function _signal(layer) {
-        const src = layer.source || "peak";
+    function _signal(spec) {
+        const src = spec.source || "peak";
         if (src === "rms") return _rms;
         if (src === "vad") return _vad;
         if (src === "state") return daemonState === "recording" ? 1.0 : 0.0;
@@ -159,9 +162,12 @@ Item {
         return _clamp((clipped - floor) / -floor, 0, 1);
     }
 
-    function _sampleRing(index, count, fallbackPhase) {
-        const r = ring || [];
-        if (r.length > 0) {
+    function _ring() {
+        return meter ? meter.ring : ring;
+    }
+
+    function _sampleRing(r, index, count, fallbackPhase) {
+        if (r && r.length > 0) {
             // Map columns onto the ring's full capacity, right-aligned, so
             // a partially filled ring reads as silence on the left instead
             // of stretching early samples across the full width (which made
@@ -170,31 +176,57 @@ Item {
             const pad = capacity - r.length;
             const start = Math.floor(index * capacity / Math.max(1, count)) - pad;
             const end = Math.max(start + 1, Math.floor((index + 1) * capacity / Math.max(1, count)) - pad);
-            let sum = 0.0;
-            let n = 0;
+            // Loudest sample in the bucket: averaging 10 ms peaks smooths
+            // away the syllable attacks that make speech read as speech.
+            let loudest = 0.0;
             for (let i = Math.max(0, start); i < Math.min(end, r.length); i++) {
-                sum += _clamp(r[i], 0, 1);
-                n++;
+                if (r[i] > loudest) loudest = r[i];
             }
-            return n > 0 ? sum / n : 0.0;
+            return _clamp(loudest, 0, 1);
         }
         const breath = 0.5 + 0.5 * Math.sin(fallbackPhase * 0.35);
         return 0.010 + breath * 0.006;
     }
 
+    // Linear peak (0..1) to a 0..1 display level on a decibel scale.
+    // Speech peaks span roughly -40..-6 dBFS, so a linear scale either
+    // flattens quiet talkers or (with gain) pins everyone else at the
+    // ceiling. -52 dBFS (room noise) maps to 0, -6 dBFS to full height.
+    function _perceptual(linear) {
+        if (!(linear > 0)) return 0.0;
+        return _clamp((20 * Math.log10(linear) + 52) / 46, 0, 1);
+    }
+
+    // True while audio frames are flowing. In every other state the last
+    // frame's values are stale and must not drive the visuals.
+    function _live() {
+        return daemonState === "recording" || daemonState === "streaming";
+    }
+
     // Per-column temporal smoothing: rise quickly, fall more slowly, which
     // reads as intentional meter inertia instead of sample-by-sample jitter.
+    // While transcribing there is no audio, so the columns ease into a
+    // slow travelling ripple that says "working" instead of freezing on
+    // the last words. Updates `levels` in place; no per-tick allocation.
     function _updateLevels(levels, count, rise, fall, dt) {
-        const next = levels.length === count ? levels.slice() : [];
-        while (next.length < count) next.push(0.0);
+        while (levels.length < count) levels.push(0.0);
+        levels.length = count;
+        const r = _ring();
+        const live = _live();
+        const working = daemonState === "transcribing";
         for (let i = 0; i < count; i++) {
-            const target = daemonState === "idle"
-                ? 0.0
-                : _sampleRing(i, count, _phase + i * 0.17);
-            const stiffness = target > next[i] ? rise : fall;
-            next[i] = _approach(next[i], target, stiffness, dt);
+            let target = 0.0;
+            if (live) {
+                target = r && r.length > 0
+                    ? _perceptual(_sampleRing(r, i, count, 0))
+                    : _sampleRing(r, i, count, _phase + i * 0.17);
+            } else if (working) {
+                const t = i / Math.max(1, count - 1);
+                target = 0.10 + 0.22 * Math.pow(0.5 + 0.5 * Math.sin(_phase * 3.2 - t * Math.PI * 4.0), 2);
+            }
+            const stiffness = target > levels[i] ? rise : fall;
+            levels[i] = _approach(levels[i], target, working ? 6.0 : stiffness, dt);
         }
-        return next;
     }
 
     function _levelAt(levels, index, count) {
@@ -207,297 +239,47 @@ Item {
         return levels[lo] * (1 - mix) + levels[hi] * mix;
     }
 
-    function _barValue(index, count) {
-        return _levelAt(_barLevels, index, count);
-    }
-
-    function _paintRounded(ctx, x, y, w, h, r) {
-        if (w <= 0 || h <= 0) return;
-        const rr = _clamp(r || 0, 0, Math.min(w, h) / 2);
-        ctx.beginPath();
-        ctx.moveTo(x + rr, y);
-        ctx.lineTo(x + w - rr, y);
-        ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-        ctx.lineTo(x + w, y + h - rr);
-        ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-        ctx.lineTo(x + rr, y + h);
-        ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-        ctx.lineTo(x, y + rr);
-        ctx.quadraticCurveTo(x, y, x + rr, y);
-        ctx.closePath();
-        ctx.fill();
-    }
-
-    function _strokeSoftLine(ctx, color, alpha, width, draw) {
-        ctx.save();
-        ctx.globalAlpha = alpha * 0.25;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = width * 4.0;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        draw();
-        ctx.stroke();
-        ctx.globalAlpha = alpha * 0.55;
-        ctx.lineWidth = width * 2.0;
-        draw();
-        ctx.stroke();
-        ctx.globalAlpha = alpha;
-        ctx.lineWidth = width;
-        draw();
-        ctx.stroke();
-        ctx.restore();
-    }
-
-    function _drawBackground(ctx, layer, rect) {
-        const signal = _signal(layer);
-        const pulse = _clamp(0.18 + signal * _num(layer.gain, 1.0) * 0.8, 0.08, 1.0);
-        const alpha = _num(layer.opacity, 0.18) * pulse;
-        const color = _color(layer.color || "accent", "#66c7ff");
-        const gradient = ctx.createLinearGradient(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
-        gradient.addColorStop(0.0, color);
-        gradient.addColorStop(0.55, _color("surface", "rgba(26, 26, 31, 0.55)"));
-        gradient.addColorStop(1.0, color);
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = gradient;
-        _paintRounded(ctx, rect.x, rect.y, rect.w, rect.h, _num(layer.radius, 12));
-        ctx.restore();
-    }
-
-    function _drawShadow(ctx, layer, rect) {
-        const signal = _signal(layer);
-        const gain = _num(layer.gain, 1.0);
-        const opacity = _num(layer.opacity, 0.9);
-        const alpha = opacity * _clamp(0.34 + signal * gain * 0.34, 0.18, 0.92);
-        const cx = rect.x + rect.w / 2;
-        const cy = rect.y + rect.h * 0.55;
-        const outer = Math.min(rect.w, rect.h) * _clamp(_num(layer.radius, 0.58), 0.25, 0.85);
-        const inner = outer * 0.08;
-        // Shadow defaults to black; a recipe can recolor it (e.g. the
-        // theme background role) for tinted backdrops.
-        const tint = _colorComponents(_color(layer.color, "#000000"));
-
-        ctx.save();
-        ctx.translate(cx, cy);
-        ctx.scale(1.08, 0.92);
-        const gradient = ctx.createRadialGradient(0, 0, inner, 0, 0, outer);
-        gradient.addColorStop(0.0, _rgbaString(tint, alpha));
-        gradient.addColorStop(0.36, _rgbaString(tint, alpha * 0.58));
-        gradient.addColorStop(0.72, _rgbaString(tint, alpha * 0.24));
-        gradient.addColorStop(1.0, _rgbaString(tint, 0.0));
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(0, 0, outer, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-    }
-
-    function _drawPulse(ctx, layer, rect) {
-        const signal = _signal(layer);
-        const speed = _num(layer.speed, 1.0);
-        const breath = 0.5 + 0.5 * Math.sin(_phase * 1.6 * speed);
-        const alpha = _num(layer.opacity, 0.24)
-            * _clamp(0.22 + signal * _num(layer.gain, 1.0) * 1.2 + breath * 0.12, 0.0, 1.0);
-        const inset = 2 + breath * 5;
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = _color(layer.color || "accent", "#66c7ff");
-        _paintRounded(
-            ctx,
-            rect.x + inset,
-            rect.y + inset,
-            rect.w - inset * 2,
-            rect.h - inset * 2,
-            _num(layer.radius, 12)
-        );
-        ctx.restore();
-    }
-
-    function _drawBars(ctx, layer, rect) {
-        const gain = _num(layer.gain, 1.0) * waveformGain;
-        const opacity = _num(layer.opacity, 1.0);
-        const radius = _num(layer.radius, 5);
-        const color = _color(layer.color || "accent", "#66c7ff");
-        const bars = Math.min(28, Math.max(12, Math.floor(rect.w / 17)));
-        const gap = Math.max(2.0, rect.w / bars * 0.24);
-        const barW = Math.max(2.0, rect.w / bars - gap);
-        const mirror = layer.mirror !== false;
-        const center = (bars - 1) / 2;
-        const breath = 0.97 + 0.03 * Math.sin(_phase * 0.85);
-        const haloColor = _color("foreground", color);
-        const baseColor = _color("accent", color);
-
-        ctx.save();
-        for (let i = 0; i < bars; i++) {
-            const position = bars <= 1 ? 0.5 : i / (bars - 1);
-            const weight = 0.72 + 0.28 * Math.cos((i - center) / Math.max(1, center) * Math.PI);
-            const sample = _barValue(i, bars);
-            const level = _clamp(sample * gain * weight * breath + _energy * 0.045, 0.028, 1.0);
-            const eased = _easeOutCubic(level);
-            const h = Math.max(3, rect.h * eased);
-            const x = rect.x + i * (barW + gap) + gap * 0.5;
-            const y = mirror ? rect.y + (rect.h - h) / 2 : rect.y + rect.h - h;
-
-            const grad = ctx.createLinearGradient(x, y, x, y + h);
-            grad.addColorStop(0.0, haloColor);
-            grad.addColorStop(0.45, color);
-            grad.addColorStop(1.0, baseColor);
-
-            ctx.globalAlpha = opacity * 0.18;
-            ctx.fillStyle = color;
-            _paintRounded(ctx, x - 1.5, y - 1.5, barW + 3, h + 3, radius + 2);
-
-            ctx.globalAlpha = opacity * (0.48 + 0.52 * position);
-            ctx.fillStyle = grad;
-            _paintRounded(ctx, x, y, barW, h, radius);
+    // Loudest of the newest `span` ring samples, `offset` samples back
+    // from the newest one, on the display (decibel) scale.
+    function _recent(offset, span) {
+        const r = _ring();
+        if (!r || r.length === 0) return 0.0;
+        const end = r.length - offset;
+        let loudest = 0.0;
+        for (let i = Math.max(0, end - span); i < Math.max(0, end); i++) {
+            if (r[i] > loudest) loudest = r[i];
         }
-        ctx.restore();
+        return _perceptual(loudest);
     }
 
-    function _drawWaveform(ctx, layer, rect) {
-        const color = _color(layer.color || "accent", "#66c7ff");
-        const opacity = _num(layer.opacity, 1.0);
-        const gain = _num(layer.gain, 1.0) * waveformGain;
-        const cols = Math.max(24, Math.min(96, Math.floor(rect.w / 5)));
-        // mirror=false anchors the envelope to the bottom edge instead of
-        // reflecting it around the vertical center.
-        const mirror = layer.mirror !== false;
-        const cy = mirror ? rect.y + rect.h / 2 : rect.y + rect.h;
-        const amp = Math.max(1, rect.h * (mirror ? 0.45 : 0.9));
+    readonly property int _dotSlots: 3
 
-        // Read the temporally smoothed wave levels once per column per
-        // frame, then apply 3-tap neighbor smoothing: ring samples hop
-        // between column buckets as history scrolls, which reads as
-        // single-column spike flicker.
-        const raw = new Array(cols);
-        for (let i = 0; i < cols; i++) {
-            raw[i] = _levelAt(_waveLevels, i, cols);
+    function _updateLine(dt) {
+        const live = _live();
+        const working = daemonState === "transcribing";
+        // Recording reads the voice; transcribing holds a calm shimmer.
+        const voice = live ? Math.max(_recent(0, 4), 0.05) : working ? 0.24 : 0.0;
+        const rates = [22.0, 11.0, 6.0];
+        for (let k = 0; k < 3; k++) {
+            const stiffness = voice > _lineLevels[k] ? rates[k] : rates[k] * 0.45;
+            _lineLevels[k] = _approach(_lineLevels[k], voice, stiffness, dt);
         }
-        const samples = new Array(cols);
-        for (let i = 0; i < cols; i++) {
-            const prev = raw[Math.max(0, i - 1)];
-            const next = raw[Math.min(cols - 1, i + 1)];
-            samples[i] = prev * 0.25 + raw[i] * 0.5 + next * 0.25;
-        }
+    }
 
-        function path() {
-            ctx.beginPath();
-            for (let i = 0; i < cols; i++) {
-                const t = cols <= 1 ? 0 : i / (cols - 1);
-                const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
-                const wave = Math.sin(_phase * 2.0 + t * Math.PI * 3.0) * 0.04;
-                const x = rect.x + t * rect.w;
-                const y = cy - (envelope + wave) * amp;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+    function _updateDots(dt) {
+        while (_dotLevels.length < _dotSlots) _dotLevels.push(0.0);
+        const live = _live();
+        const working = daemonState === "transcribing";
+        for (let d = 0; d < _dotSlots; d++) {
+            let target = 0.0;
+            if (live) {
+                // Outer dots show the voice ~70 ms later than inner ones, so
+                // each syllable ripples outward from the center.
+                target = _recent(d * 7, 5);
             }
-            if (mirror) {
-                for (let i = cols - 1; i >= 0; i--) {
-                    const t = cols <= 1 ? 0 : i / (cols - 1);
-                    const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
-                    const wave = Math.sin(_phase * 2.0 + t * Math.PI * 3.0) * 0.04;
-                    const x = rect.x + t * rect.w;
-                    const y = cy + (envelope - wave) * amp;
-                    ctx.lineTo(x, y);
-                }
-            } else {
-                ctx.lineTo(rect.x + rect.w, cy);
-                ctx.lineTo(rect.x, cy);
-            }
-            ctx.closePath();
+            const stiffness = target > _dotLevels[d] ? 24.0 : 9.0;
+            _dotLevels[d] = _approach(_dotLevels[d], target, stiffness, dt);
         }
-
-        ctx.save();
-        ctx.globalAlpha = opacity * 0.18;
-        ctx.fillStyle = color;
-        path();
-        ctx.fill();
-
-        _strokeSoftLine(ctx, color, opacity * 0.75, 1.4, function() {
-            ctx.beginPath();
-            for (let i = 0; i < cols; i++) {
-                const t = cols <= 1 ? 0 : i / (cols - 1);
-                const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
-                const x = rect.x + t * rect.w;
-                const y = cy - envelope * amp;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-        });
-        ctx.restore();
-    }
-
-    function _drawMeter(ctx, layer, rect) {
-        const liveFill = _meterFill(currentPeakDbfs);
-        const heldFill = _meterFill(heldDbfs);
-        const fill = _clamp(Math.max(liveFill, _energy * 0.08), 0, 1);
-        const opacity = _num(layer.opacity, 1.0);
-        const radius = _num(layer.radius, rect.h / 2);
-
-        ctx.save();
-        ctx.globalAlpha = opacity * 0.28;
-        ctx.fillStyle = _color("muted", "rgba(255, 255, 255, 0.25)");
-        _paintRounded(ctx, rect.x, rect.y, rect.w, rect.h, radius);
-
-        // layer.color sets the low-zone color; the mid/high stops keep
-        // the warning/error roles so hot levels still read as hot.
-        const grad = ctx.createLinearGradient(rect.x, rect.y, rect.x + rect.w, rect.y);
-        grad.addColorStop(0.0, _color(layer.color || "success", "#4dd973"));
-        grad.addColorStop(0.72, _color("warning", "#f2cc4d"));
-        grad.addColorStop(1.0, _color("error", "#f2594d"));
-        ctx.globalAlpha = opacity;
-        ctx.fillStyle = grad;
-        _paintRounded(ctx, rect.x, rect.y, rect.w * fill, rect.h, radius);
-
-        if (heldFill > 0) {
-            ctx.globalAlpha = opacity;
-            ctx.fillStyle = _color(layer.secondary_color || "foreground", "#fcfbf8");
-            _paintRounded(ctx, Math.max(rect.x, rect.x + rect.w * heldFill - 1.5), rect.y - 2, 3, rect.h + 4, 2);
-        }
-        ctx.restore();
-    }
-
-    function _drawRing(ctx, layer, rect) {
-        const signal = _signal(layer);
-        const speed = _num(layer.speed, 1.0);
-        const breath = 0.5 + 0.5 * Math.sin(_phase * 2.4 * speed);
-        const base = Math.min(rect.w, rect.h);
-        const baseScale = _num(layer.base_scale, 0.32);
-        const responseScale = _num(layer.response_scale, 0.18);
-        const responseCurve = Math.max(0.01, _num(layer.response_curve, 1.0));
-        const breathScale = _num(layer.breath_scale, 0.045);
-        const maxScale = _num(layer.max_scale, 0.46);
-        const cx = rect.x + rect.w / 2;
-        const cy = rect.y + rect.h / 2;
-        const color = _color(layer.color || "accent", "#66c7ff");
-        const opacity = _num(layer.opacity, 1.0);
-        const stroke = Math.max(2, _num(layer.radius, 3));
-        const safeRadius = Math.max(1, base / 2 - Math.max(10, stroke * 2.7));
-        const response = Math.pow(_clamp(signal * _num(layer.gain, 1.0), 0, 1), responseCurve);
-        const targetRadius = base * (baseScale + response * responseScale + breath * breathScale);
-        const radius = Math.min(safeRadius, base * maxScale, targetRadius);
-
-        ctx.save();
-        for (let pass = 0; pass < 3; pass++) {
-            ctx.globalAlpha = opacity * [0.16, 0.32, 0.95][pass];
-            ctx.strokeStyle = color;
-            ctx.lineWidth = [10, 5, stroke][pass];
-            ctx.beginPath();
-            ctx.arc(cx, cy, radius + pass * 2, -Math.PI * 0.65, Math.PI * 1.35);
-            ctx.stroke();
-        }
-        ctx.globalAlpha = opacity * 0.55;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(cx + Math.cos(_phase * 2.2) * radius, cy + Math.sin(_phase * 2.2) * radius, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-    }
-
-    function _stateIcon() {
-        if (daemonState === "streaming") return "󰜟";
-        if (daemonState === "transcribing") return "󰔟";
-        return "󰍬";
     }
 
     function _stateLabel() {
@@ -507,87 +289,650 @@ Item {
         return "Idle";
     }
 
-    function _drawIcon(ctx, layer, rect) {
-        const signal = _signal(layer);
-        const opacity = _num(layer.opacity, 1.0);
-        const size = Math.max(8, Math.min(rect.w, rect.h) * _clamp(_num(layer.gain, 1.0), 0.25, 2.5));
-        const pulse = 1.0 + signal * 0.08 + Math.sin(_phase * 1.8 * _num(layer.speed, 1.0)) * 0.025;
-
-        ctx.save();
-        ctx.globalAlpha = opacity;
-        ctx.fillStyle = _color(layer.color, _color(daemonState, "#66c7ff"));
-        ctx.font = Math.round(size * pulse) + "px 'JetBrainsMono Nerd Font', sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(_stateIcon(), rect.x + rect.w / 2, rect.y + rect.h / 2);
-        ctx.restore();
-    }
-
-    function _drawLabel(ctx, layer, rect) {
-        const signal = _signal(layer);
-        const opacity = _num(layer.opacity, 1.0);
-        const size = Math.max(9, Math.min(rect.h * 0.62, rect.w / 5.5) * _clamp(_num(layer.gain, 1.0), 0.25, 2.5));
-
-        ctx.save();
-        ctx.globalAlpha = opacity * _clamp(0.72 + signal * 0.28, 0.0, 1.0);
-        ctx.fillStyle = _color(layer.color || "foreground", "#fcfbf8");
-        ctx.font = "600 " + Math.round(size) + "px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(_stateLabel(), rect.x + rect.w / 2, rect.y + rect.h / 2, rect.w);
-        ctx.restore();
-    }
-
+    /// Advance one frame now. The tick already runs whenever the renderer
+    /// is active; this exists for hosts that reset state and want the
+    /// change visible before the next tick.
     function repaint() {
-        canvas.requestPaint();
+        _tick();
+    }
+
+    /// Drop all smoothed state, e.g. when a new recording starts.
+    function reset() {
+        _peak = 0;
+        _rms = 0;
+        _vad = 0;
+        _energy = 0;
+        _liveFill = 0;
+        _heldFill = 0;
+        voiceEnergy = 0;
+        haloEnergy = 0;
+        voiceActivity = 0;
+        _barLevels.length = 0;
+        _waveLevels.length = 0;
+        _dotLevels.length = 0;
+        _lineLevels = [0, 0, 0];
+        _frame++;
+    }
+
+    function _tick() {
+        const now = Date.now();
+        const dt = Math.min(0.05, Math.max(0.001, (now - _lastTick) / 1000));
+        _lastTick = now;
+
+        const idle = !_live();
+        const m = meter;
+        const peakIn = idle ? 0 : (m ? m.peak : peak);
+        const rmsIn = idle ? 0 : (m ? m.rms : rms);
+        const vadIn = idle ? false : (m ? m.vad : vad);
+        const peakDbfs = idle ? -120 : (m ? m.peakDbfs : currentPeakDbfs);
+        const heldIn = idle ? -120 : (m ? m.heldDbfs : heldDbfs);
+
+        _peak = _approach(_peak, _clamp(peakIn, 0, 1), 14.0, dt);
+        _rms = _approach(_rms, _clamp(rmsIn, 0, 1), 10.0, dt);
+        _vad = _approach(_vad, vadIn ? 1 : 0, 8.0, dt);
+        _energy = _approach(_energy, Math.max(_peak, _rms * 1.6, _vad * 0.08), 7.0, dt);
+        // Eased so the meter drains smoothly when audio stops instead of
+        // snapping to empty (or staying lit on the last frame).
+        _liveFill = idle
+            ? _approach(_liveFill, 0, 10.0, dt)
+            : _clamp(Math.max(_meterFill(peakDbfs), _energy * 0.08), 0, 1);
+        _heldFill = idle ? _approach(_heldFill, 0, 10.0, dt) : _meterFill(heldIn);
+
+        const rawVoice = _clamp(rmsIn * 6.0 + peakIn * 0.85, 0, 1);
+        const rawHalo = _clamp(rmsIn * 10.0 + peakIn * 1.8, 0, 1);
+        voiceEnergy = _approach(voiceEnergy, rawVoice, 18.0, dt);
+        haloEnergy = _approach(haloEnergy, rawHalo, 18.0, dt);
+        voiceActivity = _approach(voiceActivity, vadIn ? 1 : 0, 25.0, dt);
+
+        if (_wantsBars) _updateLevels(_barLevels, 40, 18.0, 6.5, dt);
+        // Stiffer than bars so scrolling history trails only ~2 columns.
+        if (_wantsWave) _updateLevels(_waveLevels, 96, 30.0, 14.0, dt);
+        if (_wantsLine) _updateLine(dt);
+        if (_wantsDots) _updateDots(dt);
+        const spinTarget = daemonState === "transcribing" ? 150 : 28 + 140 * voiceEnergy;
+        _spinSpeed = _approach(_spinSpeed, spinTarget, 3.0, dt);
+        _spin = (_spin + _spinSpeed * dt) % 360;
+        _phase += dt;
+        _frame++;
     }
 
     Timer {
-        interval: root.daemonState === "recording" ? 16 : 33
+        interval: 16
         repeat: true
-        running: root.visible && root.daemonState !== "idle"
+        running: root.active && root.visible && root.daemonState !== "idle"
         triggeredOnStart: true
-        onTriggered: {
-            const now = Date.now();
-            const dt = Math.min(0.05, Math.max(0.001, (now - root._lastTick) / 1000));
-            root._lastTick = now;
+        onTriggered: root._tick()
+    }
 
-            const targetPeak = root.daemonState === "idle" ? 0 : root._clamp(root.peak, 0, 1);
-            const targetRms = root.daemonState === "idle" ? 0 : root._clamp(root.rms, 0, 1);
-            const targetVad = root.daemonState === "idle" ? 0 : (root.vad ? 1 : 0);
-            root._peak = root._approach(root._peak, targetPeak, 14.0, dt);
-            root._rms = root._approach(root._rms, targetRms, 10.0, dt);
-            root._vad = root._approach(root._vad, targetVad, 8.0, dt);
-            root._energy = root._approach(root._energy, Math.max(root._peak, root._rms * 1.6, root._vad * 0.08), 7.0, dt);
-            root._barLevels = root._updateLevels(root._barLevels, 40, 18.0, 6.5, dt);
-            // Stiffer than bars so scrolling history trails only ~2 columns.
-            root._waveLevels = root._updateLevels(root._waveLevels, 96, 30.0, 14.0, dt);
-            root._phase += dt;
-            root.repaint();
+    Repeater {
+        model: root._sortedLayers
+        // Not anchored: a Loader with a size forces it onto its item,
+        // which would override each layer's own rect.
+        delegate: Loader {
+            required property var modelData
+            readonly property var spec: modelData
+            sourceComponent: {
+                const kind = modelData.type || "waveform";
+                if (kind === "shadow") return shadowLayer;
+                if (kind === "waveform") return waveformLayer;
+                if (kind === "bars") return barsLayer;
+                if (kind === "meter") return meterLayer;
+                if (kind === "pulse") return pulseLayer;
+                if (kind === "background") return backgroundLayer;
+                if (kind === "ring") return ringLayer;
+                if (kind === "icon") return iconLayer;
+                if (kind === "label") return labelLayer;
+                if (kind === "line") return lineLayer;
+                if (kind === "dots") return dotsLayer;
+                return null;
+            }
         }
     }
 
-    Canvas {
-        id: canvas
-        anchors.fill: parent
+    // Places itself on the layer rect: values <= 1 are fractions of the
+    // renderer, larger values are pixels.
+    component LayerItem: Item {
+        readonly property var spec: parent && parent.spec ? parent.spec : ({})
+        readonly property real _lx: root._num(spec.x, 0)
+        readonly property real _ly: root._num(spec.y, 0)
+        readonly property real _lw: root._num(spec.width, 1)
+        readonly property real _lh: root._num(spec.height, 1)
+        x: _lx <= 1 ? _lx * root.width : _lx
+        y: _ly <= 1 ? _ly * root.height : _ly
+        width: _lw <= 1 ? _lw * root.width : _lw
+        height: _lh <= 1 ? _lh * root.height : _lh
+    }
 
-        onPaint: {
-            const ctx = getContext("2d");
-            ctx.clearRect(0, 0, width, height);
-            const layers = root._sortedLayers;
-            for (let i = 0; i < layers.length; i++) {
-                const layer = layers[i];
-                const kind = layer.type || "waveform";
-                const rect = root._layerRect(layer, width, height);
-                if (kind === "shadow") root._drawShadow(ctx, layer, rect);
-                else if (kind === "waveform") root._drawWaveform(ctx, layer, rect);
-                else if (kind === "bars") root._drawBars(ctx, layer, rect);
-                else if (kind === "meter") root._drawMeter(ctx, layer, rect);
-                else if (kind === "pulse") root._drawPulse(ctx, layer, rect);
-                else if (kind === "background") root._drawBackground(ctx, layer, rect);
-                else if (kind === "ring") root._drawRing(ctx, layer, rect);
-                else if (kind === "icon") root._drawIcon(ctx, layer, rect);
-                else if (kind === "label") root._drawLabel(ctx, layer, rect);
+    // Horizontal fill that fades a ribbon out at both ends.
+    component EdgeFade: LinearGradient {
+        id: fade
+        property color tint
+        property real span: 1
+        x1: 0; y1: 0
+        x2: span; y2: 0
+        GradientStop { position: 0.0; color: Qt.alpha(fade.tint, 0) }
+        GradientStop { position: 0.22; color: fade.tint }
+        GradientStop { position: 0.78; color: fade.tint }
+        GradientStop { position: 1.0; color: Qt.alpha(fade.tint, 0) }
+    }
+
+    // Rounded rect radius clamped the way the old canvas path did.
+    function _radius(r, w, h) {
+        return _clamp(r || 0, 0, Math.max(0, Math.min(w, h) / 2));
+    }
+
+    Component {
+        id: backgroundLayer
+        LayerItem {
+            id: bg
+            readonly property color tint: root._color(spec.color || "accent", "#66c7ff")
+            readonly property color surface: root._color("surface", "#8c1a1a1f")
+            opacity: root._num(spec.opacity, 0.18)
+                * root._clamp(0.18 + root._signal(spec) * root._num(spec.gain, 1.0) * 0.8, 0.08, 1.0)
+            Shape {
+                anchors.fill: parent
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: LinearGradient {
+                        x1: 0; y1: 0
+                        x2: bg.width; y2: bg.height
+                        GradientStop { position: 0.0; color: bg.tint }
+                        GradientStop { position: 0.55; color: bg.surface }
+                        GradientStop { position: 1.0; color: bg.tint }
+                    }
+                    PathRectangle {
+                        width: bg.width
+                        height: bg.height
+                        radius: root._radius(root._num(bg.spec.radius, 12), bg.width, bg.height)
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: shadowLayer
+        LayerItem {
+            id: sh
+            readonly property real outer: Math.min(width, height)
+                * root._clamp(root._num(spec.radius, 0.58), 0.25, 0.85)
+            // Shadow defaults to black; a recipe can recolor it (e.g. the
+            // theme background role) for tinted backdrops.
+            readonly property color tint: root._color(spec.color, "#000000")
+            opacity: root._num(spec.opacity, 0.9)
+                * root._clamp(0.34 + root._signal(spec) * root._num(spec.gain, 1.0) * 0.34, 0.18, 0.92)
+            Shape {
+                x: sh.width / 2 - sh.outer
+                y: sh.height * 0.55 - sh.outer
+                width: sh.outer * 2
+                height: sh.outer * 2
+                preferredRendererType: Shape.CurveRenderer
+                transform: Scale {
+                    origin.x: sh.outer
+                    origin.y: sh.outer
+                    xScale: 1.08
+                    yScale: 0.92
+                }
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: RadialGradient {
+                        centerX: sh.outer; centerY: sh.outer; centerRadius: sh.outer
+                        focalX: sh.outer; focalY: sh.outer; focalRadius: sh.outer * 0.08
+                        GradientStop { position: 0.0; color: sh.tint }
+                        GradientStop { position: 0.36; color: root._alpha(sh.tint, 0.58) }
+                        GradientStop { position: 0.72; color: root._alpha(sh.tint, 0.24) }
+                        GradientStop { position: 1.0; color: root._alpha(sh.tint, 0.0) }
+                    }
+                    PathRectangle {
+                        width: sh.outer * 2
+                        height: sh.outer * 2
+                        radius: sh.outer
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: pulseLayer
+        LayerItem {
+            id: pl
+            readonly property real breath: 0.5 + 0.5 * Math.sin(root._phase * 1.6 * root._num(spec.speed, 1.0))
+            readonly property real inset: 2 + breath * 5
+            Rectangle {
+                x: pl.inset
+                y: pl.inset
+                width: Math.max(0, pl.width - pl.inset * 2)
+                height: Math.max(0, pl.height - pl.inset * 2)
+                radius: root._radius(root._num(pl.spec.radius, 12), width, height)
+                color: root._color(pl.spec.color || "accent", "#66c7ff")
+                opacity: root._num(pl.spec.opacity, 0.24)
+                    * root._clamp(0.22 + root._signal(pl.spec) * root._num(pl.spec.gain, 1.0) * 1.2 + pl.breath * 0.12, 0.0, 1.0)
+            }
+        }
+    }
+
+    Component {
+        id: ringLayer
+        LayerItem {
+            id: rg
+            readonly property real breath: 0.5 + 0.5 * Math.sin(root._phase * 2.4 * root._num(spec.speed, 1.0))
+            readonly property real base: Math.min(width, height)
+            readonly property real stroke: Math.max(2, root._num(spec.radius, 3))
+            readonly property real safeRadius: Math.max(1, base / 2 - Math.max(10, stroke * 2.7))
+            readonly property real response: Math.pow(
+                root._clamp(root._signal(spec) * root._num(spec.gain, 1.0), 0, 1),
+                Math.max(0.01, root._num(spec.response_curve, 1.0)))
+            readonly property real ringRadius: Math.min(
+                safeRadius,
+                base * root._num(spec.max_scale, 0.46),
+                base * (root._num(spec.base_scale, 0.32)
+                        + response * root._num(spec.response_scale, 0.18)
+                        + breath * root._num(spec.breath_scale, 0.045)))
+            readonly property color tint: root._color(spec.color || "accent", "#66c7ff")
+            readonly property real layerOpacity: root._num(spec.opacity, 1.0)
+
+            // Soft glow, mid, and core strokes, each a circle whose border
+            // is centered on the ring's radius.
+            Repeater {
+                model: 3
+                delegate: Rectangle {
+                    required property int index
+                    readonly property real lineWidth: [10, 5, rg.stroke][index]
+                    readonly property real r: rg.ringRadius + index * 2
+                    x: rg.width / 2 - r - lineWidth / 2
+                    y: rg.height / 2 - r - lineWidth / 2
+                    width: 2 * r + lineWidth
+                    height: width
+                    radius: width / 2
+                    color: "transparent"
+                    border.width: lineWidth
+                    border.color: rg.tint
+                    opacity: rg.layerOpacity * [0.16, 0.32, 0.95][index]
+                }
+            }
+
+            Rectangle {
+                readonly property real angle: root._phase * 2.2
+                x: rg.width / 2 + Math.cos(angle) * rg.ringRadius - 2.5
+                y: rg.height / 2 + Math.sin(angle) * rg.ringRadius - 2.5
+                width: 5
+                height: 5
+                radius: 2.5
+                color: rg.tint
+                opacity: rg.layerOpacity * 0.55
+            }
+        }
+    }
+
+    Component {
+        id: barsLayer
+        LayerItem {
+            id: bl
+            readonly property int count: Math.min(28, Math.max(12, Math.floor(width / 17)))
+            readonly property real gap: Math.max(2.0, width / count * 0.24)
+            readonly property real barW: Math.max(2.0, width / count - gap)
+            readonly property real gain: root._num(spec.gain, 1.0)
+            readonly property real layerOpacity: root._num(spec.opacity, 1.0)
+            readonly property real barRadius: root._num(spec.radius, 5)
+            readonly property bool mirror: spec.mirror !== false
+            readonly property real breath: 0.97 + 0.03 * Math.sin(root._phase * 0.85)
+            readonly property color tint: root._color(spec.color || "accent", "#66c7ff")
+            readonly property color haloTint: root._color("foreground", tint)
+            readonly property color baseTint: root._color("accent", tint)
+
+            Repeater {
+                model: bl.count
+                delegate: Item {
+                    id: bar
+                    required property int index
+                    readonly property real position: bl.count <= 1 ? 0.5 : index / (bl.count - 1)
+                    readonly property real center: (bl.count - 1) / 2
+                    readonly property real weight: 0.72 + 0.28 * Math.cos((index - center) / Math.max(1, center) * Math.PI)
+                    readonly property real level: {
+                        root._frame;
+                        const sample = root._levelAt(root._barLevels, index, bl.count);
+                        return root._clamp(sample * bl.gain * weight * bl.breath + root._energy * 0.045, 0.028, 1.0);
+                    }
+                    readonly property real barH: Math.max(3, bl.height * level)
+                    x: index * (bl.barW + bl.gap) + bl.gap * 0.5
+                    y: bl.mirror ? (bl.height - barH) / 2 : bl.height - barH
+                    width: bl.barW
+                    height: barH
+
+                    Rectangle {
+                        x: -1.5
+                        y: -1.5
+                        width: parent.width + 3
+                        height: parent.height + 3
+                        radius: root._radius(bl.barRadius + 2, width, height)
+                        color: bl.tint
+                        opacity: bl.layerOpacity * 0.18
+                    }
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: root._radius(bl.barRadius, width, height)
+                        opacity: bl.layerOpacity * (0.48 + 0.52 * bar.position)
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: bl.haloTint }
+                            GradientStop { position: 0.45; color: bl.tint }
+                            GradientStop { position: 1.0; color: bl.baseTint }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: waveformLayer
+        LayerItem {
+            id: wf
+            // One point every ~6 px reads as a smooth curve and keeps the
+            // per-frame path small.
+            readonly property int cols: Math.max(24, Math.min(80, Math.floor(width / 6)))
+            readonly property bool mirror: spec.mirror !== false
+            readonly property real gain: root._num(spec.gain, 1.0)
+            readonly property real layerOpacity: root._num(spec.opacity, 1.0)
+            readonly property color tint: root._color(spec.color || "accent", "#66c7ff")
+
+            // Closed envelope outline, rebuilt once per tick. Temporally
+            // smoothed levels get 3-tap neighbor smoothing: ring samples
+            // hop between column buckets as history scrolls, which reads
+            // as single-column flicker.
+            readonly property var outline: {
+                root._frame;
+                const n = cols;
+                // mirror=false anchors the envelope to the bottom edge
+                // instead of reflecting it around the vertical center.
+                const cy = mirror ? height / 2 : height - 1;
+                const amp = Math.max(1, mirror ? height / 2 - 1.5 : height - 2.5);
+                const raw = new Array(n);
+                for (let i = 0; i < n; i++) raw[i] = root._levelAt(root._waveLevels, i, n);
+                const pts = new Array(n);
+                const lower = mirror ? new Array(n) : null;
+                for (let i = 0; i < n; i++) {
+                    const prev = raw[Math.max(0, i - 1)];
+                    const next = raw[Math.min(n - 1, i + 1)];
+                    const s = prev * 0.25 + raw[i] * 0.5 + next * 0.25;
+                    const t = n <= 1 ? 0 : i / (n - 1);
+                    // Taper the ends so the trace starts and finishes at
+                    // the baseline instead of being cut off by the card.
+                    const taper = Math.min(1, t * 12, (1 - t) * 12);
+                    const e = Math.max(0.02, root._clamp(s * gain, 0, 1) * taper) * amp;
+                    const x = t * width;
+                    pts[i] = Qt.point(x, cy - e);
+                    if (mirror) lower[n - 1 - i] = Qt.point(x, cy + e);
+                }
+                if (mirror) return pts.concat(lower, [pts[0]]);
+                return pts.concat([Qt.point(width, cy), Qt.point(0, cy), pts[0]]);
+            }
+
+            Shape {
+                anchors.fill: parent
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    // Densest along the baseline and fading toward the peaks,
+                    // so the body reads as glow and the outline as the signal.
+                    fillGradient: LinearGradient {
+                        x1: 0; y1: 0
+                        x2: 0; y2: wf.height
+                        GradientStop { position: 0.0; color: root._alpha(wf.tint, wf.layerOpacity * 0.04) }
+                        GradientStop { position: wf.mirror ? 0.5 : 1.0; color: root._alpha(wf.tint, wf.layerOpacity * 0.42) }
+                        GradientStop { position: 1.0; color: root._alpha(wf.tint, wf.layerOpacity * (wf.mirror ? 0.04 : 0.42)) }
+                    }
+                    strokeColor: root._alpha(wf.tint, wf.layerOpacity * 0.95)
+                    strokeWidth: 1.5
+                    joinStyle: ShapePath.RoundJoin
+                    PathPolyline { path: wf.outline }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: meterLayer
+        LayerItem {
+            id: mt
+            readonly property real layerOpacity: root._num(spec.opacity, 1.0)
+            readonly property real meterRadius: root._num(spec.radius, height / 2)
+            readonly property real fillW: width * root._liveFill
+
+            Rectangle {
+                anchors.fill: parent
+                radius: root._radius(mt.meterRadius, width, height)
+                color: root._color("muted", "#40ffffff")
+                opacity: mt.layerOpacity * 0.28
+            }
+
+            // The gradient spans the whole track so the fill's color says
+            // how hot the level is; only the filled part is drawn.
+            Shape {
+                anchors.fill: parent
+                visible: mt.fillW > 0
+                opacity: mt.layerOpacity
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: LinearGradient {
+                        x1: 0; y1: 0
+                        x2: mt.width; y2: 0
+                        // spec.color sets the low-zone color; the mid/high
+                        // stops keep the warning/error roles so hot levels
+                        // still read as hot.
+                        GradientStop { position: 0.0; color: root._color(mt.spec.color || "success", "#4dd973") }
+                        GradientStop { position: 0.72; color: root._color("warning", "#f2cc4d") }
+                        GradientStop { position: 1.0; color: root._color("error", "#f2594d") }
+                    }
+                    PathRectangle {
+                        width: mt.fillW
+                        height: mt.height
+                        radius: root._radius(mt.meterRadius, mt.fillW, mt.height)
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: root._heldFill > 0.01
+                x: Math.max(0, mt.width * root._heldFill - 1.5)
+                y: -2
+                width: 3
+                height: mt.height + 4
+                radius: 1.5
+                color: root._color(mt.spec.secondary_color || "foreground", "#fcfbf8")
+                opacity: mt.layerOpacity
+            }
+        }
+    }
+
+    Component {
+        id: iconLayer
+        LayerItem {
+            id: ic
+            readonly property real size: Math.max(8, Math.min(width, height)
+                * root._clamp(root._num(spec.gain, 1.0), 0.25, 2.5))
+            StateIcon {
+                anchors.centerIn: parent
+                width: ic.size
+                height: ic.size
+                daemonState: root.daemonState
+                phase: root._phase
+                color: root._color(ic.spec.color, root._color(root.daemonState, "#66c7ff"))
+                opacity: root._num(ic.spec.opacity, 1.0)
+                // Scale rather than resize so the pulse costs a transform.
+                scale: 1.0 + root._signal(ic.spec) * 0.08
+                    + Math.sin(root._phase * 1.8 * root._num(ic.spec.speed, 1.0)) * 0.025
+            }
+        }
+    }
+
+    Component {
+        id: labelLayer
+        LayerItem {
+            id: lb
+            Text {
+                anchors.fill: parent
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                fontSizeMode: Text.HorizontalFit
+                minimumPixelSize: 6
+                text: root._stateLabel()
+                font.weight: Font.DemiBold
+                font.pixelSize: Math.round(Math.max(9, Math.min(lb.height * 0.62, lb.width / 5.5)
+                    * root._clamp(root._num(lb.spec.gain, 1.0), 0.25, 2.5)))
+                color: root._color(lb.spec.color || "foreground", "#fcfbf8")
+                opacity: root._num(lb.spec.opacity, 1.0)
+                    * root._clamp(0.72 + root._signal(lb.spec) * 0.28, 0.0, 1.0)
+            }
+        }
+    }
+
+    // A flowing voice line: three thin strands that swell with the voice,
+    // pinned to the baseline at both ends. It shows the live level, not
+    // history, so it answers "is it hearing me" at a glance. Each strand is
+    // a filled ribbon so a horizontal gradient can fade its ends.
+    Component {
+        id: lineLayer
+        LayerItem {
+            id: ln
+            readonly property int pts: Math.max(32, Math.min(64, Math.floor(width / 4)))
+            readonly property real gain: root._num(spec.gain, 1.0)
+            readonly property real layerOpacity: root._num(spec.opacity, 1.0)
+            readonly property real speed: root._num(spec.speed, 1.0)
+            readonly property real core: Math.max(1.2, root._num(spec.radius, 2.6))
+            readonly property color tint: root._color(spec.color || "accent", "#66c7ff")
+            readonly property color tint2: root._color(spec.secondary_color || "foreground", "#fcfbf8")
+            readonly property color tint3: Qt.tint(tint, Qt.alpha(tint2, 0.5))
+            // Per strand: cycles across the width, drift speed, amplitude.
+            readonly property var strands: [[1.1, 2.6, 1.0], [1.55, -1.9, 0.8], [2.0, 3.1, 0.6]]
+
+            function ribbon(k, thickness) {
+                root._frame;
+                const n = pts;
+                const st = strands[k];
+                const cy = height / 2;
+                // Square-root response: quiet speech still visibly moves the
+                // line, loud speech doesn't pin it to the edges.
+                const amp = Math.max(1, height / 2 - 2)
+                    * Math.sqrt(root._clamp(root._lineLevels[k] * gain, 0, 1)) * st[2];
+                const working = root.daemonState === "transcribing";
+                const ph = root._phase * st[1] * speed * (working ? 1.6 : 1.0);
+                const xs = new Array(n);
+                const ys = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    const t = i / (n - 1);
+                    const w = Math.pow(Math.sin(Math.PI * t), 2.2);
+                    xs[i] = t * width;
+                    ys[i] = cy + amp * w * (Math.sin(2 * Math.PI * st[0] * t + ph)
+                        + 0.25 * Math.sin(2 * Math.PI * st[0] * 1.6 * t - ph * 1.3)) / 1.25;
+                }
+                const half = thickness / 2;
+                const upper = new Array(n);
+                const lower = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    const a = Math.max(0, i - 1);
+                    const b = Math.min(n - 1, i + 1);
+                    const dx = xs[b] - xs[a];
+                    const dy = ys[b] - ys[a];
+                    const len = Math.max(0.001, Math.sqrt(dx * dx + dy * dy));
+                    const nx = -dy / len * half;
+                    const ny = dx / len * half;
+                    upper[i] = Qt.point(xs[i] + nx, ys[i] - ny);
+                    lower[n - 1 - i] = Qt.point(xs[i] - nx, ys[i] + ny);
+                }
+                return upper.concat(lower, [upper[0]]);
+            }
+
+            readonly property var glowPath: ribbon(0, core * 3.5)
+            readonly property var path0: ribbon(0, core)
+            readonly property var path1: ribbon(1, core * 0.7)
+            readonly property var path2: ribbon(2, core * 0.6)
+
+            // The glow is soft and faint, so it skips the curve renderer's
+            // antialiasing, which is the costly part of redrawing a path.
+            Shape {
+                anchors.fill: parent
+                opacity: ln.layerOpacity
+                preferredRendererType: Shape.GeometryRenderer
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: EdgeFade { span: ln.width; tint: root._alpha(ln.tint, 0.2) }
+                    PathPolyline { path: ln.glowPath }
+                }
+            }
+
+            Shape {
+                anchors.fill: parent
+                opacity: ln.layerOpacity
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: EdgeFade { span: ln.width; tint: root._alpha(ln.tint3, 0.55) }
+                    PathPolyline { path: ln.path2 }
+                }
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: EdgeFade { span: ln.width; tint: root._alpha(ln.tint2, 0.7) }
+                    PathPolyline { path: ln.path1 }
+                }
+                ShapePath {
+                    strokeColor: "transparent"
+                    fillGradient: EdgeFade { span: ln.width; tint: ln.tint }
+                    PathPolyline { path: ln.path0 }
+                }
+            }
+        }
+    }
+
+    // Voice-assistant dots: a short row of round dots that stretch into
+    // capsules with the voice. The center dot is now; each step out is a
+    // few tens of ms older, so syllables ripple outward. Transcribing turns
+    // them into a travelling bounce.
+    Component {
+        id: dotsLayer
+        LayerItem {
+            id: dt
+            readonly property real gain: root._num(spec.gain, 1.0)
+            readonly property real layerOpacity: root._num(spec.opacity, 1.0)
+            readonly property real dotW: root._clamp(root._num(spec.radius, height * 0.3), 3, Math.max(3, height))
+            readonly property int count: {
+                let n = Math.floor(width / (dotW * 2.0));
+                n = Math.max(3, Math.min(root._dotSlots * 2 - 1, n));
+                return n % 2 === 0 ? n - 1 : n;
+            }
+            readonly property real spacing: dotW * 0.85
+            readonly property real x0: (width - (count * dotW + (count - 1) * spacing)) / 2
+            readonly property color tint: root._color(spec.color || "accent", "#66c7ff")
+            readonly property color tint2: root._color(spec.secondary_color || spec.color || "accent", "#66c7ff")
+
+            Repeater {
+                model: dt.count
+                delegate: Rectangle {
+                    id: dot
+                    required property int index
+                    readonly property int dist: Math.abs(index - (dt.count - 1) / 2)
+                    readonly property real level: {
+                        root._frame;
+                        if (root.daemonState === "transcribing") {
+                            const wave = Math.max(0, Math.sin(root._phase * 5.0 - index * 0.75));
+                            return 0.42 * wave * wave * wave;
+                        }
+                        const v = root._dotLevels.length > dist ? root._dotLevels[dist] : 0;
+                        // A faint ripple while listening keeps silence from
+                        // looking frozen.
+                        const idle = root._live()
+                            ? 0.05 * (0.5 + 0.5 * Math.sin(root._phase * 2.2 - dist * 0.9)) : 0;
+                        return root._clamp(Math.max(v * dt.gain * (1 - dist * 0.1), idle), 0, 1);
+                    }
+                    x: dt.x0 + index * (dt.dotW + dt.spacing)
+                    width: dt.dotW
+                    height: dt.dotW + (dt.height - dt.dotW) * level
+                    y: (dt.height - height) / 2
+                    radius: dt.dotW / 2
+                    color: dist === 0 ? dt.tint : Qt.tint(dt.tint, Qt.alpha(dt.tint2, Math.min(1, dist * 0.35)))
+                    opacity: dt.layerOpacity * (0.62 + 0.38 * Math.min(1, level * 2.5))
+                }
             }
         }
     }

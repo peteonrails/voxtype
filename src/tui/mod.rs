@@ -252,6 +252,10 @@ fn run_setup_model(engine: &str, model: &str) -> Result<(), String> {
 /// model download so the changes take effect immediately. Logs the outcome
 /// to the General switch-outcome banner so the user sees it on next focus.
 fn restart_voxtype_daemon(app: &mut App) {
+    if let Err(error) = validate_saved_selection_for_restart() {
+        eprintln!("Not restarting voxtype: {error}");
+        return;
+    }
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "restart", "voxtype"])
         .status();
@@ -273,11 +277,20 @@ fn restart_if_config_newer(app: &App) -> bool {
         app::config_file_mtime(),
     );
     if restart {
+        if let Err(error) = validate_saved_selection_for_restart() {
+            eprintln!("Not restarting voxtype: {error}");
+            return false;
+        }
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "restart", "voxtype"])
             .status();
     }
     restart
+}
+
+fn validate_saved_selection_for_restart() -> Result<(), String> {
+    let path = config_editor::tui_config_path().ok_or("Cannot determine config path")?;
+    crate::model_selection::validate_saved_for_restart(&path)
 }
 
 /// Routes keypresses while the save-on-exit prompt is showing.

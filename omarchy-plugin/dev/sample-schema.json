@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "voxtype_version": "0.8.0",
+  "voxtype_version": "1.2.0",
   "config_path": "/home/you/.config/voxtype/config.toml",
   "engine": "whisper",
   "keys": [
@@ -227,16 +227,112 @@
       "restart_required": true
     },
     {
-      "key": "text.spoken_punctuation",
-      "type": "bool",
-      "section": "Text",
-      "label": "Spoken punctuation",
-      "description": "Turn phrases like \"comma\" and \"new paragraph\" into the punctuation they name.",
-      "value": true,
-      "file_value": true,
-      "engine": null,
       "compiled": true,
-      "restart_required": true
+      "description": "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.lard_disfluency",
+      "label": "LARD disfluency cleanup",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "compiled": true,
+      "description": "Path to the local VXDF model. By default use the model installed by voxtype setup lard in the XDG data directory.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.lard_model_path",
+      "label": "LARD model file",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "string",
+      "value": null
+    },
+    {
+      "compiled": true,
+      "description": "Add punctuation, sentence boundaries, and letter casing to plain CTC output. Engines that already provide them are unchanged.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.punctuation_casing",
+      "label": "Restore punctuation and casing",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "compiled": true,
+      "description": "Convert spoken names like \"period\" and \"new line\" into the characters they describe.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.spoken_punctuation",
+      "label": "Spoken punctuation",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "compiled": true,
+      "description": "Strip a trailing \"submit\" from the transcription and press Return instead.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.smart_auto_submit",
+      "label": "Say \"submit\" to press Enter",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "compiled": true,
+      "description": "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.filter_filler_words",
+      "label": "Drop filler words",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": true
+    },
+    {
+      "compiled": true,
+      "description": "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.collapse_restarts",
+      "label": "Collapse restarts and stutters",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "compiled": true,
+      "description": "Join fragments split off by a premature sentence boundary and add question marks to interrogatives.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.repair_sentence_breaks",
+      "label": "Repair sentence breaks",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "compiled": true,
+      "description": "Convert spoken quantities to written form (\"twenty five dollars\" -> \"$25\"). Prose-heavy words like \"one\" and \"first\" are left alone.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.format_numbers",
+      "label": "Format dictated numbers",
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "bool",
+      "value": false
     }
   ],
   "replacements": {

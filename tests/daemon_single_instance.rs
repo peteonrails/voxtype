@@ -36,6 +36,8 @@ fn refused_second_instance_leaves_the_running_daemons_state_alone() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_voxtype"))
+        // Even when tray support is requested, reject before any tray setup.
+        .arg("--tray")
         .arg("daemon")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())

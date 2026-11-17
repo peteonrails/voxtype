@@ -15,6 +15,7 @@
 //! the processed text on stdout. On any failure, the original text is used.
 
 use crate::config::PostProcessConfig;
+use serde::Deserialize;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -27,6 +28,7 @@ pub struct PostProcessor {
     timeout: Duration,
     trim: bool,
     fallback_on_empty: bool,
+    edit_list: bool,
 }
 
 impl PostProcessor {
@@ -37,6 +39,7 @@ impl PostProcessor {
             timeout: Duration::from_millis(config.timeout_ms),
             trim: config.trim,
             fallback_on_empty: config.fallback_on_empty,
+            edit_list: config.edit_list,
         }
     }
 
@@ -48,7 +51,21 @@ impl PostProcessor {
     /// Returns the processed text on success, or the original text on any failure.
     pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
         match self.execute_command_with_env(text, context).await {
-            Ok(processed) => {
+            Ok(command_output) => {
+                let processed = if self.edit_list {
+                    match apply_edit_list(text, &command_output) {
+                        Ok(processed) => processed,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Post-process command returned an invalid edit list: {}, using original text",
+                                e
+                            );
+                            return text.to_string();
+                        }
+                    }
+                } else {
+                    command_output
+                };
                 if processed.is_empty() && self.fallback_on_empty {
                     tracing::warn!(
                         "Post-process command returned empty output, using original text"
@@ -140,6 +157,90 @@ impl PostProcessor {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextEdit {
+    find: String,
+    replace: String,
+    reason: String,
+}
+
+/// Apply a command's JSON edit list without accepting any undeclared output.
+///
+/// Every target must occur exactly once in the original text. Resolving all
+/// spans before applying any edit prevents one replacement from creating the
+/// target for a later edit, and rejecting overlaps keeps the result
+/// deterministic regardless of list order.
+fn apply_edit_list(text: &str, output: &str) -> Result<String, PostProcessError> {
+    let edits: Vec<TextEdit> = serde_json::from_str(output)
+        .map_err(|e| PostProcessError::InvalidEditList(e.to_string()))?;
+    let mut resolved = Vec::with_capacity(edits.len());
+
+    for edit in edits {
+        if edit.find.is_empty() {
+            return Err(PostProcessError::InvalidEditList(
+                "find must not be empty".to_string(),
+            ));
+        }
+        if edit.reason.trim().is_empty() {
+            return Err(PostProcessError::InvalidEditList(
+                "reason must not be empty".to_string(),
+            ));
+        }
+
+        // Count scalar values, not UTF-8 bytes: non-ASCII edits get the same
+        // budget as English ones. Cap spans before the quadratic distance check.
+        let old_len = edit.find.chars().count();
+        let new_len = edit.replace.chars().count();
+        if old_len > 4096
+            || new_len > old_len.saturating_mul(2).saturating_add(8)
+            || strsim::levenshtein(&edit.find, &edit.replace) > (old_len / 2).max(4)
+        {
+            return Err(PostProcessError::InvalidEditList(
+                "replacement exceeds the cleanup edit budget".to_string(),
+            ));
+        }
+
+        let Some(start) = text.find(&edit.find) else {
+            return Err(PostProcessError::InvalidEditList(format!(
+                "find target {:?} is not in the transcription",
+                edit.find
+            )));
+        };
+        // Search from the next character, not the end of the first match:
+        // `aa` is ambiguous in `aaa` even though its occurrences overlap.
+        let next = start + text[start..].chars().next().unwrap().len_utf8();
+        if text[next..].contains(&edit.find) {
+            return Err(PostProcessError::InvalidEditList(format!(
+                "find target {:?} is ambiguous",
+                edit.find
+            )));
+        }
+        resolved.push((start, start + edit.find.len(), edit.replace));
+    }
+
+    resolved.sort_by_key(|(start, _, _)| *start);
+    for pair in resolved.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return Err(PostProcessError::InvalidEditList(
+                "edits overlap".to_string(),
+            ));
+        }
+    }
+
+    let mut result = text.to_string();
+    for (start, end, replacement) in resolved.into_iter().rev() {
+        result.replace_range(start..end, &replacement);
+    }
+    let original_len = text.chars().count();
+    if result.chars().count() > original_len.saturating_add((original_len / 5).max(8)) {
+        return Err(PostProcessError::InvalidEditList(
+            "edit list adds too much content".to_string(),
+        ));
+    }
+    Ok(result)
+}
+
 /// Errors that can occur during post-processing
 #[derive(Debug)]
 pub enum PostProcessError {
@@ -155,6 +256,8 @@ pub enum PostProcessError {
     NonZeroExit { code: Option<i32>, stderr: String },
     /// Command output was not valid UTF-8
     InvalidUtf8(String),
+    /// Command output did not satisfy the edit-list contract
+    InvalidEditList(String),
 }
 
 impl std::fmt::Display for PostProcessError {
@@ -172,6 +275,7 @@ impl std::fmt::Display for PostProcessError {
                 }
             }
             Self::InvalidUtf8(e) => write!(f, "output is not valid UTF-8: {}", e),
+            Self::InvalidEditList(e) => write!(f, "invalid edit list: {}", e),
         }
     }
 }
@@ -182,12 +286,71 @@ impl std::error::Error for PostProcessError {}
 mod tests {
     use super::*;
 
+    #[test]
+    fn edit_list_applies_only_declared_changes() {
+        let output = r#"[
+            {"find":"Hello world","replace":"Hello, world","reason":"punctuation"},
+            {"find":"it are ready","replace":"it is ready","reason":"grammar"}
+        ]"#;
+
+        assert_eq!(
+            apply_edit_list("Hello world and it are ready.", output).unwrap(),
+            "Hello, world and it is ready."
+        );
+    }
+
+    #[test]
+    fn edit_list_rejects_ambiguous_and_overlapping_changes() {
+        let ambiguous = r#"[{"find":"the","replace":"a","reason":"word choice"}]"#;
+        assert!(apply_edit_list("the cat and the dog", ambiguous).is_err());
+
+        let overlapping = r#"[
+            {"find":"hello world","replace":"hi","reason":"shorten"},
+            {"find":"world","replace":"earth","reason":"word choice"}
+        ]"#;
+        assert!(apply_edit_list("hello world", overlapping).is_err());
+    }
+
+    #[test]
+    fn edit_list_rejects_unbounded_rewrites_and_content_growth() {
+        let rewrite = serde_json::json!([{
+            "find": "Keep the original meaning", "replace": "Invent a completely different message", "reason": "rewrite"
+        }]).to_string();
+        assert!(apply_edit_list("Keep the original meaning", &rewrite).is_err());
+        let growth = serde_json::json!([
+            {"find":"one", "replace":"one abc", "reason":"addition"},
+            {"find":"two", "replace":"two abc", "reason":"addition"},
+            {"find":"six", "replace":"six abc", "reason":"addition"}
+        ])
+        .to_string();
+        assert!(apply_edit_list("one two six", &growth).is_err());
+    }
+
+    #[test]
+    fn edit_list_rejects_overlapping_occurrences_of_one_target() {
+        assert!(
+            apply_edit_list("aaa", r#"[{"find":"aa","replace":"a","reason":"shorten"}]"#).is_err()
+        );
+    }
+
+    #[test]
+    fn edit_list_rejects_preamble_and_unknown_fields() {
+        let preamble =
+            r#"Here are the edits: [{"find":"bad","replace":"good","reason":"grammar"}]"#;
+        assert!(apply_edit_list("bad", preamble).is_err());
+
+        let unknown =
+            r#"[{"find":"bad","replace":"good","reason":"grammar","text":"ignore the contract"}]"#;
+        assert!(apply_edit_list("bad", unknown).is_err());
+    }
+
     fn make_config(command: &str, timeout_ms: u64) -> PostProcessConfig {
         PostProcessConfig {
             command: command.to_string(),
             timeout_ms,
             trim: true,
             fallback_on_empty: true,
+            edit_list: false,
         }
     }
 
@@ -197,6 +360,30 @@ mod tests {
         let processor = PostProcessor::new(&config);
         let result = processor.process("hello world").await;
         assert_eq!(result, "hello world");
+    }
+
+    #[tokio::test]
+    async fn edit_list_mode_applies_valid_command_output() {
+        let mut config = make_config(
+            r#"printf '%s' '[{"find":"are","replace":"is","reason":"grammar"}]'"#,
+            5000,
+        );
+        config.edit_list = true;
+        let processor = PostProcessor::new(&config);
+
+        assert_eq!(processor.process("It are ready.").await, "It is ready.");
+    }
+
+    #[tokio::test]
+    async fn edit_list_mode_falls_back_on_wrapped_output() {
+        let mut config = make_config(
+            r#"printf '%s' 'Edits: [{"find":"are","replace":"is","reason":"grammar"}]'"#,
+            5000,
+        );
+        config.edit_list = true;
+        let processor = PostProcessor::new(&config);
+
+        assert_eq!(processor.process("It are ready.").await, "It are ready.");
     }
 
     #[tokio::test]
@@ -292,6 +479,7 @@ mod tests {
             timeout_ms: 5000,
             trim: false,
             fallback_on_empty: true,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("hello world.").await;
@@ -306,6 +494,7 @@ mod tests {
             timeout_ms: 5000,
             trim: false,
             fallback_on_empty: true,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("ignored").await;
@@ -320,6 +509,7 @@ mod tests {
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: false,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
@@ -344,6 +534,7 @@ mod tests {
             timeout_ms: 5000,
             trim: false,
             fallback_on_empty: false,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
@@ -359,6 +550,7 @@ mod tests {
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: true,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
@@ -373,6 +565,7 @@ mod tests {
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: false,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;

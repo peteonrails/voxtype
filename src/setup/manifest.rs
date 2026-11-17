@@ -12,7 +12,7 @@
 //! download that succeeds but doesn't match the publisher's expectation is
 //! surfaced before transcription tries to load a broken model directory).
 //!
-//! See `roadmap` in `CLAUDE.md` ("voxtype-models CDN") and the matching
+//! See `roadmap` in `AGENTS.md` ("voxtype-models CDN") and the matching
 //! mirror script at `scripts/mirror-models-to-r2.sh`.
 
 use serde::{Deserialize, Serialize};

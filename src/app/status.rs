@@ -31,7 +31,7 @@ pub(crate) async fn run_status(
     }
 
     let state_path = state_file.unwrap();
-    let ext_info = if extended {
+    let mut ext_info = if extended {
         Some(ExtendedStatusInfo::from_config(config))
     } else {
         None
@@ -111,6 +111,13 @@ pub(crate) async fn run_status(
                 if let Ok(new_state) = std::fs::read_to_string(&state_path) {
                     let new_state = new_state.trim().to_string();
                     if new_state != last_state {
+                        // An offer accepted, declined or cleaned up since
+                        // the follower started shows up on the next change.
+                        if let Some(info) = ext_info.as_mut() {
+                            let current =
+                                config::load_config(None).unwrap_or_else(|_| config.clone());
+                            info.refresh_model_upgrade(&current);
+                        }
                         if format == "json" {
                             println!(
                                 "{}",

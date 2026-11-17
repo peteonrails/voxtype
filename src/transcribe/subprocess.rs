@@ -60,6 +60,8 @@ pub struct SubprocessTranscriber {
     config: WhisperConfig,
     /// Path to the config file (if any)
     config_path: Option<std::path::PathBuf>,
+    /// Profile vocabulary selected before the worker is spawned.
+    active_vocabulary: Mutex<Vec<String>>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
     /// Last language reported by the worker, if any. Mirrors
@@ -77,6 +79,7 @@ impl SubprocessTranscriber {
         Ok(Self {
             config: config.clone(),
             config_path,
+            active_vocabulary: Mutex::new(Vec::new()),
             prepared_worker: Mutex::new(None),
             last_language: Mutex::new(None),
         })
@@ -117,6 +120,16 @@ impl SubprocessTranscriber {
         }
         if let Some(threads) = self.config.threads {
             cmd.arg("--threads").arg(threads.to_string());
+        }
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        if let Some(prompt) =
+            super::prompt_with_vocabulary(self.config.initial_prompt.as_deref(), &vocabulary)
+        {
+            cmd.arg("--initial-prompt").arg(prompt);
         }
 
         Ok(cmd)
@@ -218,6 +231,13 @@ impl SubprocessTranscriber {
 }
 
 impl Transcriber for SubprocessTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     fn prepare(&self) {
         tracing::debug!("Preparing subprocess transcriber (spawning worker)...");
         let start = std::time::Instant::now();
