@@ -55,7 +55,7 @@ pub use output::{
     OutputMode,
 };
 pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
-pub use root::{Config, OmarchyConfig, TrayConfig};
+pub use root::{Config, OmarchyConfig, TextLanguageSource, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;

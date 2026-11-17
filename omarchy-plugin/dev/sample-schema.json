@@ -251,6 +251,20 @@
       "value": null
     },
     {
+      "choices": ["auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar"],
+      "compiled": true,
+      "description": "The language you dictate in (en, en-US, pt-BR), for cleanup that depends on it: LARD is English-only. Set it when a multilingual model detects the language automatically. auto declares nothing. It is not sent to the engine, and an engine language that is set or a single-language model wins over it.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.language",
+      "label": "Dictation language",
+      "open": true,
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "enum",
+      "value": "auto"
+    },
+    {
       "compiled": true,
       "description": "Add punctuation, sentence boundaries, and letter casing to plain CTC output. Engines that already provide them are unchanged.",
       "engine": null,
