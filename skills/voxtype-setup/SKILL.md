@@ -216,9 +216,12 @@ optional. Explain the trade-off, recommend one, and let them choose. Every
 
 Settings that matter for each:
 
-- **Paste in terminals.** Many terminals don't paste on `ctrl+v`. Set
-  `output.paste_keys` to `shift+insert` (works in terminals and most GUI apps)
-  or `ctrl+shift+v`.
+- **Paste in terminals.** Many terminals don't paste on `ctrl+v`. With
+  `output.paste_keys` set to `auto` (the default when the key is absent),
+  paste mode sends `ctrl+v` to GUI apps and `output.paste_keys_terminal`
+  (default `ctrl+shift+v`) to terminals on Hyprland, Sway and niri. Elsewhere,
+  set `output.paste_keys` to `shift+insert` (works in terminals and most GUI
+  apps) or `ctrl+shift+v`.
 - **Keep the clipboard.** `voxtype config set output.restore_clipboard true`
   puts the previous clipboard back after pasting.
 - **Typing on a non-US layout.** Set the layout for the driver in use, for
