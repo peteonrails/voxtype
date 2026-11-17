@@ -254,8 +254,11 @@ show_edits = true
 # timeout_ms = 30000  # 30 second timeout (generous for LLM)
 
 [text]
-# Optional English-only trained cleanup. Install the separately licensed model
-# explicitly with: voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+# Optional English-only trained cleanup. The separately licensed model is not
+# downloadable yet and is not installed by any package: it ships in the Voxtype
+# source as assets/models/lard-disfluency-v1.vxdf. Install it explicitly with:
+#   voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+# Turned on without the model, this stage is skipped and voxtype doctor says so.
 # lard_disfluency = false
 # lard_model_path = "/path/to/lard-disfluency-v1.vxdf"
 # Text processing options (word replacements, spoken punctuation)

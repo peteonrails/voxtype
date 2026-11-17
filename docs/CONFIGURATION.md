@@ -3378,7 +3378,10 @@ replacements. User replacements remain authoritative.
 
 The compact VXDF model is separately licensed under CC BY-SA 4.0; see
 `assets/models/lard-disfluency-v1.MODEL_CARD.md` for provenance and evaluation.
-Install it explicitly, then enable cleanup:
+It is not downloadable yet and no package installs it: it ships in the Voxtype
+source tree as `assets/models/lard-disfluency-v1.vxdf`. Take it from a source
+checkout or your release's source archive, install it explicitly, then enable
+cleanup:
 
 ```bash
 voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
@@ -3394,6 +3397,22 @@ A failed download or checksum check does not replace an installed model.
 Startup never downloads weights. Missing, corrupt, or unsupported models skip
 only the LARD stage; other configured cleanup still applies. The stage never
 replaces a whole dictation with empty output.
+
+With `lard_disfluency = true` and nothing to run (no model at the path, a file
+that does not load, or an engine language that is not explicit English), the
+stage is skipped and Voxtype says so:
+
+- `voxtype doctor` fails the `text.lard_disfluency` check under **Text
+  cleanup** and prints the fix.
+- The daemon logs it and includes it in the grouped "Voxtype: N problems need
+  attention" startup notification, once per boot until it is fixed.
+- `voxtype config set` writes the value, exits 0, and prints a `warning:` line
+  on stderr. Writes to other keys print it only when they cause the problem,
+  for example setting the engine language back to `auto`.
+- `voxtype config schema --json` adds a `notice` string to the
+  `text.lard_disfluency` entry, which the graphical app shows under the switch.
+  The field is absent when there is nothing to report.
+- `voxtype configure` shows it in the switch's row and help pane.
 
 Use `--lard-disfluency`, `--no-lard-disfluency`, or `--lard-model-path FILE`
 for a CLI override. Environment variables are `VOXTYPE_LARD_DISFLUENCY` and
