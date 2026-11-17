@@ -5264,33 +5264,7 @@ impl Daemon {
             .as_deref()
             .unwrap_or("the running binary");
         let title = format!("Voxtype: {} unavailable", mismatch.configured_engine);
-        let hint = crate::setup::install_hint::hint(crate::setup::install_hint::Need::Feature(
-            mismatch.required_feature,
-        ));
-        let body = match (&mismatch.remediation, &hint) {
-            (
-                crate::setup::variant_check::Remediation::SwitchToVariant { target },
-                crate::setup::install_hint::Hint::Switch { command },
-            ) => format!(
-                "{} was built without --features {}. \
-                 Run `{}` (or open `voxtype configure` and press F2) \
-                 to switch to {}.",
-                active,
-                mismatch.required_feature,
-                command,
-                target.binary_name(),
-            ),
-            (crate::setup::variant_check::Remediation::SwitchToVariant { .. }, hint) => format!(
-                "{} was built without --features {}, and no installed variant has it. \
-                 To enable the {} engine, {}.",
-                active, mismatch.required_feature, mismatch.configured_engine, hint,
-            ),
-            (crate::setup::variant_check::Remediation::Rebuild { feature }, hint) => format!(
-                "This source build was compiled without --features {}. \
-                 To enable the {} engine, {}.",
-                feature, mismatch.configured_engine, hint,
-            ),
-        };
+        let body = mismatch.explanation();
 
         tracing::warn!(
             engine = mismatch.configured_engine,
@@ -5346,6 +5320,14 @@ impl Daemon {
         // rescan it after a package upgrade. Runs on its own thread; it never
         // blocks startup or fails the daemon.
         crate::setup::omarchy::spawn_auto_link(&self.config);
+
+        // Everything else the config depends on (model, VAD model, output
+        // tools, display env, OSD, meeting tools): one grouped notification
+        // for errors, warnings to the log. Stats, PATH lookups and env reads
+        // only, and before model loading so a missing model is reported
+        // even though the load below then fails. `voxtype doctor` runs the
+        // full set.
+        crate::setup::doctor::startup_summary(&self.config).await;
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput

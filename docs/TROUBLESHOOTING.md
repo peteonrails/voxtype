@@ -11,6 +11,26 @@ download, config-key workaround or service restart is required merely to browse.
 
 Solutions to common issues when using Voxtype.
 
+## Start Here: `voxtype doctor`
+
+Before reading further, run:
+
+```bash
+voxtype doctor
+```
+
+It checks your model files, VAD model, GPU runtime libraries, audio device,
+output tools, display environment of the systemd service, input device
+access, notifications, OSD and meeting-mode tools, and the systemd unit, and
+prints the exact fix for anything that is wrong (`✗` means broken, `!` means
+degraded). Only features enabled in your config are checked. Most of the
+problems below show up there with the fix on the next line.
+
+The daemon also runs the quick part of these checks at startup and sends one
+desktop notification listing any errors. If you got a "Voxtype: N problems
+need attention" notification, `voxtype doctor` shows the same problems in
+full.
+
 ## Ultra is missing, cannot download, or is not the current model
 
 Use `voxtype info models --json` to distinguish catalogued, supported and locally
@@ -223,6 +243,8 @@ what is wrong instead of showing an empty pane:
   `voxtype meeting summarize <id> --agent claude` for this meeting only.
 
 ## Table of Contents
+
+- [Start Here: `voxtype doctor`](#start-here-voxtype-doctor)
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
 - [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
@@ -2128,7 +2150,7 @@ journalctl --user -u voxtype -n 50
 
 **Cause:** The systemd user manager does not have `WAYLAND_DISPLAY` (or `DISPLAY` on X11), so the voxtype service doesn't either, and wtype, wl-copy and friends cannot reach your desktop. This happens when the compositor does not import its environment into systemd.
 
-**Solution:** From a terminal in your desktop session, import the variables and restart the service:
+**Solution:** `voxtype doctor` reports whether `WAYLAND_DISPLAY` or `DISPLAY` is set in the systemd user environment (your terminal's environment says nothing about the service's). If neither is, import them from a terminal in your desktop session and restart the service:
 ```bash
 systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
 systemctl --user restart voxtype
@@ -2247,7 +2269,7 @@ journalctl --user -u pulseaudio -n 20
 
 If you're still having issues:
 
-1. **Run setup check:** `voxtype setup`
+1. **Run the health check:** `voxtype doctor` (attach `voxtype doctor --json` to bug reports)
 2. **Gather debug logs:** `voxtype -vv 2>&1 | tee debug.log`
 3. **Check system info:**
    ```bash

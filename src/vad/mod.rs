@@ -12,7 +12,7 @@ mod whisper_vad;
 
 use crate::config::{Config, TranscriptionEngine, VadBackend};
 use crate::error::VadError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use energy::EnergyVad;
 pub use whisper_vad::WhisperVad;
@@ -161,18 +161,27 @@ fn default_whisper_vad_model_path() -> PathBuf {
     Config::models_dir().join(get_whisper_vad_model_filename())
 }
 
+/// Where the Whisper VAD model is expected: the configured path, or the
+/// default file in `models_dir`.
+pub fn whisper_vad_model_path(config: &crate::config::VadConfig, models_dir: &Path) -> PathBuf {
+    match config.model {
+        Some(ref model) => PathBuf::from(model),
+        None => models_dir.join(get_whisper_vad_model_filename()),
+    }
+}
+
 /// Resolve the path to the Whisper VAD model
 fn resolve_whisper_vad_model_path(config: &crate::config::VadConfig) -> Result<PathBuf, VadError> {
-    // If model path is explicitly configured, use it
+    let model_path = whisper_vad_model_path(config, &Config::models_dir());
+
+    // An explicitly configured path is reported as given.
     if let Some(ref model) = config.model {
-        let path = PathBuf::from(model);
-        if path.exists() {
-            return Ok(path);
+        if model_path.exists() {
+            return Ok(model_path);
         }
         return Err(VadError::ModelNotFound(model.clone()));
     }
 
-    let model_path = default_whisper_vad_model_path();
     if model_path.exists() {
         Ok(model_path)
     } else {
