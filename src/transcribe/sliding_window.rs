@@ -286,17 +286,30 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
             loop {
                 let outcome = runtime.block_on(async {
                     tokio::select! {
+                        // Audio first: once inference is slower than the
+                        // tick, the ticker is ready on every iteration, and
+                        // an unbiased select would keep re-transcribing a
+                        // stale buffer while the audio backs up and drops.
+                        biased;
                         chunk = samples_rx.recv() => match chunk {
                             Some(c) => Outcome::Chunk(c),
                             None => Outcome::Eof,
                         },
-                        _ = ticker.tick() => Outcome::Tick,
                         _ = &mut cancel_rx => Outcome::Cancelled,
+                        _ = ticker.tick() => Outcome::Tick,
                     }
                 });
 
                 match outcome {
-                    Outcome::Chunk(chunk) => session.feed(&chunk),
+                    Outcome::Chunk(chunk) => {
+                        session.feed(&chunk);
+                        // Take everything that queued up during the last
+                        // inference pass in one go, so the next pass sees
+                        // all of it.
+                        while let Ok(chunk) = samples_rx.try_recv() {
+                            session.feed(&chunk);
+                        }
+                    }
                     Outcome::Cancelled => {
                         // Abort promptly; contract allows ending without flush.
                         let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
