@@ -614,6 +614,20 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", help_heading = "Text Processing")]
     pub lard_model_path: Option<std::path::PathBuf>,
 
+    /// Language you dictate in, for text cleanup (e.g. en, en-US, pt-BR, auto)
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "Text Processing",
+        long_help = "The language you dictate in, for text cleanup that depends on it (LARD\n\
+        disfluency cleanup is English-only). Set it when a multilingual model detects\n\
+        the language automatically: an engine language that is set, or a model that\n\
+        only writes one language, already answers the question and wins over this.\n\
+        It is not sent to the transcription engine; --language is the engine's hint.\n\
+        Use a code such as en, en-US or pt-BR, or auto to declare nothing."
+    )]
+    pub text_language: Option<String>,
+
     /// Restore punctuation and casing for plain CTC transcription engines
     #[arg(
         long,
