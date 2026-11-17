@@ -28,9 +28,15 @@ pub struct TextState {
     pub lard_model_path: Option<String>,
     original_model_path: Option<String>,
     pub model_edit: Option<TextInput>,
-    /// The active engine's language in the config file, which decides
-    /// whether LARD can run at all.
-    language: Option<String>,
+    /// `text.language` as this form holds it: `auto`, or the language the
+    /// user declares they dictate in.
+    pub language: String,
+    original_language: String,
+    pub language_edit: Option<TextInput>,
+    /// The configuration in the file, which the language of the text is
+    /// worked out from (engine, model and this form's `language`). `None`
+    /// when the file does not load.
+    candidate: Option<crate::config::Config>,
     /// Why LARD would be skipped with the switch and path as they are now,
     /// kept current as either is edited. `None` while it is off or working.
     pub lard_problem: Option<crate::setup::lard::Problem>,
@@ -75,8 +81,13 @@ fn toggle_count() -> usize {
     8
 }
 
+/// The declared dictation language, below the local model path.
+fn language_row() -> usize {
+    toggle_count() + 1
+}
+
 fn replacement_start() -> usize {
-    toggle_count() + 1 // local model path follows the switches
+    toggle_count() + 2 // local model path and language follow the switches
 }
 
 fn add_row_index(replacements: &[(String, String)]) -> usize {
@@ -114,10 +125,11 @@ impl TextState {
             config.punctuation_casing,
             config.smart_auto_submit,
         ];
+        let candidate = ed.candidate_config().ok();
         let language = ed
-            .candidate_config()
-            .ok()
-            .and_then(|config| config.active_language().map(str::to_string));
+            .get_string("text", "language")
+            .map(|raw| crate::config::text::normalize_language(&raw))
+            .unwrap_or_else(|| "auto".to_string());
         let mut state = Self {
             spoken_punctuation: config.spoken_punctuation,
             smart_auto_submit: config.smart_auto_submit,
@@ -131,7 +143,10 @@ impl TextState {
             lard_model_path: ed.get_string("text", "lard_model_path"),
             original_model_path: ed.get_string("text", "lard_model_path"),
             model_edit: None,
+            original_language: language.clone(),
             language,
+            language_edit: None,
+            candidate,
             lard_problem: None,
             replacements,
             original_keys,
@@ -144,15 +159,81 @@ impl TextState {
         Ok(state)
     }
 
-    /// Re-check whether LARD can run with the switch and model path as they
-    /// stand in this form, saved or not.
+    /// The file's configuration with this form's LARD switch, model path and
+    /// dictation language applied, saved or not.
+    fn form_config(&self) -> Option<crate::config::Config> {
+        let mut config = self.candidate.clone()?;
+        config.text.lard_disfluency = self.lard_disfluency;
+        config.text.lard_model_path = self.lard_model_path.as_ref().map(Into::into);
+        config.text.language = self.language.clone();
+        Some(config)
+    }
+
+    /// Re-check whether LARD can run with the switch, model path and
+    /// language as they stand in this form, saved or not.
     fn refresh_lard_problem(&mut self) {
-        let text = crate::config::TextConfig {
-            lard_disfluency: self.lard_disfluency,
-            lard_model_path: self.lard_model_path.as_ref().map(Into::into),
-            ..Default::default()
+        self.lard_problem = match self.form_config() {
+            Some(config) => crate::setup::lard::problem(&config),
+            // A file that does not load says nothing about the language.
+            None => crate::setup::lard::problem_for(
+                &crate::config::TextConfig {
+                    lard_disfluency: self.lard_disfluency,
+                    lard_model_path: self.lard_model_path.as_ref().map(Into::into),
+                    ..Default::default()
+                },
+                None,
+            ),
         };
-        self.lard_problem = crate::setup::lard::problem_for(&text, self.language.as_deref());
+    }
+
+    /// The language row's value: what is declared, and what text cleanup
+    /// makes of it next to the engine and the model.
+    fn language_value(&self) -> String {
+        use crate::config::TextLanguageSource::{Declared, Engine, Model};
+        let Some(config) = self.form_config() else {
+            return self.language.clone();
+        };
+        if config.text.language_is_malformed() {
+            return format!("{} (not a language code, ignored)", self.language);
+        }
+        let key = config.engine_language_key();
+        let declared = config.text.declared_language();
+        match (declared, config.text_language_source()) {
+            (None, Some((code, Engine))) => format!("auto ({code}, from {key})"),
+            (None, Some((code, Model))) => format!("auto ({code}, the model's only language)"),
+            (None, _) => "auto (not known)".to_string(),
+            (Some(language), Some((_, Declared))) => language.to_string(),
+            (Some(language), Some((code, Engine))) => {
+                format!("{language} (unused: {key} is {code})")
+            }
+            (Some(language), Some((code, Model))) => {
+                format!("{language} (unused: the model only writes {code})")
+            }
+            (Some(language), None) => format!("{language} (unused: {key} leaves it out)"),
+        }
+    }
+
+    /// Take the committed text of the language editor. Blank means `auto`.
+    fn commit_language(&mut self, typed: &str) {
+        let value = crate::config::text::normalize_language(typed);
+        let value = if value.is_empty() {
+            "auto".to_string()
+        } else {
+            value
+        };
+        if value != "auto" && !crate::config::text::is_language_tag(&value) {
+            self.feedback = Some((
+                FeedbackLevel::Err,
+                format!(
+                    "'{value}' is not a language code. Use one such as en, en-US or pt-BR, or auto."
+                ),
+            ));
+            return;
+        }
+        self.language = value;
+        self.dirty_since_load = true;
+        self.feedback = None;
+        self.warn_about_lard();
     }
 
     /// Say so on the feedback line when the form now has LARD on with nothing
@@ -195,6 +276,14 @@ impl TextState {
             }
         }
 
+        if self.language != self.original_language {
+            if self.language == "auto" {
+                ed.unset("text", "language");
+            } else {
+                ed.set_string("text", "language", &self.language);
+            }
+        }
+
         // Replacements: write every current entry, then unset any original
         // keys that are no longer in the list (deletions).
         let current_keys: std::collections::HashSet<&String> =
@@ -215,6 +304,7 @@ impl TextState {
                 self.dirty_since_load = false;
                 self.original_switches = self.switches().map(|(_, value)| value);
                 self.original_model_path = self.lard_model_path.clone();
+                self.original_language = self.language.clone();
                 self.original_keys = self.replacements.iter().map(|(k, _)| k.clone()).collect();
                 self.feedback = Some((
                     FeedbackLevel::Ok,
@@ -286,6 +376,10 @@ impl TextState {
             self.model_edit = Some(TextInput::new(
                 self.lard_model_path.clone().unwrap_or_default(),
             ));
+            return;
+        }
+        if self.cursor == language_row() {
+            self.language_edit = Some(TextInput::new(self.language.clone()));
             return;
         }
         let target = if self.cursor == add_row_index(&self.replacements) {
@@ -472,6 +566,15 @@ fn render_state(f: &mut Frame, area: Rect, state: &TextState) {
         "LARD model path",
         model_value,
     ));
+    let language_value = match &state.language_edit {
+        Some(input) => input.caret_string(),
+        None => state.language_value(),
+    };
+    rows.push(FormRowSpec::new(
+        state.cursor == language_row(),
+        "Dictation language",
+        language_value,
+    ));
 
     for (i, (k, v)) in state.replacements.iter().enumerate() {
         let row_idx = replacement_start() + i;
@@ -538,6 +641,18 @@ fn heading(text: impl Into<String>) -> Line<'static> {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ))
+}
+
+/// Whether LARD is off, running, or on and skipped, with the fix.
+fn lard_status(state: &TextState) -> Line<'static> {
+    match (state.lard_disfluency, &state.lard_problem) {
+        (false, _) => Line::from("Status: off."),
+        (true, None) => Line::from("Status: on, model installed, running."),
+        (true, Some(problem)) => Line::from(Span::styled(
+            format!("Status: not running. {}", problem.summary()),
+            Style::default().fg(Color::Yellow),
+        )),
+    }
 }
 
 fn guidance(state: &TextState) -> Vec<Line<'static>> {
@@ -618,19 +733,12 @@ fn guidance(state: &TextState) -> Vec<Line<'static>> {
         return vec![heading(title), Line::from(""), Line::from(description), Line::from(""), Line::from("Clean up text stages are independent. They do not enable LARD or download any model.")];
     }
     if state.cursor == 5 || state.cursor == toggle_count() {
-        let status = match (state.lard_disfluency, &state.lard_problem) {
-            (false, _) => Line::from("Status: off."),
-            (true, None) => Line::from("Status: on, model installed, running."),
-            (true, Some(problem)) => Line::from(Span::styled(
-                format!("Status: not running. {}", problem.summary()),
-                Style::default().fg(Color::Yellow),
-            )),
-        };
+        let status = lard_status(state);
         return vec![
             heading("LARD disfluency cleanup (opt-in)"),
             status,
             Line::from(""),
-            Line::from("English only: set the engine language explicitly to en. Independent of deterministic cleanup."),
+            Line::from("English only. It runs when the engine language is English, the model only writes English, or Dictation language below says en. Independent of deterministic cleanup."),
             Line::from(""),
             Line::from("Requires a separately installed local VXDF model. Missing/invalid models skip LARD; no automatic download."),
             Line::from("Setup: voxtype setup lard (downloads and verifies the model)"),
@@ -638,6 +746,45 @@ fn guidance(state: &TextState) -> Vec<Line<'static>> {
             Line::from("https://creativecommons.org/licenses/by-sa/4.0/"),
             Line::from("Enter/i edits the model path; blank restores the default path. Esc cancels. Setting a path does not enable LARD or prove the model is installed."),
         ];
+    }
+    if state.cursor == language_row() {
+        // The LARD warning sends the reader to this pane for the fix, so the
+        // status belongs here whenever the stage is on.
+        let lard = if state.lard_disfluency {
+            vec![
+                Line::from(""),
+                Line::from("LARD disfluency cleanup (English only)"),
+                lard_status(state),
+            ]
+        } else {
+            Vec::new()
+        };
+        return [
+            vec![
+                heading("Dictation language"),
+                Line::from(""),
+                Line::from(
+                    "The language you dictate in, for text cleanup: en, en-US, \
+                 pt-BR and so on, or auto to declare nothing.",
+                ),
+                Line::from(""),
+                Line::from(
+                    "Set it when your model handles several languages and detects \
+                 them automatically, so cleanup that depends on the language \
+                 (LARD is English-only) knows what it is reading. It is not \
+                 sent to the engine and does not change transcription.",
+                ),
+                Line::from(""),
+                Line::from(
+                    "An engine language that is set, and a model that only writes \
+                 one language, already answer the question and win over this.",
+                ),
+                Line::from(""),
+                Line::from("Enter/i edits; blank restores auto. Esc cancels."),
+            ],
+            lard,
+        ]
+        .concat();
     }
     if state.cursor == 6 {
         return vec![heading("Learned punctuation/casing"), Line::from("Separate model-assisted feature, not deterministic cleanup. Requires a punctuation-casing build and its separately set-up model."), Line::from("Only applies to plain CTC-output engines. Engines already providing punctuation/casing are left unchanged."), Line::from(if cfg!(feature = "punctuation-casing") { "Compiled in this client; model availability is not checked here." } else { "Not compiled in this client. Existing config choice is preserved; this switch cannot be changed here." })];
@@ -707,6 +854,18 @@ fn handle_state_key(state: &mut TextState, key: KeyEvent) -> Action {
                 state.dirty_since_load = true;
                 state.feedback = None;
                 state.warn_about_lard();
+            }
+        }
+        return Action::None;
+    }
+    if let Some(input) = state.language_edit.as_mut() {
+        match input.handle_key(key) {
+            TextInputResult::Continue => {}
+            TextInputResult::Cancel => state.language_edit = None,
+            TextInputResult::Commit => {
+                let typed = input.buffer().to_string();
+                state.language_edit = None;
+                state.commit_language(&typed);
             }
         }
         return Action::None;
@@ -998,23 +1157,153 @@ mod tests {
         ));
         assert_eq!(state.feedback.as_ref().unwrap().0, FeedbackLevel::Warn);
 
-        // An automatic language keeps the stage from running whatever the
-        // model, and the form reports that instead.
+        // A multilingual model on automatic detection keeps the stage from
+        // running whatever the LARD model, and the form reports that instead.
         std::fs::write(
             &path,
             format!(
-                "engine = 'whisper'\n[whisper]\nlanguage = 'auto'\n[text]\nlard_disfluency = true\nlard_model_path = {:?}\n",
+                "engine = 'whisper'\n[whisper]\nmodel = 'large-v3'\nlanguage = 'auto'\n[text]\nlard_disfluency = true\nlard_model_path = {:?}\n",
                 model.to_string_lossy()
             ),
         )
         .unwrap();
         let ed = ConfigEditor::load_from_path(path).unwrap();
         let state = TextState::from_editor(&ed).unwrap();
-        assert_eq!(
+        assert!(matches!(
             state.lard_problem,
-            Some(crate::setup::lard::Problem::NotEnglish)
+            Some(crate::setup::lard::Problem::NotEnglish(
+                crate::setup::lard::NotEnglish::Undeclared { .. }
+            ))
+        ));
+        assert!(screen_of(&state).contains("yes (language not declared)"));
+    }
+
+    fn type_into_language_row(state: &mut TextState, text: &str) {
+        state.cursor = language_row();
+        handle_state_key(state, KeyCode::Enter.into());
+        handle_state_key(
+            state,
+            KeyEvent::new(KeyCode::Char('u'), crossterm::event::KeyModifiers::CONTROL),
         );
-        assert!(screen_of(&state).contains("yes (needs an English language)"));
+        for ch in text.chars() {
+            handle_state_key(state, KeyCode::Char(ch).into());
+        }
+        handle_state_key(state, KeyCode::Enter.into());
+    }
+
+    /// The form is where a Parakeet user says "I dictate in English": the
+    /// row takes a code, LARD's status follows it before saving, and saving
+    /// writes `text.language` and nothing else.
+    #[test]
+    fn declaring_the_dictation_language_gets_lard_running() {
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::setup::lard::SOURCE_TREE_PATH);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let source = format!(
+            "engine = 'parakeet' # keep\n[parakeet]\nmodel = 'parakeet-tdt-0.6b-v3'\n[text]\nlard_disfluency = true\nlard_model_path = {:?}\n",
+            model.to_string_lossy()
+        );
+        std::fs::write(&path, &source).unwrap();
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = TextState::from_editor(&ed).unwrap();
+        assert_eq!(state.language, "auto");
+        assert!(state.lard_problem.is_some());
+        state.cursor = language_row();
+        let screen = screen_of(&state);
+        assert!(screen.contains("auto (not known)"), "{screen}");
+        assert!(screen.contains("Status: not running."), "{screen}");
+        // The help pane wraps, so read the fix from its lines.
+        let help: String = guidance(&state)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect();
+        assert!(
+            help.contains("declare it: voxtype config set text.language en"),
+            "{help}"
+        );
+
+        // Not a language code: refused, nothing changes.
+        type_into_language_row(&mut state, "english");
+        assert_eq!(state.language, "auto");
+        assert_eq!(state.feedback.as_ref().unwrap().0, FeedbackLevel::Err);
+        assert!(!state.dirty_since_load);
+
+        type_into_language_row(&mut state, "EN");
+        assert_eq!(state.language, "en");
+        assert_eq!(state.lard_problem, None);
+        assert_eq!(state.feedback, None);
+        let screen = screen_of(&state);
+        assert!(screen.contains("Status: on, model installed, running."));
+
+        state.save_with_editor(&mut ed);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("engine = 'parakeet' # keep"));
+        let config: crate::config::Config = toml::from_str(&saved).unwrap();
+        assert_eq!(config.text.language, "en");
+        assert_eq!(config.text_language(), Some("en"));
+
+        // Blank goes back to auto and takes the key out of the file again.
+        type_into_language_row(&mut state, "");
+        assert_eq!(state.language, "auto");
+        assert!(state.lard_problem.is_some());
+        state.save_with_editor(&mut ed);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("engine = 'parakeet' # keep"));
+        let doc: toml::Value = saved.parse().unwrap();
+        assert!(doc["text"].get("language").is_none(), "{saved}");
+        assert_eq!(doc["text"]["lard_disfluency"].as_bool(), Some(true));
+    }
+
+    /// The row never shows a declaration as if it were in effect when the
+    /// engine or the model already answers the question.
+    #[test]
+    fn language_row_says_what_cleanup_makes_of_it() {
+        let value_for = |source: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, source).unwrap();
+            let ed = ConfigEditor::load_from_path(path).unwrap();
+            TextState::from_editor(&ed).unwrap().language_value()
+        };
+        assert_eq!(
+            value_for("[whisper]\nmodel = 'large-v3'\nlanguage = 'fr'\n"),
+            "auto (fr, from whisper.language)"
+        );
+        assert_eq!(
+            value_for("[whisper]\nmodel = 'base.en'\nlanguage = 'auto'\n"),
+            "auto (en, the model's only language)"
+        );
+        assert_eq!(
+            value_for("[whisper]\nmodel = 'large-v3'\nlanguage = 'auto'\n"),
+            "auto (not known)"
+        );
+        assert_eq!(
+            value_for(
+                "[whisper]\nmodel = 'large-v3'\nlanguage = 'auto'\n[text]\nlanguage = 'en'\n"
+            ),
+            "en"
+        );
+        assert_eq!(
+            value_for("[whisper]\nmodel = 'large-v3'\nlanguage = 'fr'\n[text]\nlanguage = 'en'\n"),
+            "en (unused: whisper.language is fr)"
+        );
+        assert_eq!(
+            value_for(
+                "engine = 'moonshine'\n[moonshine]\nmodel = 'base-ja'\n[text]\nlanguage = 'en'\n"
+            ),
+            "en (unused: the model only writes ja)"
+        );
+        assert_eq!(
+            value_for(
+                "[whisper]\nmodel = 'large-v3'\nlanguage = ['fr', 'de']\n[text]\nlanguage = 'en'\n"
+            ),
+            "en (unused: whisper.language leaves it out)"
+        );
+        assert_eq!(
+            value_for("[text]\nlanguage = 'english'\n"),
+            "english (not a language code, ignored)"
+        );
     }
 
     #[test]
@@ -1090,9 +1379,9 @@ mod tests {
         );
         assert_eq!(
             add_row_index(&[]),
-            9,
-            "model path is an editable row, not a toggle"
+            10,
+            "model path and dictation language are editable rows, not toggles"
         );
-        assert_eq!(total_rows(&[("vox".into(), "Vox".into())]), 11);
+        assert_eq!(total_rows(&[("vox".into(), "Vox".into())]), 12);
     }
 }

@@ -1414,11 +1414,42 @@ mod tests {
             Severity::Ok
         );
 
+        // A multilingual model on automatic detection: nothing says the
+        // dictation is English, and the fix is the command that says so.
+        config.whisper.model = "large-v3-turbo".into();
         config.whisper.language = crate::config::LanguageConfig::Single("auto".into());
         let problem = crate::setup::lard::problem(&config);
         let check = lard_check(&config, problem.as_ref()).unwrap();
         assert_eq!(check.severity, Severity::Error);
-        assert!(check.message.contains("English"));
+        assert_eq!(
+            check.message,
+            "LARD disfluency cleanup is on but is being skipped: it only runs on English, \
+             and nothing says whisper dictation with large-v3-turbo is English"
+        );
+        assert_eq!(
+            check.fix.as_deref(),
+            Some(
+                "If you dictate in English, declare it: voxtype config set text.language en, \
+                 or turn it off: voxtype config set text.lard_disfluency false"
+            )
+        );
+        let (_, body) = startup_notification(&report(vec![check])).unwrap();
+        assert!(body.contains("voxtype config set text.language en"));
+
+        // Declaring it, or an English-only model, is all it takes.
+        config.text.language = "en".into();
+        let problem = crate::setup::lard::problem(&config);
+        assert_eq!(
+            lard_check(&config, problem.as_ref()).unwrap().severity,
+            Severity::Ok
+        );
+        config.text.language = "auto".into();
+        config.whisper.model = "base.en".into();
+        let problem = crate::setup::lard::problem(&config);
+        assert_eq!(
+            lard_check(&config, problem.as_ref()).unwrap().severity,
+            Severity::Ok
+        );
     }
 
     /// Nothing else in the daemon notifies about a skipped LARD stage, so it

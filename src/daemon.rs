@@ -1403,11 +1403,11 @@ impl Daemon {
         };
 
         // Initialize text processor
-        // Pass the active engine's language so filler filtering can skip
-        // words that are ordinary vocabulary there rather than disfluencies
-        // (#566).
+        // Pass the language of the text so filler filtering can skip words
+        // that are ordinary vocabulary there rather than disfluencies (#566)
+        // and English-only cleanup runs only on English (#696).
         let text_processor =
-            TextProcessor::new_for_config(&config.text, config.active_language(), &config);
+            TextProcessor::new_for_config(&config.text, config.text_language(), &config);
         let profile_vocabularies = config
             .profiles
             .iter()
@@ -1802,7 +1802,7 @@ impl Daemon {
             .then(|| ModelManager::new(&self.config.whisper, self.config_path.clone()));
         self.text_processor = TextProcessor::new_for_config(
             &self.config.text,
-            self.config.active_language(),
+            self.config.text_language(),
             &self.config,
         );
         tracing::info!(language = ?self.config.active_language(), "Tray language applied for next dictation");
