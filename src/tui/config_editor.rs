@@ -44,6 +44,46 @@ pub struct ConfigEditor {
     path: PathBuf,
     document: DocumentMut,
     dirty: bool,
+    /// The file's text when this editor read it. A save compares the file
+    /// against this to tell whether someone else has written it since.
+    loaded_text: String,
+    /// What this editor changed, in order, so a save can apply the same
+    /// changes to a file that moved on underneath it.
+    changes: Vec<Change>,
+}
+
+/// One edit made through a [`ConfigEditor`].
+#[derive(Debug, Clone)]
+enum Change {
+    Set {
+        table: String,
+        key: String,
+        value: Value,
+        /// Whether the editor already saw this value in the file. A form
+        /// that writes back every field it shows produces these; they say
+        /// nothing about what the user wanted.
+        unchanged: bool,
+    },
+    Unset {
+        table: String,
+        key: String,
+    },
+    Overlay {
+        dotted: String,
+        overlay: toml_edit::Table,
+    },
+}
+
+impl Change {
+    /// Pausing history or turning it off. These are applied to a file that
+    /// changed underneath the editor even when the editor saw the same value
+    /// already: a request to stop recording must not lose to a stale read.
+    fn tightens_history_privacy(&self) -> bool {
+        matches!(self, Change::Set { table, key, value, .. }
+            if table == "history"
+                && ((key == "paused" && value.as_bool() == Some(true))
+                    || (key == "enabled" && value.as_bool() == Some(false))))
+    }
 }
 
 /// Config file the TUI edits, when it is not the default.
@@ -137,6 +177,8 @@ impl ConfigEditor {
             path,
             document,
             dirty,
+            loaded_text: text,
+            changes: Vec::new(),
         })
     }
 
@@ -161,26 +203,27 @@ impl ConfigEditor {
         self.set_decorated_value(table, key, Value::from(value));
     }
 
-    fn set_decorated_value(&mut self, table: &str, key: &str, mut value: Value) {
-        if let Some(previous) = self.value(table, key) {
-            *value.decor_mut() = previous.decor().clone();
-        }
-        if table.is_empty() {
-            self.document.as_table_mut()[key] = Item::Value(value);
-        } else {
-            self.ensure_table(table)[key] = Item::Value(value);
-        }
+    fn set_decorated_value(&mut self, table: &str, key: &str, value: Value) {
+        self.record_set(table, key, value, true);
+    }
+
+    /// Apply a set to this editor's document and remember it for a rebase.
+    fn record_set(&mut self, table: &str, key: &str, value: Value, keep_decor: bool) {
+        let unchanged = self
+            .value(table, key)
+            .is_some_and(|previous| same_value(previous, &value));
+        apply_set(&mut self.document, table, key, value.clone(), keep_decor);
+        self.changes.push(Change::Set {
+            table: table.to_string(),
+            key: key.to_string(),
+            value,
+            unchanged,
+        });
         self.dirty = true;
     }
 
     pub fn set_int(&mut self, table: &str, key: &str, value: i64) {
-        if table.is_empty() {
-            self.document.as_table_mut()[key] = toml_edit::value(value);
-        } else {
-            let item = self.ensure_table(table);
-            item[key] = toml_edit::value(value);
-        }
-        self.dirty = true;
+        self.record_set(table, key, Value::from(value), false);
     }
 
     /// Write a TOML float. Use this rather than `set_string` with a
@@ -188,13 +231,7 @@ impl ConfigEditor {
     /// section's deserializer (TOML 0.x rejects "0.95" as a float in
     /// strict mode).
     pub fn set_float(&mut self, table: &str, key: &str, value: f64) {
-        if table.is_empty() {
-            self.document.as_table_mut()[key] = toml_edit::value(value);
-        } else {
-            let item = self.ensure_table(table);
-            item[key] = toml_edit::value(value);
-        }
-        self.dirty = true;
+        self.record_set(table, key, Value::from(value), false);
     }
 
     /// Write an `f32` as a TOML float. Convenience wrapper over `set_float`
@@ -224,10 +261,12 @@ impl ConfigEditor {
 
     /// Remove a key from a table (no-op if absent).
     pub fn unset(&mut self, table: &str, key: &str) {
-        if let Some(t) = self.table_mut(table) {
-            if t.remove(key).is_some() {
-                self.dirty = true;
-            }
+        if apply_unset(&mut self.document, table, key) {
+            self.changes.push(Change::Unset {
+                table: table.to_string(),
+                key: key.to_string(),
+            });
+            self.dirty = true;
         }
     }
 
@@ -243,38 +282,19 @@ impl ConfigEditor {
         dotted: &str,
         overlay: &toml_edit::Table,
     ) -> Vec<OverlayChange> {
-        let target = self
-            .ensure_table(dotted)
-            .as_table_mut()
-            .expect("ensure_table returns a table");
-        let mut changes = Vec::new();
-        merge_table(target, overlay, dotted, &mut changes);
+        let changes = apply_overlay(&mut self.document, dotted, overlay);
         if !changes.is_empty() {
+            self.changes.push(Change::Overlay {
+                dotted: dotted.to_string(),
+                overlay: overlay.clone(),
+            });
             self.dirty = true;
         }
         changes
     }
 
-    fn table_mut(&mut self, dotted: &str) -> Option<&mut toml_edit::Table> {
-        let mut current = self.document.as_table_mut();
-        if dotted.is_empty() {
-            return Some(current);
-        }
-        for segment in dotted.split('.') {
-            current = current.get_mut(segment).and_then(|i| i.as_table_mut())?;
-        }
-        Some(current)
-    }
-
     fn table(&self, dotted: &str) -> Option<&toml_edit::Table> {
-        let mut current = self.document.as_table();
-        if dotted.is_empty() {
-            return Some(current);
-        }
-        for segment in dotted.split('.') {
-            current = current.get(segment).and_then(|i| i.as_table())?;
-        }
-        Some(current)
+        table_in(&self.document, dotted)
     }
 
     /// Public read-only access to a table, for callers that need to iterate
@@ -319,33 +339,91 @@ impl ConfigEditor {
 
     /// Ensure a (possibly dotted) `[table]` path exists and return it as a
     /// mutable Item. Creates intermediate tables as needed.
+    #[cfg(test)]
     fn ensure_table(&mut self, dotted: &str) -> &mut Item {
-        let segments: Vec<&str> = dotted.split('.').collect();
-        let (last, rest) = segments
-            .split_last()
-            .expect("ensure_table called with empty path");
+        ensure_table(&mut self.document, dotted)
+    }
 
-        // Walk through (or create) intermediate tables.
-        let mut current: &mut toml_edit::Table = self.document.as_table_mut();
-        for segment in rest {
-            if !current.get(segment).map(|i| i.is_table()).unwrap_or(false) {
-                current.insert(segment, Item::Table(toml_edit::Table::new()));
+    /// If the file changed since this editor read it, start again from what
+    /// is on disk and apply this editor's own changes to that. Without this a
+    /// save writes back the whole file as it was at load, undoing whatever
+    /// another process wrote in between: a `voxtype history pause` could be
+    /// reverted by a settings window that was already open.
+    ///
+    /// Call only while holding the file's privacy lock, which every save
+    /// takes, so the read and the write cannot be interleaved again.
+    fn rebase_onto_disk(&mut self) -> Result<(), EditorError> {
+        let on_disk = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(source) => {
+                return Err(EditorError::Read {
+                    path: self.path.clone(),
+                    source,
+                })
             }
-            current = current[segment]
-                .as_table_mut()
-                .expect("just inserted a table");
+        };
+        if on_disk == self.loaded_text {
+            return Ok(());
         }
-
-        if !current.get(last).map(|i| i.is_table()).unwrap_or(false) {
-            current.insert(last, Item::Table(toml_edit::Table::new()));
+        let mut fresh: DocumentMut = on_disk.parse().map_err(|e| EditorError::Parse {
+            path: self.path.clone(),
+            source: e,
+        })?;
+        if fresh.as_table().contains_key("") {
+            fresh.as_table_mut().remove("");
         }
-        &mut current[last]
+        for change in &self.changes {
+            match change {
+                // A field the editor wrote back as it found it is not a
+                // request, so it does not override the newer file. A request
+                // to pause or turn off history always is one.
+                Change::Set { unchanged, .. }
+                    if *unchanged && !change.tightens_history_privacy() => {}
+                Change::Set {
+                    table, key, value, ..
+                } => apply_set(&mut fresh, table, key, value.clone(), true),
+                Change::Unset { table, key } => {
+                    apply_unset(&mut fresh, table, key);
+                }
+                Change::Overlay { dotted, overlay } => {
+                    apply_overlay(&mut fresh, dotted, overlay);
+                }
+            }
+        }
+        self.document = fresh;
+        self.loaded_text = on_disk;
+        Ok(())
     }
 
     /// Atomically write the document and validate it parses through the
     /// regular `load_config` path. On validation failure the file is left
     /// untouched on disk (atomic rename hasn't happened yet).
     pub fn save(&mut self) -> Result<(), EditorError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| EditorError::Write {
+                path: self.path.clone(),
+                source: std::io::Error::other("config path has no parent directory"),
+            })?
+            .to_path_buf();
+        let parent = parent.as_path();
+        fs::create_dir_all(parent).map_err(|e| EditorError::Write {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+        // Held from here to the rename. Reading the file, applying this
+        // editor's changes to it and writing it back are one step as far as
+        // any other save is concerned.
+        let _history_privacy =
+            crate::history::store::privacy_lock(&self.path).map_err(|source| {
+                EditorError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
+        self.rebase_onto_disk()?;
         let serialized = self.document.to_string();
 
         // Validate the file-layer selection, not CLI/environment overrides.
@@ -371,21 +449,6 @@ impl ConfigEditor {
         // Validate before touching the on-disk file: parse the serialized
         // text via the runtime config loader. We do this by writing to a temp
         // file, loading from there, and only renaming on success.
-        let parent = self.path.parent().ok_or_else(|| EditorError::Write {
-            path: self.path.clone(),
-            source: std::io::Error::other("config path has no parent directory"),
-        })?;
-        fs::create_dir_all(parent).map_err(|e| EditorError::Write {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
-        let _history_privacy =
-            crate::history::store::privacy_lock(&self.path).map_err(|source| {
-                EditorError::Write {
-                    path: self.path.clone(),
-                    source,
-                }
-            })?;
         let current_history = fs::read_to_string(&self.path)
             .ok()
             .and_then(|text| toml::from_str::<config::Config>(&text).ok())
@@ -492,8 +555,110 @@ impl ConfigEditor {
             })?;
 
         self.dirty = false;
+        self.loaded_text = serialized;
+        self.changes.clear();
         Ok(())
     }
+}
+
+/// Whether two TOML values mean the same thing, whatever their formatting.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x.value() == y.value(),
+        (Value::Boolean(x), Value::Boolean(y)) => x.value() == y.value(),
+        (Value::Integer(x), Value::Integer(y)) => x.value() == y.value(),
+        (Value::Float(x), Value::Float(y)) => x.value() == y.value(),
+        _ => false,
+    }
+}
+
+fn apply_set(
+    document: &mut DocumentMut,
+    table: &str,
+    key: &str,
+    mut value: Value,
+    keep_decor: bool,
+) {
+    if keep_decor {
+        let previous = table_in(document, table)
+            .and_then(|t| t.get(key))
+            .and_then(|i| i.as_value());
+        if let Some(previous) = previous {
+            *value.decor_mut() = previous.decor().clone();
+        }
+    }
+    if table.is_empty() {
+        document.as_table_mut()[key] = Item::Value(value);
+    } else {
+        ensure_table(document, table)[key] = Item::Value(value);
+    }
+}
+
+/// Remove a key; whether it was there.
+fn apply_unset(document: &mut DocumentMut, table: &str, key: &str) -> bool {
+    table_mut_in(document, table).is_some_and(|t| t.remove(key).is_some())
+}
+
+fn apply_overlay(
+    document: &mut DocumentMut,
+    dotted: &str,
+    overlay: &toml_edit::Table,
+) -> Vec<OverlayChange> {
+    let target = ensure_table(document, dotted)
+        .as_table_mut()
+        .expect("ensure_table returns a table");
+    let mut changes = Vec::new();
+    merge_table(target, overlay, dotted, &mut changes);
+    changes
+}
+
+fn table_in<'a>(document: &'a DocumentMut, dotted: &str) -> Option<&'a toml_edit::Table> {
+    let mut current = document.as_table();
+    if dotted.is_empty() {
+        return Some(current);
+    }
+    for segment in dotted.split('.') {
+        current = current.get(segment).and_then(|i| i.as_table())?;
+    }
+    Some(current)
+}
+
+fn table_mut_in<'a>(
+    document: &'a mut DocumentMut,
+    dotted: &str,
+) -> Option<&'a mut toml_edit::Table> {
+    let mut current = document.as_table_mut();
+    if dotted.is_empty() {
+        return Some(current);
+    }
+    for segment in dotted.split('.') {
+        current = current.get_mut(segment).and_then(|i| i.as_table_mut())?;
+    }
+    Some(current)
+}
+
+/// Ensure a (possibly dotted) `[table]` path exists in `document` and return
+/// it as a mutable Item, creating intermediate tables as needed.
+fn ensure_table<'a>(document: &'a mut DocumentMut, dotted: &str) -> &'a mut Item {
+    let segments: Vec<&str> = dotted.split('.').collect();
+    let (last, rest) = segments
+        .split_last()
+        .expect("ensure_table called with empty path");
+
+    let mut current: &mut toml_edit::Table = document.as_table_mut();
+    for segment in rest {
+        if !current.get(segment).map(|i| i.is_table()).unwrap_or(false) {
+            current.insert(segment, Item::Table(toml_edit::Table::new()));
+        }
+        current = current[segment]
+            .as_table_mut()
+            .expect("just inserted a table");
+    }
+
+    if !current.get(last).map(|i| i.is_table()).unwrap_or(false) {
+        current.insert(last, Item::Table(toml_edit::Table::new()));
+    }
+    &mut current[last]
 }
 
 /// One leaf [`ConfigEditor::overlay_table`] changed: its full dotted key and
@@ -658,6 +823,135 @@ mod tests {
         assert!(serialized.contains("# inline"), "{}", serialized);
         assert!(serialized.contains("key = \"PAUSE\""));
         assert!(serialized.contains("mode = \"toggle\""));
+    }
+
+    const SHARED: &str = "# keep this comment\nengine = \"whisper\"\n\n[history]\nenabled = true\npaused = false\n\n[audio]\nmax_duration_secs = 60\n";
+
+    fn saved(path: &Path) -> (config::Config, String) {
+        let text = fs::read_to_string(path).unwrap();
+        (toml::from_str(&text).unwrap(), text)
+    }
+
+    /// Another process writes `table.key` while an editor is open.
+    fn written_meanwhile(path: &Path, table: &str, key: &str, value: bool) {
+        let mut other = ConfigEditor::load_from_path(path.to_path_buf()).unwrap();
+        other.set_bool(table, key, value);
+        other.save().unwrap();
+    }
+
+    #[test]
+    fn a_stale_save_keeps_a_pause_made_in_between() {
+        let (_dir, path) = temp_config(SHARED);
+        let mut stale = ConfigEditor::load_from_path(path.clone()).unwrap();
+        stale.set_int("audio", "max_duration_secs", 90);
+        written_meanwhile(&path, "history", "paused", true);
+        stale.save().unwrap();
+
+        let (config, text) = saved(&path);
+        assert!(config.history.paused, "the pause was written over");
+        assert_eq!(config.audio.max_duration_secs, 90);
+        assert!(text.contains("# keep this comment"));
+    }
+
+    #[test]
+    fn a_stale_save_keeps_history_turned_off_in_between() {
+        let (_dir, path) = temp_config(SHARED);
+        let mut stale = ConfigEditor::load_from_path(path.clone()).unwrap();
+        stale.set_int("audio", "max_duration_secs", 90);
+        written_meanwhile(&path, "history", "enabled", false);
+        stale.save().unwrap();
+
+        let (config, _) = saved(&path);
+        assert!(!config.history.enabled, "history was turned back on");
+        assert_eq!(config.audio.max_duration_secs, 90);
+    }
+
+    #[test]
+    fn a_form_writing_back_what_it_showed_does_not_undo_a_pause() {
+        let (_dir, path) = temp_config(SHARED);
+        let mut form = ConfigEditor::load_from_path(path.clone()).unwrap();
+        // A settings page saves every field it shows, changed or not.
+        form.set_bool("history", "enabled", true);
+        form.set_bool("history", "paused", false);
+        form.set_int("audio", "max_duration_secs", 90);
+        written_meanwhile(&path, "history", "paused", true);
+        form.save().unwrap();
+
+        let (config, _) = saved(&path);
+        assert!(config.history.paused, "an unchanged field undid the pause");
+        assert_eq!(config.audio.max_duration_secs, 90);
+    }
+
+    #[test]
+    fn a_request_to_pause_wins_over_a_resume_made_in_between() {
+        let (_dir, path) = temp_config(&SHARED.replace("paused = false", "paused = true"));
+        let mut pausing = ConfigEditor::load_from_path(path.clone()).unwrap();
+        // Already paused as far as this editor can see, and asked for again.
+        pausing.set_bool("history", "paused", true);
+        written_meanwhile(&path, "history", "paused", false);
+        pausing.save().unwrap();
+
+        assert!(saved(&path).0.history.paused, "a pause request was lost");
+    }
+
+    #[test]
+    fn a_later_resume_still_resumes() {
+        let (_dir, path) = temp_config(&SHARED.replace("paused = false", "paused = true"));
+        let mut resuming = ConfigEditor::load_from_path(path.clone()).unwrap();
+        resuming.set_bool("history", "paused", false);
+        // Something unrelated is written while the resume is in flight.
+        let mut other = ConfigEditor::load_from_path(path.clone()).unwrap();
+        other.set_int("audio", "max_duration_secs", 45);
+        other.save().unwrap();
+        resuming.save().unwrap();
+
+        let (config, _) = saved(&path);
+        assert!(!config.history.paused, "privacy state must not be one-way");
+        assert_eq!(config.audio.max_duration_secs, 45);
+    }
+
+    #[test]
+    fn a_stale_unset_removes_only_its_own_key() {
+        let (_dir, path) = temp_config(SHARED);
+        let mut stale = ConfigEditor::load_from_path(path.clone()).unwrap();
+        stale.unset("audio", "max_duration_secs");
+        written_meanwhile(&path, "history", "paused", true);
+        stale.save().unwrap();
+
+        let (config, text) = saved(&path);
+        assert!(!text.contains("max_duration_secs"));
+        assert!(config.history.paused);
+    }
+
+    #[test]
+    fn the_later_save_wins_when_both_changed_the_same_key() {
+        let (_dir, path) = temp_config(SHARED);
+        let mut first = ConfigEditor::load_from_path(path.clone()).unwrap();
+        first.set_int("audio", "max_duration_secs", 90);
+        let mut second = ConfigEditor::load_from_path(path.clone()).unwrap();
+        second.set_int("audio", "max_duration_secs", 30);
+        second.save().unwrap();
+        first.save().unwrap();
+
+        assert_eq!(saved(&path).0.audio.max_duration_secs, 90);
+    }
+
+    #[test]
+    fn a_second_save_from_the_same_editor_does_not_replay_old_changes() {
+        let (_dir, path) = temp_config(SHARED);
+        let mut editor = ConfigEditor::load_from_path(path.clone()).unwrap();
+        editor.set_bool("history", "paused", true);
+        editor.save().unwrap();
+        written_meanwhile(&path, "history", "paused", false);
+        editor.set_int("audio", "max_duration_secs", 90);
+        editor.save().unwrap();
+
+        let (config, _) = saved(&path);
+        assert!(
+            !config.history.paused,
+            "an already-saved pause was replayed"
+        );
+        assert_eq!(config.audio.max_duration_secs, 90);
     }
 
     #[test]
