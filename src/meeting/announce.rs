@@ -67,6 +67,57 @@ pub const VOICES: &[&str] = crate::cli::ANNOUNCEMENT_VOICES;
 /// the announcement on the speakers only.
 pub const WAIT_FOR_CALL: Duration = Duration::from_secs(120);
 
+/// How long a call app has to hold the same microphone streams before the
+/// announcement plays.
+///
+/// A call app opens the microphone on its pre-join screen, where nobody on
+/// the call can hear it, and opens a new stream when the user joins. Played
+/// the moment the first stream appeared, the announcement went into the
+/// preview and was over before the user was in the meeting. Waiting for one
+/// set of streams to last this long puts it after the join.
+pub const SETTLE: Duration = Duration::from_secs(5);
+
+/// How often the graph is looked at while a call is settling.
+const SETTLE_POLL: Duration = Duration::from_secs(1);
+
+/// Whether a call has held the same microphone streams for long enough.
+#[derive(Debug)]
+pub(crate) struct Settle {
+    need: Duration,
+    /// The streams last seen, and since when
+    held: Option<(Vec<u32>, std::time::Instant)>,
+}
+
+impl Settle {
+    pub(crate) fn new(need: Duration) -> Self {
+        Self { need, held: None }
+    }
+
+    /// Whether a call is being timed.
+    pub(crate) fn settling(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Note the call's capture streams as they are at `now` (`None` when no
+    /// call has the microphone) and say whether to announce. A different set
+    /// of streams, or none, starts the count again.
+    pub(crate) fn observe(&mut self, streams: Option<&[u32]>, now: std::time::Instant) -> bool {
+        let Some(streams) = streams else {
+            self.held = None;
+            return false;
+        };
+        let mut ids = streams.to_vec();
+        ids.sort_unstable();
+        match &self.held {
+            Some((seen, since)) if *seen == ids => now.duration_since(*since) >= self.need,
+            _ => {
+                self.held = Some((ids, now));
+                self.need.is_zero()
+            }
+        }
+    }
+}
+
 /// How often it looks for the call while waiting.
 const POLL: Duration = Duration::from_secs(2);
 
@@ -611,6 +662,8 @@ mod live {
         pub runtime_dir: PathBuf,
         /// How long to wait for a call ([`WAIT_FOR_CALL`])
         pub wait: Duration,
+        /// How long the call has to hold its streams first ([`SETTLE`])
+        pub settle: Duration,
         /// Where the local copy plays: `None` for the default output, as
         /// PipeWire routes it. Tests send it to a null sink.
         pub local_target: Option<String>,
@@ -633,6 +686,7 @@ mod live {
                 detect,
                 runtime_dir,
                 wait: WAIT_FOR_CALL,
+                settle: SETTLE,
                 local_target: None,
                 jessica_url: jessica::url(),
                 jessica_timeout: jessica::MEETING_TIMEOUT,
@@ -704,11 +758,35 @@ mod live {
 
             let deadline = Instant::now() + self.wait;
             let mut told_waiting = false;
+            let mut settle = Settle::new(self.settle);
             let call = loop {
                 match find_call(&self.detect).await {
-                    Ok(Some(call)) => break Ok(call),
-                    Ok(None) => {}
+                    Ok(Some(call)) => {
+                        let ids: Vec<u32> = call.streams.iter().map(|s| s.id).collect();
+                        let was_settling = settle.settling();
+                        if settle.observe(Some(&ids), Instant::now()) {
+                            break Ok(call);
+                        }
+                        if !was_settling {
+                            tracing::info!(
+                                "Recording announcement: {} has the mic (streams {:?}); \
+                                 announcing once it has kept them for {} s",
+                                call.app,
+                                ids,
+                                self.settle.as_secs()
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        settle.observe(None, Instant::now());
+                    }
                     Err(e) => break Err(e),
+                }
+                // A call that is settling is not held to the deadline: it
+                // is there, and the wait for it is short.
+                if settle.settling() {
+                    tokio::time::sleep(SETTLE_POLL.min(self.settle)).await;
+                    continue;
                 }
                 if Instant::now() >= deadline {
                     break Err(format!(
