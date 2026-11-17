@@ -17,10 +17,9 @@ use crate::text::disfluency::DisfluencyTagger;
 pub const MODEL_SHA256: &str = "f11b45d644b2d829349df2ac2ad3d69c9cf19cd3fae888c69268bddf64cfb354";
 const MODEL_SIZE: u64 = 65_560;
 
-/// Where the model can be had today. Publication on the model host is still
-/// pending approval, so this names the copy in the voxtype source tree. It is
-/// a path, not a URL: nothing here may point at a download that does not
-/// exist.
+/// The pinned model as it sits in the source tree. `voxtype setup lard`
+/// downloads the same bytes from the mirror; tests load this copy, and
+/// `--source` installs from it without a network.
 pub const SOURCE_TREE_PATH: &str = "assets/models/lard-disfluency-v1.vxdf";
 
 const TURN_OFF: &str = "or turn it off: voxtype config set text.lard_disfluency false";
@@ -40,7 +39,11 @@ pub enum Problem {
     /// `text.lard_model_path` rather than the default install location.
     ModelMissing { path: PathBuf, custom: bool },
     /// Something is at the model path but it does not load as a VXDF model.
-    ModelInvalid { path: PathBuf, error: String },
+    ModelInvalid {
+        path: PathBuf,
+        error: String,
+        custom: bool,
+    },
 }
 
 impl Problem {
@@ -60,28 +63,32 @@ impl Problem {
                 "LARD disfluency cleanup is on but text.lard_model_path names a missing file ({})",
                 path.display()
             ),
-            Problem::ModelInvalid { path, error } => format!(
+            Problem::ModelInvalid { path, error, .. } => format!(
                 "LARD disfluency cleanup is on but its model does not load ({}: {error})",
                 path.display()
             ),
         }
     }
 
-    /// What to do about it. The model is not downloadable, so the fix never
-    /// promises a download: it names the source-tree copy and the off switch.
+    /// What to do about it: the command that installs the model, and always
+    /// the switch that turns the stage off. A path the user set is theirs to
+    /// correct, because `voxtype setup lard` installs to the default one.
     pub fn fix(&self) -> String {
         match self {
             Problem::NotEnglish => format!(
                 "Set the active engine's language to en instead of auto (engines \
                  without a language setting cannot run this stage), {TURN_OFF}"
             ),
-            Problem::ModelMissing { custom: true, .. } => format!(
-                "Correct [text] lard_model_path, or remove it to use the model installed by voxtype setup lard, {TURN_OFF}"
+            Problem::ModelMissing { custom: true, .. }
+            | Problem::ModelInvalid { custom: true, .. } => format!(
+                "Correct [text] lard_model_path, or remove it to use the model \
+                 installed by voxtype setup lard, {TURN_OFF}"
             ),
-            Problem::ModelMissing { custom: false, .. } | Problem::ModelInvalid { .. } => {
-                format!(
-                    "The model cannot be downloaded yet. Take {SOURCE_TREE_PATH} from the voxtype source and run: voxtype setup lard --source <that file>, {TURN_OFF}"
-                )
+            Problem::ModelMissing { custom: false, .. } => {
+                format!("Run: voxtype setup lard, {TURN_OFF}")
+            }
+            Problem::ModelInvalid { custom: false, .. } => {
+                format!("Replace it: voxtype setup lard, {TURN_OFF}")
             }
         }
     }
@@ -130,12 +137,14 @@ pub fn load_tagger(text: &TextConfig, language: Option<&str>) -> Result<Disfluen
             return Err(Problem::ModelInvalid {
                 path,
                 error: error.to_string(),
+                custom,
             });
         }
     };
     DisfluencyTagger::from_bytes(&bytes).map_err(|error| Problem::ModelInvalid {
         path,
         error: error.to_string(),
+        custom,
     })
 }
 
@@ -248,10 +257,7 @@ fn status_lines(installed: Result<(), String>, destination: &Path, config: &Conf
         )),
         Err(error) => {
             lines.push(format!(
-                "LARD model unavailable: {error}. Install with voxtype setup lard --source <model.vxdf>"
-            ));
-            lines.push(format!(
-                "The model cannot be downloaded yet; it ships in the voxtype source as {SOURCE_TREE_PATH}."
+                "LARD model unavailable: {error}. Download it with: voxtype setup lard"
             ));
         }
     }
@@ -583,33 +589,33 @@ mod tests {
         }
     }
 
-    /// The model is not published. Whatever the fix says, it must not point
-    /// at a download, and it must offer the way out that always works.
+    /// Every fix is a command the user can run as written, and every one
+    /// offers the way out that always works.
     #[test]
-    fn fixes_never_promise_a_download() {
+    fn fixes_name_the_setup_command_and_the_off_switch() {
         let path = PathBuf::from("/data/voxtype/models/lard-disfluency-v1.vxdf");
-        let problems = [
+        let invalid = |custom| Problem::ModelInvalid {
+            path: path.clone(),
+            error: "unsupported disfluency model format".into(),
+            custom,
+        };
+        let missing = |custom| Problem::ModelMissing {
+            path: path.clone(),
+            custom,
+        };
+        let off = "or turn it off: voxtype config set text.lard_disfluency false";
+
+        for problem in [
             Problem::NotEnglish,
-            Problem::ModelMissing {
-                path: path.clone(),
-                custom: false,
-            },
-            Problem::ModelMissing {
-                path: path.clone(),
-                custom: true,
-            },
-            Problem::ModelInvalid {
-                path: path.clone(),
-                error: "unsupported disfluency model format".into(),
-            },
-        ];
-        for problem in &problems {
+            missing(false),
+            missing(true),
+            invalid(false),
+            invalid(true),
+        ] {
             let fix = problem.fix();
+            assert!(fix.ends_with(off), "{fix}");
+            // The command is the fix. A URL in a notification is not.
             assert!(!fix.contains("http"), "{fix}");
-            assert!(
-                fix.contains("voxtype config set text.lard_disfluency false"),
-                "{fix}"
-            );
             assert!(problem
                 .message()
                 .starts_with("LARD disfluency cleanup is on"));
@@ -619,18 +625,23 @@ mod tests {
             assert!(!problem.summary().contains('\n'));
         }
 
-        let default_missing = &problems[1];
-        assert!(default_missing.message().contains("not installed"));
-        assert!(default_missing.message().contains(path.to_str().unwrap()));
-        assert!(default_missing.fix().contains("cannot be downloaded yet"));
-        assert!(default_missing.fix().contains(SOURCE_TREE_PATH));
-        assert!(default_missing
-            .fix()
-            .contains("voxtype setup lard --source"));
+        assert!(missing(false).message().contains("not installed"));
+        assert!(missing(false).message().contains(path.to_str().unwrap()));
+        assert_eq!(
+            missing(false).fix(),
+            format!("Run: voxtype setup lard, {off}")
+        );
+        assert_eq!(
+            invalid(false).fix(),
+            format!("Replace it: voxtype setup lard, {off}")
+        );
 
-        // A path the user set is theirs to correct, not ours to reinstall.
-        assert!(problems[2].fix().contains("lard_model_path"));
-        assert!(!problems[2].fix().contains("setup lard --source"));
+        // A path the user set is theirs to correct: setup lard installs to
+        // the default location, which that config does not read.
+        for custom in [missing(true), invalid(true)] {
+            assert!(custom.fix().starts_with("Correct [text] lard_model_path"));
+            assert!(!custom.fix().contains("Run: voxtype setup lard"));
+        }
     }
 
     #[test]
@@ -640,8 +651,9 @@ mod tests {
 
         let mut config = Config::default();
         let off = status_lines(Err("No such file".into()), destination, &config).join("\n");
-        assert!(off.contains("LARD model unavailable: No such file"));
-        assert!(off.contains("cannot be downloaded yet"));
+        assert!(off.contains(
+            "LARD model unavailable: No such file. Download it with: voxtype setup lard"
+        ));
         assert!(off.contains("text.lard_disfluency is off"));
 
         // On with nothing to load: the status says so instead of only

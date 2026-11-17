@@ -1366,18 +1366,41 @@ mod tests {
             .contains("voxtype config set text.lard_disfluency false"));
     }
 
+    /// What a user with the setting on and no model sees, to the letter.
     #[test]
-    fn lard_check_names_the_source_tree_copy_for_the_default_path() {
+    fn lard_check_tells_the_user_to_run_setup_lard() {
         let config = lard_config(Path::new("unused"));
         let problem = crate::setup::lard::Problem::ModelMissing {
-            path: PathBuf::from("/data/voxtype/models/lard-disfluency-v1.vxdf"),
+            path: PathBuf::from("/home/u/.local/share/voxtype/models/lard-disfluency-v1.vxdf"),
             custom: false,
         };
         let check = lard_check(&config, Some(&problem)).unwrap();
-        let fix = check.fix.unwrap();
-        assert!(fix.contains("cannot be downloaded yet"));
-        assert!(fix.contains("voxtype setup lard --source"));
-        assert!(!fix.contains("http"));
+        assert_eq!(check.severity, Severity::Error);
+        assert_eq!(
+            render_text(&report(vec![check.clone()]), false),
+            "Voxtype System Check\n\
+             ====================\n\
+             \n\
+             Text cleanup:\n  \
+               ✗ LARD disfluency cleanup is on but its model is not installed \
+             (/home/u/.local/share/voxtype/models/lard-disfluency-v1.vxdf)\n      \
+                   Fix: Run: voxtype setup lard, or turn it off: \
+             voxtype config set text.lard_disfluency false\n\
+             \n\
+             ---\n\
+             ✗ Some checks failed. 1 error(s), 0 warning(s). Please fix the issues above.\n"
+        );
+
+        let (title, body) = startup_notification(&report(vec![check])).unwrap();
+        assert_eq!(title, "Voxtype: 1 problem needs attention");
+        assert_eq!(
+            body,
+            "• LARD disfluency cleanup is on but its model is not installed \
+             (/home/u/.local/share/voxtype/models/lard-disfluency-v1.vxdf)\n  \
+               Run: voxtype setup lard, or turn it off: \
+             voxtype config set text.lard_disfluency false\n\
+             Run `voxtype doctor` for details."
+        );
     }
 
     #[test]

@@ -1268,7 +1268,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Text Cleanup",
         "LARD disfluency cleanup",
-        "Opt in to the local English-only LARD model, installed separately with voxtype setup lard (it is not downloadable yet). Without the model this stage is skipped and the other cleanup stages still run.",
+        "Opt in to the local English-only LARD model. Download it first with voxtype setup lard: without the model this stage is skipped and the other cleanup stages still run.",
     ),
     spec(
         "text.lard_model_path",

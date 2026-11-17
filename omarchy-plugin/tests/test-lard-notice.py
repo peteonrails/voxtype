@@ -26,7 +26,8 @@ import panel_harness as h
 
 SCENARIOS = ("missing", "ready", "installed")
 NOTICE = ("LARD disfluency cleanup is on but its model is not installed "
-          "(/data/voxtype/models/lard-disfluency-v1.vxdf). The model cannot be downloaded yet.")
+          "(/data/voxtype/models/lard-disfluency-v1.vxdf). Run: voxtype setup lard, "
+          "or turn it off: voxtype config set text.lard_disfluency false")
 
 
 def run(scenario, shell, evidence):
