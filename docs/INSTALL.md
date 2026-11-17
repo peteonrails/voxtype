@@ -376,7 +376,7 @@ For the other engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup 
 systemctl --user enable --now voxtype
 
 # Or run in foreground for testing
-voxtype daemon -v
+voxtype daemon
 ```
 
 ### 4. Wire up a hotkey
