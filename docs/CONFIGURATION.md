@@ -4481,7 +4481,7 @@ auto_record_apps = ["Zoom"]
 **Default:** `5`
 **Required:** No
 
-How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+How long a call app must hold the microphone before voxtype prompts, and how long a call must show no sign of itself before it counts as over. Keeps a quick mic test or a permission check from prompting.
 
 ### on_call_end
 
@@ -4491,13 +4491,20 @@ How long a call app must hold the microphone before voxtype prompts, and how lon
 
 What happens when a detected call ends while a meeting records. `"stop"` shows **Call ended** with **Keep recording** and stops the meeting after `stop_grace_secs` unless you keep it; the stop runs the summary at stop as usual. `"ask"` offers **Stop meeting** and **Keep recording** and waits for you. `"keep"` leaves the meeting recording. A meeting started by hand with no detected call is never stopped. Changing it needs a daemon restart.
 
+A call has ended when nothing shows it any more for `debounce_secs`:
+
+- A call in a browser (an app with `titles`) has ended when the browser has released the microphone and no window title shows the call. While the browser still has the microphone, or a window title still shows the call, the call goes on. So bringing another tab to the front does not end it, and neither does the browser letting go of the microphone while the call's tab is still there. When Hyprland cannot be asked for its windows, the window is not taken to be gone.
+- A native client (an app without `titles`) has ended its call when it releases the microphone.
+
+A call tab left open after you hang up therefore keeps the recording going until you close it, stop the meeting, or [`max_duration_mins`](#max_duration_mins) is reached. See [When a call is over](MEETING_MODE.md#when-a-call-is-over).
+
 ### stop_grace_secs
 
 **Type:** Integer (0 to 600)
 **Default:** `20`
 **Required:** No
 
-Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call app takes the microphone again in that time, the stop is called off.
+Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call shows again in that time (its app takes the microphone again, or its window title comes back), it is the same call: the stop is called off and the call is not offered a second time. The same time applies with `"ask"`, whose question is withdrawn, and with `"keep"`. With `0` an ended call is forgotten at once.
 
 ### apps
 

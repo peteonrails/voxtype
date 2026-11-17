@@ -18,6 +18,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
 - [Meeting Detection](#meeting-detection)
   - [How calls are recognized](#how-calls-are-recognized)
   - [When it prompts](#when-it-prompts)
+  - [When a call is over](#when-a-call-is-over)
   - [Titles from Your Calendar](#titles-from-your-calendar)
   - [Checking what it sees](#checking-what-it-sees)
 - [Working with Transcripts](#working-with-transcripts)
@@ -443,22 +444,51 @@ The setting is read when the daemon starts, so restart it after changing it.
 ### How calls are recognized
 
 - **The microphone.** A call app opening a PipeWire capture stream is the main signal. Native clients (Zoom, `teams-for-linux`) count on that alone.
-- **The window title.** A browser opens the microphone for many things, so a browser's stream only counts when a window title confirms a call: "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web. Titles come from Hyprland; on other compositors browser calls are not detected.
+- **The window title.** A browser opens the microphone for many things, so a browser's stream only counts when a window title confirms a call: "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web, "Zoom Meeting" or "Zoom Workplace" for Zoom on the web. Titles come from Hyprland; on other compositors browser calls are not detected. A browser window's title is the title of its front tab, so the call's tab has to be in front for the call to be noticed. The Zoom web client titles its own window with the meeting's name, which says nothing about Zoom, so a Zoom call in a browser is noticed by the "Join from Zoom Workplace app" tab that launched it.
 - **Voxtype's own capture never counts**, nor do other dictation apps or the camera-effects virtual microphone.
 
 ### When it prompts
 
-- Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt.
+- Once per call. The app must hold the microphone for `debounce_secs` (default 5) first, so a mic test or a permission check does not prompt. A call that lets go of the microphone and takes it again, or whose tab goes behind another and comes back, is still the same call: it is not offered a second time, and the recording is not announced again.
 - Not while a meeting is already recording.
 - Not while you are dictating: the prompt waits until dictation ends.
-- When the call ends (the call app releases the microphone for `debounce_secs`) while a meeting records, `on_call_end` decides:
-  - `"stop"` (default): a notification says **Call ended**, "Stopping the recording in 20 s.", with **Keep recording**. Unless you press it, the meeting then stops as `voxtype meeting stop` would, and the summary at stop runs as usual. `stop_grace_secs` sets the wait. If the call app takes the microphone again within it, the stop is called off.
-  - `"ask"`: a notification offers **Stop meeting** and **Keep recording**, and nothing happens until you choose.
-  - `"keep"`: the meeting keeps recording.
-- A meeting you started by hand, with no call detected while it ran, is never stopped this way.
-- Each step is logged at info level (`journalctl --user -u voxtype | grep "Meeting detection"`): the call seen, with its app and audio stream, the prompt, the call ending, and the stop taken or not.
 
 Detection never records by itself, except for apps you list in `auto_record_apps`.
+
+### When a call is over
+
+Once a call has been noticed, it goes on for as long as anything still shows it. It is over when nothing has for `debounce_secs`:
+
+- **A call in a browser** is over when the browser has released the microphone and no window title shows the call. One without the other is not the end:
+  - The browser still has the microphone, but no title shows the call. You brought another tab to the front of that browser window, or closed the tab that launched the call. The call goes on.
+  - The browser released the microphone, but a window title still shows the call. The call goes on, however long the microphone stays released.
+  - Hyprland cannot be asked for its windows. Voxtype does not take that to mean the window is gone, and the call goes on until the windows can be read again.
+- **A native client** (Zoom, `teams-for-linux`) has only its microphone stream. Its call is over when it releases the microphone, whatever windows it still has open.
+- **A call back within `stop_grace_secs`** of ending (its app on the microphone again, or its window title back) is the same call. A stop that was waiting is called off (with `"ask"`, the question is withdrawn), and nothing is offered again.
+
+A call tab left open after you hang up keeps the call going by this rule, so the recording runs on until you close the tab, stop the meeting yourself, or it reaches `max_duration_mins`. Voxtype would rather record too long than stop in the middle of a call.
+
+When the call is over while a meeting records, `on_call_end` decides:
+
+- `"stop"` (default): a notification says **Call ended**, "Stopping the recording in 20 s.", with **Keep recording**. Unless you press it, the meeting then stops as `voxtype meeting stop` would, and the summary at stop runs as usual. `stop_grace_secs` sets the wait.
+- `"ask"`: a notification offers **Stop meeting** and **Keep recording**, and nothing happens until you choose.
+- `"keep"`: the meeting keeps recording.
+
+A meeting you started by hand, with no call detected while it ran, is never stopped this way.
+
+Each step is logged at info level, with what was seen:
+
+```text
+$ journalctl --user -u voxtype | grep "Meeting detection"
+Meeting detection: call seen: Zoom (web) - Chromium input has the mic (stream 115) and window "Join from Zoom Workplace app - Zoom - Chromium" matches; prompting if it lasts 5s
+Meeting detection: call continues: Zoom (web) still has the mic, but no window title shows the call any more (another tab or page is in front)
+Meeting detection: call continues: Zoom (web) has the mic and its call window again
+Meeting detection: call continues: Zoom (web) released the mic, but its call window is still open (muted, or reconnecting)
+Meeting detection: call ended: Zoom (web) released the mic and no window shows the call any more while a meeting records ([meeting.detect] on_call_end decides)
+Meeting detection: the Zoom (web) call ended; stopping the meeting in 20 s unless kept
+Meeting detection: call is back: Zoom (web) is seen again within the grace period; the same call, so nothing is offered again
+Meeting detection: not stopping the meeting: the call came back
+```
 
 ### Titles from Your Calendar
 
