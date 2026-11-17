@@ -1255,7 +1255,7 @@ pub struct Daemon {
     meeting_mic_buffer: Vec<f32>,
     meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
-    meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    meeting_event_rx: Option<meeting::MeetingEventReceiver>,
     // The recording announcement's progress, while it runs
     meeting_announce_rx: Option<tokio::sync::mpsc::Receiver<meeting::announce::Update>>,
     meeting_announce_task: Option<tokio::task::JoinHandle<meeting::announce::Status>>,
@@ -3475,8 +3475,9 @@ impl Daemon {
             tracing::info!("Single audio capture: mic only");
         }
 
-        // Create event channel
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        // The meeting's events, read by the event loop. Sending never
+        // waits: the meeting runs on the loop's own task.
+        let (tx, rx) = meeting::event_channel();
         self.meeting_event_rx = Some(rx);
 
         // Create meeting daemon, on dictation's loaded model when it is the
@@ -4191,10 +4192,8 @@ impl Daemon {
         }
 
         if check_meeting_edit() {
-            if let Some(ref mut daemon) = self.meeting_daemon {
-                tracing::debug!("Meeting transcript edit requested via file trigger");
-                daemon.apply_segment_edits().await;
-            }
+            tracing::debug!("Meeting transcript edit requested via file trigger");
+            self.apply_meeting_edits().await;
         }
 
         if let Some(retitle) = meeting::retitle::take_trigger(&Config::runtime_dir()) {
@@ -4250,6 +4249,16 @@ impl Daemon {
         }
 
         changed
+    }
+
+    /// Bring the running meeting up to date with what the user changed in
+    /// its transcript (`meeting label`, `reassign`, `annotate`, `edit`,
+    /// `delete-line`). The changed lines reach the views as meeting events,
+    /// once the event loop is back to reading them.
+    async fn apply_meeting_edits(&mut self) {
+        if let Some(ref mut daemon) = self.meeting_daemon {
+            daemon.apply_segment_edits().await;
+        }
     }
 
     /// Tell the user a meeting is losing transcript, once per meeting: a
@@ -7311,6 +7320,88 @@ while True:
         fn transcribe(&self, _samples: &[f32]) -> TranscriptionResult {
             Ok(self.0.to_string())
         }
+    }
+
+    /// The event loop is the only reader of a meeting's events, and it runs
+    /// the meeting's work inline, so nothing the meeting publishes may wait
+    /// for a reader. Naming a speaker who had 52 lines published 52 events
+    /// into a channel that held 32: the loop waited on itself, and the
+    /// daemon stopped transcribing, dictating and answering `meeting stop`
+    /// until it was restarted. Here the daemon applies that edit with its
+    /// receiver unread, as inside the loop's trigger handler, and then
+    /// takes the next command.
+    #[tokio::test]
+    async fn an_edit_of_many_lines_leaves_the_daemon_running() {
+        const LINES: u32 = 52;
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        // Nothing written to the runtime directory, nothing shown.
+        config.state_file = None;
+        config.meeting.status_notifications = "never".to_string();
+        let mut daemon = Daemon::new(config, None);
+
+        let meeting_config = meeting::MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+                my_name: None,
+            },
+            ..Default::default()
+        };
+        // The channel `start_meeting` gives a meeting.
+        let (tx, mut rx) = meeting::event_channel();
+        let mut running =
+            MeetingDaemon::for_test(meeting_config, Arc::new(FixedTranscriber("")), None, tx);
+        let id = running.start(Some("Call".to_string()), None).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(MeetingEvent::Started { .. })));
+        let transcript = &mut running.current_meeting_mut().unwrap().transcript;
+        for i in 0..LINES {
+            let start = u64::from(i) * 5_000;
+            let mut line =
+                meeting::TranscriptSegment::new(i, start, start + 4_000, format!("line {i}"), i);
+            line.source = meeting::AudioSource::Loopback;
+            line.speaker_id = Some("Remote 2".to_string());
+            transcript.add_segment(line);
+        }
+        // Saved as after every chunk, then what `voxtype meeting label`
+        // stores before it drops its trigger.
+        let saved = transcript.clone();
+        running.storage().save_transcript(&id, &saved).unwrap();
+        running
+            .storage()
+            .set_speaker_label(&id, "Remote 2", "Chris")
+            .unwrap();
+        daemon.meeting_daemon = Some(running);
+        daemon.meeting_event_rx = Some(rx);
+
+        let wait = Duration::from_secs(5);
+        tokio::time::timeout(wait, daemon.apply_meeting_edits())
+            .await
+            .expect("the daemon waited on its own meeting events: it would hang here");
+        tokio::time::timeout(wait, daemon.pause_meeting())
+            .await
+            .expect("the daemon did not get to the next command")
+            .unwrap();
+        assert!(daemon.meeting_daemon.as_ref().unwrap().state().is_paused());
+
+        // Back in the loop, every changed line is there to publish.
+        let rx = daemon.meeting_event_rx.as_mut().unwrap();
+        let events: Vec<MeetingEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let named = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    MeetingEvent::SegmentUpdated { segment }
+                        if segment.speaker_label.as_deref() == Some("Chris")
+                )
+            })
+            .count();
+        assert_eq!(named, LINES as usize);
+        assert!(matches!(events.last(), Some(MeetingEvent::Paused)));
     }
 
     fn parakeet_daemon(on_demand: bool) -> Daemon {
