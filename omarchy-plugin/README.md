@@ -333,6 +333,11 @@ Inside the panel:
 - Keys the schema flags `onnx_model_only` (today Parakeet's **Decoder type**) are
   hidden while the engine's model is a `.gguf` file, which carries its own
   architecture. A voxtype that predates the flag shows the key as before.
+- A key the schema gives a `notice` shows it under the row. Today that is
+  **LARD disfluency cleanup** while the switch is on with nothing to run: no
+  model installed, or a language that is not explicit English. The notice says
+  what is wrong and how to fix it, and goes away once it is fixed. A voxtype
+  that predates the field shows no notice.
 - Enums the schema marks `open` (an evdev key name, a language list, a sound
   theme that may be a path) carry a **Custom value…** row that turns the picker
   into a text field. Escape backs out of it without writing.
@@ -500,6 +505,7 @@ and not before), and an unset Threads row.
 python3 omarchy-plugin/tests/test-cli-missing.py [--evidence DIR]
 python3 omarchy-plugin/tests/test-section-refresh.py [--evidence DIR]
 python3 omarchy-plugin/tests/test-onnx-model-only.py [--evidence DIR]
+python3 omarchy-plugin/tests/test-lard-notice.py [--evidence DIR]
 ```
 
 Same harness (`tests/panel_harness.py`) and the same isolation rules as the
@@ -510,6 +516,9 @@ nothing stale stays on screen. `test-section-refresh.py` changes the fake CLI's
 answers behind an open panel and checks that `section` re-reads all of them.
 `test-onnx-model-only.py` checks Decoder type is hidden for a GGUF model, shown
 for an ONNX one, and shown by a schema without the flag.
+`test-lard-notice.py` checks the LARD row shows the schema's `notice` while the
+model is missing, shows nothing without one, and clears it when the model is
+installed behind an open panel.
 Terminal launches are logged by a stand-in, never opened.
 
 ### Meeting view tests
