@@ -370,10 +370,17 @@ fn resolve_explicit(configured: OsdFrontend, probe: &dyn OsdProbe) -> Resolution
 
 /// Title and body of the desktop notification the daemon sends once at
 /// startup when the OSD the user asked for won't be the one shown: an
-/// explicit frontend that falls back to another, or no frontend at all.
-/// `None` when the requested frontend runs, or when `auto` settled on a
-/// later choice, since nothing the user asked for is being overridden.
+/// explicit frontend that falls back to another, or to nothing.
+/// `None` when the requested frontend runs, or when the request was `auto`,
+/// since nothing the user asked for is being overridden. That includes
+/// `auto` finding nothing to run: it is the default, so installs that ship
+/// no OSD frontend (macOS, the default Nix package, minimal Linux installs)
+/// would otherwise be notified on every start. The daemon still logs it.
 pub fn fallback_notice(resolution: &Resolution) -> Option<(String, String)> {
+    let configured = resolution.configured;
+    if configured == OsdFrontend::Auto {
+        return None;
+    }
     let Some(active) = resolution.active else {
         return Some((
             "Voxtype: no OSD available".to_string(),
@@ -384,8 +391,7 @@ pub fn fallback_notice(resolution: &Resolution) -> Option<(String, String)> {
             ),
         ));
     };
-    let configured = resolution.configured;
-    if configured == OsdFrontend::Auto || active == configured {
+    if active == configured {
         return None;
     }
     let using = active.as_str();
@@ -798,11 +804,20 @@ mod tests {
         assert!(body.contains("Quickshell (qs) is not on PATH"), "{body}");
         assert!(body.contains("[osd] frontend = \"gtk4\""), "{body}");
 
-        for f in [OsdFrontend::Auto, OsdFrontend::Gtk4] {
-            let r = resolve(f, &Fake::with(&[], &[], true));
-            let (title, _) = fallback_notice(&r).unwrap();
-            assert_eq!(title, "Voxtype: no OSD available");
-        }
+        // An explicit frontend with nothing to fall back to still notifies.
+        let r = resolve(OsdFrontend::Gtk4, &Fake::with(&[], &[], true));
+        assert_eq!(r.active, None);
+        let (title, _) = fallback_notice(&r).unwrap();
+        assert_eq!(title, "Voxtype: no OSD available");
+    }
+
+    #[test]
+    fn fallback_notice_is_silent_when_auto_finds_no_frontend() {
+        // The default config on an install with no OSD frontend at all
+        // (macOS, the default Nix package) must not notify on every start.
+        let r = resolve(OsdFrontend::Auto, &Fake::with(&[], &[], true));
+        assert_eq!(r.active, None);
+        assert_eq!(fallback_notice(&r), None);
     }
 
     #[test]
