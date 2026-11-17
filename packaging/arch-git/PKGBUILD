@@ -2,7 +2,7 @@
 # Based on the stable voxtype AUR source package.
 
 pkgname=voxtype-git
-pkgver=1.0.1.r52.g320a737
+pkgver=1.2.2.r7.g96a4277
 pkgrel=1
 pkgdesc="Push-to-talk voice-to-text for Linux (development version)"
 arch=('x86_64' 'aarch64')
