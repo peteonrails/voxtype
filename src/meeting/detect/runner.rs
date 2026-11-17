@@ -112,7 +112,8 @@ impl Default for CallEndPolicy {
 #[derive(Debug, Clone)]
 struct PendingStop {
     at: tokio::time::Instant,
-    app: String,
+    /// The calls whose end it waits on: any of them back calls it off
+    apps: Vec<String>,
     notice: Option<u32>,
 }
 
@@ -217,7 +218,7 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
         }
         tracing::info!(
             "Meeting detection: stopping the meeting, the {} call ended",
-            p.app
+            p.apps.join(" and ")
         );
         if let Err(e) = self.control.stop().await {
             tracing::warn!("Could not stop the meeting: {}", e);
@@ -276,6 +277,16 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                         }
                     }
                     CallEnd::Stop => {
+                        // Calls that share a browser's mic end together:
+                        // one stop and one notice for all of them.
+                        if let Some(p) = self.pending_stop.as_mut() {
+                            tracing::info!(
+                                "Meeting detection: the {} call ended too; a stop is already waiting",
+                                call.app
+                            );
+                            p.apps.push(call.app.clone());
+                            return;
+                        }
                         let grace = self.call_end.grace;
                         tracing::info!(
                             "Meeting detection: the {} call ended; stopping the meeting in {} s unless kept",
@@ -294,7 +305,7 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                         };
                         self.pending_stop = Some(PendingStop {
                             at: tokio::time::Instant::now() + grace,
-                            app: call.app.clone(),
+                            apps: vec![call.app.clone()],
                             notice,
                         });
                     }
@@ -306,7 +317,7 @@ impl<N: Notifier, M: MeetingControl> Controller<N, M> {
                 if self
                     .pending_stop
                     .as_ref()
-                    .is_some_and(|p| p.app == call.app)
+                    .is_some_and(|p| p.apps.contains(&call.app))
                 {
                     self.cancel_stop("the call came back").await;
                 }
@@ -943,6 +954,36 @@ mod tests {
         .await;
         assert_eq!(c.stop_due_at(), None);
         assert!(!log.take().contains(&"stop".to_string()));
+    }
+
+    /// A Teams tab in front of a browser that is on a Zoom call makes a
+    /// second call of the same mic, and both end when the mic goes.
+    #[tokio::test]
+    async fn two_calls_ending_together_get_one_notice_and_one_stop() {
+        let log = Log::default();
+        let mut c = controller(&log);
+        c.on_event(&ended("Zoom (web)", true)).await;
+        let due = c.stop_due_at();
+        c.on_event(&ended("Microsoft Teams (web)", true)).await;
+        assert_eq!(c.stop_due_at(), due, "the first stop stands");
+        assert_eq!(
+            log.take(),
+            vec![
+                "show 1 Zoom (web) released the microphone. Stopping the recording in 20 s. [keep]"
+            ]
+        );
+        c.fire_due_stop(true).await;
+        assert_eq!(log.take(), vec!["close 1", "stop"]);
+
+        // Either of them back calls the stop off.
+        c.on_event(&ended("Zoom (web)", true)).await;
+        c.on_event(&ended("Microsoft Teams (web)", true)).await;
+        c.on_event(&Event::Returned {
+            call: call("Microsoft Teams (web)", "Teams call"),
+        })
+        .await;
+        assert_eq!(c.stop_due_at(), None);
+        assert_eq!(log.take().last().map(String::as_str), Some("close 2"));
     }
 
     #[tokio::test]
