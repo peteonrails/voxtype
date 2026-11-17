@@ -1222,6 +1222,9 @@ pub struct Daemon {
     // Exercise streaming startup/tap without opening an audio device.
     #[cfg(test)]
     history_test_capture: Option<Box<dyn AudioCapture>>,
+    /// Stands in for the configured output methods in one batch delivery.
+    #[cfg(test)]
+    history_test_output_chain: Option<Vec<Box<dyn TextOutput>>>,
     #[cfg(test)]
     history_test_eager_loop: Option<HistoryTestEagerLoop>,
     #[cfg(test)]
@@ -1488,6 +1491,8 @@ impl Daemon {
             active_transcriber: None,
             #[cfg(test)]
             history_test_capture: None,
+            #[cfg(test)]
+            history_test_output_chain: None,
             #[cfg(test)]
             history_test_eager_loop: None,
             #[cfg(test)]
@@ -2530,7 +2535,12 @@ impl Daemon {
                     FileDelivery::FellBack(_) => (true, None),
                     FileDelivery::Lost(err) => (false, Some(err.to_string())),
                 };
+                let fallback_text =
+                    fell_back.then(|| output::delivered_form(&final_text).into_owned());
                 self.history_note(|p| {
+                    if let Some(text) = &fallback_text {
+                        p.delivered_text(text);
+                    }
                     p.entry.output = Some(crate::history::OutputInfo {
                         mode: "file".into(),
                         driver: Some(if fell_back { "clipboard" } else { "file" }.into()),
@@ -2573,9 +2583,12 @@ impl Daemon {
         if let Some(session) = streaming_session.as_mut() {
             session.finalize_pending_partial();
         }
+        // Each piece went through the output chain, which changes one
+        // character for another and never the count, so the whole text in
+        // its delivered form is the pieces as they were delivered.
         let streamed = streaming_session
             .as_ref()
-            .map(|s| s.finalized_text().to_string())
+            .map(|s| output::delivered_form(s.finalized_text()).into_owned())
             .unwrap_or_default();
         let raw = streaming_session
             .as_ref()
@@ -5230,7 +5243,14 @@ impl Daemon {
                                 FileDelivery::FellBack(_) => (true, None),
                                 FileDelivery::Lost(err) => (false, Some(err.to_string())),
                             };
+                            let fallback_text =
+                                fell_back.then(|| output::delivered_form(&final_text).into_owned());
                             self.history_note(|p| {
+                                // The file gets the text as is; the clipboard
+                                // fallback gets it through the output chain.
+                                if let Some(text) = &fallback_text {
+                                    p.delivered_text(text);
+                                }
                                 p.entry.output = Some(OutputInfo {
                                     mode: "file".into(),
                                     driver: Some(
@@ -5371,6 +5391,12 @@ impl Daemon {
                         }
                     }
 
+                    #[cfg(test)]
+                    let output_chain = match self.history_test_output_chain.take() {
+                        Some(chain) => chain,
+                        None => output::create_output_chain(&output_config),
+                    };
+                    #[cfg(not(test))]
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
@@ -5400,7 +5426,11 @@ impl Daemon {
                             Ok(d) => (Some(d.driver.clone()), d.fell_back, None),
                             Err(e) => (None, false, Some(e.to_string())),
                         };
+                        let delivered_text = delivery.as_ref().ok().map(|d| d.text.clone());
                         self.history_note(|p| {
+                            if let Some(text) = &delivered_text {
+                                p.delivered_text(text);
+                            }
                             p.entry.output = Some(OutputInfo {
                                 mode,
                                 driver,
@@ -7534,6 +7564,105 @@ while True:
         assert_eq!(entries[0].raw_text, "synthetic invoice");
         assert_eq!(entries[0].output.as_ref().unwrap().mode, "file");
         assert!(entries[0].delivered);
+    }
+
+    #[tokio::test]
+    async fn history_records_the_text_as_it_was_delivered() {
+        const PROBE: &str = "delivered-text";
+        if std::env::var("VOXTYPE_HISTORY_METADATA_PROBE").as_deref() != Ok(PROBE) {
+            // The real completion path, with a private runtime and no
+            // inherited desktop, config or output helpers.
+            let fixture = tempfile::tempdir().unwrap();
+            let runtime = fixture.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::history_records_the_text_as_it_was_delivered",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", fixture.path())
+                .env("XDG_CONFIG_HOME", fixture.path().join("config"))
+                .env("XDG_DATA_HOME", fixture.path().join("data"))
+                .env("XDG_RUNTIME_DIR", runtime)
+                .env("TMPDIR", fixture.path())
+                .env("RUST_MIN_STACK", "16777216")
+                .env("VOXTYPE_HISTORY_METADATA_PROBE", PROBE)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        // Curly quotes and an apostrophe, which the output chain straightens
+        // for the keyboard tools, and a dash it leaves alone.
+        const HEARD: &str = "He said \u{201C}hello\u{201D} \u{2014} it\u{2019}s fine.";
+        const TYPED: &str = "He said \"hello\" \u{2014} it's fine.";
+
+        let fixture = tempfile::tempdir().unwrap();
+        let mut daemon = history_daemon(fixture.path());
+        daemon.config.engine = crate::config::TranscriptionEngine::Whisper;
+        daemon.config.output.wait_for_modifier_release = false;
+        daemon.config.output.notification.on_transcription = false;
+        daemon.config.text.spoken_punctuation = false;
+        let got = Arc::new(std::sync::Mutex::new(None));
+        daemon.history_test_output_chain = Some(vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: true,
+        })]);
+        daemon.begin_osd_session(&State::Recording {
+            started_at: std::time::Instant::now(),
+            model_override: None,
+        });
+        let mut state = State::Transcribing { audio: Vec::new() };
+        daemon
+            .handle_transcription_result(&mut state, Ok(Ok(HEARD.into())))
+            .await;
+
+        let typed = got.lock().unwrap().clone().expect("nothing was delivered");
+        assert_eq!(
+            typed, TYPED,
+            "the fixture's expectation of the output chain"
+        );
+        let entries = wait_for_entries(fixture.path(), 1).await;
+        let entry = &entries[0];
+        assert!(entry.delivered);
+        assert_eq!(entry.text, typed, "history differs from what was typed");
+        assert_eq!(entry.best_text(), typed, "Copy would not reproduce it");
+        assert_eq!(entry.raw_text, HEARD, "the engine's wording must be kept");
+        assert!(
+            !entry.edits.is_empty(),
+            "the change from heard to typed is an automatic edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_delivered_text_is_untouched_when_delivery_changes_nothing() {
+        let mut pending = crate::history::recorder::Recorder::with_paths(
+            {
+                let mut settings = crate::config::HistoryConfig::default();
+                settings.enabled = true;
+                settings
+            },
+            std::env::temp_dir().join("voxtype-unused-history"),
+            std::env::temp_dir().join("voxtype-unused-index.db"),
+        )
+        .begin()
+        .expect("history is on");
+        pending.texts("um plain text", "Plain text.");
+        let edits = pending.entry.edits.clone();
+        pending.delivered_text("Plain text.");
+        assert_eq!(pending.entry.text, "Plain text.");
+        assert_eq!(pending.entry.edits, edits);
+        pending.delivered_text("Plain 'text'.");
+        assert_eq!(pending.entry.text, "Plain 'text'.");
+        assert_eq!(pending.entry.raw_text, "um plain text");
     }
 
     #[tokio::test]

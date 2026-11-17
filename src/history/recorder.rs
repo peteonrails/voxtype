@@ -95,6 +95,17 @@ impl Pending {
         self.entry.text = text.to_string();
         self.entry.edits = super::entry::edits_between(raw, text);
     }
+
+    /// The text an output method actually received, when delivery changed
+    /// it on the way (curly quotes become straight ones for the keyboard
+    /// tools). `text` is what the user got, so it is what Copy and Paste
+    /// again must reproduce; the engine's wording stays in `raw_text`.
+    pub fn delivered_text(&mut self, delivered: &str) {
+        if self.entry.text != delivered {
+            self.entry.text = delivered.to_string();
+            self.entry.edits = super::entry::edits_between(&self.entry.raw_text, delivered);
+        }
+    }
 }
 
 /// What the daemon keeps between dictations.

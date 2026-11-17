@@ -105,12 +105,24 @@ pub fn find_ydotool_socket() -> Option<PathBuf> {
     None
 }
 
+/// `text` as the output methods receive it from [`deliver_with_fallback`].
+///
+/// History records what was delivered, not what was about to be. Callers
+/// that only know the text they asked to deliver (the streaming path, which
+/// delivers in pieces) use this rather than repeating the rules. A
+/// successful delivery also reports it directly, in [`Delivered::text`].
+/// Writing to a file does not go through here and is not changed.
+///
 /// Normalize Unicode curly quotes to ASCII equivalents.
 ///
 /// Whisper sometimes outputs curly/smart quotes which can cause issues with
 /// keyboard simulation tools (wtype, dotool, ydotool). This function converts
 /// them to standard ASCII quotes to prevent unexpected line breaks or other
 /// typing artifacts.
+pub fn delivered_form(text: &str) -> Cow<'_, str> {
+    normalize_quotes(text)
+}
+
 fn normalize_quotes(text: &str) -> Cow<'_, str> {
     // Quick check to avoid allocation if no normalization needed
     let needs_normalization = text.chars().any(|c| {
@@ -556,6 +568,9 @@ pub struct Delivered {
     pub driver: String,
     /// Whether an earlier method in the chain was skipped or failed first.
     pub fell_back: bool,
+    /// The text the method was given: the caller's, after the changes this
+    /// module makes for the keyboard tools.
+    pub text: String,
 }
 
 /// [`output_with_fallback`], also saying which method delivered the text.
@@ -642,6 +657,7 @@ pub async fn deliver_with_fallback(
                 result = Ok(Delivered {
                     driver: output.name().to_string(),
                     fell_back: position > 0,
+                    text: normalized_text.to_string(),
                 });
                 break;
             }
