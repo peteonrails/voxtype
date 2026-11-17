@@ -169,10 +169,19 @@ check() {
     export CC=clang
     export CXX=clang++
     export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+    # The meeting assistant's jail test runs bwrap whenever it is installed,
+    # and gtk4 pulls bubblewrap in. bwrap needs unprivileged user
+    # namespaces, which containers, some chroots and hardened kernels do
+    # not allow; skip that one test there instead of failing the build.
+    local _skip=()
+    if ! bwrap --ro-bind / / true 2>/dev/null; then
+        _skip=(--skip meeting::assistant::tests::codex_runs_in_a_jail_that_hides_home)
+    fi
     # Include both waveform implementations and the meetings window.
     # Model-dependent inference tests remain opt-in, as in upstream's
     # regular test suite.
-    cargo test --frozen --lib --bins --tests --features "$(_companion_features)"
+    cargo test --frozen --lib --bins --tests --features "$(_companion_features)" \
+        -- "${_skip[@]}"
 }
 
 package() {
