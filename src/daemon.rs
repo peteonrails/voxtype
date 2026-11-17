@@ -4067,6 +4067,15 @@ impl Daemon {
             tracing::debug!("Interrupted meeting notification skipped");
             return;
         }
+        // Only Linux has the freedesktop notification action protocol. Other
+        // platforms use the existing native notifier and name the recovery CLI.
+        #[cfg(not(target_os = "linux"))]
+        tokio::spawn(async move {
+            let (summary, mut body, _) = notify::wording(&new);
+            body.push_str("\nRun: voxtype meeting recover");
+            crate::notification::send(&summary, &body).await;
+        });
+        #[cfg(target_os = "linux")]
         tokio::spawn(async move {
             let choice = match zbus::Connection::session().await {
                 Ok(conn) => notify::announce(&conn, &new).await,

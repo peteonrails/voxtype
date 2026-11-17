@@ -196,11 +196,18 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved VERSION=${VERSION} (Cargo.toml: ${CARGO_VERSION})"
 
+      - name: Install Rust for source-seam regressions
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
       - name: Check release transport and desktop assets
         run: |
           python3 testing/test-release-transport.py
           python3 testing/test-release-validation.py
           python3 testing/test-platform-ci.py
+          python3 testing/test-meeting-portability.py
+          python3 testing/test-ci-baseline-model.py
 
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |
@@ -384,8 +391,8 @@ jobs:
           export XDG_DATA_HOME="${RUNNER_TEMP}/xdg-data"
           export XDG_CONFIG_HOME="${RUNNER_TEMP}/xdg-config"
           mkdir -p "${XDG_DATA_HOME}/voxtype/models" "${XDG_CONFIG_HOME}/voxtype"
-          curl -sSL --retry 3 -o "${XDG_DATA_HOME}/voxtype/models/ggml-tiny.en.bin" \
-            https://models.voxtype.io/whisper/tiny.en/ggml-tiny.en.bin
+          bash scripts/ci/fetch-baseline-model.sh \
+            "${XDG_DATA_HOME}/voxtype/models/ggml-tiny.en.bin"
           printf 'engine = "whisper"\n\n[whisper]\nmodel = "tiny.en"\n' \
             > "${XDG_CONFIG_HOME}/voxtype/config.toml"
           qemu-x86_64-static -cpu Nehalem "${BIN}" transcribe tests/fixtures/vad/speech_hello.wav

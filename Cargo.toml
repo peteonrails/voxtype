@@ -3,7 +3,7 @@ members = ["xtask", "crates/gguf-worker"]
 
 [package]
 name = "voxtype"
-version = "1.3.0-rc1"
+version = "1.3.0-rc2"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -177,11 +177,14 @@ ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
 # Input handling (evdev for kernel-level key events)
 evdev = "0.13.2"
 inotify = "0.10"  # Watch /dev/input for device hotplug
-nix = { version = "0.29", features = ["signal", "process", "user"] }  # Unix signals for IPC
 # MPRIS media-player control over the session bus. Talking D-Bus directly
 # instead of shelling out to playerctl lets us see MPRIS-compliant players
 # that playerctl silently filters out, and surfaces real errors on resume.
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+
+[target.'cfg(unix)'.dependencies]
+# Meeting subprocess groups are also used on macOS.
+nix = { version = "0.29", features = ["signal", "process", "user"] }
 
 [features]
 default = ["itn"]
