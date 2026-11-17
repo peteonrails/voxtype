@@ -31,6 +31,6 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-') as n
     assert report['screen']=='history', report
     assert report['state']=='History on', report
     assert report['entries']==1, report
-    assert report['selected_id']==entry_id, report
+    assert report['ids']==[entry_id], report
     assert Path('/work/out/history-gtk-list.png').is_file()
     print(json.dumps({'case':'gtk-real-history-list','report':report,'boundary':'private Xvfb with synthetic history, not production display or physical desktop acceptance'}))

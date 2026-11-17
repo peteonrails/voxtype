@@ -144,7 +144,7 @@ ShellRoot {
   def nodes(node):
    yield node
    for child in node.get('nodes',[])+node.get('floating_nodes',[]): yield from nodes(child)
-  return [n for n in nodes(json.loads(result.stdout)) if n.get('name')=='VoxType History']
+  return [n for n in nodes(json.loads(result.stdout)) if n.get('name')=='Voxtype History']
  with (root/'sway.stdout').open('xb') as sway_out,(root/'sway.stderr').open('xb') as sway_err,(root/'panel.stdout').open('xb') as panel_out,(root/'panel.stderr').open('xb') as panel_err:
   try:
    compositor=subprocess.Popen(['sway','-c',str(sway_config)],env=env,stdin=subprocess.DEVNULL,stdout=sway_out,stderr=sway_err)

@@ -5,7 +5,7 @@ Native tray, installed private QML and canonical actions remain unchanged.
 import hashlib,os
 from pathlib import Path
 base=Path(__file__).with_name('test-history-native-tray.py');data=base.read_bytes()
-assert hashlib.sha256(data).hexdigest()=='88ef7642540d6ae5f1f838b260103b056060995f3f0c6e84bbecbd20e7aa1e15'
+assert hashlib.sha256(data).hexdigest()=='491c38c58a783f3dee8e3b7c6d116da8398f3c66606b54b70d0fc67660391908'
 assert os.environ['VOX_HISTORY_TRAY_CASE']=='default'
 code=data.decode()
 changes=[("case in ['explicit','legacy']","case in ['explicit','legacy','default']"),("config=root/'chosen.toml'","config=default\n default=root/'unchosen.toml';default.write_text('# Untouched unchosen sentinel\\n[history]\\nenabled=false\\n')"),("daemon=start([str(exe),'--config',str(config)],'daemon')","daemon=start([str(exe)],'daemon')"),("digest=hashlib.sha256(Path('/proc',str(daemon.pid),'exe').read_bytes()).hexdigest();assert digest==hashlib.sha256(exe.read_bytes()).hexdigest()","digest=hashlib.sha256(Path('/proc',str(daemon.pid),'exe').read_bytes()).hexdigest();assert digest==hashlib.sha256(exe.read_bytes()).hexdigest()\n  native_argv=Path('/proc',str(daemon.pid),'cmdline').read_bytes().decode().strip('\\0').split('\\0');assert native_argv==[str(exe)],native_argv"),("chosen_config=str(config),default_unchanged=True","intended_config=str(config),daemon_argv=native_argv,unselected_sentinel_unchanged=True")]

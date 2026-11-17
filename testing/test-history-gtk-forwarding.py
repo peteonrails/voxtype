@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-forward
    assert launch.returncode==0,launch.stdout+launch.stderr
    frame=wait(lambda:frame_with('History off'),'Forwarded --config B must show B collection state, not silently keep A',timeout=5)
    assert primary_pid()==gui.pid, 'Forwarding must reach the same unique GTK primary'
-   activate(frame,'Enable history')
+   activate(frame,'Turn on')
    if case=='missing-parent-relative':
     expected=subprocess.run([cli,'--config',str(b),'history','--json','enable'],env=env,capture_output=True,text=True,timeout=10)
     assert expected.returncode!=0, 'Synthetic non-directory config parent must retain its normal write error'
@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-forward
    else:
     wait(lambda:state(b)['enabled'],'Enable in B window must persist B')
     wait(lambda:any(n.name=='History on' and showing(n) for n in walk(frame)),'B window did not refresh')
-    activate(frame,'Pause history')
+    activate(frame,'Pause')
     wait(lambda:state(b)['paused'],'Pause in B window must persist B')
    assert state(a)['enabled'] is True and state(a)['paused'] is False, 'Forwarded B controls must never mutate configuration A'
    print(json.dumps({'case':'normal-unique-gtk-forwarded-config','path_case':case,'argument':b_argument,'caller_a':str(cwd_a),'caller_b':str(cwd_b),'primary_pid':gui.pid,'a':state(a),'b':state(b),'scope':'actual HANDLES_COMMAND_LINE forwarding through public CLI or supported helper and scoped GTK actions; no NON_UNIQUE smoke mode or production session'}))

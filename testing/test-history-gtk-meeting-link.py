@@ -66,9 +66,16 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-meeting-lin
   wait(lambda:any(n.name=='History on' for n in nodes()),'Actual History window must load')
   search=wait(lambda:next((n for n in nodes() if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None),'Actual History search must be editable')
   assert search.queryEditableText().setTextContents('invoice')
-  wait(lambda:any(n.name=='[meeting] '+title for n in nodes()),'Actual unified search must render saved meeting result')
+  def meeting_row():
+   # A meeting is a row tagged Meeting, with its title and its own action.
+   for item in nodes():
+    if item.getRoleName()!='list item':continue
+    row=[n for n in walk(item) if n.getState().contains(pyatspi.STATE_SHOWING)]
+    names=[n.name for n in row]
+    if 'Meeting' in names and title in names:return row
+  wait(meeting_row,'Actual unified search must render saved meeting result')
   capture('/work/out/history-meeting-link-before.png')
-  button=wait(lambda:next((n for n in nodes() if n.name=='Open meeting' and n.getRoleName() in ['button','push button']),None),'Meeting search result must provide its real Open meeting action')
+  button=wait(lambda:next((n for n in meeting_row() or [] if n.name=='Open meeting' and n.getRoleName() in ['button','push button']),None),'Meeting search result must provide its real Open meeting action')
   assert button.queryAction().doAction(0)
   def selected_meeting():
    frames=[n for n in nodes() if n.getRoleName()=='frame' and n.name=='Meetings - Voxtype']

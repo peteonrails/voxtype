@@ -111,6 +111,9 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
             except GLib.Error:
                 continue
         return False
+    def window_mapped(title):
+        found=subprocess.run(['xdotool','search','--onlyvisible','--name','^'+title+'$'],env=env,capture_output=True,text=True,timeout=5)
+        return bool(found.stdout.split())
     def wait(check, timeout=10):
         deadline=time.monotonic()+timeout
         while True:
@@ -123,10 +126,7 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
             assert time.monotonic()<deadline, 'GTK control missing or not updated: '+repr([(n.name,n.getRoleName()) for n in all_nodes()])
             time.sleep(0.05)
     def activate(name):
-        # GTK's Expander exposes its descendant text in the accessible name.
-        # Keep all existing collection controls exact; identify only the real
-        # Details expander by its native label prefix, then assert visible content.
-        button=wait(lambda:next((n for n in all_nodes() if (n.name==name or (name=='Details' and n.name.startswith('Details '))) and n.getRoleName() in ['push button','button','toggle button'] and n.getState().contains(pyatspi.STATE_SHOWING)),None))
+        button=wait(lambda:next((n for n in all_nodes() if n.name==name and n.getRoleName() in ['push button','button','toggle button'] and n.getState().contains(pyatspi.STATE_SHOWING)),None))
         assert button.queryAction().doAction(0), name
     def state():
         result=subprocess.run([cli,'--config',str(config),'history','status','--json'],env=env,capture_output=True,text=True,timeout=10)
@@ -145,9 +145,14 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
             activate('Cancel replay')
             wait(lambda:not any(n.name=='Paste dictation' and n.getState().contains(pyatspi.STATE_SHOWING) for n in all_nodes()))
             assert not sink.exists(), 'Cancel must not send any output'
+            assert window_mapped('Voxtype History'), 'The X11 check below must be able to see the window'
             activate('Paste again')
             activate('Paste dictation')
-            wait(lambda:not frame_visible('Voxtype History'))
+            # Watch the X11 window, not the accessible tree, while it hides.
+            # GTK 4.24.1 segfaults when asked for a child of the application
+            # root that has just gone (fixed upstream in GTK 21d3eb76), and a
+            # tree walk across the hide asks exactly that.
+            wait(lambda:not window_mapped('Voxtype History'))
             wait(lambda:sink.is_file())
             assert sink.read_text()=='Synthetic invoice.'
             assert state()['count']==1, 'Replay must not record another history entry'
@@ -159,7 +164,7 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
             activate('Copy')
             wait(lambda:sink.is_file())
             assert sink.read_text()=='Synthetic invoice.'
-            wait(lambda:any(n.name=='Copied transcript.' and n.getState().contains(pyatspi.STATE_SHOWING) for n in all_nodes()))
+            wait(lambda:any(n.name=='Copied.' and n.getState().contains(pyatspi.STATE_SHOWING) for n in all_nodes()))
             assert current_entry()['id']==entry_id
         if case == 'delete':
             activate('Delete')
@@ -172,42 +177,45 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
             wait(lambda:any(n.name=='No dictations stored' for n in all_nodes()))
         if case == 'correction':
             def editor():
-                return wait(lambda:next((n for n in all_nodes() if n.getRoleName()=='text' and n.getState().contains(pyatspi.STATE_EDITABLE) and n.getState().contains(pyatspi.STATE_SHOWING)),None))
-            activate('Correct')
+                return wait(lambda:next((n for n in all_nodes() if n.name=='Correction' and n.getRoleName()=='text' and n.getState().contains(pyatspi.STATE_EDITABLE) and n.getState().contains(pyatspi.STATE_SHOWING)),None))
+            def shown(text):
+                return any(n.name==text and n.getState().contains(pyatspi.STATE_SHOWING) for n in all_nodes())
+            activate('Edit')
+            assert editor().queryText().getText(0,-1)=='Synthetic invoice.', 'The editor must start from the transcript it replaces'
             assert editor().queryEditableText().setTextContents('Cancelled correction')
-            activate('Cancel correction')
-            wait(lambda:not any(n.name=='Correct dictation' and n.getState().contains(pyatspi.STATE_SHOWING) for n in all_nodes()))
+            activate('Cancel')
+            wait(lambda:shown('Synthetic invoice.') and shown('Edit') and not shown('Correction') and not shown('Save'))
             assert current_entry().get('corrected_text') is None
-            activate('Correct')
+            activate('Edit')
             assert editor().queryEditableText().setTextContents('- Corrected invoice.\nSecond line.')
-            activate('Save correction')
+            activate('Save')
             wait(lambda:current_entry().get('corrected_text')=='- Corrected invoice.\nSecond line.')
-            wait(lambda:any('[corrected]' in n.name for n in all_nodes()))
+            wait(lambda:shown('[corrected]') and shown('- Corrected invoice.\nSecond line.') and not shown('Correction'))
             assert current_entry()['raw_text']=='um synthetic invoice' and current_entry()['text']=='Synthetic invoice.'
-            activate('Correct')
+            activate('Edit')
             assert editor().queryEditableText().setTextContents('')
-            activate('Save correction')
+            activate('Save')
             wait(lambda:current_entry().get('corrected_text')=='')
         if case == 'details':
             def shown(text):
                 return any(n.name==text and n.getState().contains(pyatspi.STATE_SHOWING) for n in all_nodes())
             activate('Details')
             wait(lambda:shown('Raw:') and shown('um synthetic invoice'))
-            wait(lambda:shown('Output:') and shown('Automatic edits:') and shown('- um\n+ '))
-            activate('Details')
-            wait(lambda:not shown('Raw:'))
+            wait(lambda:shown('Output:') and shown('Synthetic invoice.') and shown('Automatic edits:') and shown('- um'))
+            activate('Hide details')
+            wait(lambda:not shown('Raw:') and not shown('um synthetic invoice'))
             activate('Details')
             wait(lambda:shown('Raw:'))
         if case == 'search':
             search = wait(lambda:next((n for n in all_nodes() if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None))
             assert search.queryEditableText().setTextContents('nonexistentneedle')
-            wait(lambda:any(n.name=='No matching dictations or meetings' for n in all_nodes()))
+            wait(lambda:any(n.name=='No matches' for n in all_nodes()))
             assert not any(n.name=='Synthetic invoice.' for n in all_nodes())
             assert search.queryEditableText().setTextContents('invoice')
             wait(lambda:any(n.name=='Synthetic invoice.' for n in all_nodes()))
             assert search.queryEditableText().setTextContents('')
-            wait(lambda:any(n.name=='synthetic-editor | synthetic-model.gguf' for n in all_nodes()))
-        for control,enabled,paused,label in [('Pause history',True,True,'History paused'),('Resume history',True,False,'History on'),('Disable history',False,False,'History off'),('Enable history',True,False,'History on')]:
+            wait(lambda:any(n.name=='synthetic-editor  \u00b7  synthetic-model.gguf' for n in all_nodes()))
+        for control,enabled,paused,label in [('Pause',True,True,'History paused'),('Resume',True,False,'History on'),('Turn off',False,False,'History off'),('Turn on',True,False,'History on')]:
             activate(control)
             wait(lambda:state()['enabled']==enabled and state()['paused']==paused)
             wait(lambda:any(n.name==label for n in all_nodes()))
@@ -217,7 +225,12 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
         print(stderr)
         assert gui.returncode==0
         if cli_launch or case=='paste':
-            wait(lambda:capture.is_file(), timeout=20)
+            # The capture is drawn by the window `history view` opened. With a
+            # direct launch that is a second process, which outlives `gui`.
+            deadline=time.monotonic()+20
+            while not capture.is_file():
+                assert time.monotonic()<deadline, 'The history window opened by the CLI drew no capture'
+                time.sleep(0.05)
         assert capture.is_file()
         print(json.dumps({'case':'gtk-real-'+case+'-cli-launch' if cli_launch else 'gtk-real-'+case,'state':state(),'boundary':'actual GTK AT-SPI actions, private Xvfb/D-Bus, real CLI; not physical desktop acceptance'}))
     finally:

@@ -136,7 +136,7 @@ ShellRoot {
                         yield node
                         for child_node in node.get('nodes',[])+node.get('floating_nodes',[]):
                             yield from nodes(child_node)
-                    window_node = next((n for n in nodes(json.loads(tree_result.stdout)) if n.get('name')=='VoxType History'),None)
+                    window_node = next((n for n in nodes(json.loads(tree_result.stdout)) if n.get('name')=='Voxtype History'),None)
                     assert window_node and window_node.get('shell')=='xdg_shell', window_node
                     assert window_node['rect']['width']>0 and window_node['rect']['height']>0
                     shot = subprocess.run(['grim','-o','HEADLESS-1','/work/out/history-quickshell-window.png'],env=env,capture_output=True,text=True,timeout=5)

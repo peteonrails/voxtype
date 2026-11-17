@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-launch-') a
    def windows():
     response=subprocess.run(['swaymsg','-t','get_tree','-r'],env=env,capture_output=True,text=True,timeout=5)
     assert response.returncode==0,response.stderr
-    return [node for node in nodes(json.loads(response.stdout)) if node.get('name')=='VoxType History']
+    return [node for node in nodes(json.loads(response.stdout)) if node.get('name')=='Voxtype History']
    def launch(argument=None,cwd=None):
     result=subprocess.run([str(exe),*(['--config',argument] if argument is not None else []),'history','view'],cwd=cwd,env=env,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=15)
     print(result.stdout); print(result.stderr)
@@ -106,7 +106,12 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-launch-') a
     def showing(node):
      try:return node.getState().contains(pyatspi.STATE_SHOWING)
      except GLib.Error:return False
-    def visible(text):return next((n for n in walk(pyatspi.Registry.getDesktop(0)) if n.name==text and showing(n)),None)
+    def control(text):return next((n for n in walk(pyatspi.Registry.getDesktop(0)) if n.name==text and n.getRoleName() in ['button','push button'] and showing(n)),None)
+    def history_state():
+     # The window's header reads Voxtype / History / On, Paused or Off.
+     frame=next((n for n in walk(pyatspi.Registry.getDesktop(0)) if n.getRoleName() in ['frame','window'] and n.name=='Voxtype History' and showing(n)),None)
+     labels=[n.name for n in walk(frame) if n.getRoleName()=='label' and showing(n)][:3] if frame is not None else []
+     return labels[2] if labels[:2]==['Voxtype','History'] and len(labels)==3 else None
     def wait(check,message):
      deadline=time.monotonic()+10
      while True:
@@ -115,28 +120,28 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-launch-') a
       assert compositor.poll() is None,'Private compositor exited'
       assert time.monotonic()<deadline,message
       time.sleep(.05)
-    wait(lambda:visible('History on'),'Real standalone first-window accessibility/state precondition unavailable')
+    wait(lambda:history_state()=='On','Real standalone first-window accessibility/state precondition unavailable')
     launch('./config.toml',caller_b)
-    wait(lambda:visible('History off'),'Existing standalone must forward caller B config instead of reusing A')
-    button=wait(lambda:visible('Enable history'),'Actual standalone enable control missing')
+    wait(lambda:history_state()=='Off','Existing standalone must forward caller B config instead of reusing A')
+    button=wait(lambda:control('Turn on'),'Actual standalone enable control missing')
     assert button.queryAction().doAction(0)
     def config_state(path):
      result=subprocess.run([str(exe),'--config',str(path),'history','--json','status'],env=env,capture_output=True,text=True,timeout=5)
      assert result.returncode==0,result.stderr
      return json.loads(result.stdout)
-    wait(lambda:config_state(config_b)['enabled'] and visible('History on'),'Actual standalone enable must save and reload B')
-    button=wait(lambda:visible('Pause history'),'Actual standalone pause control missing')
+    wait(lambda:config_state(config_b)['enabled'] and history_state()=='On','Actual standalone enable must save and reload B')
+    button=wait(lambda:control('Pause'),'Actual standalone pause control missing')
     assert button.queryAction().doAction(0)
-    wait(lambda:config_state(config_b)['paused'] and visible('History paused'),'Actual standalone pause must save and reload B')
+    wait(lambda:config_state(config_b)['paused'] and history_state()=='Paused','Actual standalone pause must save and reload B')
     assert config_a.read_bytes()==original_a and config.read_bytes()==original_default,'Standalone B controls must not write A/default'
     launch('config.toml',caller_a)
-    wait(lambda:visible('History on') and not visible('History paused'),'Reopening A must restore its immutable client')
+    wait(lambda:history_state()=='On','Reopening A must restore its immutable client')
     assert len(windows())==1,'Only the current history window is visible'
     launch()
-    wait(lambda:visible('History on'),'Absent config must select the default client')
-    button=wait(lambda:visible('Pause history'),'Default client pause control missing')
+    wait(lambda:history_state()=='On','Absent config must select the default client')
+    button=wait(lambda:control('Pause'),'Default client pause control missing')
     assert button.queryAction().doAction(0)
-    wait(lambda:config_state(config)['paused'] and visible('History paused'),'Absent config must mutate default, not the original process config A')
+    wait(lambda:config_state(config)['paused'] and history_state()=='Paused','Absent config must mutate default, not the original process config A')
     assert config_a.read_bytes()==original_a and config_state(config_b)['paused'],'Default client must not change A or B'
    print(json.dumps({'case':'actual-installed-quickshell-canonical-launch','path_case':case,'surface':windows()[0],'entry_id':entry_id,'boundary':'actual setup command and public CLI in private Sway; not production deployment'}))
   finally:

@@ -67,7 +67,7 @@ class MeetingLinks:
    assert time.monotonic()<deadline,(message,[(n.name,n.getRoleName()) for n in self.all()])
    time.sleep(.05)
  def press(self,frame,name):
-  button=self.wait(lambda:next((n for n in self.inside(frame) if n.name==name and n.getRoleName() in ['button','push button','toggle button'] and (frame!='VoxType History' or n.getState().contains(pyatspi.STATE_ENABLED))),None),'Missing enabled real '+name+' in '+frame)
+  button=self.wait(lambda:next((n for n in self.inside(frame) if n.name==name and n.getRoleName() in ['button','push button','toggle button'] and (frame!='Voxtype History' or n.getState().contains(pyatspi.STATE_ENABLED))),None),'Missing enabled real '+name+' in '+frame)
   print('ACTUAL_ACCESSIBLE_ACTION_STATES',frame,name,[str(state) for state in button.getState().getStates()],flush=True)
   assert button.queryAction().doAction(0),name
  def pid(self):return self.bus.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetConnectionUnixProcessID',GLib.Variant('(s)',('io.voxtype.Meetings',)),GLib.VariantType.new('(u)'),Gio.DBusCallFlags.NONE,1000,None).unpack()[0]
@@ -78,15 +78,15 @@ class MeetingLinks:
   try:
    for label in ['A','B','A','D','A']:
     launch(label)
-    self.wait(lambda:self.frame('VoxType History'),'Canonical packaged launcher must show actual QML History frame')
-    editor=self.wait(lambda:next((n for n in self.inside('VoxType History') if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None),'Real QML search editor missing')
+    self.wait(lambda:self.frame('Voxtype History'),'Canonical packaged launcher must show actual QML History frame')
+    editor=self.wait(lambda:next((n for n in self.inside('Voxtype History') if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None),'Real QML search editor missing')
+    # Search runs as the text changes; there is no Search button.
     assert editor.queryEditableText().setTextContents('linkedneedle')
-    self.press('VoxType History','Search')
     title,text,original,transcript,folder=self.saved[label]
-    self.wait(lambda:any(title in n.name for n in self.inside('VoxType History')),'Actual QML search must show the current private-store meeting')
+    self.wait(lambda:any(title in n.name for n in self.inside('Voxtype History')),'Actual QML search must show the current private-store meeting')
     shot='/work/out/history-link-'+surface+'-'+label+'-search.png'
     subprocess.run(['grim','-o','HEADLESS-1',shot],env=self.env,check=True,timeout=5)
-    self.press('VoxType History','Open meeting')
+    self.press('Voxtype History','Open meeting')
     def selected():
      names=[n.name for n in self.inside('Meetings - Voxtype')]
      if not any(title in name for name in names) or not any(text in name for name in names):return False
@@ -119,14 +119,13 @@ class MeetingLinks:
 
  def failure_exercise(self,launch,surface):
   launch('A')
-  self.wait(lambda:self.frame('VoxType History'),'Real packaged History frame missing')
+  self.wait(lambda:self.frame('Voxtype History'),'Real packaged History frame missing')
   def search(query):
-   editor=self.wait(lambda:next((n for n in self.inside('VoxType History') if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None),'Real search editor missing')
+   editor=self.wait(lambda:next((n for n in self.inside('Voxtype History') if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None),'Real search editor missing')
    assert editor.queryEditableText().setTextContents(query)
-   self.press('VoxType History','Search')
   query='Synthetic' if self.failure_mode=='copy-search' else 'linkedneedle'
   search(query)
-  self.press('VoxType History','Copy' if self.failure_mode=='copy-search' else 'Open meeting')
+  self.press('Voxtype History','Copy' if self.failure_mode=='copy-search' else 'Open meeting')
   held=self.wait(lambda:json.loads((self.root/'action-held.json').read_text()) if (self.root/'action-held.json').exists() else None,'Actual canonical child must reach private execution gate')
   assert held['argv'][:2]==['--config',str(self.configs['A'])]
   if self.failure_mode=='copy-search':
@@ -140,17 +139,17 @@ class MeetingLinks:
   launch('A')  # Actual public host reopen also refreshes while the action waits.
   if self.failure_mode=='cross-context':
    launch('B');search('private-unmatched-current-results')
-   self.wait(lambda:any(n.name=='No matches' for n in self.inside('VoxType History')),'Independent B list must remain responsive while A launch waits')
+   self.wait(lambda:any(n.name=='No matches' for n in self.inside('Voxtype History')),'Independent B list must remain responsive while A launch waits')
   (self.root/'action-release').touch()
   finished=self.wait(lambda:json.loads((self.root/'action-finished.json').read_text()) if (self.root/'action-finished.json').exists() else None,'Actual canonical command must finish')
   assert finished['rc']!=0,finished
   if self.failure_mode=='cross-context':
-   assert not any(failure in n.name for n in self.inside('VoxType History')),'Hidden A error must not retarget B'
+   assert not any(failure in n.name for n in self.inside('Voxtype History')),'Hidden A error must not retarget B'
    launch('A')
-  self.wait(lambda:any(n.name=='No matches' for n in self.inside('VoxType History')),'Latest search results must remain current after action completion')
+  self.wait(lambda:any(n.name=='No matches' for n in self.inside('Voxtype History')),'Latest search results must remain current after action completion')
   print('ACTUAL_QML_FAILED_ACTION_BARRIER',json.dumps({'surface':surface,'mode':self.failure_mode,'held':held,'real_finished':finished,'expected_error':failure}),flush=True)
   subprocess.run(['grim','-o','HEADLESS-1','/work/out/history-action-'+surface+'-'+self.failure_mode+'.png'],env=self.env,check=True,timeout=5)
-  self.wait(lambda:any(failure in n.name for n in self.inside('VoxType History')),'Failed action completion must remain observable after search/refresh/reopen')
+  self.wait(lambda:any(failure in n.name for n in self.inside('Voxtype History')),'Failed action completion must remain observable after search/refresh/reopen')
   for label,(_,_,original,transcript,folder) in self.saved.items():
    assert self.configs[label].read_bytes()==original and (folder/'transcript.json').read_bytes()==transcript
   record={'surface':surface,'mode':self.failure_mode,'actual_held_argv':held['argv'],'actual_canonical_exit':finished['rc'],'observable_error':failure,'current_results':'No matches','config_transcripts_unchanged':True}

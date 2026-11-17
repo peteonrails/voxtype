@@ -82,6 +82,16 @@ Window {
  def inside(title):
   frame=next((n for n in allnodes() if n.getRoleName()=='frame' and n.name==title and n.getState().contains(pyatspi.STATE_SHOWING)),None)
   return list(walk(frame)) if frame is not None else []
+ def showing(node):
+  try:return node.getState().contains(pyatspi.STATE_SHOWING)
+  except GLib.Error:return False
+ def content(node):
+  # A transcript is a text field: its words are its text, not its name.
+  try:return node.queryText().getText(0,-1)
+  except (NotImplementedError,GLib.Error):return None
+ def header(title):
+  # The history header reads Voxtype / History / On, Paused or Off.
+  return [n.name for n in inside(title) if n.getRoleName()=='label' and showing(n)][:3]
  def wait(fn,message,seconds=15):
   deadline=time.monotonic()+seconds
   while True:
@@ -118,8 +128,8 @@ Window {
   press('Private native history tray','Resume History (paused)');wait(lambda:read().get('paused') is False,'Resume must persist chosen file')
   press('Private native history tray','Copy last transcript');wait(lambda:sink.exists(),'Canonical copy action missing');assert sink.read_bytes()==text.encode()
   press('Private native history tray','History')
-  wait(lambda:any(n.name==text for n in inside('VoxType History')),'Actual native tray must open canonical installed History window with saved content')
-  wait(lambda:any(n.name=='History on' for n in inside('VoxType History')),'History window must use enabled chosen file, not off default');shot('history')
+  wait(lambda:any(n.getRoleName()=='text' and showing(n) and content(n)==text for n in inside('Voxtype History')),'Actual native tray must open canonical installed History window with saved content')
+  wait(lambda:header('Voxtype History')==['Voxtype','History','On'],'History window must use enabled chosen file, not off default');shot('history')
   assert default.read_bytes()==untouched and daemon.poll() is None
   descriptors=[os.readlink(p) for p in Path('/proc',str(daemon.pid),'fd').iterdir() if p.exists()]
   assert not any(p.startswith(('/dev/snd','/dev/input')) for p in descriptors)
