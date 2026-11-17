@@ -53,7 +53,8 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Increase verbosity (-v = debug, -vv = trace)
+    /// Increase verbosity (-v = debug, -vv = trace). Dictated text is only
+    /// logged from debug up
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 

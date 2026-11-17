@@ -409,15 +409,7 @@ impl Transcriber for RemoteTranscriber {
 
         let text = self.transcribe_json(samples)?;
 
-        tracing::info!(
-            "Remote transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if text.chars().count() > 50 {
-                format!("{}...", text.chars().take(50).collect::<String>())
-            } else {
-                text.clone()
-            }
-        );
+        super::log_transcription("Remote transcription", start, &text);
 
         Ok(text)
     }

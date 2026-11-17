@@ -55,6 +55,19 @@ fn summarize_legacy(
         .map_err(|e| AssistantError::Local(e.to_string()))
 }
 
+/// `error` as a log line at the default level may show it. An answer that
+/// could not be read is quoted in its error, and the answer is the meeting
+/// in summary: the log says only that it could not be read. The whole error
+/// still reaches the meeting view and the command line, and debug logging.
+fn error_for_log(error: &AssistantError) -> String {
+    let message = error.to_string();
+    if matches!(error, AssistantError::Parse(_)) || message.contains(summary::PARSE_FAILED) {
+        "the model's answer could not be read (debug logging shows it)".to_string()
+    } else {
+        message
+    }
+}
+
 /// Summarize with `backend`. An agent that fails may hand over to the local
 /// model, but only when `[meeting.summary] backend = "local"` says the user
 /// set it up, and never the other way: the local model failing never sends
@@ -81,7 +94,8 @@ fn run_summary(
                 match summarize_legacy(settings, meeting, "local") {
                     Ok(s) => Ok((s, local, Some(b.display_name()))),
                     Err(local_err) => {
-                        tracing::warn!("The local model failed too: {local_err}");
+                        tracing::debug!("The local model's error in full: {local_err}");
+                        tracing::warn!("The local model failed too: {}", error_for_log(&local_err));
                         Err(e)
                     }
                 }
@@ -246,7 +260,8 @@ impl AutoSummary {
                 emit(SummaryEvent::Ready(Box::new(outcome)));
             }
             Ok(Err(e)) => {
-                tracing::warn!("Meeting {} summary failed: {}", id, e);
+                tracing::warn!("Meeting {} summary failed: {}", id, error_for_log(&e));
+                tracing::debug!("Meeting {} summary error in full: {}", id, e);
                 emit(SummaryEvent::Failed {
                     meeting_id: id,
                     code: e.code(),
@@ -278,6 +293,34 @@ mod tests {
         "decisions": ["Ship on Friday"],
         "action_items": [{"description": "Tag the release", "owner": "Steve", "due": "Friday"}],
         "chapters": [{"start": "00:41", "title": "Release date"}, {"start": "01:00", "title": "Budget"}]}"#;
+
+    /// A summary that cannot be parsed is quoted in its error, by either
+    /// backend and through the "no backend" wrapper. The log line at the
+    /// default level drops the quote and keeps every other failure as it is.
+    #[test]
+    fn the_log_line_for_an_unreadable_summary_leaves_the_answer_out() {
+        let answer = "They agreed to move the launch to March";
+        let parse = parse_summary_response(answer, None).unwrap_err();
+        assert!(parse.to_string().contains(answer), "{parse}");
+
+        let quoting = [
+            AssistantError::Parse(parse.to_string()),
+            AssistantError::Local(parse.to_string()),
+            AssistantError::NoBackend {
+                message: parse.to_string(),
+                model: "llama3".into(),
+            },
+        ];
+        for error in quoting {
+            assert!(error.to_string().contains(answer), "{error}");
+            let line = error_for_log(&error);
+            assert!(!line.contains("launch"), "{line}");
+            assert!(line.contains("could not be read"), "{line}");
+        }
+
+        let other = AssistantError::Local("Ollama not available at localhost:11434".into());
+        assert_eq!(error_for_log(&other), other.to_string());
+    }
 
     #[test]
     fn summarize_saves_summary_md_metadata_and_index() {

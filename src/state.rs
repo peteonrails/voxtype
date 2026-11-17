@@ -179,13 +179,9 @@ impl std::fmt::Display for State {
                 write!(f, "Transcribing ({:.1}s of audio)", duration)
             }
             State::Outputting { text } => {
-                // Use chars() to handle multi-byte UTF-8 characters
-                let preview = if text.chars().count() > 20 {
-                    format!("{}...", text.chars().take(20).collect::<String>())
-                } else {
-                    text.clone()
-                };
-                write!(f, "Outputting: {:?}", preview)
+                // The length, not the words: this is formatted into log
+                // lines at the default level.
+                write!(f, "Outputting ({} chars)", text.chars().count())
             }
             State::Streaming {
                 started_at,
@@ -242,6 +238,16 @@ mod tests {
             model_override: None,
         };
         assert!(format!("{}", state).starts_with("Recording"));
+    }
+
+    /// The state is formatted into log lines at the default level, so the
+    /// outputting state gives the length of the text and none of its words.
+    #[test]
+    fn outputting_display_leaves_the_text_out() {
+        let state = State::Outputting {
+            text: "meet me at the quarry".to_string(),
+        };
+        assert_eq!(format!("{}", state), "Outputting (21 chars)");
     }
 
     #[test]

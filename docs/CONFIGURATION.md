@@ -2393,6 +2393,8 @@ When `true`, a transcription that no output method could deliver (typing failed 
 
 Set it to `false` to save no file. The notification then shows neither a file nor the text, because notification daemons keep a log of what they display. It still lists what failed and how to fix it, and says the text was not kept. A dictation that can't be typed or copied is then lost. Files saved earlier stay until you delete them.
 
+Whatever this is set to, voxtype's own log records the failure with the length of the text, not the text.
+
 ```toml
 [output]
 keep_undelivered_text = false
@@ -3174,6 +3176,7 @@ Run voxtype with `-v` or `-vv` to see detailed logs about post-processing:
 ```bash
 voxtype -vv
 ```
+These logs show the text going into and coming out of the command. Without `-v` the log only says whether post-processing changed the text.
 
 ### Example LM Studio Script
 
@@ -4698,12 +4701,25 @@ voxtype status --format json --icon-theme nerd-font
 
 ### RUST_LOG
 
-Controls log verbosity via the tracing crate.
+Controls log verbosity via the tracing crate. It takes precedence over `-v`, `-vv` and `-q`.
 
 ```bash
 RUST_LOG=debug voxtype
 RUST_LOG=voxtype=trace voxtype
 ```
+
+**Dictated text and the log.** At the default level (info) voxtype does not log what you say. A dictation is logged as its length and its engine, for example `Transcribed 42 chars (whisper engine)`, and meeting transcript lines, undelivered text and post-processed text are logged the same way. The systemd service logs to the journal, so this is what keeps your words out of `journalctl --user -u voxtype` when `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` are off.
+
+The text is logged at debug level (`voxtype -v`, or `RUST_LOG=voxtype=debug`), which you turn on yourself, typically to show what the engine heard in a report about a recognition problem. For the service:
+
+```bash
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+```
+
+Remove the line and restart when you are done: while it is set, the journal keeps every dictation. See [Troubleshooting](TROUBLESHOOTING.md#dictated-text-in-the-log) for the lines to look for.
 
 ### XDG_CONFIG_HOME
 
