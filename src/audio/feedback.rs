@@ -4,7 +4,7 @@
 //! Supports multiple sound themes and custom sound files.
 
 use crate::config::AudioFeedbackConfig;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -25,8 +25,6 @@ pub enum SoundEvent {
 
 /// Audio feedback player
 pub struct AudioFeedback {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
     config: AudioFeedbackConfig,
     theme: SoundTheme,
 }
@@ -47,14 +45,13 @@ impl AudioFeedback {
             return Err("Audio feedback is disabled".to_string());
         }
 
-        let (stream, stream_handle) = OutputStream::try_default()
+        // Verify audio output is available at startup (fail fast)
+        let _ = OutputStream::try_default()
             .map_err(|e| format!("Failed to open audio output: {}", e))?;
 
         let theme = load_theme(&config.theme)?;
 
         Ok(Self {
-            _stream: stream,
-            stream_handle,
             config: config.clone(),
             theme,
         })
@@ -80,17 +77,42 @@ impl AudioFeedback {
     }
 
     fn play_wav(&self, data: &[u8]) -> Result<(), String> {
-        let cursor = Cursor::new(data.to_vec());
-        let source = Decoder::new(cursor).map_err(|e| format!("Failed to decode audio: {}", e))?;
+        let data = data.to_vec();
+        let volume = self.config.volume;
 
-        // Apply volume control
-        let source = source.amplify(self.config.volume);
+        // Open a fresh OutputStream on a dedicated thread so playback
+        // always targets the current default audio device.
+        std::thread::spawn(move || {
+            let (_stream, stream_handle) = match OutputStream::try_default() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to open audio output for feedback: {}", e);
+                    return;
+                }
+            };
 
-        let sink = Sink::try_new(&self.stream_handle)
-            .map_err(|e| format!("Failed to create audio sink: {}", e))?;
+            let cursor = Cursor::new(data);
+            let source = match Decoder::new(cursor) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to decode feedback audio: {}", e);
+                    return;
+                }
+            };
 
-        sink.append(source);
-        sink.detach(); // Let it play in the background
+            let source = source.amplify(volume);
+
+            let sink = match Sink::try_new(&stream_handle) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to create feedback audio sink: {}", e);
+                    return;
+                }
+            };
+
+            sink.append(source);
+            sink.sleep_until_end();
+        });
 
         Ok(())
     }
