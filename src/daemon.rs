@@ -1310,16 +1310,11 @@ pub struct Daemon {
 
 impl Daemon {
     /// Create a new daemon with the given configuration
-    /// Send the last dictation again, for the paste-last key. The text is in
-    /// history, so this runs `voxtype history paste last`, the same command
-    /// a compositor binding would: one code path for both kinds of hotkey.
+    /// Send the last dictation again, for the paste-last key. This runs
+    /// `voxtype paste-last`, the command a compositor binding runs: one code
+    /// path for both kinds of hotkey, including its notification when
+    /// history is off or empty.
     fn paste_last_dictation(&self) {
-        if !self.config.history.enabled {
-            tracing::warn!(
-                "The paste-last key needs history, which is off. Turn it on with: voxtype history enable"
-            );
-            return;
-        }
         let Ok(exe) = std::env::current_exe() else {
             tracing::warn!("Could not find the voxtype binary to paste the last dictation");
             return;
@@ -1328,10 +1323,8 @@ impl Daemon {
         if let Some(path) = &self.config_path {
             command.arg("--config").arg(path);
         }
-        // A short wait lets the keys of the combination come back up before
-        // the text is typed or pasted into the focused window.
         command
-            .args(["history", "paste", "last", "--delay-ms", "150"])
+            .arg("paste-last")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());

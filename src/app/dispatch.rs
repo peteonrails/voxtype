@@ -607,6 +607,30 @@ pub(crate) async fn dispatch(
             run_meeting_command(&config, action).await?;
         }
 
+        Commands::PasteLast { delay_ms } => {
+            let result = if config.history.enabled {
+                super::history::run(
+                    &config,
+                    cli.config.clone(),
+                    voxtype::HistoryAction::Paste {
+                        id: "last".to_string(),
+                        delay_ms,
+                    },
+                    false,
+                )
+                .await
+            } else {
+                Err(anyhow::anyhow!(
+                    "Paste last needs history, which is off. Turn it on with: voxtype history enable"
+                ))
+            };
+            if let Err(error) = result {
+                // A keybinding has no terminal, so say it where it will be seen.
+                voxtype::notification::send("Voxtype", &error.to_string()).await;
+                return Err(error);
+            }
+        }
+
         Commands::History {
             action,
             json,

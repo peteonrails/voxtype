@@ -437,12 +437,12 @@ paste_last_key = "CTRL+ALT+V"
 
 The value is a key, or modifiers and a key joined with `+`. `CTRL`, `ALT`, `SHIFT` and `SUPER` match either side of the keyboard; `LEFTCTRL`, `RIGHTALT` and the other evdev names match one key. A bare key such as `F9` works too.
 
-The text comes from [history](#history), so `history.enabled` must be `true`. With history off the key does nothing and the daemon logs why.
+The text comes from [history](#history), so `history.enabled` must be `true`. With history off, or nothing in it yet, a desktop notification says so.
 
-**Note:** This only applies when using evdev hotkey detection (`enabled = true`). The focused application also receives the keys, so choose a combination it ignores. With compositor keybindings, bind a key to `voxtype history paste last` instead:
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). The focused application also receives the keys, so choose a combination it ignores. With compositor keybindings, bind a key to `voxtype paste-last` instead, which is the command this key runs:
 
 ```
-bind = CTRL ALT, V, exec, voxtype history paste last
+bind = CTRL ALT, V, exec, voxtype paste-last
 ```
 
 Also `VOXTYPE_PASTE_LAST_KEY` and `--paste-last-key`.

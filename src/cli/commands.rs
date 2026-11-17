@@ -172,6 +172,23 @@ pub enum Commands {
         action: MeetingAction,
     },
 
+    /// Paste your last dictation again, into the focused window
+    ///
+    /// For when the text went to the wrong window, or you need it twice.
+    /// Made for a keybinding:
+    ///
+    ///   bind = CTRL ALT, V, exec, voxtype paste-last
+    ///
+    /// The text comes from history, so history must be on (`voxtype history
+    /// enable`). When it cannot paste, it says why in a desktop notification,
+    /// since a keybinding has no terminal to print to. The same as `voxtype
+    /// history paste last`, plus that notification.
+    PasteLast {
+        /// Wait this long before typing, so the binding's keys are released
+        #[arg(long, value_name = "MS", default_value_t = 150)]
+        delay_ms: u64,
+    },
+
     /// Recover, search and manage dictation history
     #[command(after_help = super::HISTORY_AFTER_HELP)]
     History {
