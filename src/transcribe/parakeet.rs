@@ -28,6 +28,7 @@ use std::sync::Mutex;
 const SAMPLE_RATE: usize = 16_000;
 
 /// Internal enum to hold either CTC or TDT model instance
+#[allow(clippy::large_enum_variant)] // one instance per transcriber; boxing buys nothing
 enum ParakeetModel {
     /// CTC model (character-level, faster)
     Ctc(Mutex<Parakeet>),
@@ -280,6 +281,8 @@ pub(super) fn build_execution_config(threads: Option<usize>) -> Option<Execution
 }
 
 /// Execution provider config based on compile-time feature flags
+// The early returns are only needless when exactly one GPU feature is on.
+#[allow(clippy::needless_return)]
 fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
@@ -352,12 +355,7 @@ fn probe_cuda_runtime() -> bool {
         return false;
     }
 
-    let sym = unsafe {
-        libc::dlsym(
-            handle,
-            b"cudaRuntimeGetVersion\0".as_ptr() as *const libc::c_char,
-        )
-    };
+    let sym = unsafe { libc::dlsym(handle, c"cudaRuntimeGetVersion".as_ptr()) };
 
     if sym.is_null() {
         tracing::warn!("Could not find cudaRuntimeGetVersion in CUDA runtime library");

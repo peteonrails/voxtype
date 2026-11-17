@@ -26,9 +26,12 @@ use cli::Cli;
 mod man;
 
 fn main() -> Result<(), Error> {
-    // Before the man-page early return: the version must be stamped for
-    // every build, not just release builds.
+    // Before the man-page early return: the version and the CUDA major must
+    // be stamped for every build, not just release builds. parakeet.rs reads
+    // VOXTYPE_BUILD_CUDA_MAJOR with env!, so a dev or clippy build with a
+    // *-cuda feature fails to compile without it.
     expose_build_version();
+    expose_cuda_build_major();
 
     // Only generate man pages for release builds or when explicitly requested
     let profile = env::var("PROFILE").unwrap_or_default();
@@ -51,8 +54,6 @@ fn main() -> Result<(), Error> {
         "cargo:warning=Man pages generated in: {}",
         man_dir.display()
     );
-
-    expose_cuda_build_major();
 
     Ok(())
 }

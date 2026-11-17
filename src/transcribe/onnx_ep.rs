@@ -56,17 +56,17 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
 
     #[cfg(feature = "onnx-tensorrt-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
+        use ort::execution_providers::TensorRTExecutionProvider;
         providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-cuda-enabled")]
     {
-        use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
+        use ort::execution_providers::CUDAExecutionProvider;
         providers.push(("CUDA", CUDAExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-migraphx-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, MIGraphXExecutionProvider};
+        use ort::execution_providers::MIGraphXExecutionProvider;
         providers.push(("MIGraphX", MIGraphXExecutionProvider::default().build()));
     }
 
