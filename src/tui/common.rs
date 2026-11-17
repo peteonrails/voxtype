@@ -290,7 +290,7 @@ fn split_at_cursor(s: &str, idx: usize) -> (String, String, String) {
     )
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackLevel {
     Ok,
     Err,

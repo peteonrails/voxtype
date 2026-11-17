@@ -63,6 +63,9 @@ pub(crate) fn run_config_schema(
             if !notes.is_empty() {
                 println!("    notes   {}", notes.join(", "));
             }
+            if let Some(notice) = schema::key_notice(spec, config) {
+                println!("    notice  {}", notice);
+            }
             println!("    {}", spec.description);
         }
         println!();
