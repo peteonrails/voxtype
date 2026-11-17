@@ -7,6 +7,9 @@ voxtype (1.3.0-1) unstable; urgency=medium
   * Built-in Kokoro recording announcement; the ElevenLabs voice is a download
   * Whisper, VAD, speaker and echo models download from models.voxtype.io
   * RC2: fix macOS meeting portability and verify baseline CI model downloads
+  * RC3: notifications for failures that were silent, voxtype doctor, terminal-aware
+    paste keys, OSD scale and placement fixes, kept failed recordings and
+    undelivered text with settings to turn them off
 
  -- Peter Jackson <pete@peteonrails.com>  Sat, 14 Nov 2026 12:00:00 +0000
 
