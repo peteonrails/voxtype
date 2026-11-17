@@ -128,7 +128,7 @@ Window {
   press('Private native history tray','Resume History (paused)');wait(lambda:read().get('paused') is False,'Resume must persist chosen file')
   press('Private native history tray','Copy last transcript');wait(lambda:sink.exists(),'Canonical copy action missing');assert sink.read_bytes()==text.encode()
   press('Private native history tray','History')
-  wait(lambda:any(n.getRoleName()=='text' and showing(n) and content(n)==text for n in inside('Voxtype History')),'Actual native tray must open canonical installed History window with saved content')
+  wait(lambda:any(n.getRoleName()=='text' and n.name=='Transcript' and showing(n) and content(n)==text for n in inside('Voxtype History')),'Actual native tray must open canonical installed History window with saved content in a field named Transcript')
   wait(lambda:header('Voxtype History')==['Voxtype','History','On'],'History window must use enabled chosen file, not off default');shot('history')
   assert default.read_bytes()==untouched and daemon.poll() is None
   descriptors=[os.readlink(p) for p in Path('/proc',str(daemon.pid),'fd').iterdir() if p.exists()]

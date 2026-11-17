@@ -2,7 +2,7 @@
 import hashlib
 from pathlib import Path
 adapter=Path(__file__).with_name('test-history-native-tray-default.py');data=adapter.read_bytes()
-assert hashlib.sha256(data).hexdigest()=='58611c171070489ba2c80617d6ad98d50e1d16211797cb5fd3c2ce2b3a36c66b'
+assert hashlib.sha256(data).hexdigest()=='7440df1c3ef4bcb0181695e38e1fa7ed8c80cf0beb140efffdfeb13af99c7fb5'
 tail="exec(compile(code,str(base),'exec'),{'__name__':'__main__','__file__':str(base)})"
 text=data.decode();assert text.count(tail)==1
 extra="""needle=\"  press('Private native history tray','Copy last transcript');\"

@@ -452,6 +452,7 @@ Rectangle {
         font.pixelSize: 13
         color: root.fg
         placeholderText: "Search dictations and meetings"
+        Accessible.name: placeholderText
         placeholderTextColor: root.faint
         selectByMouse: true
         leftPadding: 10
@@ -473,6 +474,7 @@ Rectangle {
         visible: root.stateKnown
         enabled: root.pending === ""
         text: "Keep " + root.retentionLabel(root.retentionDays) + "  ▾"
+        Accessible.name: "Keep dictations for " + root.retentionLabel(root.retentionDays)
         onClicked: retentionMenu.popup(retentionChip, 0, retentionChip.height + 2)
         Menu {
           id: retentionMenu
@@ -519,6 +521,7 @@ Rectangle {
       Chip {
         objectName: "history-close"
         text: "✕"
+        Accessible.name: "Close"
         font.pixelSize: 15
         leftPadding: 7
         rightPadding: 7
@@ -629,6 +632,10 @@ Rectangle {
                 objectName: entryCard.editing ? "history-correction-text" : "history-text-" + entryCard.entryId
                 Layout.fillWidth: true
                 readOnly: !entryCard.editing
+                // The words are the field's text; without a name a screen
+                // reader announces an anonymous, apparently editable field.
+                Accessible.name: entryCard.editing ? "Correction" : "Transcript"
+                Accessible.readOnly: readOnly
                 wrapMode: TextEdit.Wrap
                 textFormat: TextEdit.PlainText
                 selectByMouse: entryCard.editing
@@ -683,6 +690,7 @@ Rectangle {
                   visible: !entryCard.isMeeting && !entryCard.editing
                   enabled: root.pending === ""
                   text: "✎ Edit"
+                  Accessible.name: "Edit"
                   onClicked: root.beginCorrection(entryCard.entryId, -1)
                 }
                 Chip {
