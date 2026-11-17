@@ -289,6 +289,20 @@ impl WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    /// Creates the Whisper state while the user speaks. A state in use
+    /// already exists, so a busy lock is left alone.
+    fn prepare(&self) {
+        let Ok(mut state) = self.state.try_lock() else {
+            return;
+        };
+        if state.is_none() {
+            match self.ctx.create_state() {
+                Ok(created) => *state = Some(created),
+                Err(e) => tracing::warn!("Failed to create the Whisper state: {}", e),
+            }
+        }
+    }
+
     fn set_vocabulary(&self, terms: &[String]) {
         if let Ok(mut active) = self.active_vocabulary.lock() {
             active.clear();

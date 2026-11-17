@@ -266,6 +266,9 @@ impl ModelManager {
     /// caller must await before invoking transcription, so that we don't
     /// race against the in-flight prepare and end up spawning a second
     /// worker.
+    ///
+    /// A local model that is already loaded creates its Whisper state, which
+    /// takes most of a second on the GPU the first time.
     pub fn prepare_model(
         &mut self,
         model: Option<&str>,
@@ -299,6 +302,14 @@ impl ModelManager {
                     is_primary: false,
                 },
             );
+            let handle = tokio::task::spawn_blocking(move || {
+                transcriber.prepare();
+            });
+            return Ok(Some(handle));
+        }
+
+        if let Some(loaded) = self.loaded_models.get(&model_name) {
+            let transcriber = loaded.transcriber.clone();
             let handle = tokio::task::spawn_blocking(move || {
                 transcriber.prepare();
             });
