@@ -15,7 +15,7 @@
 
 use crate::config::{Config, MeetingStartOptions};
 use crate::meeting::{
-    retained_audio, AudioSource, MeetingConfig, MeetingDaemon, MeetingEvent, MeetingId,
+    event_channel, retained_audio, AudioSource, MeetingConfig, MeetingDaemon, MeetingId,
     MeetingStorage, StorageConfig, StorageError,
 };
 use crate::transcribe::Transcriber;
@@ -565,15 +565,14 @@ pub(crate) fn mono_diarization(config: &mut MeetingConfig) {
     }
 }
 
-/// A meeting daemon for an import or retranscribe, and a task draining the
-/// events nobody is listening to.
+/// A meeting daemon for an import or retranscribe. Nobody listens to its
+/// events, so they are dropped as they are sent.
 pub(crate) fn daemon_for(
     meeting_config: MeetingConfig,
     effective: &Config,
     resident: Option<Arc<dyn Transcriber>>,
 ) -> Result<MeetingDaemon, ImportError> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<MeetingEvent>(256);
-    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let (tx, _) = event_channel();
     Ok(MeetingDaemon::new(meeting_config, effective, tx, resident)?)
 }
 
