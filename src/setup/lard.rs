@@ -154,8 +154,13 @@ pub fn problem(config: &Config) -> Option<Problem> {
 }
 
 fn validate(bytes: &[u8]) -> Result<()> {
-    if bytes.len() as u64 != MODEL_SIZE || format!("{:x}", Sha256::digest(bytes)) != MODEL_SHA256 {
-        bail!("LARD model checksum mismatch; use the pinned lard-disfluency-v1.vxdf artifact");
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    if bytes.len() as u64 != MODEL_SIZE || digest != MODEL_SHA256 {
+        bail!(
+            "LARD model checksum mismatch: got {} bytes with SHA-256 {digest}, \
+             expected {MODEL_SIZE} bytes with SHA-256 {MODEL_SHA256}",
+            bytes.len()
+        );
     }
     crate::text::disfluency::DisfluencyTagger::from_bytes(bytes)?;
     Ok(())
@@ -172,6 +177,64 @@ fn install(bytes: &[u8], destination: &Path) -> Result<()> {
     file.persist(destination)
         .context("Cannot install LARD model")?;
     Ok(())
+}
+
+/// Where `voxtype setup lard` downloads the model from: the same mirror
+/// every other model comes from.
+pub fn model_url() -> String {
+    format!(
+        "{}/text/lard-disfluency-v1.vxdf",
+        super::manifest::MODELS_BASE_URL
+    )
+}
+
+/// The model card published beside the model: provenance, attribution and
+/// the CC BY-SA 4.0 terms.
+pub fn model_card_url() -> String {
+    format!(
+        "{}/text/lard-disfluency-v1.MODEL_CARD.md",
+        super::manifest::MODELS_BASE_URL
+    )
+}
+
+/// What every failed install ends with, so nobody has to wonder whether a
+/// working model was damaged.
+const UNTOUCHED: &str = "Nothing was installed and any existing model is untouched";
+
+/// Fetch the model bytes. Each failure says what happened: an HTTP status,
+/// an unreachable host, or a body that stopped early.
+fn download(url: &str) -> Result<Vec<u8>> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(60))
+        .build();
+    let response = match agent.get(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, _)) => {
+            bail!("LARD model download failed: {url} answered HTTP {code}. {UNTOUCHED}.")
+        }
+        Err(error) => bail!(
+            "LARD model download failed: could not reach {url} ({error}). {UNTOUCHED}. \
+             Check your connection and run voxtype setup lard again."
+        ),
+    };
+    let mut bytes = Vec::new();
+    // One byte past the pinned size is enough to know a body is too long.
+    response
+        .into_reader()
+        .take(MODEL_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| {
+            format!("LARD model download from {url} stopped before the end. {UNTOUCHED}.")
+        })?;
+    Ok(bytes)
+}
+
+/// Download from `url` and install at `destination`, replacing it only with
+/// bytes that match the pinned checksum.
+fn install_from_url(url: &str, destination: &Path) -> Result<()> {
+    let bytes = download(url)?;
+    install(&bytes, destination)
+        .with_context(|| format!("{url} did not serve the pinned LARD model. {UNTOUCHED}"))
 }
 
 /// What `voxtype setup lard --status` prints: the installed model, then
@@ -208,8 +271,9 @@ fn status_lines(installed: Result<(), String>, destination: &Path, config: &Conf
     lines
 }
 
-/// No URL is enabled implicitly until model publication has been approved.
-/// An explicit URL is still pinned to the exact release bytes, not arbitrary weights.
+/// `voxtype setup lard`: download the model from the mirror, or install it
+/// from a file or another URL. Every route installs only the pinned bytes.
+/// Nothing here runs at daemon start: installing is always this command.
 pub fn setup(
     source: Option<&Path>,
     url: Option<&str>,
@@ -217,61 +281,77 @@ pub fn setup(
     config: &Config,
 ) -> Result<()> {
     let destination = model_path();
-    if status {
-        let installed = std::fs::read(&destination)
+    let installed = || {
+        std::fs::read(&destination)
             .map_err(anyhow::Error::from)
             .and_then(|bytes| validate(&bytes))
-            .map_err(|error| error.to_string());
+    };
+    if status {
+        let installed = installed().map_err(|error| error.to_string());
         for line in status_lines(installed, &destination, config) {
             println!("{line}");
         }
         return Ok(());
     }
-    let bytes = if let Some(source) = source {
-        std::fs::read(source).context("Cannot read LARD model source")?
+    if let Some(source) = source {
+        let bytes = std::fs::read(source).context("Cannot read LARD model source")?;
+        install(&bytes, &destination).with_context(|| {
+            format!(
+                "{} is not the pinned LARD model. {UNTOUCHED}",
+                source.display()
+            )
+        })?;
     } else if let Some(url) = url {
         if !url.starts_with("https://") {
-            bail!("LARD model downloads require an explicit HTTPS URL");
+            bail!("LARD model downloads require an HTTPS URL");
         }
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(60))
-            .build();
-        let response = agent
-            .get(url)
-            .call()
-            .context("LARD download failed; local cleanup remains available")?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(MODEL_SIZE + 1)
-            .read_to_end(&mut bytes)?;
-        bytes
-    } else {
-        bail!(
-            "The LARD model cannot be downloaded yet: publication is pending approval.\n  \
-             It ships in the voxtype source as {SOURCE_TREE_PATH}. Install it with:\n    \
-             voxtype setup lard --source <path to lard-disfluency-v1.vxdf>\n  \
-             (or --url <approved-https-url>). Pinned SHA-256: {MODEL_SHA256}\n  \
-             Until it is installed, text.lard_disfluency = true has no effect."
-        );
-    };
-    install(&bytes, &destination)?;
-    println!("LARD model installed: {}.", destination.display());
-    if config.text.lard_disfluency && config.text.lard_model_path.is_none() {
-        match problem(config) {
-            None => println!(
-                "text.lard_disfluency is already on. Restart voxtype to load the model: systemctl --user restart voxtype"
-            ),
-            Some(problem) => println!("{}.\n  Fix: {}", problem.message(), problem.fix()),
-        }
-    } else if config.text.lard_disfluency {
+        install_from_url(url, &destination)?;
+    } else if installed().is_ok() {
         println!(
-            "text.lard_model_path is set, so the daemon reads that file, not this one. Remove it to use the installed model: voxtype config unset text.lard_model_path"
+            "LARD model already installed and verified: {}",
+            destination.display()
         );
+        for line in next_step_lines(config) {
+            println!("{line}");
+        }
+        return Ok(());
     } else {
-        println!("Enable with voxtype config set text.lard_disfluency true (English only).");
+        let url = model_url();
+        println!("Downloading the LARD disfluency model (64 KB) from {url}");
+        install_from_url(&url, &destination)?;
+    }
+    println!("LARD model installed: {}.", destination.display());
+    println!(
+        "Model license: CC BY-SA 4.0, separate from Voxtype's MIT code. Model card: {}",
+        model_card_url()
+    );
+    for line in next_step_lines(config) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// What to do once the model is in place, for this configuration.
+fn next_step_lines(config: &Config) -> Vec<String> {
+    if !config.text.lard_disfluency {
+        return vec![
+            "Enable with voxtype config set text.lard_disfluency true (English only).".to_string(),
+        ];
+    }
+    if config.text.lard_model_path.is_some() {
+        return vec![
+            "text.lard_model_path is set, so the daemon reads that file, not this one. Remove it to use the installed model: voxtype config unset text.lard_model_path".to_string(),
+        ];
+    }
+    match problem(config) {
+        None => vec![
+            "text.lard_disfluency is already on. Restart voxtype to load the model: systemctl --user restart voxtype".to_string(),
+        ],
+        Some(problem) => vec![
+            format!("{}.", problem.message()),
+            format!("  Fix: {}", problem.fix()),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +378,158 @@ mod tests {
         install(model, &destination).unwrap();
         assert!(install(b"corrupt", &destination).is_err());
         assert_eq!(std::fs::read(destination).unwrap(), model);
+    }
+
+    /// Answer one HTTP request on loopback with `status` and `body`, then
+    /// close. Returns the URL to fetch. The test sandbox has no network, and a
+    /// download test must never depend on the real mirror being up.
+    fn serve_once(status: &'static str, body: Vec<u8>) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/text/lard-disfluency-v1.vxdf",
+            listener.local_addr().unwrap()
+        );
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Read the request head so the client is not reset mid-send.
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match stream.read(&mut byte) {
+                    Ok(1) => head.push(byte[0]),
+                    _ => break,
+                }
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
+        });
+        url
+    }
+
+    /// A models directory that already holds a good model, to prove a failed
+    /// download leaves it alone.
+    fn installed_model() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("lard-disfluency-v1.vxdf");
+        let model = std::fs::read(repo_model()).unwrap();
+        install(&model, &destination).unwrap();
+        (dir, destination, model)
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn default_download_comes_from_the_model_mirror() {
+        assert_eq!(
+            model_url(),
+            "https://models.voxtype.io/text/lard-disfluency-v1.vxdf"
+        );
+        assert!(model_url().starts_with(crate::setup::manifest::MODELS_BASE_URL));
+        assert!(model_card_url().starts_with(crate::setup::manifest::MODELS_BASE_URL));
+    }
+
+    #[test]
+    fn download_installs_the_pinned_model() {
+        let dir = tempfile::tempdir().unwrap();
+        // The models directory may not exist yet on a fresh install.
+        let destination = dir.path().join("models/lard-disfluency-v1.vxdf");
+        let model = std::fs::read(repo_model()).unwrap();
+        let url = serve_once("200 OK", model.clone());
+
+        install_from_url(&url, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), model);
+    }
+
+    #[test]
+    fn download_with_the_wrong_bytes_is_refused_and_named() {
+        let (dir, destination, model) = installed_model();
+        // Right size, wrong content: only the checksum can tell.
+        let mut tampered = model.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        let url = serve_once("200 OK", tampered);
+
+        let error = install_from_url(&url, &destination).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("did not serve the pinned LARD model"),
+            "{text}"
+        );
+        assert!(text.contains("checksum mismatch"), "{text}");
+        assert!(text.contains(MODEL_SHA256), "{text}");
+        assert!(text.contains("any existing model is untouched"), "{text}");
+        assert_eq!(std::fs::read(&destination).unwrap(), model);
+        assert_eq!(files_in(dir.path()), ["lard-disfluency-v1.vxdf"]);
+    }
+
+    #[test]
+    fn download_of_an_error_page_is_refused_whatever_its_size() {
+        let (dir, destination, model) = installed_model();
+        for body in [b"<html>captive portal</html>".to_vec(), vec![0u8; 200_000]] {
+            let url = serve_once("200 OK", body);
+            let error = install_from_url(&url, &destination).unwrap_err();
+            assert!(format!("{error:#}").contains("checksum mismatch"));
+            assert_eq!(std::fs::read(&destination).unwrap(), model);
+        }
+        assert_eq!(files_in(dir.path()), ["lard-disfluency-v1.vxdf"]);
+    }
+
+    #[test]
+    fn http_error_is_reported_with_its_status() {
+        let (dir, destination, model) = installed_model();
+        let url = serve_once("404 Not Found", b"not here".to_vec());
+
+        let error = install_from_url(&url, &destination).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("answered HTTP 404"), "{text}");
+        assert!(text.contains(&url), "{text}");
+        assert!(text.contains("any existing model is untouched"), "{text}");
+        assert_eq!(std::fs::read(&destination).unwrap(), model);
+        assert_eq!(files_in(dir.path()), ["lard-disfluency-v1.vxdf"]);
+
+        // And with nothing installed before, nothing is left behind.
+        let empty = tempfile::tempdir().unwrap();
+        let fresh = empty.path().join("lard-disfluency-v1.vxdf");
+        let url = serve_once("503 Service Unavailable", Vec::new());
+        let error = install_from_url(&url, &fresh).unwrap_err();
+        assert!(format!("{error:#}").contains("answered HTTP 503"));
+        assert!(files_in(empty.path()).is_empty());
+    }
+
+    #[test]
+    fn unreachable_host_is_reported_as_a_network_error() {
+        let (_dir, destination, model) = installed_model();
+        // Bind, note the port, and close it: nothing is listening there.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.vxdf", closed.local_addr().unwrap());
+        drop(closed);
+
+        let error = install_from_url(&url, &destination).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("could not reach"), "{text}");
+        assert!(text.contains("any existing model is untouched"), "{text}");
+        assert_eq!(std::fs::read(&destination).unwrap(), model);
+    }
+
+    #[test]
+    fn a_local_file_that_is_not_the_model_names_the_mismatch() {
+        let error = validate(b"corrupt").unwrap_err().to_string();
+        assert!(error.contains("got 7 bytes"), "{error}");
+        assert!(error.contains(MODEL_SHA256), "{error}");
     }
 
     /// The fix text sends people to this path, so it has to be the pinned
