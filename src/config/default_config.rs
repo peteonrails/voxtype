@@ -331,11 +331,12 @@ show_edits = true
 # urgency = "normal"
 
 [text]
-# Optional English-only trained cleanup. The separately licensed model is not
-# downloadable yet and is not installed by any package: it ships in the Voxtype
-# source as assets/models/lard-disfluency-v1.vxdf. Install it explicitly with:
-#   voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
-# Turned on without the model, this stage is skipped and voxtype doctor says so.
+# Optional English-only trained cleanup. Download its model first with:
+#   voxtype setup lard
+# The model is licensed CC BY-SA 4.0, separately from Voxtype's MIT code:
+#   https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md
+# Turning this on does not download anything. Without the model the stage is
+# skipped and voxtype doctor says so.
 # lard_disfluency = false
 # lard_model_path = "/path/to/lard-disfluency-v1.vxdf"
 # Text processing options (word replacements, spoken punctuation)

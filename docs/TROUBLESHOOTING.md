@@ -2297,18 +2297,23 @@ journalctl --user -u pulseaudio -n 20
   daemon's "Voxtype: N problems need attention" startup notification and in
   the log as `LARD cleanup unavailable; preserving text`.
 - "LARD disfluency cleanup is on but its model is not installed": the setting
-  is on and the model file is not there. The model is not downloadable yet
-  (publication is pending approval) and no package installs it, so
-  `voxtype setup lard` on its own cannot fetch it. It ships in the Voxtype
-  source tree as `assets/models/lard-disfluency-v1.vxdf`. Take it from a source
-  checkout or your release's source archive and install it with
-  `voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`, then restart
-  the daemon. Or turn the stage off:
-  `voxtype config set text.lard_disfluency false`.
+  is on and the model file is not there. Turning the setting on does not
+  download it. Run `voxtype setup lard`, then restart the daemon. Or turn the
+  stage off: `voxtype config set text.lard_disfluency false`.
+- `voxtype setup lard` fails with "answered HTTP ..." or "could not reach":
+  the download did not complete. Nothing was installed and an existing model
+  is untouched. Check your connection and run it again, or install from a copy
+  of the file with
+  `voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`.
+- `voxtype setup lard` fails with "checksum mismatch": what was downloaded (or
+  the file given to `--source`) is not the pinned model. The message shows the
+  size and SHA-256 it got and the ones it expected. Nothing was installed. A
+  captive portal or a proxy that rewrites downloads is the usual cause.
 - Run `voxtype setup lard --status` to see the installed file and whether the
   stage is running for your configuration.
 - An explicit `--url` must be HTTPS and return the exact pinned artifact.
-  Checksum failures preserve any existing installed model.
+- The model is licensed CC BY-SA 4.0, separately from Voxtype's MIT code. See
+  the [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md).
 - Check `text.lard_model_path` and the XDG data directory used by the daemon.
   Restart after changing configuration. Missing or invalid models skip only
   this stage; startup never tries a download.

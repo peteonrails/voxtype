@@ -2466,17 +2466,28 @@ not advertised by your executable's schema are not shown, so an older binary
 may not offer LARD yet. Punctuation/casing restoration and smart auto-submit
 remain under **Other text options**, not the deterministic cleanup group.
 
-The model is not downloadable yet: publication on the Voxtype model host is
-pending approval, so `voxtype setup lard` on its own has nothing to fetch and
-no package installs the file. It ships in the Voxtype source tree as
-`assets/models/lard-disfluency-v1.vxdf`. Take it from a source checkout or the
-source archive of your release, then install it with
-`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`, run
-`voxtype config set text.lard_disfluency true` and restart the daemon. Check it
-with `voxtype setup lard --status`, which reports both the installed file and
-whether the stage is running for your configuration. Use an explicit English
-engine language; auto-detected and non-English languages skip this stage, and
-engines without a language setting cannot run it.
+Install the model, turn the stage on, and restart the daemon:
+
+```bash
+voxtype setup lard
+voxtype config set text.lard_disfluency true
+systemctl --user restart voxtype
+```
+
+`voxtype setup lard` downloads the 64 KB model from the Voxtype model mirror
+and installs it only if it matches the pinned checksum. If the download fails
+or the checksum does not match, the command says which and leaves any model you
+already have in place. To install without a network, pass a copy of the file:
+`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf` (the source tree
+carries one as `assets/models/lard-disfluency-v1.vxdf`). Check the result with
+`voxtype setup lard --status`, which reports both the installed file and
+whether the stage is running for your configuration. Nothing is downloaded
+unless you run that command: not at daemon start, and not when you turn the
+setting on.
+
+Use an explicit English engine language; auto-detected and non-English
+languages skip this stage, and engines without a language setting cannot run
+it.
 
 Turning the setting on without the model does not break dictation, but the
 stage does nothing until the model is installed. Voxtype tells you instead of
@@ -2489,14 +2500,19 @@ skipping it quietly:
 - The daemon includes it in its "Voxtype: N problems need attention"
   notification at startup, once per boot until it is fixed.
 
-To clear it, install the model as above or turn the stage off with
+To clear it, run `voxtype setup lard` or turn the stage off with
 `voxtype config set text.lard_disfluency false`.
 
 This opt-in stage can remove a discarded phrase such as "I need a flight no"
 from "I need a flight no I need a hotel". It does not generate replacement
-words. The model is CC BY-SA 4.0 and has its own model card under
-`assets/models/`. Missing or invalid weights leave the remaining cleanup
-available.
+words. Missing or invalid weights leave the remaining cleanup available.
+
+The model is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/),
+separately from Voxtype's MIT code. It was trained on the LARD dataset
+(Passali et al., LREC 2022), which derives from the Schema-Guided Dialogue
+dataset. The [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md)
+gives the attribution, provenance, evaluation and how to reproduce it; the same
+card is in the source tree as `assets/models/lard-disfluency-v1.MODEL_CARD.md`.
 See [LARD configuration](CONFIGURATION.md#lard_disfluency-and-lard_model_path)
 for CLI/environment overrides and finalized-streaming behavior.
 

@@ -247,8 +247,10 @@ switches: spoken punctuation, filler removal, restart collapse, sentence-break
 repair, and number formatting. It preserves each stage's schema value; opening
 the section does not enable anything. **LARD disfluency cleanup** is a separate
 opt-in switch over `text.lard_disfluency`, with its own local-model path and
-CC BY-SA 4.0 license link. It requires explicit English and separate model setup
-(`voxtype setup lard --source /path/to/model.vxdf`). Missing or invalid models
+CC BY-SA 4.0 license link. It requires explicit English and the model, which
+`voxtype setup lard` downloads and verifies (or installs from a file with
+`--source /path/to/model.vxdf`). The panel does not download it: with the switch
+on and no model, the row carries a notice saying so. Missing or invalid models
 leave deterministic cleanup available. A click on the license opens the browser;
 there are no automatic network requests or downloads. Older schemas only show
 the keys they actually support. Learned punctuation/casing restoration and
