@@ -472,6 +472,18 @@ systemctl --user restart pipewire pipewire-pulse
 systemctl --user restart pulseaudio
 ```
 
+### "No sound server answered within 5 s"
+
+Voxtype asked the audio system for the microphone and got no reply. This happens when PipeWire or PulseAudio is wedged (its socket exists but it does not answer), or in a sandbox, container or clean chroot with no sound server. Recording, `voxtype info devices` and the Settings panel's device list stop waiting after 5 seconds and report this instead of hanging.
+
+```bash
+systemctl --user status pipewire pipewire-pulse wireplumber
+systemctl --user restart pipewire pipewire-pulse wireplumber
+voxtype info devices
+```
+
+If `info devices` lists your microphone again, recording works too; the daemon does not need a restart.
+
 ### "Audio format not supported"
 
 **Cause:** Audio device doesn't support 16kHz sample rate.
@@ -1100,6 +1112,14 @@ journalctl --user -u ydotool
 ydotool type "test"
 ```
 
+#### Clipboard helper exits before accepting text
+
+If `wl-copy` or another output helper exits before reading its input, the daemon
+reports the broken pipe as an output error and tries the configured fallbacks.
+It no longer exits silently from SIGPIPE. Check the helper's installation and
+session environment if output still fails. This does not change the configured
+output order or make an unavailable clipboard service work.
+
 #### 2. Fallback to clipboard not working
 ```bash
 # Test wl-copy
@@ -1493,6 +1513,22 @@ An empty list means no MPRIS-capable player is running, which is a different
 problem from a missing `playerctl`. Some players (notably certain browsers)
 report unreliable MPRIS status; skip those with
 `pause_media_ignored_players`.
+
+## OSD looks different after upgrading, or styles do nothing
+
+Check which frontend is running and why:
+
+```bash
+voxtype setup osd --status
+```
+
+- **The OSD changed look after an upgrade.** Configs without `[osd] frontend` now default to `auto`, which prefers the Quickshell OSD when it can run. To get the old look back: `voxtype config set osd.frontend gtk4`, then `systemctl --user restart voxtype`.
+- **Picking a style in Settings changes nothing.** Quickshell styles only apply to the Quickshell OSD. If `Active:` says `gtk4` or `native`, either your config names that frontend (switch with `voxtype setup osd --use-auto`) or Quickshell can't run here. The `Reason:` line says which: `voxtype-osd-quickshell is not installed`, Quickshell is not on PATH (install the `quickshell` package), or no Wayland session.
+- **`Reason:` says `gtk4 OSD installed but libgtk4-layer-shell is missing`.** Your distro doesn't package gtk4-layer-shell (Ubuntu 24.04, for example), so voxtype uses the native OSD instead. Install gtk4-layer-shell if your distro has it, or install Quickshell.
+- **`Active: none`.** No OSD frontend is installed, or none can reach a display. Install a frontend, or set `[osd] enabled = false` to silence the warning.
+- **The Settings panel keeps saying "Changes take effect after restart".** It clears after any daemon restart, including `systemctl --user restart voxtype` and `voxtype setup model`, within about five seconds while the panel is open, or the next time you open it.
+
+The choice is made when the daemon starts, so restart it after installing Quickshell or gtk4-layer-shell, or after changing `osd.frontend`.
 
 ## Quickshell OSD Issues
 

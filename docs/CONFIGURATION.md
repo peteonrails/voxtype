@@ -2089,7 +2089,7 @@ Configuration for the OpenVINO Whisper speech-to-text engine. This section is on
 | `device` | String | `"NPU"` | OpenVINO device: `"NPU"`, `"CPU"`, `"GPU"`, or `"AUTO"`. On a genuine device error (missing driver, unsupported op, no NPU on this chip) voxtype falls back automatically: configured device → GPU → CPU, skipping a device already tried. This is for actual errors only — see the note below on large models, which don't error on NPU, just compile slowly the first time. When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype setup` also compiles a newly downloaded or activated model for the NPU before it finishes, so the first recording does not absorb that wait (see Compiled model caching below). |
 | `quantized` | Boolean | `true` | Prefer int8 quantized model variants |
 | `threads` | Integer | system-detected | CPU inference threads |
-| `language` | String | `"en"` | Whisper language code |
+| `language` | String | `"en"` | Whisper language code, or `"auto"` to detect it (multilingual models only) |
 | `translate` | Boolean | `false` | Translate non-English speech to English |
 | `on_demand_loading` | Boolean | `false` | Load the model when recording begins |
 | `streaming` | Boolean | `false` | Live streaming transcription via the shared sliding-window engine — see `[streaming]` for tuning |
@@ -2734,7 +2734,7 @@ If you see this notification while you were speaking, your microphone level is p
 **Default:** `true`
 **Required:** No
 
-When `[text]` cleanup or `[output.post_process]` changed the transcription, the transcription notification shows what changed: deletions struck through and replacements highlighted, with an "✎ N edits" title. Set it to `false` to get the plain text preview instead. An LLM `post_process` command that rewrites whole sentences produces a long diff, and this is the switch for that.
+When `[text]` cleanup or `[output.post_process]` changed the transcription, the transcription notification shows what changed, with an "✎ N edits" title. Deletions are struck through. Insertions are bold on Qt notification servers (Omarchy, KDE Plasma) and green on Pango servers (mako, dunst, swaync, GNOME), where deletions are also red. Qt servers get no colour because Omarchy's notification panel prints any markup outside the spec's bold, italic, underline and strikethrough as literal text. Set it to `false` to get the plain text preview instead. An LLM `post_process` command that rewrites whole sentences produces a long diff, and this is the switch for that.
 
 ```toml
 [output.notification]
@@ -4416,10 +4416,20 @@ the `voxtype-osd` wrapper launches via `[osd] frontend`.
 
 ```toml
 [osd]
-frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
+frontend = "auto"           # Default. Picks the best frontend this system can run.
+# frontend = "gtk4"         # GTK4 + layer-shell (voxtype-osd-gtk4).
 # frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
 # frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
 ```
+
+`auto` resolves in this order when the daemon starts:
+
+1. `quickshell` when `voxtype-osd-quickshell` is installed (next to the voxtype binary or on PATH), `qs` or `quickshell` is on PATH, and a Wayland session is present
+2. `gtk4` when `voxtype-osd-gtk4` is installed, its libraries (gtk4-layer-shell and GTK 4) load, and a display (Wayland or X11) is present
+3. `native` when `voxtype-osd-native` is installed
+4. otherwise no OSD; the daemon logs why and keeps running
+
+The daemon logs its choice and the reason once at startup. `voxtype setup osd --status` shows the same thing without starting anything, and `voxtype status --format json --extended` reports it as `osd_frontend_active`. An explicit `gtk4`, `native` or `quickshell` is never changed: if that binary is missing, the launcher falls back to whichever frontend is installed, as before. `VOXTYPE_OSD_FRONTEND` overrides the config value. Configs written before 1.2.2 that say `frontend = "gtk4"` keep GTK4. Configs without the key now get `auto`.
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
 find it:
@@ -4443,7 +4453,7 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 
 ### Quickshell OSD customization
 
-The Quickshell frontend can customize the whole OSD without editing VoxType's
+The Quickshell frontend can customize the whole OSD without editing Voxtype's
 packaged QML. Normal users configure declarative recipes; advanced users can
 explicitly opt into trusted custom QML packages. The styling system was
 contributed by [OldJobobo](https://github.com/OldJobobo)
@@ -4494,7 +4504,7 @@ mirror = true
 ```
 
 When `palette` is omitted, a selected package manifest may choose the palette;
-otherwise VoxType falls back to Omarchy colors. With `palette = "omarchy"`,
+otherwise Voxtype falls back to Omarchy colors. With `palette = "omarchy"`,
 recipe colors such as `accent`, `background`,
 `foreground`, `success`, `warning`, and `error` resolve from the active
 Omarchy theme at `~/.config/omarchy/current/theme/colors.toml`. Literal colors
@@ -4677,7 +4687,7 @@ Quickshell launcher exits with an error explaining what to fix instead of
 silently falling back to the default style. `style` and `plugin_path` paths
 may start with `~`.
 
-VoxType ships working examples to copy from. Packaged installs place style
+Voxtype ships working examples to copy from. Packaged installs place style
 packages under `/usr/share/voxtype/osd/` and recipe presets under
 `/usr/share/voxtype/osd-recipes/`; in the source tree they live in
 [`examples/osd-packages/`](../examples/osd-packages/) (full packages,
@@ -4736,13 +4746,21 @@ The following configuration options are deprecated but still supported for backw
 |-------------------|-------------|-------|
 | `wtype_delay_ms` | `pre_type_delay_ms` | Renamed for clarity (applies to all output drivers, not just wtype) |
 | `--wtype-delay` CLI flag | `--pre-type-delay` | CLI equivalent of the above |
-## Atomic generic GGUF selection
+## Atomic model selection
 
-`voxtype config select-model gguf MODEL [--language CODE]` selects an installed
-generic GGUF checkpoint without downloading or restarting. Catalog checkpoints
-set the canonical architecture; custom checkpoints require an existing explicit
+`voxtype config select-model ENGINE MODEL` sets `engine` and `ENGINE.model`
+together in one validated write, without downloading or restarting. It accepts
+every engine `config set engine` does (whisper, parakeet, moonshine,
+sensevoice, paraformer, dolphin, omnilingual, cohere, gguf and openvino). The
+model must already be installed, and the engine must be compiled into the
+running binary; otherwise the command exits 2 and the config file is left
+byte-identical. The Omarchy Settings panel's **Use** button runs it.
+
+For the generic `gguf` engine, `--language CODE` sets the language hint (it is
+refused for every other engine). Catalog checkpoints set the canonical
+architecture; custom checkpoints require an existing explicit
 `gguf.architecture`. Omitting `--language` preserves a compatible saved hint;
 incompatible hints fail without modifying the file. Model paths are preserved
 literally and resolved like the worker: an existing current-directory path wins,
-otherwise the models directory is searched. This additive command currently
-accepts only engine `gguf`; existing `config set` contracts are unchanged.
+otherwise the models directory is searched. Existing `config set` contracts are
+unchanged.

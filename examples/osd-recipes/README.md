@@ -30,7 +30,7 @@ cargo run --bin voxtype-osd-quickshell -- \
 Swap the config path for any recipe in this directory.
 
 The manual state file makes the OSD visible. To see live movement, run a real
-VoxType recording while the OSD is open so `voxtype-audio-bridge` receives
+Voxtype recording while the OSD is open so `voxtype-audio-bridge` receives
 audio frames from the daemon.
 
 Hide the OSD:

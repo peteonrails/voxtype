@@ -57,6 +57,7 @@ RUN for attempt in 1 2 3 4; do apt-get update && apt-get install -y \
     && break; \
     [ "$attempt" = 4 ] && exit 1; \
     echo "apt failed (attempt $attempt), mirror may be syncing; retrying in 90s"; \
+    if [ "$attempt" = 2 ]; then echo "switching apt to azure.archive.ubuntu.com"; sed -i -E 's#https?://(archive|security)\.ubuntu\.com#http://azure.archive.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true; fi; \
     rm -rf /var/lib/apt/lists/*; sleep 90; \
     done && rm -rf /var/lib/apt/lists/*
 

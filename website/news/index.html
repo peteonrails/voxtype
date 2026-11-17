@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.6.6: Media Pause, Audio Feedback, KDE Support, 7 Bug Fixes">
-    <meta property="og:description" content="Pauses media players during recording, plays audio feedback on transcription completion, documents KDE Plasma keybindings, and fixes seven output driver and text processing bugs.">
+    <meta property="og:title" content="Voxtype v1.2.2: OSD Selection, Settings, and Output Fixes">
+    <meta property="og:description" content="Automatic OSD frontend selection, validated Settings changes, output and audio failure handling, text cleanup fixes, and updated source packaging.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.6.6: Media Pause, Audio Feedback, KDE Support, 7 Bug Fixes">
-    <meta name="twitter:description" content="Pauses media players during recording, plays audio feedback on transcription completion, documents KDE Plasma keybindings, and fixes seven output driver and text processing bugs.">
+    <meta name="twitter:title" content="Voxtype v1.2.2: OSD Selection, Settings, and Output Fixes">
+    <meta name="twitter:description" content="Automatic OSD frontend selection, validated Settings changes, output and audio failure handling, text cleanup fixes, and updated source packaging.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -75,7 +75,95 @@
     <main class="news-content">
         <div class="container">
 
-            <!-- v0.7.x Era Posts -->
+            <article class="news-article" id="v122">
+                <div class="article-meta">
+                    <time datetime="2026-11-14">November 14, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.2.2: OSD Selection, Settings, and Output Fixes</h2>
+                <div class="article-body">
+                    <p>Voxtype 1.2.2 improves the OSD and Settings panel, fixes transcript delivery and text cleanup bugs, and brings the Debian and RPM source packages up to date. It also adds setup instructions that you can install for a coding agent.</p>
+
+                    <h3>The OSD chooses an available frontend</h3>
+                    <p>The default OSD frontend is now <code>auto</code>. Voxtype uses Quickshell when it is available in a Wayland session, GTK4 when its libraries load, and the native OSD otherwise. An explicit <code>gtk4</code>, <code>native</code> or <code>quickshell</code> selection stays as configured. The new default also applies to existing configurations that omit the frontend key.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup osd --status</code></pre>
+                    </div>
+                    <p>This reports the configured frontend, what can run and why. On a compatible installation, Settings can offer to switch an explicit GTK4 or native selection to Quickshell. Choosing <strong>Not now</strong> is remembered. Picking a Quickshell style now switches to <code>auto</code> when supported, or explains why it cannot, instead of silently doing nothing.</p>
+                    <p><strong>Why use it:</strong> OSD styles work on installations where the previous GTK4 default prevented Quickshell from being selected.</p>
+
+                    <h3>Settings can switch every supported engine</h3>
+                    <p>The Settings panel can select installed models for every engine supported by the installed binary. Engine and model are validated and saved together. An unavailable engine or incompatible model is rejected without changing the configuration.</p>
+                    <p>The restart banner also clears after restarts made outside the panel, and unset numeric values display their defaults instead of the minimum.</p>
+                    <p><strong>Why use it:</strong> You can switch engines from Settings without separately editing the engine and model from a terminal.</p>
+
+                    <h3>Output and audio failure handling</h3>
+                    <p>A closed output-helper pipe now returns an error instead of terminating the daemon with SIGPIPE. One-shot commands, status pipelines and transcription-worker output retain their existing behavior. Paste mode also falls back to the clipboard when pasting fails, rather than losing the transcript.</p>
+                    <p>Device listing runs in a child process that is stopped if it exceeds its five-second deadline. Recording-device lookups have a five-second deadline per lookup. A streaming-to-batch fallback can require more than one lookup. These deadlines do not cancel native threads that are already stuck or guarantee normal daemon shutdown afterward.</p>
+                    <p><strong>Why use it:</strong> A failed output helper no longer kills the daemon, and an unresponsive sound server no longer leaves device enumeration waiting indefinitely.</p>
+
+                    <h3>A setup skill for coding agents</h3>
+                    <div class="code-block">
+                        <pre><code>voxtype setup skill
+voxtype setup skill --status</code></pre>
+                    </div>
+                    <p>The installed skill tells a supported coding agent to inspect the running version, hardware, available engines and configuration before recommending changes. It covers model selection, output setup and older configuration defaults.</p>
+                    <p>The command asks before replacing an edited skill. Without an interactive terminal, it leaves an edited copy alone unless replacement is explicitly forced. Package upgrades do not write into an agent's home-directory configuration.</p>
+
+                    <h3>Text cleanup and engine fixes</h3>
+                    <ul>
+                        <li>Cleanup edit notifications use supported formatting on Omarchy's newer notification panel instead of displaying raw font-color tags. Qt notification servers show deletions with strikethrough and insertions in bold; Pango servers retain their colors.</li>
+                        <li>Punctuation and casing restoration capitalizes the correct letter instead of producing words such as "HEllo" or "fRiday".</li>
+                        <li><code>voxtype setup punctuation</code> can download its model again.</li>
+                        <li>The English Paraformer vocabulary no longer leaves YAML quotes around words such as "on", "yes" and "no", or around digits.</li>
+                        <li>OpenVINO Whisper accepts <code>language = "auto"</code>.</li>
+                        <li>Soniox no longer reports a false unavailable-engine warning. Async transcription also deletes the uploaded audio file after use.</li>
+                        <li>eitype handles text that starts with a hyphen.</li>
+                        <li>ONNX builds and OSD helpers no longer emit an incorrect punctuation-casing warning while loading configuration.</li>
+                        <li>Unknown or missing local Whisper model overrides are rejected before recording starts.</li>
+                        <li>The user manual explains when sentence-break repair applies.</li>
+                    </ul>
+
+                    <h3>Desktop and packaging fixes</h3>
+                    <ul>
+                        <li>Notifications and the desktop launcher use Voxtype's microphone icon. Debian and RPM packages include the SVG and 128-pixel PNG icons.</li>
+                        <li>The OSD discovers an available <code>wayland-N</code> socket when <code>WAYLAND_DISPLAY</code> is unset. CUDA and MIGraphX installations also find their packaged OSD helpers.</li>
+                        <li>Package-install guidance handles symlinked package directories correctly on Linux and macOS. The macOS menu bar app no longer shows a Dock icon.</li>
+                        <li>Debian and RPM source builds include the GGUF clients and workers, OSD launcher, Quickshell frontend, audio bridge, styles, Settings plugin and man pages. The GTK4 frontend is available as a separate package.</li>
+                        <li>Debian and RPM source packages ship AVX2 and Vulkan builds. They no longer ship a misleadingly named AVX-512 build that contained AVX2-level Whisper code. Upgrades repair links to that removed build while preserving a valid Vulkan selection. Prebuilt release AVX-512 binaries are unaffected.</li>
+                        <li>Source-package builds use the expected runtime paths and compiler flags. Package post-install messages now point users at <code>voxtype setup skill</code>.</li>
+                        <li>First-run setup prints the correct <code>voxtype record toggle</code> command, and model-download documentation names the current mirror.</li>
+                        <li>The local RC package's upgrade handoff no longer uses a predictable file in <code>/tmp</code>.</li>
+                    </ul>
+
+                    <h3>Dependency and build updates</h3>
+                    <p>TLS and HTTP dependency updates include rustls, rustls-webpki, webpki-roots, webpki-root-certs, bytes, quinn-proto and crossbeam-epoch to address RustSec findings.</p>
+                    <p>ONNX Runtime downloads during source builds now use rustls instead of native-tls, avoiding the OpenSSL bindings that rejected Arch's OpenSSL 4 installation. Release binaries did not previously link OpenSSL at runtime.</p>
+                    <p>Linux release builds can recover Ubuntu mirror addresses through DNS-over-HTTPS when normal resolution fails. This includes the ARM package mirror. This build repair follows the DNS outage that prevented RC2's Linux artifacts from being published.</p>
+
+                    <h3>Contributors</h3>
+                    <p>Thanks to iacore, liamwh, komagata, Nutchanon Ninyawee, Adamkadaban, fralapo, hulakdar, grigio, materemias, Vladkarok, ivancis1, Carmine Paolino and Tim Richardson for the fixes, reports and diagnosis incorporated into this release.</p>
+
+                    <h3>Downloads and verification</h3>
+                    <div class="code-block">
+                        <table>
+                            <thead><tr><th scope="col">Platform</th><th scope="col">Download</th></tr></thead>
+                            <tbody>
+                                <tr><td>Linux binaries and companion workers</td><td>Choose the architecture and acceleration variant from the <a href="https://github.com/peteonrails/voxtype/releases/tag/v1.2.2">release assets</a>. Keep the matching worker and any provider libraries with the selected binary.</td></tr>
+                                <tr><td>Debian and Ubuntu prebuilt package</td><td><a href="https://github.com/peteonrails/voxtype/releases/download/v1.2.2/voxtype_1.2.2-1_amd64.deb">voxtype_1.2.2-1_amd64.deb</a></td></tr>
+                                <tr><td>Fedora prebuilt package</td><td><a href="https://github.com/peteonrails/voxtype/releases/download/v1.2.2/voxtype-1.2.2-1.x86_64.rpm">voxtype-1.2.2-1.x86_64.rpm</a></td></tr>
+                                <tr><td>macOS</td><td>Choose the universal binary or DMG from the release assets.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>Verify Linux downloads against <code>SHA256SUMS.txt</code> and its detached signature, <code>SHA256SUMS.txt.asc</code>. The CI release signing key is <code>9CCF7915B750CAE8B095ED1AA3FC9F33FD209279</code>. macOS checksums are in <code>SHA256SUMS-macos.txt</code>.</p>
+                    <div class="code-block">
+                        <pre><code>gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt
+sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
+                    </div>
+                    <p>Only run the checksum command from a directory containing the intended downloads, and confirm each intended file is listed and passes. A valid manifest signature alone does not verify files you have not downloaded.</p>
+                </div>
+            </article>
 
             <article class="news-article" id="v121">
                 <div class="article-meta">

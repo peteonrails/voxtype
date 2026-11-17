@@ -463,17 +463,12 @@ impl Transcriber for OpenVinoTranscriber {
         let is_multilingual = gen_config.get_is_multilingual().unwrap_or(false);
 
         if is_multilingual {
-            // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
-            // in generation_config.json), while voxtype config uses bare codes like "en"
-            let lang = &self.config.language;
-            let lang_token = if lang.starts_with("<|") {
-                lang.to_string()
-            } else {
-                format!("<|{}|>", lang)
-            };
-            gen_config.set_language(&lang_token).map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
-            })?;
+            // Leaving the language unset is how GenAI auto-detects it.
+            if let Some(lang_token) = language_token(&self.config.language) {
+                gen_config.set_language(&lang_token).map_err(|e| {
+                    TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
+                })?;
+            }
 
             let task = if self.config.translate {
                 "translate"
@@ -521,6 +516,22 @@ impl Transcriber for OpenVinoTranscriber {
         );
 
         Ok(result)
+    }
+}
+
+/// The GenAI language token for a configured language, or `None` to let
+/// GenAI detect it. GenAI expects "<|xx|>" (the lang_to_id keys in
+/// generation_config.json) while voxtype config uses bare codes like "en";
+/// "auto" or an empty value has no token, and "<|auto|>" makes inference
+/// fail with an unknown exception (#875).
+fn language_token(language: &str) -> Option<String> {
+    let language = language.trim();
+    if language.is_empty() || language.eq_ignore_ascii_case("auto") {
+        None
+    } else if language.starts_with("<|") {
+        Some(language.to_string())
+    } else {
+        Some(format!("<|{}|>", language))
     }
 }
 
@@ -709,6 +720,16 @@ mod tests {
         assert_eq!(device_candidates("GPU"), ["GPU", "CPU"]);
         assert_eq!(device_candidates("gpu"), ["gpu", "CPU"]);
         assert_eq!(device_candidates("CPU"), ["CPU", "GPU"]);
+    }
+
+    #[test]
+    fn language_token_leaves_auto_detection_to_genai() {
+        assert_eq!(language_token("en").as_deref(), Some("<|en|>"));
+        assert_eq!(language_token("<|it|>").as_deref(), Some("<|it|>"));
+        assert_eq!(language_token("auto"), None);
+        assert_eq!(language_token("AUTO"), None);
+        assert_eq!(language_token(""), None);
+        assert_eq!(language_token("  "), None);
     }
 
     #[test]
