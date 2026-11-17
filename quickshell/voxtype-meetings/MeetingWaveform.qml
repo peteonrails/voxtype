@@ -21,6 +21,8 @@ Item {
 
   property string meetingId: ""
   property real durationMs: 0
+  // How long each peak covers; 0 from a voxtype that does not say.
+  property real bucketMs: 0
   property var mic: []
   property var loopback: null
   property string micTrack: "mic"
@@ -39,6 +41,7 @@ Item {
   function clear() {
     root.meetingId = ""
     root.durationMs = 0
+    root.bucketMs = 0
     root.mic = []
     root.loopback = null
   }
@@ -56,6 +59,7 @@ Item {
       root.mic = data.mic
       root.loopback = data.loopback && data.loopback.length !== undefined ? data.loopback : null
       root.micTrack = data.mic_track ? String(data.mic_track) : "mic"
+      root.bucketMs = Number(data.bucket_ms) || 0
       root.durationMs = Number(data.duration_ms) || 0
     }
   }

@@ -7,6 +7,9 @@ import QtQuick.Controls.Basic as C
 // reassign chooser; hovering a line offers Edit (its text, inline: Enter
 // saves, Escape cancels), Add note and Delete; a note or highlight shows as a
 // marker in the margin and the note under the text.
+//
+// Each speaker has one colour, on its chip, by its name on every line and on
+// the waveform (MeetingFeed.speakerSlot, MeetingTheme.speakerColor).
 Item {
   id: root
 
@@ -79,10 +82,8 @@ Item {
   property int flashSegId: -1
   Timer { id: flashTimer; interval: 1600; onTriggered: root.flashSegId = -1 }
 
-  function chipColor(index) {
-    var hues = [0.58, 0.08, 0.33, 0.83, 0.15, 0.5, 0.0, 0.7]
-    return Qt.hsla(hues[index % hues.length], 0.55, 0.62, 1.0)
-  }
+  // A speaker's colour: the same on its chip, its lines and the waveform.
+  function speakerColor(key) { return root.theme.speakerColor(root.feed ? root.feed.speakerSlot(key) : -2) }
 
   function clock(ms) {
     var total = Math.max(0, Math.floor(ms / 1000))
@@ -113,6 +114,7 @@ Item {
           property bool editing: false
           objectName: "speakerChip_" + index
           readonly property string name: modelData.name
+          readonly property color tint: root.speakerColor(modelData.keys[0])
           implicitWidth: editing ? 170 : chipRow.implicitWidth + root.theme.padX * 2
           implicitHeight: root.theme.controlHeight
 
@@ -136,7 +138,7 @@ Item {
             radius: height / 2
             color: chipMouse.containsMouse ? root.theme.alpha(root.theme.fg, 0.12) : root.theme.alpha(root.theme.fg, 0.06)
             border.width: 1
-            border.color: root.theme.alpha(root.chipColor(chip.index), 0.6)
+            border.color: root.theme.alpha(chip.tint, 0.6)
 
             Row {
               id: chipRow
@@ -147,7 +149,7 @@ Item {
                 width: 8
                 height: 8
                 radius: 4
-                color: root.chipColor(chip.index)
+                color: chip.tint
               }
               Text {
                 objectName: "speakerChipName"
@@ -295,7 +297,7 @@ Item {
           width: ListView.view.width
           implicitHeight: lineColumn.implicitHeight
           readonly property string speakerName: root.feed.displayName(line.speaker)
-          readonly property int chipIndex: root.feed.chipIndexFor(line.speaker)
+          readonly property color speakerTint: root.speakerColor(line.speaker)
           readonly property bool marked: line.annotation !== "" || line.highlight
           property bool editing: false
 
@@ -397,12 +399,23 @@ Item {
               Row {
                 spacing: root.theme.md
 
+                // The speaker's colour as on the waveform, beside the name
+                // and inside its row: it adds no height.
+                Rectangle {
+                  objectName: "lineSpeakerMark"
+                  anchors.verticalCenter: speakerLabel.verticalCenter
+                  width: 8
+                  height: 8
+                  radius: 4
+                  color: line.speakerTint
+                }
+
                 // The speaker is the handle for moving this line elsewhere.
                 Text {
                   id: speakerLabel
                   objectName: "lineSpeaker"
                   text: line.speakerName
-                  color: root.chipColor(Math.max(0, line.chipIndex))
+                  color: line.speakerTint
                   font.family: root.theme.fontFamily
                   font.pixelSize: root.theme.bodySmall
                   font.bold: true

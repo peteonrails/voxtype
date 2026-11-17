@@ -1,4 +1,5 @@
 import QtQuick
+import "MeetingSpeakers.js" as MS
 
 // Colours, type sizes and spacing for the meeting view. The view uses nothing
 // else, so it runs under any host: the Omarchy plugin binds these to the
@@ -45,4 +46,17 @@ QtObject {
   property int inputDemand: 0
 
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
+
+  // The speakers' colours, made from this theme (MeetingSpeakers.palette).
+  // You are the accent; the rest take these in turn, and a meeting with more
+  // speakers than colours starts over, so its ninth shares with its first.
+  readonly property var speakerColors: MS.palette(accent, bg, fg, 8)
+
+  // The colour of a speaker's slot (MeetingFeed.speakerSlot).
+  function speakerColor(slot) {
+    if (slot === MS.YOU_SLOT) return accent
+    if (slot < 0 || speakerColors.length === 0) return dim
+    var c = speakerColors[slot % speakerColors.length]
+    return Qt.rgba(c[0], c[1], c[2], 1)
+  }
 }

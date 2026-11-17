@@ -550,6 +550,16 @@ socket that goes away and a daemon restart, the idle state and a refused start,
 no daemon at all, and auto-scroll. `--evidence` also saves a screenshot of the
 view in each state.
 
+```bash
+python3 omarchy-plugin/tests/test-meeting-speakers.py [--evidence DIR]
+```
+
+The functions behind the speaker colours (`MeetingSpeakers.js`: a speaker's
+colour slot, which speaker a stretch of the waveform belongs to, and the
+palette made from a theme), loaded into a bare QML engine with PySide6. No
+window, no Quickshell and no Omarchy shell needed. `--evidence` saves
+`palette.png`, the colours on a dozen themes.
+
 ### Calendar link test
 
 ```bash
