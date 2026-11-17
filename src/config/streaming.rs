@@ -48,11 +48,29 @@ pub struct StreamingConfig {
     /// whole segments at once (`false`).
     pub type_partials: bool,
 
-    /// Experimental: type the current best-guess tail immediately and
-    /// correct it later via backspace + retype if a later tick disagrees,
-    /// instead of withholding it until two consecutive ticks agree. See
-    /// `transcribe::sliding_window`'s "Revision mode" doc section.
+    /// Type the current best-guess tail immediately and correct it later via
+    /// backspace + retype if a later tick disagrees, instead of withholding
+    /// it until it has been stable for a few ticks. More responsive; can
+    /// visibly flicker (type then backspace then retype) when Whisper
+    /// changes its mind about a word. **Default true.** `false` opts back
+    /// into the legacy conservative wait-for-stability gate. See
+    /// `transcribe::sliding_window`'s "Commit policy" doc section.
     pub revision_mode: bool,
+
+    /// When a new "?" lands on the tail's last word, scan back this many
+    /// words for a stale earlier "?" and remove it, so a question ends with
+    /// exactly one "?". See `reconcile_question_marks` in
+    /// `transcribe::sliding_window`.
+    pub question_mark_lookback_words: usize,
+
+    /// Consecutive ticks a word must be present (text + punctuation) before
+    /// it's promoted out of the revisable provisional tail (type-then-correct
+    /// mode) or typed at all (conservative mode).
+    pub stability_passes: u32,
+
+    /// How many trailing words of the provisional tail stay revisable in
+    /// type-then-correct mode.
+    pub revision_lag_words: usize,
 }
 
 impl Default for StreamingConfig {
@@ -64,7 +82,10 @@ impl Default for StreamingConfig {
             min_audio_secs: 1.0,
             partial_min_words: 1,
             type_partials: true,
-            revision_mode: false,
+            revision_mode: true,
+            question_mark_lookback_words: 3,
+            stability_passes: 2,
+            revision_lag_words: 4,
         }
     }
 }
