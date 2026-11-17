@@ -103,6 +103,14 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
                 yield from walk(child,depth+1)
     def all_nodes():
         return list(walk(pyatspi.Registry.getDesktop(0)))
+    def names():
+        found=[]
+        for node in all_nodes():
+            try:
+                found.append(node.name)
+            except GLib.Error:
+                continue
+        return found
     def frame_visible(name):
         for node in all_nodes():
             try:
@@ -119,7 +127,13 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
         while True:
             while GLib.MainContext.default().pending():
                 GLib.MainContext.default().iteration(False)
-            value=check()
+            # GTK can destroy a node between the tree walk and the read of
+            # its name (a row removed by a search). That is "not yet", and
+            # the deadline below still applies.
+            try:
+                value=check()
+            except GLib.Error:
+                value=None
             if value:
                 return value
             assert gui.poll() is None or (cli_launch and gui.returncode==0), 'GTK exited before the control journey'
@@ -210,7 +224,7 @@ with tempfile.TemporaryDirectory(dir='/work/scratch',prefix='history-gtk-control
             search = wait(lambda:next((n for n in all_nodes() if n.getRoleName() in ['entry','text'] and n.getState().contains(pyatspi.STATE_EDITABLE)),None))
             assert search.queryEditableText().setTextContents('nonexistentneedle')
             wait(lambda:any(n.name=='No matches' for n in all_nodes()))
-            assert not any(n.name=='Synthetic invoice.' for n in all_nodes())
+            assert 'Synthetic invoice.' not in names()
             assert search.queryEditableText().setTextContents('invoice')
             wait(lambda:any(n.name=='Synthetic invoice.' for n in all_nodes()))
             assert search.queryEditableText().setTextContents('')
