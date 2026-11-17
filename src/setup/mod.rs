@@ -35,6 +35,7 @@ pub mod parakeet;
 pub mod progress;
 pub mod punctuation;
 pub mod quickshell;
+pub mod skill;
 pub mod systemd;
 pub mod vad;
 pub mod variant_check;
@@ -1289,7 +1290,7 @@ pub async fn run_setup(
         {
             println!("  1. Set up a compositor keybinding to trigger recording:");
             println!(
-                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
+                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record toggle\n"
             );
             println!("  2. Start the daemon: voxtype daemon\n");
             println!("Optional:");
@@ -1560,6 +1561,20 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
             print_failure("Engine set to 'parakeet' but [parakeet] config section is missing");
             all_ok = false;
         }
+    }
+
+    // Coding-agent skill: a hint, never a failure.
+    let stale_skills = skill::needs_attention();
+    if !stale_skills.is_empty() {
+        println!("\nCoding Agents:");
+        for (target, state) in &stale_skills {
+            let what = match state {
+                skill::State::Outdated => "has an outdated voxtype-setup skill",
+                _ => "found, voxtype-setup skill not installed",
+            };
+            print_info(&format!("{}: {what}", target.label()));
+        }
+        println!("       Install or update it with: voxtype setup skill");
     }
 
     // Summary

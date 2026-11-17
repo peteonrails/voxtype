@@ -220,9 +220,15 @@ fn apply_predictions(
                 post[idx]
             ))
         })?;
-        let piece = token.strip_prefix('▁').unwrap_or(token);
+        // The true-case head scores every character of the token, the `▁`
+        // word marker included, so a stripped piece's flags start at 1.
+        let (piece, first_flag) = match token.strip_prefix('▁') {
+            Some(piece) => (piece, 1),
+            None => (token.as_str(), 0),
+        };
         for (char_idx, ch) in piece.chars().enumerate() {
-            if char_idx < cap_width && caps[idx * cap_width + char_idx] {
+            let flag = first_flag + char_idx;
+            if flag < cap_width && caps[idx * cap_width + flag] {
                 out.extend(ch.to_uppercase());
             } else {
                 out.push(ch);
@@ -249,10 +255,59 @@ mod tests {
     fn applies_punctuation_casing_and_sentence_boundaries() {
         let tokens = vec!["▁hello".to_string(), "▁friend".to_string()];
         let mut caps = vec![false; 2 * 8];
-        caps[0] = true;
+        caps[1] = true; // slot 0 is the ▁ marker
         assert_eq!(
             apply_predictions(&tokens, &[0, 0], &[0, 4], &caps, 8, &[false, true]).unwrap(),
             "Hello friend?"
+        );
+    }
+
+    /// The checkpoint's true-case head scores every character of the
+    /// SentencePiece token, the `▁` word marker included, so a word-initial
+    /// token's first letter is slot 1, not slot 0. Reading slot 0 for "h"
+    /// shifted every flag one letter right: the demo typed "HEllo, DAna" and
+    /// "fRiday" (bug 5). Flags below are the shape the model returned there:
+    /// slot 1 marks the capital, and slot 0 (the marker) is noise.
+    #[test]
+    fn true_case_flags_count_the_word_marker() {
+        let tokens = vec![
+            "▁hello".to_string(),
+            "▁dana".to_string(),
+            "▁by".to_string(),
+            "▁fri".to_string(),
+            "day".to_string(),
+        ];
+        let width = 8;
+        let mut caps = vec![false; tokens.len() * width];
+        caps[0] = true; // ▁ of hello (noise)
+        caps[1] = true; // h
+        caps[width] = true; // ▁ of dana (noise)
+        caps[width + 1] = true; // d
+        caps[3 * width + 1] = true; // f of ▁fri
+        assert_eq!(
+            apply_predictions(
+                &tokens,
+                &[0; 5],
+                &[3, 3, 0, 0, 4],
+                &caps,
+                width,
+                &[false; 5]
+            )
+            .unwrap(),
+            "Hello, Dana, by Friday?"
+        );
+    }
+
+    /// A continuation piece has no marker, so its flags start at slot 0.
+    #[test]
+    fn true_case_flags_on_continuation_pieces_start_at_zero() {
+        let tokens = vec!["▁i".to_string(), "phone".to_string()];
+        let width = 8;
+        let mut caps = vec![false; 2 * width];
+        caps[width] = true; // p of "phone"
+        assert_eq!(
+            apply_predictions(&tokens, &[0, 0], &[0, 0], &caps, width, &[false, false]).unwrap(),
+            "iPhone"
         );
     }
 
@@ -272,6 +327,28 @@ mod tests {
             apply_predictions(&tokens, &[0, 0], &[2, 2], &[false; 16], 8, &[true, true]).unwrap(),
             "one. two."
         );
+    }
+
+    /// Runs the real checkpoint on the demo sentence. Needs the model files:
+    /// `VOXTYPE_PUNCT_MODEL_DIR=<dir with model.onnx and tokenizer.json>
+    /// cargo test --features punctuation-casing -- --ignored real_model`
+    #[test]
+    #[ignore = "needs the 1.1 GB punctuation model; set VOXTYPE_PUNCT_MODEL_DIR"]
+    fn real_model_cases_the_demo_sentence() {
+        let dir = std::env::var("VOXTYPE_PUNCT_MODEL_DIR").expect("VOXTYPE_PUNCT_MODEL_DIR");
+        let caser = PunctuationCaser::from_dir(Path::new(&dir)).unwrap();
+        for (input, expected) in [
+            (
+                "hello dana can you send me the release notes by friday i want to read them before the meeting on monday",
+                "Hello, Dana, can you send me the release notes by Friday? I want to read them before the meeting on Monday.",
+            ),
+            (
+                "remind me to send the release notes to the team on friday afternoon",
+                "Remind me to send the release notes to the team on Friday afternoon.",
+            ),
+        ] {
+            assert_eq!(caser.restore(input).unwrap(), expected);
+        }
     }
 
     #[test]

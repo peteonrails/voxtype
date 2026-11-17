@@ -342,6 +342,59 @@ pub enum SetupAction {
         progress_format: Option<String>,
     },
 
+    /// Install the voxtype-setup skill for your coding agents
+    #[command(long_about = "\
+        Install the voxtype-setup skill for your coding agents\n\n\
+        The skill teaches a coding agent to configure Voxtype for this \
+        machine: it inspects the hardware, asks what you dictate, and tunes \
+        the engine, model, GPU acceleration, memory use and output settings, \
+        asking before it changes anything.\n\n\
+        With no options, installs the skill for every agent found: Claude Code \
+        (~/.claude/skills) and the agents that read ~/.agents/skills (Codex, \
+        Gemini CLI, OpenCode, Cursor, GitHub Copilot, Goose). An agent counts \
+        as found when its config directory exists or its command is on PATH. \
+        Use --target to install for one that was not found.\n\n\
+        The skill is built into this voxtype binary, so the copy it writes \
+        matches this version. Run the command again after upgrading voxtype: \
+        --status and `voxtype setup check` report a copy that is out of date. \
+        Run it as your own user, not with sudo.\n\n\
+        A SKILL.md you have edited, or a different skill at the same path, \
+        is never replaced or removed without asking. Without a terminal to \
+        ask on, it is left alone; --force replaces it.\n\n\
+        --remove deletes only the SKILL.md voxtype wrote, and keeps any other \
+        files in that directory.\n\n\
+        Examples:\n  \
+        voxtype setup skill\n  \
+        voxtype setup skill --target claude\n  \
+        voxtype setup skill --status\n  \
+        voxtype setup skill --status --json\n  \
+        voxtype setup skill --remove")]
+    Skill {
+        /// Show where the skill is installed and whether it is current
+        #[arg(long, conflicts_with = "remove")]
+        status: bool,
+
+        /// With --status, print the state as JSON
+        #[arg(long, requires = "status")]
+        json: bool,
+
+        /// Remove the skill voxtype installed
+        #[arg(long)]
+        remove: bool,
+
+        /// Replace or remove a copy you edited, or a different skill at the same path, without asking
+        #[arg(long, conflicts_with = "status")]
+        force: bool,
+
+        /// Install for (or remove from) these agents instead of the ones found
+        #[arg(
+            long,
+            value_name = "TARGET",
+            value_parser = clap::builder::PossibleValuesParser::new(["claude", "agents", "all"]),
+        )]
+        target: Option<String>,
+    },
+
     /// Download the Silero VAD model for speech detection
     Vad {
         /// Show VAD model status
@@ -369,9 +422,9 @@ pub enum SetupAction {
         status: bool,
     },
 
-    /// Apply or list OSD recipe presets
+    /// Apply or list OSD recipe presets, or show which OSD frontend runs
     #[command(long_about = "\
-        Apply or list OSD recipe presets\n\n\
+        Apply or list OSD recipe presets, or show which OSD frontend runs\n\n\
         A recipe is a complete [osd] preset: layout, frame, and \
         [[osd.visual.layers]]. Applying one writes its keys into config.toml \
         through the same editor as `voxtype config set`: keys the recipe sets \
@@ -383,11 +436,31 @@ pub enum SetupAction {
         ~/.local/share/voxtype/osd-recipes, then \
         /usr/share/voxtype/osd-recipes; a user copy shadows a shipped one. \
         With no --recipe name, lists the available recipes.\n\n\
+        Frontend: [osd] frontend = \"auto\" (the default) runs the Quickshell \
+        OSD when voxtype-osd-quickshell is installed, qs (or quickshell) is \
+        on PATH and a Wayland session is present; otherwise gtk4 when \
+        voxtype-osd-gtk4 is installed, its libraries (gtk4-layer-shell, GTK \
+        4) load and a display is present; otherwise native. An explicit gtk4, native or quickshell is always kept.\n\n\
+        --status shows the configured frontend, the one that runs and why. \
+        --status --json prints {configured, active, reason, \
+        quickshell_available, offer, offer_dismissed}, where configured is \
+        auto, gtk4, native or quickshell, active is quickshell, gtk4, native \
+        or none, and offer is true when an explicit gtk4 or native could \
+        switch to the Quickshell OSD and the offer was not dismissed.\n\n\
+        --use-auto sets osd.frontend = \"auto\" (validated, like `voxtype \
+        config set`) and clears a dismissed offer. --dismiss-offer answers \
+        \"Keep\" to the offer; it is stored in \
+        ~/.local/state/voxtype/osd-offer.json, never in config.toml. Neither \
+        restarts the daemon: restart voxtype to apply a frontend change.\n\n\
         Examples:\n  \
         voxtype setup osd --list\n  \
         voxtype setup osd --recipe showcase-bars --dry-run\n  \
         voxtype setup osd --recipe showcase-bars\n  \
-        voxtype setup osd --recipe ./my-recipe.toml")]
+        voxtype setup osd --recipe ./my-recipe.toml\n  \
+        voxtype setup osd --status\n  \
+        voxtype setup osd --status --json\n  \
+        voxtype setup osd --use-auto && systemctl --user restart voxtype\n  \
+        voxtype setup osd --dismiss-offer")]
     Osd {
         /// Recipe name from --list, or a path to a recipe .toml file
         #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
@@ -400,6 +473,22 @@ pub enum SetupAction {
         /// Show what would change without writing config.toml
         #[arg(long)]
         dry_run: bool,
+
+        /// Show the configured OSD frontend, the one that runs, and why
+        #[arg(long, conflicts_with_all = ["recipe", "list", "dry_run", "use_auto", "dismiss_offer"])]
+        status: bool,
+
+        /// With --status, print the state as JSON
+        #[arg(long, requires = "status")]
+        json: bool,
+
+        /// Set osd.frontend = "auto" and clear a dismissed Quickshell offer
+        #[arg(long, conflicts_with_all = ["recipe", "list", "dry_run", "dismiss_offer"])]
+        use_auto: bool,
+
+        /// Dismiss the offer to switch to the Quickshell OSD
+        #[arg(long, conflicts_with_all = ["recipe", "list", "dry_run"])]
+        dismiss_offer: bool,
     },
 
     /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher

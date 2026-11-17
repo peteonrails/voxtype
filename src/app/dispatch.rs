@@ -9,7 +9,10 @@ use voxtype::{config, daemon, setup, transcribe, Cli, Commands, ConfigAction, Se
 
 use super::config_get::run_config_get;
 use super::config_schema::run_config_schema;
-use super::config_set::{run_config_set, run_config_unset, run_setup_osd};
+use super::config_set::{
+    run_config_set, run_config_unset, run_setup_osd, run_setup_osd_dismiss_offer,
+    run_setup_osd_status, run_setup_osd_use_auto,
+};
 use super::config_show::show_config;
 use super::info::run_info_command;
 use super::meeting::run_meeting_command;
@@ -71,6 +74,7 @@ pub(crate) async fn dispatch(
     // Run the appropriate command
     match cli.command.unwrap_or(default_command) {
         Commands::Daemon => {
+            super::sigpipe::ignore_sigpipe();
             let mut daemon = daemon::Daemon::new(config, config_path);
             daemon.run().await?;
         }
@@ -411,6 +415,24 @@ pub(crate) async fn dispatch(
                         },
                     )?;
                 }
+                Some(SetupAction::Skill {
+                    status,
+                    json,
+                    remove,
+                    force,
+                    target,
+                }) => {
+                    if !json {
+                        warn_if_root("skill");
+                    }
+                    setup::skill::run(setup::skill::CliArgs {
+                        status,
+                        json,
+                        remove,
+                        force,
+                        target,
+                    })?;
+                }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");
                     if status {
@@ -439,9 +461,21 @@ pub(crate) async fn dispatch(
                     recipe,
                     list,
                     dry_run,
+                    status,
+                    json,
+                    use_auto,
+                    dismiss_offer,
                 }) => {
                     warn_if_root("osd");
-                    run_setup_osd(cli.config.clone(), recipe, list, dry_run)?;
+                    if status {
+                        run_setup_osd_status(&config, json)?;
+                    } else if use_auto {
+                        run_setup_osd_use_auto(cli.config.clone())?;
+                    } else if dismiss_offer {
+                        run_setup_osd_dismiss_offer()?;
+                    } else {
+                        run_setup_osd(cli.config.clone(), recipe, list, dry_run)?;
+                    }
                 }
                 Some(SetupAction::Quickshell {
                     target,
@@ -572,4 +606,117 @@ pub(crate) async fn dispatch(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod sigpipe_tests {
+    use super::*;
+    use clap::Parser;
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::time::{Duration, Instant};
+
+    const HELPER: &str = "app::dispatch::sigpipe_tests::broken_pipe_helper";
+    const MODE: &str = "VOXTYPE_SIGPIPE_TEST_MODE";
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn wait(child: &mut Child) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "SIGPIPE subprocess timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run_helper(mode: &str) -> ExitStatus {
+        let private = tempfile::tempdir().unwrap();
+        let blocked_runtime = private.path().join("not-a-directory");
+        std::fs::write(&blocked_runtime, b"private startup failure fixture").unwrap();
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", HELPER, "--nocapture"])
+                .env(MODE, mode)
+                .env("XDG_RUNTIME_DIR", blocked_runtime)
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait(&mut child.0)
+    }
+
+    #[test]
+    fn daemon_broken_pipe_returns_epipe() {
+        for mode in ["daemon", "implicit-daemon"] {
+            let status = run_helper(mode);
+            assert!(status.success(), "{mode}: {status}");
+        }
+    }
+
+    #[test]
+    fn default_disposition_still_terminates_on_sigpipe() {
+        assert_eq!(run_helper("default").signal(), Some(libc::SIGPIPE));
+    }
+
+    // Reexecuted in a separate process: never change the harness's signals
+    // or environment. Waiting for true makes the missing reader deterministic.
+    #[tokio::test]
+    async fn broken_pipe_helper() {
+        let Ok(mode) = std::env::var(MODE) else {
+            return;
+        };
+        super::super::sigpipe::reset_sigpipe();
+        if mode != "default" {
+            let args = if mode == "daemon" {
+                vec!["voxtype", "daemon"]
+            } else {
+                assert_eq!(mode, "implicit-daemon");
+                vec!["voxtype"]
+            };
+            // Fail at the instance-lock boundary, before any device, model,
+            // output or service is opened, but after real command dispatch.
+            let error = dispatch(Cli::parse_from(args), None, config::Config::default(), None)
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("Failed to create runtime directory"));
+        }
+        if mode != "default" {
+            // Rust must restore SIG_DFL before exec even when the daemon
+            // ignores SIGPIPE. A shell inherits ignored signals across exec.
+            let mut exec_child = ChildGuard(
+                Command::new("sh")
+                    .args(["-c", "kill -PIPE $$; exit 99"])
+                    .spawn()
+                    .unwrap(),
+            );
+            assert_eq!(wait(&mut exec_child.0).signal(), Some(libc::SIGPIPE));
+        }
+        let mut reader = ChildGuard(
+            Command::new("true")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut stdin = reader.0.stdin.take().unwrap();
+        assert!(wait(&mut reader.0).success());
+        let error = stdin.write_all(b"dictation").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
+        assert_ne!(mode, "default", "negative control did not raise SIGPIPE");
+    }
 }

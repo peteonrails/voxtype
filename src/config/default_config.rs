@@ -361,10 +361,12 @@ repair_sentence_breaks = true
 
 [osd]
 # On-screen display frontend.
-# - gtk4: Default toolkit frontend
+# - auto: Quickshell when qs and a Wayland session are available, else gtk4,
+#   else native (default)
+# - gtk4: GTK4 + layer-shell frontend
 # - native: SCTK + wgpu + egui frontend
 # - quickshell: QML frontend with recipe/style customization
-frontend = "gtk4"
+frontend = "auto"
 
 # Quickshell style customization. These fields are ignored by gtk4/native.
 # style can be "default", an installed package name, or a package path.
@@ -373,7 +375,7 @@ style = "default"
 # Palette source for Quickshell recipes. Leave unset to let a selected
 # package manifest choose its palette, falling back to Omarchy.
 # - omarchy: inherit colors from ~/.config/omarchy/current/theme/colors.toml
-# - fallback: use VoxType's built-in palette
+# - fallback: use Voxtype's built-in palette
 # - package: use package colors when a style package provides them
 # - custom: use literal recipe colors
 # palette = "omarchy"

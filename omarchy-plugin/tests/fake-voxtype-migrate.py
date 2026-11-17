@@ -18,8 +18,34 @@ build without the subcommand, which exits 2 like an unknown subcommand does.
 as an older CLI omits it. `setup omarchy --dismiss-copy` sets it, or with
 state["dismiss_fail"] exits 1 and changes nothing.
 
+state["gguf_model"] adds the generic GGUF engine with that model installed, and
+state["engine"] names the configured engine ("parakeet" when absent).
+state["installed"] lists the Parakeet models on disk (default: the configured
+one). `config select-model` and `config set parakeet.model` update the state.
+state["extra_engines"] maps further engines ("omnilingual", "dolphin", ...) to
+their installed models: each gets an engine choice, a compiled `info engines`
+row, a `<engine>.model` schema key and an `info models` catalog, and
+`config select-model` records its choice in state["extra_models"]. Like the
+real CLI, select-model accepts every engine `config set engine` offers and
+refuses `--language` for anything but gguf.
+
 state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
 the stderr it should fail with (exit 1).
+
+`setup osd --status --json` answers from state["osd"] (contract C3 of the
+1.2.2 plan): {"configured", "quickshell_available", "offer_dismissed"}, with
+"active" and "offer" derived the way the real CLI derives them. Absent, it
+exits 2 like a CLI that predates --status. `--use-auto` and `--dismiss-offer`
+(C4) change it; state["osd_use_auto_fail"] / state["osd_dismiss_fail"] make
+them exit 1 instead.
+
+state["osd_keys"] adds the OSD section's Frontend and Style rows (and a
+second style) to the schema; state["threads_key"] adds parakeet.threads, unset
+unless state["values"] holds it. `config set` / `config unset` write
+state["values"] for exactly those keys and reject anything else (exit 2);
+`osd.frontend` writes go to state["osd"]["configured"] as well.
+`config validate-selection` exits 0, so the panel's restart flow runs through
+to `systemctl --user restart voxtype` (see fake-systemctl.py).
 
 Accept behavior is scripted per attempt by state["accept_script"]: "fail",
 "slow" (one progress line, then wait to be cancelled) or "ok". After the script
@@ -70,6 +96,34 @@ def status(state):
     }
 
 
+FRONTENDS = ["auto", "gtk4", "native", "quickshell"]
+# config_set::ENGINE_NAMES: what the real select-model accepts.
+SELECTABLE = ("whisper", "parakeet", "moonshine", "sensevoice", "paraformer", "dolphin", "omnilingual",
+              "cohere", "gguf", "openvino")
+SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads"}
+
+
+def osd_status(state):
+    osd = state["osd"]
+    configured = osd["configured"]
+    available = osd["quickshell_available"]
+    if configured == "quickshell" or (configured == "auto" and available):
+        active = "quickshell" if available else "none"
+    elif configured == "auto":
+        active = "gtk4"
+    else:
+        active = configured
+    dismissed = osd.get("offer_dismissed", False)
+    return {"configured": configured, "active": active, "reason": "fake: " + active,
+            "quickshell_available": available,
+            "offer": configured in ("gtk4", "native") and available and not dismissed,
+            "offer_dismissed": dismissed}
+
+
+def value_of(state, key, default=None):
+    return state.get("values", {}).get(key, default)
+
+
 def schema(state):
     model_type = {"key": "parakeet.model_type", "type": "enum", "choices": ["tdt", "ctc"], "section": "Engine",
                   "label": "Decoder type", "description": "", "value": None, "file_value": None,
@@ -77,28 +131,66 @@ def schema(state):
     # Older CLIs never emitted the flag; state["legacy_schema"] reproduces them.
     if not state.get("legacy_schema"):
         model_type["onnx_model_only"] = True
+    engine = state.get("engine", "parakeet")
+    extra = state.get("extra_engines", {})
+    choices = ["whisper", "parakeet"] + (["gguf"] if "gguf_model" in state else []) \
+        + (["cohere"] if "cohere_models" in state else []) + list(extra)
+    keys = [
+        {"key": "engine", "type": "enum", "choices": choices, "section": "Engine",
+         "label": "Transcription engine", "description": "", "value": engine,
+         "file_value": engine, "engine": None, "compiled": True, "restart_required": True},
+        {"key": "parakeet.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+         "label": "Model", "description": "", "value": state["model"], "file_value": state["model"],
+         "engine": "parakeet", "compiled": True, "restart_required": True},
+        model_type,
+    ]
+    if "cohere_models" in state:
+        cohere = state.get("cohere_model", state["cohere_models"][0])
+        keys.append({"key": "cohere.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+                     "label": "Model", "description": "", "value": cohere, "file_value": cohere,
+                     "engine": "cohere", "compiled": True, "restart_required": True})
+    for name, installed in extra.items():
+        chosen = state.get("extra_models", {}).get(name, installed[0])
+        keys.append({"key": name + ".model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+                     "label": "Model", "description": "", "value": chosen, "file_value": chosen,
+                     "engine": name, "compiled": True, "restart_required": True})
+    if "gguf_model" in state:
+        keys.append({"key": "gguf.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
+                     "label": "Model", "description": "", "value": state["gguf_model"],
+                     "file_value": state["gguf_model"], "engine": "gguf", "compiled": True,
+                     "restart_required": True})
+    if state.get("threads_key"):
+        # Like the real schema: an unset Option<u32> is null in both fields.
+        threads = value_of(state, "parakeet.threads")
+        keys.append({"key": "parakeet.threads", "type": "int", "min": 1, "max": 256, "section": "Engine",
+                     "label": "Threads", "description": "ONNX Runtime intra-op threads. Unset uses 4.",
+                     "value": threads, "file_value": threads, "engine": "parakeet", "compiled": True,
+                     "restart_required": True})
+    keys.append({"key": "audio.device", "type": "string", "section": "Audio", "label": "Device",
+                 "description": "", "value": "default", "file_value": None, "engine": None,
+                 "compiled": True, "restart_required": True})
+    if state.get("osd_keys"):
+        frontend = state["osd"]["configured"] if state.get("osd") else value_of(state, "osd.frontend", "gtk4")
+        style = value_of(state, "osd.style")
+        keys += [
+            {"key": "osd.frontend", "type": "enum", "choices": FRONTENDS, "section": "OSD", "label": "Frontend",
+             "description": "Which OSD renderer the daemon launches.", "value": frontend,
+             "file_value": frontend, "engine": None, "compiled": True, "restart_required": True},
+            {"key": "osd.style", "type": "dynamic_enum", "source": "styles", "section": "OSD", "label": "Style",
+             "description": "Quickshell style name.", "value": style or "hud",
+             "file_value": style, "engine": None, "compiled": True, "restart_required": True},
+        ]
     return {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
-        "engine": "parakeet", "replacements": {},
-        "keys": [
-            {"key": "engine", "type": "enum", "choices": ["whisper", "parakeet"], "section": "Engine",
-             "label": "Transcription engine", "description": "", "value": "parakeet",
-             "file_value": "parakeet", "engine": None, "compiled": True, "restart_required": True},
-            {"key": "parakeet.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
-             "label": "Model", "description": "", "value": state["model"], "file_value": state["model"],
-             "engine": "parakeet", "compiled": True, "restart_required": True},
-            model_type,
-            {"key": "audio.device", "type": "string", "section": "Audio", "label": "Device",
-             "description": "", "value": "default", "file_value": None, "engine": None,
-             "compiled": True, "restart_required": True},
-        ],
+        "engine": engine, "replacements": {}, "keys": keys,
     }
 
 
 def models(state):
     names = ["parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-Q8_0.gguf", "parakeet-ultra-Q8_0.gguf",
              "parakeet-tdt-0.6b-v2"]
-    rows = [{"name": n, "installed": n == state["model"], "languages": []} for n in names]
+    installed = state.get("installed", [state["model"]])
+    rows = [{"name": n, "installed": n in installed, "languages": []} for n in names]
     # Legacy ONNX rows: listed only while configured (one-way door).
     rows[0]["legacy"] = True
     rows[3]["legacy"] = True
@@ -106,7 +198,15 @@ def models(state):
     # URL (no link), one like an older build (neither field).
     rows[0].update(license="CC-BY-4.0", license_url="https://creativecommons.org/licenses/by/4.0/")
     rows[1].update(license="CC-BY-4.0", license_url="")
-    return {"engines": {"parakeet": {"models": rows}}}
+    engines = {"parakeet": {"models": rows}}
+    if "gguf_model" in state:
+        engines["gguf"] = {"models": [{"name": state["gguf_model"], "installed": True, "languages": ["auto"]}]}
+    if "cohere_models" in state:
+        engines["cohere"] = {"models": [{"name": n, "installed": True, "languages": ["en"]}
+                                        for n in state["cohere_models"]]}
+    for name, installed in state.get("extra_engines", {}).items():
+        engines[name] = {"models": [{"name": n, "installed": True, "languages": []} for n in installed]}
+    return {"engines": engines}
 
 
 def accept(state, args):
@@ -177,13 +277,74 @@ def main():
     elif args[:3] == ["info", "models", "--json"]:
         print(json.dumps(models(state)))
     elif args[:3] == ["info", "engines", "--json"]:
-        print(json.dumps([{"name": "whisper", "compiled": True}, {"name": "parakeet", "compiled": True}]))
+        engines = [{"name": "whisper", "compiled": True}, {"name": "parakeet", "compiled": True}]
+        if "gguf_model" in state:
+            engines.append({"name": "gguf", "compiled": True})
+        if "cohere_models" in state:
+            engines.append({"name": "cohere", "compiled": True})
+        engines += [{"name": name, "compiled": True} for name in state.get("extra_engines", {})]
+        print(json.dumps(engines))
     elif args[:3] == ["info", "devices", "--json"]:
         print(json.dumps([{"name": "Built-in Microphone", "default": True}]))
     elif args[:3] == ["info", "styles", "--json"]:
-        print(json.dumps([{"name": "hud", "description": "Heads-up display"}]))
+        styles = [{"name": "hud", "description": "Heads-up display"}]
+        if state.get("osd_keys"):
+            styles.append({"name": "pill", "description": "Compact pill"})
+        print(json.dumps(styles))
+    elif args[:2] == ["config", "validate-selection"]:
+        return 0
+    elif args[:2] in (["config", "set"], ["config", "unset"]) and len(args) >= 3 and args[2] in SETTABLE:
+        key = args[2]
+        values = state.setdefault("values", {})
+        if args[1] == "unset":
+            values.pop(key, None)
+        elif key == "osd.frontend" and args[3] not in FRONTENDS:
+            print("error: invalid osd.frontend", file=sys.stderr)
+            return 2
+        elif key == "parakeet.threads":
+            values[key] = int(args[3])
+        else:
+            values[key] = args[3]
+        if key == "osd.frontend" and state.get("osd"):
+            state["osd"]["configured"] = values.get(key, "auto")
+        save(state)
+    elif args[:2] == ["setup", "osd"]:
+        if state.get("osd") is None:
+            print("error: unexpected argument found", file=sys.stderr)
+            return 2
+        if args[2:] == ["--status", "--json"]:
+            print(json.dumps(osd_status(state)))
+        elif args[2:] == ["--use-auto"]:
+            if state.get("osd_use_auto_fail"):
+                print("error: could not write osd.frontend", file=sys.stderr)
+                return 1
+            state["osd"]["configured"] = "auto"
+            state["osd"]["offer_dismissed"] = False
+            save(state)
+        elif args[2:] == ["--dismiss-offer"]:
+            if state.get("osd_dismiss_fail"):
+                print("error: could not write the dismissal", file=sys.stderr)
+                return 1
+            state["osd"]["offer_dismissed"] = True
+            save(state)
+        else:
+            return 2
     elif args[:3] == ["status", "--format", "json"]:
         print(json.dumps({"class": "idle"}))
+    elif args[:2] == ["config", "select-model"] and len(args) >= 4:
+        engine, model = args[2], args[3]
+        if engine not in SELECTABLE or ("--language" in args and engine != "gguf"):
+            print("error: select-model rejected " + " ".join(args[2:]), file=sys.stderr)
+            return 2
+        state["engine"] = engine
+        if engine in state.get("extra_engines", {}):
+            state.setdefault("extra_models", {})[engine] = model
+        else:
+            state[{"gguf": "gguf_model", "cohere": "cohere_model"}.get(engine, "model")] = model
+        save(state)
+    elif args[:3] == ["config", "set", "parakeet.model"] and len(args) == 4:
+        state["model"] = args[3]
+        save(state)
     elif args[:2] == ["setup", "omarchy"]:
         if state.get("omarchy") is None:
             print("error: unrecognized subcommand 'omarchy'", file=sys.stderr)

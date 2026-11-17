@@ -24,10 +24,10 @@ languages as v3 automatically; it does not expose a language hint, translation o
 streaming control. The tray therefore correctly shows its language as automatic
 and read-only. Upstream inference-pipeline features are not implied by the weights.
 
-Ultra downloads are an explicit exception to the usual R2-mirror policy: they
-come directly from a pinned handy-computer Hugging Face revision, with pinned
-size and SHA-256 checks. No unpopulated Voxtype mirror is advertised. See
-[model provenance](models/parakeet-ultra.md) for attribution and CC-BY-4.0 terms.
+Ultra downloads come from Voxtype's model mirror at `models.voxtype.io`, like
+every other model, with pinned size and SHA-256 checks. See
+[model provenance](models/parakeet-ultra.md) for where the weights originate,
+attribution and CC-BY-4.0 terms.
 
 ## Handy GGUF model families
 
@@ -186,6 +186,26 @@ settings application; `voxtype-osd-gtk4` is an OSD, not settings. On a headless 
 run `voxtype configure` directly in your terminal. Concurrent app-open requests
 are coalesced, and Quickshell uses idempotent `open` rather than `toggle`.
 
+## Which OSD frontend runs
+
+New installs use `[osd] frontend = "auto"`, which runs the Quickshell OSD where Quickshell and a Wayland session are available, GTK4 otherwise, and the native frontend as a last resort. Quickshell styles from the style picker apply only to the Quickshell OSD.
+
+```bash
+voxtype setup osd --status          # configured frontend, active frontend, and why
+voxtype setup osd --status --json   # the same for scripts and the Settings panel
+```
+
+If your config names `gtk4` or `native` and Quickshell can run, the Settings panel offers to switch, at the top of its OSD and Engine sections. **Switch** runs `voxtype setup osd --use-auto` and restarts voxtype. **Not now** runs `voxtype setup osd --dismiss-offer`, and the panel stops asking. From the command line:
+
+```bash
+voxtype setup osd --use-auto && systemctl --user restart voxtype   # switch
+voxtype setup osd --dismiss-offer                                  # keep your frontend
+```
+
+The dismissal is stored in `~/.local/state/voxtype/osd-offer.json`, not in config.toml, and `--use-auto` clears it again. If you pick a style in the panel while another OSD is in use, the panel also sets the frontend to `auto` when Quickshell is available and tells you so. If Quickshell is not available, it changes nothing and says why.
+
+A setting left unset shows "default" in the Settings panel. For example, `parakeet.threads` unset uses 4 threads.
+
 ## Omarchy Settings panel
 
 The deb, rpm and AUR packages include a Settings panel for Omarchy's shell,
@@ -228,6 +248,44 @@ configuration guide).
 
 When the configured Parakeet model is a `.gguf` file, the panel and
 `voxtype configure` hide **Decoder type**, which only applies to ONNX models.
+
+The engine list at the top of the Engine section only browses another engine's
+models. **Use** on an installed model of any engine switches the engine and the
+model together, so you can move between engines from the panel, for example
+from Parakeet to an Omnilingual model, or back to Parakeet Ultra after trying a
+GGUF model. From a terminal, the same switch is
+`voxtype config select-model <engine> <model>`. An engine your build of
+voxtype was compiled without lists no models to use, and `select-model`
+refuses it with the command that gets you a build that includes it.
+
+## Coding agent setup skill
+
+If you use a coding agent such as Claude Code, Codex, Gemini CLI, OpenCode,
+Cursor, GitHub Copilot or Goose, Voxtype can install a skill that teaches it to
+configure Voxtype for your machine:
+
+```bash
+voxtype setup skill
+```
+
+Then ask your agent to "set up voxtype for this machine". It inspects your
+hardware, asks which languages you dictate and whether battery life matters,
+and suggests an engine, model, GPU acceleration, thread count, memory settings
+and output mode. On an older install it also points out settings your config
+is missing that new installs get. It shows you the plan and asks before
+changing your config or running anything with `sudo`.
+
+The command installs the skill for every agent it finds: Claude Code in
+`~/.claude/skills`, and the others in `~/.agents/skills`. Use `--target claude`,
+`--target agents` or `--target all` to choose. The skill is built into the
+voxtype binary, so run `voxtype setup skill` again after upgrading.
+`voxtype setup skill --status` and `voxtype setup check` tell you when the
+installed copy is out of date, and `voxtype setup skill --remove` uninstalls it.
+
+If you edit the installed `SKILL.md`, voxtype notices. It asks before replacing
+or removing your copy, and when it can't ask (no terminal) it leaves the file
+alone. `--force` replaces it without asking. The same applies if a different
+skill already sits at that path.
 
 ## Table of Contents
 
@@ -1379,7 +1437,7 @@ Arabic (`ar`), German (`de`), English (`en`, default), Spanish (`es`), French (`
 voxtype setup model      # Pick the Cohere section, confirm the size warning
 ```
 
-The download fetches five files from the `cstr/cohere-transcribe-onnx-int8` HuggingFace repository (Apache 2.0 licensed, not gated): the encoder/decoder ONNX graphs, their weight sidecars, and `tokens.txt`.
+The download fetches the encoder/decoder ONNX graphs, their weight sidecars and `tokens.txt` from Voxtype's model mirror at `models.voxtype.io`, checking each file's SHA-256. The files are mirrored from `onnx-community/cohere-transcribe-03-2026-ONNX` (Apache 2.0).
 
 ---
 
@@ -2268,7 +2326,7 @@ Learned punctuation/casing is separate from deterministic cleanup and is disable
 in the TUI if this client lacks the `punctuation-casing` build feature.
 
 
-In the graphical VoxType app, the **Text Cleanup** section separates **Clean up text**
+In the graphical Voxtype app, the **Text Cleanup** section separates **Clean up text**
 from **LARD disfluency cleanup**. Clean up text contains independent deterministic
 stage switches. There is no master switch that resets your individual choices.
 The LARD switch only changes `text.lard_disfluency`; it does not change those
@@ -2310,12 +2368,14 @@ I think we should ship it on Tuesday. Scratch that. We should ship it on Wednesd
 
 The recognised retractions are "scratch that", "strike that", "I'm sorry", "I mean", "I meant to say" and "or rather".
 
-**Sentence breaks** (`repair_sentence_breaks`). A period followed by a lower-case word is the engine contradicting itself, so the fragment is rejoined. A sentence that opens with a question word and inverts its subject gets its question mark back:
+**Sentence breaks** (`repair_sentence_breaks`). Some engines, mostly Whisper, sometimes end a sentence and then carry on in lower case. A period followed by a lower-case word is the engine contradicting itself, so voxtype rejoins the fragment. A sentence that opens with a question word and inverts its subject gets its question mark back:
 
 ```text
 what are the other phases? we have here.
   -> what are the other phases we have here?
 ```
+
+Parakeet and Cohere capitalize after every mark they write, and they only write one where your voice ended a sentence. A pause on its own does not do it: Parakeet keeps a sentence together across a pause of several seconds. If you drop your voice as if you were finishing a sentence, those engines write a full stop, and this setting leaves it alone.
 
 **Numbers, times and money** (`format_numbers`). Dictated quantities become written ones:
 

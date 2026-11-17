@@ -367,7 +367,7 @@ voxtype setup model
 
 `.en` models are English-only but faster than their multilingual siblings.
 
-For the ONNX engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup model` — pick an engine and it downloads the right model from HuggingFace.
+For the other engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup model`: pick an engine and it downloads the right model from Voxtype's model mirror at `models.voxtype.io`, checking each file's SHA-256.
 
 ### 3. Start the daemon
 

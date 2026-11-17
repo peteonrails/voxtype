@@ -423,7 +423,7 @@
         };
       }) // {
         # Home Manager module for declarative user-level configuration
-        # This is the recommended way to use VoxType on NixOS
+        # This is the recommended way to use Voxtype on NixOS
         homeManagerModules.default = import ./nix/home-manager-module.nix;
 
         # NixOS module for system-level configuration

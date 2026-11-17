@@ -357,7 +357,7 @@ Runtime support entirely.** Phase 3 risk (does every ONNX engine have a ggml/GGU
 resolved for the important ones; the rest (exact list TBD) get evaluated for porting or
 retirement closer to 2.0, not before.
 
-**Shipped:** 1.0.1, 1.1.0 and 1.1.1. The planned 1.1.2 (output drivers) and 1.1.3 (macOS) releases were folded into 1.2.0 instead of shipping on their own; their fixes are on `rc/1.2.0`. 1.1.5 was retired and its one item (#603) moved to 1.2.1.
+**Shipped:** 1.0.1, 1.1.0, 1.1.1, 1.2.0 and 1.2.1. 1.2.0 shipped the native StatusNotifierItem tray (`src/tray.rs`), which covers [#267](https://github.com/peteonrails/voxtype/issues/267). The planned 1.1.2 (output drivers) and 1.1.3 (macOS) releases were folded into 1.2.0 instead of shipping on their own; their fixes are on `rc/1.2.0`. 1.1.5 was retired and its one item (#603) moved to 1.2.1.
 
 **1.2.0 (GGUF Cohere and text cleanup):** **Resident Vulkan Cohere GGUF transcription** ([#792](https://github.com/peteonrails/voxtype/pull/792), Jacob Mink) - runs Cohere `.gguf` through the official `transcribe.cpp` Rust binding, model/session resident in-process (no subprocess worker) when `on_demand_loading = false`, with the weights served from R2 like every other model. It does not implement an end-to-end GPU-probe/fallback policy, which overlaps #611/#577. Long audio is windowed for Cohere (#551) and Parakeet (#288). Also carries the output-driver fixes (#530, #538, #507, #543), the macOS fixes (#522, #576, #452), and mouse-button hotkeys (#546). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 
@@ -414,7 +414,6 @@ Prerequisite: profiles have to reach `TextProcessor`, which they do not today - 
 - **Consolidated release binaries** - Superseded by the 2.0 ONNX removal above: once no engine depends on ONNX Runtime, the 5 onnx-* build targets disappear outright rather than needing a combined-binary redesign. What's left to decide is only the ggml-side split (cpu/vulkan/cuda/rocm vs today's avx2/avx512/vulkan), with the same AVX-512-vs-binary-count trade-off as today.
 - **Vibe Voice backend** ([#285](https://github.com/peteonrails/voxtype/issues/285)) - Microsoft's speech model
 - **Parakeet sortformer for meeting diarization** - Evaluate parakeet-rs's sortformer feature as alternative to the current ml-diarization ECAPA-TDNN pipeline
-- **Native StatusNotifierItem tray** ([#267](https://github.com/peteonrails/voxtype/issues/267)) - Awaiting a contributor rebase; two PRs (#291, #438) predate the `src/cli` and `src/main` refactors and no longer apply
 
 **Engine policy:** Ten engines ship today. New ones are accepted when they cover something the existing set doesn't, or when the ecosystem value is worth the surface on its own terms. Declined on packaging grounds: anything requiring a Python runtime, since voxtype ships as a single static binary ([#481](https://github.com/peteonrails/voxtype/issues/481), [#524](https://github.com/peteonrails/voxtype/issues/524)).
 
@@ -464,9 +463,11 @@ Multiple co-authors are fine when several people contributed to the work.
 
 ## Version Bumping
 
-**When bumping the version in Cargo.toml, ALWAYS update Cargo.lock and `omarchy-plugin/manifest.json` before committing.**
+**When bumping the version in Cargo.toml, ALWAYS update Cargo.lock, `omarchy-plugin/manifest.json`, `packaging/rpm/voxtype.spec` and `packaging/debian/changelog` before committing.**
 
 The plugin manifest's `version` names the directory packages install the Settings panel's QML into (`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings/<version>/`). Omarchy only reloads a panel whose entry path changed, so a stale manifest version ships new QML that users never see. Use the full version string, including any `-rcN` suffix. `cargo test` (`tests/omarchy_plugin_manifest.rs`) and `scripts/package.sh` both fail when it differs from Cargo.toml.
+
+The source RPM spec (`packaging/rpm/voxtype.spec`) and Debian source package (`packaging/debian/`) are what from-source builds such as COPR use. Set the spec's `Version:` to the release without the `-rcN` suffix (RPM versions cannot contain a hyphen) and add a `%changelog` entry, and add a matching `packaging/debian/changelog` entry. `scripts/package.sh` fails when either differs.
 
 The AUR source package (`voxtype`) uses `cargo fetch --locked` and `cargo build --frozen`, which require Cargo.lock to exactly match Cargo.toml. If the version in Cargo.lock doesn't match Cargo.toml, the build fails.
 
@@ -474,12 +475,14 @@ The AUR source package (`voxtype`) uses `cargo fetch --locked` and `cargo build 
 # Correct version bump process:
 # 1. Edit Cargo.toml to set new version
 # 2. Set "version" in omarchy-plugin/manifest.json to the same string
-# 3. Run cargo build to update Cargo.lock
+# 3. Set Version: in packaging/rpm/voxtype.spec (no -rcN) and add a %changelog entry,
+#    and add an entry at the top of packaging/debian/changelog
+# 4. Run cargo build to update Cargo.lock
 cargo build
-# 4. Verify Cargo.lock was updated
+# 5. Verify Cargo.lock was updated
 grep -A2 'name = "voxtype"' Cargo.lock  # Should show new version
-# 5. Commit all three files together
-git add Cargo.toml Cargo.lock omarchy-plugin/manifest.json
+# 6. Commit them together
+git add Cargo.toml Cargo.lock omarchy-plugin/manifest.json packaging/rpm/voxtype.spec packaging/debian/changelog
 git commit -S -m "Bump version to X.Y.Z"
 ```
 
@@ -695,9 +698,24 @@ If GPU detection fails but the binary otherwise works, the build used stale arti
 
 The baseline variant promises x86-64-v2 and has its own contamination class:
 BMI2/FMA/AVX2 leaking in through ggml when the CMake toolchain constraints
-don't take (#740 - env vars like `GGML_NATIVE=OFF` and `CMAKE_C_FLAGS` are
-read by nothing; the only reliable channel into whisper-rs-sys's CMake is
-`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`).
+don't take (#740). The baseline build pins its floor with
+`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`.
+
+How environment variables reach whisper.cpp's CMake: whisper-rs-sys's
+`build.rs` forwards every `GGML_*`, `CMAKE_*` and `WHISPER_*` variable as a
+`-D` definition, so they are read, with two traps:
+
+- `CMAKE_C_FLAGS` / `CMAKE_CXX_FLAGS` **replace** the flags the cmake crate
+  would pass, `-fPIC` included, rather than adding to them. Ubuntu's and
+  Arch's GCC build PIE by default and hide this. Fedora's GCC does not, and
+  the link fails with `relocation R_X86_64_32S against .bss`. Put `-fPIC`
+  back in any `CMAKE_*_FLAGS` you set (the source RPM spec and Debian rules
+  do).
+- ggml turns `GGML_NATIVE` off by default when `SOURCE_DATE_EPOCH` is set,
+  and rpmbuild and dpkg-buildpackage both set it. With native off and no
+  `GGML_AVX512*` options, ggml builds AVX2-level code only, so a package
+  build cannot produce AVX-512 whisper.cpp without asking for it
+  explicitly. That is why the source packages ship no AVX-512 variant.
 
 No static count can gate the v2 floor: a correct build legitimately carries
 ~370 BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800 FMA
@@ -967,8 +985,9 @@ option = "value"</code></pre>
 2. Add matching article to `website/news/index.html`
 3. Update download examples in `website/index.html` (deb/rpm URLs with new version)
 4. Update `packaging/arch-bin/voxtype-bin.install` post_upgrade() message with current version highlights
-5. Commit and push website changes
-6. Push AUR package updates
+5. Check `skills/voxtype-setup/SKILL.md` against the release: every command, flag and config key it names still exists (`voxtype --help`, `voxtype config schema`), and its engine, model and output advice covers what shipped. Features it calls "on the roadmap" (such as built-in history, #209) get rewritten once they ship
+6. Commit and push website changes
+7. Push AUR package updates
 
 ### Shipping a Release: Sequencing
 
