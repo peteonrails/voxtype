@@ -594,7 +594,16 @@ A recording whose transcription fails is not thrown away. Voxtype saves it as a 
 voxtype transcribe ~/.local/state/voxtype/failed-audio/recording-20261020-143015.wav
 ```
 
-The 20 most recent failed recordings are kept; older ones are removed automatically.
+The 20 most recent failed recordings are kept; older ones are removed automatically. The directory and the files in it are private to your user: other accounts on the machine can't read them.
+
+To stop Voxtype keeping these recordings:
+
+```bash
+voxtype config set audio.keep_failed_recordings false
+systemctl --user restart voxtype
+```
+
+With it off nothing is written, so a dictation whose transcription fails can't be retried, and the "Transcription Failed" notification says the recording was not kept. Recordings saved before you turned it off stay until you delete them: `rm -r ~/.local/state/voxtype/failed-audio/`.
 
 ### Meeting transcript has no remote participants
 

@@ -67,6 +67,12 @@ sample_rate = 16000
 # Maximum recording duration in seconds (safety limit)
 max_duration_secs = 60
 
+# Keep the audio of a recording whose transcription failed, so it can be
+# retried with `voxtype transcribe <file>`. The 20 most recent are kept in
+# ~/.local/state/voxtype/failed-audio/, readable only by you. Set to false to
+# write nothing; a dictation whose transcription fails is then lost.
+# keep_failed_recordings = true
+
 # Pause MPRIS media players (Spotify, Firefox, etc.) when recording starts and
 # resume them when it stops. Talks D-Bus directly, so no playerctl binary is
 # required. Distros that ship playerctl-free (Omarchy Quattro, for example) can

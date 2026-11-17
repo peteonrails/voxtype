@@ -23,6 +23,7 @@ use crate::config::AudioConfig;
 pub struct AudioState {
     pub device: String,
     pub max_duration_secs: u32,
+    pub keep_failed_recordings: bool,
     pub pause_media: bool,
     pub duck_media: bool,
     pub duck_media_volume_percent: u8,
@@ -73,6 +74,7 @@ pub enum FeedbackLevel {
 pub enum Field {
     Device,
     MaxDuration,
+    KeepFailedRecordings,
     PauseMedia,
     DuckMedia,
     DuckMediaVolume,
@@ -86,6 +88,7 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Device,
         Field::MaxDuration,
+        Field::KeepFailedRecordings,
         Field::PauseMedia,
         Field::DuckMedia,
         Field::DuckMediaVolume,
@@ -119,6 +122,9 @@ impl AudioState {
                 .get_int("audio", "max_duration_secs")
                 .map(|n| n.clamp(0, u32::MAX as i64) as u32)
                 .unwrap_or(120),
+            keep_failed_recordings: ed
+                .get_bool("audio", "keep_failed_recordings")
+                .unwrap_or(true),
             pause_media: ed.get_bool("audio", "pause_media").unwrap_or(false),
             duck_media: ed.get_bool("audio", "duck_media").unwrap_or(false),
             duck_media_volume_percent: ed
@@ -211,6 +217,11 @@ impl AudioState {
         };
         ed.set_string("audio", "device", &self.device);
         ed.set_int("audio", "max_duration_secs", self.max_duration_secs as i64);
+        ed.set_bool(
+            "audio",
+            "keep_failed_recordings",
+            self.keep_failed_recordings,
+        );
         ed.set_bool("audio", "pause_media", self.pause_media);
         ed.set_bool("audio", "duck_media", self.duck_media);
         ed.set_int(
@@ -301,6 +312,9 @@ impl AudioState {
                 let next = self.max_duration_secs as i32 + delta * DURATION_STEP as i32;
                 self.max_duration_secs =
                     next.clamp(DURATION_MIN as i32, DURATION_MAX as i32) as u32;
+            }
+            Field::KeepFailedRecordings => {
+                self.keep_failed_recordings = !self.keep_failed_recordings;
             }
             Field::PauseMedia => {
                 self.pause_media = !self.pause_media;
@@ -419,6 +433,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             state.field == Field::MaxDuration,
             "Max recording (seconds)",
             state.max_duration_secs.to_string(),
+        ),
+        FormRowSpec::new(
+            state.field == Field::KeepFailedRecordings,
+            "Keep failed recordings",
+            yesno(state.keep_failed_recordings),
         ),
         FormRowSpec::new(
             state.field == Field::PauseMedia,
@@ -553,6 +572,21 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(
                 "120-300 seconds is normal for dictation. Bump to 600+ for \
                  meeting-mode-style long recordings.",
+            ),
+        ],
+        Field::KeepFailedRecordings => vec![
+            heading("Keep failed recordings"),
+            Line::from(""),
+            Line::from(
+                "When transcription fails, voxtype saves the audio so the \
+                 dictation can be retried with `voxtype transcribe <file>`. \
+                 The 20 most recent are kept in \
+                 ~/.local/state/voxtype/failed-audio/, readable only by you.",
+            ),
+            Line::from(""),
+            Line::from(
+                "Turn this off to write no audio to disk. A dictation whose \
+                 transcription fails is then lost.",
             ),
         ],
         Field::PauseMedia => vec![
@@ -766,6 +800,7 @@ mod tests {
             .map(|f| match f {
                 Field::Device => "audio.device",
                 Field::MaxDuration => "audio.max_duration_secs",
+                Field::KeepFailedRecordings => "audio.keep_failed_recordings",
                 Field::PauseMedia => "audio.pause_media",
                 Field::DuckMedia => "audio.duck_media",
                 Field::DuckMediaVolume => "audio.duck_media_volume_percent",

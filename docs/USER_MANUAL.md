@@ -416,7 +416,7 @@ voxtype --model large-v3 transcribe interview.wav  # Use specific model
 
 Supported formats: WAV (16-bit PCM, 16kHz mono recommended)
 
-If the daemon fails to transcribe a recording, it saves the audio to `~/.local/state/voxtype/failed-audio/` and its notification and log line give the exact `voxtype transcribe` command to retry it. The 20 most recent failed recordings are kept.
+If the daemon fails to transcribe a recording, it saves the audio to `~/.local/state/voxtype/failed-audio/` and its notification and log line give the exact `voxtype transcribe` command to retry it. The 20 most recent failed recordings are kept, readable only by your user. Set `[audio] keep_failed_recordings = false` to keep none.
 
 ### `voxtype setup`
 

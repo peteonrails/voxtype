@@ -1080,6 +1080,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Safety cap in seconds; recording stops on its own at this point.",
     ),
     spec(
+        "audio.keep_failed_recordings",
+        "audio",
+        "keep_failed_recordings",
+        KeyType::Bool,
+        "Audio",
+        "Keep failed recordings",
+        "Save the audio when transcription fails so it can be retried. The 20 most recent are kept, readable only by you.",
+    ),
+    spec(
         "audio.pause_media",
         "audio",
         "pause_media",
@@ -3173,6 +3182,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
+        "audio.keep_failed_recordings" => json!(cfg.audio.keep_failed_recordings),
         "audio.pause_media" => json!(cfg.audio.pause_media),
         "audio.duck_media" => json!(cfg.audio.duck_media),
         "audio.duck_media_volume_percent" => json!(cfg.audio.duck_media_volume_percent),

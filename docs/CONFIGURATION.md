@@ -538,6 +538,23 @@ Raise it for long dictations. A recording uses about 3.8 MB of memory per minute
 max_duration_secs = 120  # Allow 2-minute recordings
 ```
 
+### keep_failed_recordings
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, a recording whose transcription fails is saved as a WAV file in `~/.local/state/voxtype/failed-audio/` (or `$XDG_STATE_HOME/voxtype/failed-audio/`), and the "Transcription Failed" notification gives the `voxtype transcribe` command to retry it. The 20 most recent are kept and older ones are removed automatically. The directory and the files are private to your user (modes `0700` and `0600`).
+
+Set it to `false` to write no audio to disk. A dictation whose transcription fails is then lost, and the notification says the recording was not kept. Files saved earlier stay until you delete them.
+
+```toml
+[audio]
+keep_failed_recordings = false
+```
+
+Also available as `--no-keep-failed-recordings` (and `--keep-failed-recordings` to override a config that turns it off) or `VOXTYPE_KEEP_FAILED_RECORDINGS=false`.
+
 ### pause_media
 
 **Type:** Boolean
@@ -4722,6 +4739,7 @@ Any config file setting can be overridden via environment variable. These are ap
 |----------|------|-------------------|
 | `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
 | `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
+| `VOXTYPE_KEEP_FAILED_RECORDINGS` | bool | `audio.keep_failed_recordings` |
 | `VOXTYPE_PAUSE_MEDIA` | bool | `audio.pause_media` |
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |

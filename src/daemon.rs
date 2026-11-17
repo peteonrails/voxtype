@@ -2748,7 +2748,9 @@ impl Daemon {
 
     /// Save the audio of a recording whose transcription failed, so the
     /// failure costs a retry instead of the whole dictation, and tell the
-    /// user where it is and how to retry it.
+    /// user where it is and how to retry it. With `[audio]
+    /// keep_failed_recordings` off nothing is written, and the notification
+    /// says so instead of naming a file.
     async fn keep_failed_recording(&self, state: &State) {
         let State::Transcribing { audio } = state else {
             return;
@@ -2757,27 +2759,37 @@ impl Daemon {
             return;
         }
         let audio = audio.clone();
-        let saved = tokio::task::spawn_blocking(move || crate::failed_recording::save(&audio))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r);
+        let keep = self.config.audio.keep_failed_recordings;
+        let saved =
+            tokio::task::spawn_blocking(move || crate::failed_recording::keep(keep, &audio))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r);
         match saved {
-            Ok(path) => {
-                tracing::error!(
-                    "Recording saved to {}. Retry with: voxtype transcribe {}",
-                    path.display(),
-                    path.display()
-                );
+            Ok(saved) => {
+                // The retry command stays up until dismissed so it can be
+                // copied. With nothing to retry, the notice just times out.
+                let lifetime = match &saved {
+                    Some(path) => {
+                        tracing::error!(
+                            "Recording saved to {}. Retry with: voxtype transcribe {}",
+                            path.display(),
+                            path.display()
+                        );
+                        Lifetime::UntilClosed
+                    }
+                    None => {
+                        tracing::info!("Recording not kept: [audio] keep_failed_recordings is off");
+                        Lifetime::Millis(10000)
+                    }
+                };
                 send_notification_with_lifetime(
                     "Transcription Failed",
-                    &format!(
-                        "Recording saved. Retry with:\nvoxtype transcribe {}",
-                        path.display()
-                    ),
+                    &crate::failed_recording::notice_body(saved.as_deref()),
                     self.config.output.notification.show_engine_icon,
                     self.config.engine,
                     "critical",
-                    Lifetime::UntilClosed,
+                    lifetime,
                 )
                 .await;
             }

@@ -9,7 +9,8 @@
 //!
 //! A recording is the user's voice, so on Unix the directory is only
 //! accessible to the user (0700) and each file only readable by them (0600),
-//! like the undelivered transcripts in `output::fallback`.
+//! like the undelivered transcripts in `output::fallback`. Setting
+//! `[audio] keep_failed_recordings = false` turns it off: nothing is written.
 
 use std::path::{Path, PathBuf};
 
@@ -38,9 +39,37 @@ fn state_dir() -> PathBuf {
         .unwrap_or_else(|| crate::config::Config::data_dir().join("state"))
 }
 
-/// Save `samples` (16 kHz mono) as a WAV file in [`dir`] and return its path.
-pub fn save(samples: &[f32]) -> anyhow::Result<PathBuf> {
-    save_in(&dir(), samples, chrono::Local::now())
+/// Save `samples` (16 kHz mono) as a WAV file in [`dir`] and return its
+/// path. With `enabled` false (`[audio] keep_failed_recordings`), write
+/// nothing and return `None`.
+pub fn keep(enabled: bool, samples: &[f32]) -> anyhow::Result<Option<PathBuf>> {
+    keep_in(enabled, &dir(), samples, chrono::Local::now())
+}
+
+fn keep_in(
+    enabled: bool,
+    dir: &Path,
+    samples: &[f32],
+    now: chrono::DateTime<chrono::Local>,
+) -> anyhow::Result<Option<PathBuf>> {
+    if !enabled {
+        return Ok(None);
+    }
+    save_in(dir, samples, now).map(Some)
+}
+
+/// Body of the "Transcription Failed" notification: the retry command for a
+/// saved recording, or that there is nothing to retry when keeping is off.
+pub fn notice_body(saved: Option<&Path>) -> String {
+    match saved {
+        Some(path) => format!(
+            "Recording saved. Retry with:\nvoxtype transcribe {}",
+            path.display()
+        ),
+        None => "The recording was not kept, so it can't be retried \
+                 ([audio] keep_failed_recordings is off)."
+            .to_string(),
+    }
 }
 
 fn save_in(
@@ -178,6 +207,31 @@ mod tests {
         let path = save_in(&dir, &[0.0; 160], at(0)).unwrap();
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn turned_off_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("failed-audio");
+        assert_eq!(keep_in(false, &dir, &[0.0; 160], at(0)).unwrap(), None);
+        assert!(!dir.exists());
+
+        let path = keep_in(true, &dir, &[0.0; 160], at(0)).unwrap().unwrap();
+        assert!(path.starts_with(&dir) && path.exists());
+    }
+
+    #[test]
+    fn notice_points_at_a_file_only_when_one_was_saved() {
+        let saved = notice_body(Some(Path::new("/state/failed-audio/recording-1.wav")));
+        assert!(saved.contains("voxtype transcribe /state/failed-audio/recording-1.wav"));
+
+        let off = notice_body(None);
+        assert!(!off.contains("voxtype transcribe"), "{off}");
+        assert!(
+            !off.contains(".wav") && !off.contains("failed-audio"),
+            "{off}"
+        );
+        assert!(off.contains("keep_failed_recordings"), "{off}");
     }
 
     #[test]

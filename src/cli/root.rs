@@ -297,6 +297,28 @@ pub struct Cli {
     )]
     pub no_audio_feedback: bool,
 
+    /// Keep the audio of a recording whose transcription failed (default)
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        long_help = "Keep the audio of a recording whose transcription failed, so it can be \
+        retried with 'voxtype transcribe <file>'. This is the default. The 20 most recent \
+        are kept in ~/.local/state/voxtype/failed-audio/, readable only by you."
+    )]
+    pub keep_failed_recordings: bool,
+
+    /// Don't keep the audio of a recording whose transcription failed
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "keep_failed_recordings",
+        long_help = "Don't write the audio of a failed transcription to disk (overrides \
+        config and environment). A dictation whose transcription fails is then lost."
+    )]
+    pub no_keep_failed_recordings: bool,
+
     /// Pause MPRIS media players during recording
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub pause_media: bool,
@@ -724,6 +746,22 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn keep_failed_recordings_flags_parse_and_conflict() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.keep_failed_recordings && !cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--no-keep-failed-recordings"]);
+        assert!(cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--keep-failed-recordings"]);
+        assert!(cli.keep_failed_recordings);
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-failed-recordings",
+            "--no-keep-failed-recordings"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn test_engine_flag_whisper() {
