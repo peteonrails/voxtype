@@ -16,6 +16,7 @@ makedepends=(
     'git'
     'pkgconf'
     'shaderc'
+    'spirv-headers'
     'vulkan-headers'
     'vulkan-icd-loader'
     'gtk4'
@@ -33,7 +34,7 @@ optdepends=(
     'libnotify: desktop notifications'
     'pipewire-alsa: ALSA compatibility for PipeWire'
     'pulseaudio-alsa: ALSA compatibility for PulseAudio'
-    'vulkan-icd-loader: GPU acceleration for Whisper and native OSD rendering'
+    'vulkan-icd-loader: GPU acceleration for Whisper and GGUF models, and native OSD rendering'
     'onnxruntime>=1.24.0: CPU inference for the ONNX engines'
     'gtk4: GTK4 OSD frontend'
     'gtk4-layer-shell: GTK4 OSD frontend'
@@ -98,17 +99,31 @@ build() {
     # artifacts are shared between GPU feature sets, and separate directories
     # give that without the cargo clean that would make every update of this
     # package rebuild all of them from nothing.
+    #
+    # Every daemon carries the client for GGUF models (Parakeet and Cohere
+    # .gguf files); gpu-vulkan implies it. The models run in
+    # voxtype-gguf-worker, a separate crate because transcribe.cpp and
+    # whisper.cpp each bring their own ggml.
+    local _gguf=gguf,cohere-gguf,parakeet-gguf
+
     CARGO_TARGET_DIR=target \
-        cargo build --frozen --release --bin voxtype
+        cargo build --frozen --release --bin voxtype --features "$_gguf"
+    # CPU worker, installed under the generic name every variant falls
+    # back to. .cargo/config.toml holds its transcribe.cpp build at AVX2.
+    CARGO_TARGET_DIR=target \
+        cargo build --frozen --release -p voxtype-gguf-worker
 
     CARGO_TARGET_DIR=target-vulkan \
         cargo build --frozen --release --bin voxtype --features gpu-vulkan
+    # voxtype-vulkan looks beside itself for voxtype-gguf-worker-vulkan.
+    CARGO_TARGET_DIR=target-vulkan \
+        cargo build --frozen --release -p voxtype-gguf-worker --features vulkan
 
     # Dynamic loading needs no ONNX Runtime at build time. Always build
     # the same engines; users install the optional runtime to use them.
     CARGO_TARGET_DIR=target-onnx \
         cargo build --frozen --release --bin voxtype \
-        --features parakeet-load-dynamic,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere
+        --features "parakeet-load-dynamic,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,$_gguf"
 
     # The OSD frontends and the audio bridge do not link a GPU backend, so
     # they share the CPU build's directory.
@@ -143,6 +158,10 @@ package() {
         "$pkgdir/usr/lib/voxtype/voxtype-vulkan"
     install -Dm755 target-onnx/release/voxtype \
         "$pkgdir/usr/lib/voxtype/voxtype-onnx"
+    install -Dm755 target/release/voxtype-gguf-worker \
+        "$pkgdir/usr/lib/voxtype/voxtype-gguf-worker"
+    install -Dm755 target-vulkan/release/voxtype-gguf-worker \
+        "$pkgdir/usr/lib/voxtype/voxtype-gguf-worker-vulkan"
     install -Dm755 -t "$pkgdir/usr/lib/voxtype" \
         target/release/voxtype-osd \
         target/release/voxtype-osd-gtk4 \
