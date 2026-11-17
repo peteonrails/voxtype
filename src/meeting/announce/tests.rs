@@ -18,6 +18,59 @@ fn port(id: u32, direction: Direction, channel: &str) -> Port {
 }
 
 #[test]
+fn the_announcement_waits_for_the_call_to_keep_its_streams() {
+    let start = std::time::Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+    let mut settle = Settle::new(SETTLE);
+    // The call app opens the mic: seen, not announced.
+    assert!(!settle.observe(Some(&[184]), at(0)));
+    assert!(settle.settling());
+    assert!(!settle.observe(Some(&[184]), at(4)));
+    // Five seconds on the same stream: now.
+    assert!(settle.observe(Some(&[184]), at(5)));
+}
+
+#[test]
+fn a_new_stream_starts_the_wait_again() {
+    // Zoom in a browser, 2026-11-17: stream 184 on the pre-join screen, then
+    // stream 175 once in the meeting. The clip went into 184 and was over
+    // before the join.
+    let start = std::time::Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+    let mut settle = Settle::new(SETTLE);
+    assert!(!settle.observe(Some(&[184]), at(0)));
+    assert!(!settle.observe(Some(&[175]), at(4)));
+    assert!(
+        !settle.observe(Some(&[175]), at(8)),
+        "counted from the old stream"
+    );
+    assert!(settle.observe(Some(&[175]), at(9)));
+    // The order the graph lists streams in does not matter.
+    let mut settle = Settle::new(SETTLE);
+    assert!(!settle.observe(Some(&[7, 3]), at(0)));
+    assert!(settle.observe(Some(&[3, 7]), at(5)));
+}
+
+#[test]
+fn a_call_that_lets_go_of_the_mic_starts_the_wait_again() {
+    let start = std::time::Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+    let mut settle = Settle::new(SETTLE);
+    assert!(!settle.observe(Some(&[184]), at(0)));
+    assert!(!settle.observe(None, at(2)));
+    assert!(!settle.settling());
+    assert!(!settle.observe(Some(&[184]), at(3)));
+    assert!(!settle.observe(Some(&[184]), at(7)));
+    assert!(settle.observe(Some(&[184]), at(8)));
+}
+
+#[test]
+fn no_wait_announces_at_once() {
+    let mut settle = Settle::new(Duration::ZERO);
+    assert!(settle.observe(Some(&[1]), std::time::Instant::now()));
+}
+
+#[test]
 fn the_builtin_clip_is_a_short_wav() {
     let reader = hound::WavReader::new(std::io::Cursor::new(BUILTIN_CLIP)).unwrap();
     assert_eq!(reader.spec().channels, 1);
@@ -674,6 +727,7 @@ mod live {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let mut runner = Runner::new(Clip::Builtin, detect_for(&app), dir.path().to_path_buf());
         runner.wait = Duration::from_secs(5);
+        runner.settle = Duration::from_secs(1);
         runner.local_target = Some(speakers.name.clone());
         let status = runner.run(tx).await;
         tokio::time::sleep(Duration::from_millis(500)).await;

@@ -352,6 +352,9 @@ fi
 - Built-in Kokoro recording announcement; the ElevenLabs voice is a download
 - Whisper, VAD, speaker and echo models download from models.voxtype.io
 - RC2: fix macOS meeting portability and verify baseline CI model downloads
+- RC3: notifications for failures that were silent, voxtype doctor, terminal-aware
+  paste keys, OSD scale and placement fixes, kept failed recordings and
+  undelivered text with settings to turn them off
 
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
 - Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes

@@ -3988,7 +3988,7 @@ voxtype config set meeting.auto_label_from_title false
 **Default:** `false`
 **Required:** No
 
-When a meeting starts, play "This meeting is being recorded and transcribed with Voxtype" once: into the call app's microphone stream, so the other people on the call hear it, and on your speakers. The call app is found as [meeting detection](MEETING_MODE.md#meeting-detection) finds it; a meeting started before the call waits up to two minutes for one. Without a call, or when the link into the call fails, it plays on your speakers only and `voxtype meeting status` says so. The announcement is kept out of the transcript. It needs PipeWire (`pw-play`, `pw-link`, `pw-dump`).
+When a meeting starts, play "This meeting is being recorded and transcribed with Voxtype" once: into the call app's microphone stream, so the other people on the call hear it, and on your speakers. The call app is found as [meeting detection](MEETING_MODE.md#meeting-detection) finds it; a meeting started before the call waits up to two minutes for one. It plays once the call app has kept the same microphone stream for five seconds: call apps open the microphone on their pre-join screen and again when you join, and an announcement played into the first of those is over before you are in the meeting. Without a call, or when the link into the call fails, it plays on your speakers only and `voxtype meeting status` says so. The announcement is kept out of the transcript. It needs PipeWire (`pw-play`, `pw-link`, `pw-dump`).
 
 This is a courtesy, not legal compliance: you remain responsible for the laws on recording calls. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
 
