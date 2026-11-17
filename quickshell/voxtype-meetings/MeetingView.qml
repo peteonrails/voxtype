@@ -850,7 +850,8 @@ Item {
       }
 
       // A finished meeting with its audio kept: the whole meeting as a
-      // waveform; a click plays from there.
+      // waveform, the call in its speakers' colours. A click plays from
+      // there, and the transcript goes to that line (and with a drag).
       WaveformPlayer {
         objectName: "waveform"
         Layout.fillWidth: true
@@ -858,7 +859,12 @@ Item {
         theme: root.theme
         wave: root.waveform
         positionMs: root.playPositionMs
-        onSeekRequested: function(ms) { root.playAtRequested(ms) }
+        feed: root.feed
+        onScrubbed: function(ms) { transcriptPane.scrubTo(ms) }
+        onSeekRequested: function(ms) {
+          transcriptPane.seekTo(ms)
+          root.playAtRequested(ms)
+        }
       }
 
       // Listening, paused or finalizing, between chunks.
@@ -1680,13 +1686,14 @@ Item {
             objectName: "reassignChip_" + index
             readonly property string name: modelData.name
             readonly property bool current: modelData.keys.indexOf(reassignPopup.speaker) !== -1
+            readonly property color tint: transcriptPane.speakerColor(modelData.keys[0])
             implicitWidth: pickRow.implicitWidth + root.theme.padX * 2
             implicitHeight: root.theme.controlHeight
             radius: height / 2
-            color: pick.current ? root.theme.alpha(transcriptPane.chipColor(pick.index), 0.25)
+            color: pick.current ? root.theme.alpha(pick.tint, 0.25)
               : pickMouse.containsMouse ? root.theme.alpha(root.theme.fg, 0.12) : root.theme.alpha(root.theme.fg, 0.06)
             border.width: 1
-            border.color: root.theme.alpha(transcriptPane.chipColor(pick.index), pick.current ? 1.0 : 0.6)
+            border.color: root.theme.alpha(pick.tint, pick.current ? 1.0 : 0.6)
 
             Row {
               id: pickRow
@@ -1697,7 +1704,7 @@ Item {
                 width: 8
                 height: 8
                 radius: 4
-                color: transcriptPane.chipColor(pick.index)
+                color: pick.tint
               }
               Text {
                 anchors.verticalCenter: parent.verticalCenter

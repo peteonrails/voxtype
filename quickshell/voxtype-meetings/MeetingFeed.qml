@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "MeetingSpeakers.js" as MS
 
 // The live meeting, as the daemon publishes it on
 // $XDG_RUNTIME_DIR/voxtype/meeting.sock (docs/INTEGRATIONS.md, "Live transcript
@@ -71,6 +72,10 @@ Item {
   property var labels: ({})
   // Speaker keys in order of first appearance.
   property var speakerOrder: []
+  // speaker key → colour slot (MeetingSpeakers.withSpeaker). Unlike
+  // speakerOrder it never forgets a speaker whose lines were all moved away,
+  // so nobody's colour changes while the meeting is on screen.
+  property var speakerSlots: ({})
 
   readonly property bool active: status === "recording" || status === "paused" || status === "finalizing"
   // The last meeting is over but still on screen for editing.
@@ -148,14 +153,27 @@ Item {
     return out
   }
 
-  function chipIndexFor(key) {
-    var fold = root.displayName(key).toLowerCase()
-    for (var i = 0; i < root.chips.length; i++)
-      if (root.chips[i].name.toLowerCase() === fold) return i
-    return -1
+  // The slot a speaker is drawn in (MeetingTheme.speakerColor): its own, or
+  // the one it shares with the speakers named as it is.
+  function speakerSlot(key) { return MS.colorSlot(root.speakerSlots, root.labels, key) }
+
+  function noteSlot(key) {
+    var next = MS.withSpeaker(root.speakerSlots, key)
+    if (next !== root.speakerSlots) root.speakerSlots = next
+  }
+
+  // Every line's time, speaker and side, for the waveform's colours.
+  function spans() {
+    var out = []
+    for (var i = 0; i < model.count; i++) {
+      var r = model.get(i)
+      out.push({ startMs: r.startMs, endMs: r.endMs, speaker: r.speaker, source: r.source })
+    }
+    return out
   }
 
   function noteSpeaker(key) {
+    root.noteSlot(key)
     if (root.speakerOrder.indexOf(key) !== -1) return
     var next = root.speakerOrder.slice()
     next.push(key)
@@ -199,9 +217,13 @@ Item {
       highlight: root.annotationOf(segment).highlight
     }
     if (row.text === "") return
+    // A moved line counts for the speaker it was first heard as, so the
+    // slots come out the same when the meeting is opened again.
+    if (row.originalSpeaker !== "") root.noteSlot(row.originalSpeaker)
     for (var d = model.count - 1; d >= 0; d--) {
       if (model.get(d).segId === row.segId) {
         model.set(d, row)
+        root.noteSlot(key)
         root.noteLabel(key, segment)
         return
       }
@@ -446,6 +468,7 @@ Item {
     model.clear()
     root.labels = ({})
     root.speakerOrder = []
+    root.speakerSlots = ({})
     root.meetingId = ""
     root.title = ""
     root.startedAt = ""
@@ -596,6 +619,8 @@ Item {
       else order.splice(at, 1)
       root.speakerOrder = order
     }
+    var slots = MS.renamedSlots(root.speakerSlots, from, to)
+    if (slots !== root.speakerSlots) root.speakerSlots = slots
     // A name given to the old ID moves to the new one, unless the new one
     // already has its own (the daemon's rule for the saved labels too).
     if (root.labels[from] !== undefined) {
