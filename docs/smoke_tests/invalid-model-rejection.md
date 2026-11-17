@@ -1,20 +1,20 @@
 # Invalid Model Rejection
 
-Verify bad model names warn and fall back to default:
+Verify bad model names are rejected before anything records:
 
 ```bash
-# Should warn, send notification, and fall back to default model
-voxtype --model nonexistent record start
-sleep 2
-voxtype record cancel
+# record start refuses an unknown model instead of recording with the default
+voxtype --model nonexistent record start; echo "exit=$?"
+voxtype status
 
 # Expected behavior:
-# 1. Warning logged: "Unknown model 'nonexistent', using default model 'base.en'"
-# 2. Desktop notification via notify-send
-# 3. Recording proceeds with the default model
+# 1. Only this error, exit 1: "Unknown model 'nonexistent'. Run `voxtype info models` to list available models."
+#    (no "using default model" warning: that fallback applies to other commands, not record)
+# 2. No recording starts: status stays "idle"
 
-# Check logs for warning:
-journalctl --user -u voxtype --since "30 seconds ago" | grep -i "unknown model"
+# Other commands still fall back to the default model and say so:
+voxtype --model nonexistent config 2>&1 | grep -i "unknown model"
+# Expected: WARN "Unknown model 'nonexistent', using default model '...'"
 
 # The setup --set command should still reject invalid models:
 voxtype setup model --set nonexistent

@@ -89,7 +89,7 @@ Pick your distro from the list below. The fastest path on each:
 - **Fedora:** `sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm`
 - **macOS:** `brew install --cask peteonrails/voxtype/voxtype`
 - **NixOS:** `nix profile install github:peteonrails/voxtype#vulkan`
-- **AppImage:** download, `chmod +x`, run.
+- **AppImage:** not currently published; see [available alternatives](#appimage).
 
 After install, see [Post-Install Setup](#post-install-setup) for the model download, hotkey, and systemd-service steps.
 
@@ -138,6 +138,33 @@ sudo pacman -S wtype wl-clipboard libnotify gtk4-layer-shell pipewire-alsa
 
 The post-install hook auto-picks the right CUDA variant (`cuda-12` vs `cuda-13`) based on your installed libcudart, and sets up `/usr/bin/voxtype` as a wrapper that dispatches to the matching binary.
 
+`voxtype-bin` downloads only the variants your machine uses: the CPU build for
+your processor, the baseline build, the Vulkan build, and whichever variant
+`/usr/bin/voxtype` runs now. That is about 170 MB instead of 914 MB. Variants
+you ask for are remembered for later upgrades in
+`/usr/lib/voxtype/package-variants`. To add one, set `VOXTYPE_VARIANTS` when
+you build:
+
+```bash
+VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin
+VOXTYPE_VARIANTS=onnx-migraphx paru -S --rebuild voxtype-bin
+VOXTYPE_VARIANTS=onnx-avx2 makepkg -si      # from a clone of the AUR repo
+```
+
+Names: `baseline`, `avx2`, `avx512`, `vulkan`, `onnx-avx2`, `onnx-avx512`,
+`onnx-cuda-12`, `onnx-cuda-13`, `onnx-migraphx` (aarch64: `cpu`, `onnx`).
+Separate several with commas. `all` downloads every variant, as before 1.2.1;
+`default` forgets the variants you asked for earlier. Clean-chroot builds
+(`makechrootpkg`, `pkgctl build`, `paru --chroot`, `aurutils --chroot`) pass no
+environment and cannot see your current backend, so they build the default
+set. Build on the host, or set the variable in your helper's chroot
+environment. Repackagers should build with `VOXTYPE_VARIANTS=all`.
+
+The deb, rpm and AUR packages also install the Omarchy Settings panel at
+`/usr/share/voxtype/omarchy-plugin/io.voxtype.settings`. On Omarchy the daemon
+links it into `~/.config/omarchy/plugins` on first start, or run
+`voxtype setup omarchy`. See the user manual's "Omarchy Settings panel" section.
+
 #### Development source package
 
 For unreleased fixes, the repository includes a [`voxtype-git` PKGBUILD](https://github.com/peteonrails/voxtype/blob/dev/packaging/arch-git/README.md)
@@ -169,7 +196,7 @@ Recommended optional packages:
 sudo apt install wtype wl-clipboard libnotify-bin pipewire-alsa
 ```
 
-The .deb ships every Linux binary variant (avx2, avx512, vulkan, plus ONNX CPU/CUDA/MIGraphX) under `/usr/lib/voxtype/`. Run `sudo voxtype setup gpu --enable` after install to pick a GPU binary.
+The .deb ships every Linux binary variant (baseline for pre-AVX2 CPUs, avx2, avx512, vulkan, plus ONNX CPU/CUDA/MIGraphX) under `/usr/lib/voxtype/`. Run `sudo voxtype setup gpu --enable` after install to pick a GPU binary.
 
 ### Fedora / RHEL
 
@@ -207,12 +234,20 @@ A flake ships every variant:
 # Imperative install
 nix profile install github:peteonrails/voxtype/v1.0.1#vulkan
 
-# Available outputs: default, vulkan, cuda, rocm, osdGtk4, osdNative
-nix build github:peteonrails/voxtype/v1.0.1#osdGtk4
+# Available outputs: default, vulkan, rocm, onnx, onnx-cuda, onnx-migraphx,
+# osd-gtk4, osd-native, meetings-gtk4
+nix build github:peteonrails/voxtype/v1.0.1#osd-gtk4
 
 # Or pin in your flake inputs
 inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";
 ```
+
+Each voxtype package includes the GGUF worker, the Quickshell QML tree (the OSD and the Voxtype Meetings view), the Voxtype Configuration and Voxtype Meetings desktop entries, and the `voxtype` icon. The GTK4 meetings window, which `voxtype meeting view` opens on desktops without Quickshell, is its own output, `meetings-gtk4`; install it beside the voxtype package so the daemon finds it on `PATH`. The wrapper puts the typing and clipboard tools on `PATH`, and appends ffmpeg, the PulseAudio client tools (`parec`, `pactl`, `paplay`), xdg-utils and bubblewrap for the meeting features, plus curl for model downloads and `which` for the output driver probes, so the system's own copies take precedence when present.
+
+Two things the meeting features use are not included:
+
+- **PipeWire tools** (`pw-dump` for call detection, `pw-play` for playback). They only work against a running PipeWire, and `services.pipewire.enable = true` already installs them.
+- **Quickshell.** The meeting view and the Quickshell OSD need it, so add `pkgs.quickshell` to your packages to use them.
 
 ### Linux arm64 (aarch64) — manual install
 
@@ -250,16 +285,13 @@ tooling.
 
 ### AppImage
 
-Self-contained binary for distros that don't have a packaged voxtype.
+AppImage builds are not currently published. The download commands in older
+versions of this guide point to assets that do not exist.
 
-```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.5/voxtype-0.7.5-x86_64.AppImage
-chmod +x voxtype-0.7.5-x86_64.AppImage
-mkdir -p ~/.local/bin
-mv voxtype-0.7.5-x86_64.AppImage ~/.local/bin/voxtype
-```
-
-Three AppImage variants ship: CPU, Vulkan, ONNX engines. The CPU one is the smallest and the right default for most users.
+For now, use one of the packaged installation methods above or
+[build from source](#build-from-source). Check the release's asset list before
+following any AppImage download instructions; do not construct a filename from
+the version number.
 
 ### Build from Source
 
@@ -299,6 +331,7 @@ sudo install -Dm755 target/release/voxtype /usr/local/bin/voxtype
 | `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere` | Additional ONNX engines |
 | `osd-gtk4` | GTK4 on-screen visualizer |
 | `osd-native` | wgpu + egui on-screen visualizer |
+| `meetings-gtk4` | GTK4 meetings window (`voxtype-meetings-gtk4`) |
 
 Example: full ONNX engine set with MIGraphX:
 
@@ -359,7 +392,7 @@ voxtype setup model
 
 `.en` models are English-only but faster than their multilingual siblings.
 
-For the ONNX engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup model` — pick an engine and it downloads the right model from HuggingFace.
+For the other engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup model`: pick an engine and it downloads the right model from Voxtype's model mirror at `models.voxtype.io`, checking each file's SHA-256.
 
 ### 3. Start the daemon
 

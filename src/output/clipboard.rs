@@ -16,6 +16,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Clipboard-based text output
+/// MIME type passed to wl-copy for transcribed text. Without it wl-copy
+/// guesses the type from the content, which costs ~10 ms per copy and
+/// misfiles some text: a transcript starting with "From " is offered only as
+/// `application/mbox`, so text fields refuse to paste it (#738). With a text
+/// type, wl-copy also offers the `text/plain`, `UTF8_STRING`, `STRING` and
+/// `TEXT` aliases that XWayland and older clients ask for.
+pub(crate) const WL_COPY_TEXT_MIME: &str = "text/plain;charset=utf-8";
+
 pub struct ClipboardOutput {
     /// Text to append after transcription
     append_text: Option<String>,
@@ -44,6 +52,8 @@ impl TextOutput for ClipboardOutput {
 
         // Spawn wl-copy with stdin pipe
         let mut child = Command::new("wl-copy")
+            .arg("--type")
+            .arg(WL_COPY_TEXT_MIME)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

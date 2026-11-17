@@ -16,8 +16,8 @@
 //! - `transcribe()` sends audio to already-ready worker
 //! - Perceived latency is just transcription time, not model load + transcription
 
-use super::worker::READY_SIGNAL;
-use super::Transcriber;
+use super::worker::{READY_SIGNAL, TIMED_FLAG};
+use super::{TimedSegment, Transcriber};
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -38,6 +38,9 @@ struct WorkerResponse {
     /// Older workers that do not emit this field deserialize to `None`.
     #[serde(default)]
     language: Option<String>,
+    /// Timed segments, when they were asked for
+    #[serde(default)]
+    segments: Option<Vec<TimedSegment>>,
 }
 
 /// A prepared worker process ready to receive audio
@@ -60,6 +63,8 @@ pub struct SubprocessTranscriber {
     config: WhisperConfig,
     /// Path to the config file (if any)
     config_path: Option<std::path::PathBuf>,
+    /// Profile vocabulary selected before the worker is spawned.
+    active_vocabulary: Mutex<Vec<String>>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
     /// Last language reported by the worker, if any. Mirrors
@@ -77,6 +82,7 @@ impl SubprocessTranscriber {
         Ok(Self {
             config: config.clone(),
             config_path,
+            active_vocabulary: Mutex::new(Vec::new()),
             prepared_worker: Mutex::new(None),
             last_language: Mutex::new(None),
         })
@@ -117,6 +123,16 @@ impl SubprocessTranscriber {
         }
         if let Some(threads) = self.config.threads {
             cmd.arg("--threads").arg(threads.to_string());
+        }
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        if let Some(prompt) =
+            super::prompt_with_vocabulary(self.config.initial_prompt.as_deref(), &vocabulary)
+        {
+            cmd.arg("--initial-prompt").arg(prompt);
         }
 
         Ok(cmd)
@@ -174,9 +190,10 @@ impl SubprocessTranscriber {
     fn write_audio_to_worker(
         stdin: &mut ChildStdin,
         samples: &[f32],
+        timed: bool,
     ) -> Result<(), TranscribeError> {
-        // Write sample count (u32 little-endian)
-        let count = samples.len() as u32;
+        // Write sample count (u32 little-endian), flagged for a timed decode
+        let count = samples.len() as u32 | if timed { TIMED_FLAG } else { 0 };
         stdin.write_all(&count.to_le_bytes()).map_err(|e| {
             TranscribeError::InferenceFailed(format!("Failed to write sample count: {}", e))
         })?;
@@ -215,29 +232,8 @@ impl SubprocessTranscriber {
             ))
         })
     }
-}
 
-impl Transcriber for SubprocessTranscriber {
-    fn prepare(&self) {
-        tracing::debug!("Preparing subprocess transcriber (spawning worker)...");
-        let start = std::time::Instant::now();
-
-        match self.spawn_and_wait_ready() {
-            Ok(worker) => {
-                let mut guard = self.prepared_worker.lock().unwrap();
-                *guard = Some(worker);
-                tracing::info!(
-                    "Worker prepared in {:.2}s (model loaded while recording)",
-                    start.elapsed().as_secs_f32()
-                );
-            }
-            Err(e) => {
-                tracing::warn!("Failed to prepare worker: {} (will retry on transcribe)", e);
-            }
-        }
-    }
-
-    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+    fn run(&self, samples: &[f32], timed: bool) -> Result<WorkerResponse, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -269,7 +265,7 @@ impl Transcriber for SubprocessTranscriber {
         let start = std::time::Instant::now();
 
         // Write audio to worker
-        Self::write_audio_to_worker(&mut worker.stdin, samples)?;
+        Self::write_audio_to_worker(&mut worker.stdin, samples, timed)?;
         drop(worker.stdin); // Close stdin to signal EOF
 
         // Read response
@@ -305,17 +301,63 @@ impl Transcriber for SubprocessTranscriber {
             *guard = response.language.clone();
         }
 
-        // Handle response
         if response.ok {
-            response.text.ok_or_else(|| {
-                TranscribeError::InferenceFailed("Worker returned ok but no text".to_string())
-            })
+            Ok(response)
         } else {
             Err(TranscribeError::InferenceFailed(
                 response
                     .error
                     .unwrap_or_else(|| "Unknown worker error".to_string()),
             ))
+        }
+    }
+}
+
+impl Transcriber for SubprocessTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
+    fn prepare(&self) {
+        tracing::debug!("Preparing subprocess transcriber (spawning worker)...");
+        let start = std::time::Instant::now();
+
+        match self.spawn_and_wait_ready() {
+            Ok(worker) => {
+                let mut guard = self.prepared_worker.lock().unwrap();
+                *guard = Some(worker);
+                tracing::info!(
+                    "Worker prepared in {:.2}s (model loaded while recording)",
+                    start.elapsed().as_secs_f32()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to prepare worker: {} (will retry on transcribe)", e);
+            }
+        }
+    }
+
+    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.run(samples, false)?.text.ok_or_else(|| {
+            TranscribeError::InferenceFailed("Worker returned ok but no text".to_string())
+        })
+    }
+
+    /// The worker decodes with Whisper's own segment timestamps, so a
+    /// meeting chunk gets one line per utterance from one GPU-isolated call.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        let response = self.run(samples, true)?;
+        match (response.segments, response.text) {
+            (Some(segments), _) => Ok(segments),
+            (None, Some(text)) if !text.trim().is_empty() => Ok(vec![TimedSegment {
+                text,
+                start_secs: 0.0,
+                end_secs: samples.len() as f32 / 16000.0,
+            }]),
+            (None, _) => Ok(Vec::new()),
         }
     }
 

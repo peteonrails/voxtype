@@ -73,7 +73,7 @@ impl ParaformerTranscriber {
                 tokens_path.display()
             )));
         }
-        let tokens = ctc::load_tokens(&tokens_path)?;
+        let tokens = load_tokens(&tokens_path)?;
         tracing::debug!("Loaded {} tokens", tokens.len());
 
         // Create ONNX session.
@@ -122,6 +122,10 @@ impl ParaformerTranscriber {
 }
 
 impl Transcriber for ParaformerTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -243,7 +247,7 @@ fn decode_paraformer_output(
 
     // Try extracting as i64 first (direct token IDs)
     if let Ok((shape, data)) = output_val.try_extract_tensor::<i64>() {
-        tracing::debug!("Paraformer output shape (i64): {:?}", &*shape);
+        tracing::debug!("Paraformer output shape (i64): {:?}", shape);
         let token_ids: Vec<u32> = data.iter().map(|&id| id as u32).collect();
         return Ok(tokens_to_text(&token_ids, tokens));
     }
@@ -303,29 +307,88 @@ fn ctc_decode_to_ids(logits: &[f32], time_steps: usize, vocab_size: usize) -> Ve
     token_ids
 }
 
+/// Whether `c` belongs to a script written without spaces between words.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3000}'..='\u{303F}'   // CJK symbols and punctuation
+        | '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+        | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
+        | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
+        | '\u{FF00}'..='\u{FFEF}' // Fullwidth forms
+    )
+}
+
+/// Load tokens.txt, undoing the YAML single-quoting paraformer-en's export
+/// kept on every token YAML would otherwise read as a boolean, number or
+/// symbol (`'on'`, `'yes'`, `'3'`, `'''s'`). Taken literally, every "on" in
+/// a transcript was typed as "'on'".
+fn load_tokens(path: &std::path::Path) -> Result<HashMap<u32, String>, TranscribeError> {
+    let mut tokens = ctc::load_tokens(path)?;
+    for token in tokens.values_mut() {
+        if let Some(plain) = unquote_yaml_scalar(token) {
+            *token = plain;
+        }
+    }
+    Ok(tokens)
+}
+
+/// The content of a YAML single-quoted scalar, where `''` stands for `'`.
+/// `None` for anything that is not one, such as a bare `'` token.
+fn unquote_yaml_scalar(token: &str) -> Option<String> {
+    let inner = token.strip_prefix('\'')?.strip_suffix('\'')?;
+    // Every quote inside must be a doubled pair, or this is not YAML quoting.
+    if inner.replace("''", "").contains('\'') {
+        return None;
+    }
+    Some(inner.replace("''", "'"))
+}
+
 /// Convert token IDs to text, handling BPE continuation markers
 ///
-/// Paraformer uses `@@` suffix for BPE continuation (e.g., "hel@@" + "lo" = "hello").
-/// Chinese characters appear as individual tokens without markers.
+/// Paraformer vocabularies are whole words plus `@@`-suffixed pieces
+/// ("hel@@" + "lo" = "hello"), with no word-boundary marker, so the spaces
+/// have to be put back. This follows FunASR's `sentence_postprocess`: a
+/// finished Latin word is separated from the next Latin word by one space,
+/// and CJK characters join their neighbours with none.
 /// Special tokens (<blank>, <s>, </s>, <OOV>) are filtered out.
 fn tokens_to_text(token_ids: &[u32], tokens: &HashMap<u32, String>) -> String {
     let mut result = String::new();
+    // A finished Latin word is waiting for a separator before the next one.
+    let mut word_ended = false;
 
     for &id in token_ids {
-        if let Some(token_str) = tokens.get(&id) {
-            // Skip special tokens
-            if token_str.starts_with('<') && token_str.ends_with('>') {
-                continue;
-            }
-
-            // Handle BPE continuation marker
-            if let Some(base) = token_str.strip_suffix("@@") {
-                result.push_str(base);
-            } else {
-                // SentencePiece marker cleanup (some models use this instead of @@)
-                result.push_str(&token_str.replace('\u{2581}', " "));
-            }
+        let Some(token_str) = tokens.get(&id) else {
+            continue;
+        };
+        if token_str.starts_with('<') && token_str.ends_with('>') {
+            continue;
         }
+
+        // Some exports use SentencePiece markers, which carry their own spacing.
+        if token_str.contains('\u{2581}') {
+            result.push_str(&token_str.replace('\u{2581}', " "));
+            word_ended = false;
+            continue;
+        }
+
+        let (piece, continues) = match token_str.strip_suffix("@@") {
+            Some(base) => (base, true),
+            None => (token_str.as_str(), false),
+        };
+
+        if piece.chars().next().is_some_and(is_cjk) {
+            result.push_str(piece);
+            word_ended = false;
+            continue;
+        }
+
+        if word_ended {
+            result.push(' ');
+        }
+        result.push_str(piece);
+        word_ended = !continues;
     }
 
     result.trim().to_string()
@@ -479,9 +542,9 @@ fn read_cmvn_from_kaldi_mvn(
     let mut neg_mean = Vec::with_capacity(feat_dim);
     let mut inv_stddev = Vec::with_capacity(feat_dim);
 
-    for i in 0..feat_dim {
-        let mean = matrix[0][i] / count;
-        let variance = (matrix[1][i] / count) - (mean * mean);
+    for (sum, sum_sq) in matrix[0][..feat_dim].iter().zip(&matrix[1][..feat_dim]) {
+        let mean = sum / count;
+        let variance = (sum_sq / count) - (mean * mean);
         let stddev = variance.max(1e-20).sqrt();
         neg_mean.push(-mean as f32);
         inv_stddev.push((1.0 / stddev) as f32);
@@ -638,7 +701,86 @@ mod tests {
 
         let ids = vec![1, 10, 11, 12, 13, 2];
         let result = tokens_to_text(&ids, &tokens);
-        assert_eq!(result, "helloworld");
+        assert_eq!(result, "hello world");
+    }
+
+    /// Token strings from paraformer-en's tokens.txt: whole words, `@@`
+    /// pieces and contractions, with no word-boundary marker at all. Joining
+    /// them bare produced "thisisitsaidthejudge"-style output.
+    #[test]
+    fn test_tokens_to_text_english_words_get_spaces() {
+        let mut tokens = HashMap::new();
+        for (id, t) in [
+            (1, "<s>"),
+            (2, "</s>"),
+            (5, "the"),
+            (14, "is"),
+            (69, "it's"),
+            (142, "don't"),
+            (200, "dict@@"),
+            (201, "ation"),
+            (300, "1@@"),
+            (301, "0"),
+            (302, "works"),
+        ] {
+            tokens.insert(id, t.to_string());
+        }
+
+        let ids = vec![1, 69, 5, 200, 201, 2];
+        assert_eq!(tokens_to_text(&ids, &tokens), "it's the dictation");
+
+        let ids = vec![142, 14, 300, 301, 302];
+        assert_eq!(tokens_to_text(&ids, &tokens), "don't is 10 works");
+    }
+
+    /// paraformer-zh mixes CJK characters with Latin words and pieces.
+    /// FunASR joins CJK with no spaces, including next to an English word.
+    #[test]
+    fn test_tokens_to_text_mixed_chinese_and_english() {
+        let mut tokens = HashMap::new();
+        for (id, t) in [
+            (10, "你"),
+            (11, "好"),
+            (3, "and@@"),
+            (27, "price"),
+            (39, "these"),
+            (12, "世"),
+        ] {
+            tokens.insert(id, t.to_string());
+        }
+
+        let ids = vec![10, 11, 39, 27, 12];
+        assert_eq!(tokens_to_text(&ids, &tokens), "你好these price世");
+
+        let ids = vec![3, 27, 10];
+        assert_eq!(tokens_to_text(&ids, &tokens), "andprice你");
+    }
+
+    /// paraformer-en's tokens.txt keeps YAML single-quoting on every token
+    /// YAML would read as a boolean, number or symbol (lines copied from the
+    /// shipped file). Taken literally, the demo dictation came out as
+    /// "before the meeting 'on' monday".
+    #[test]
+    fn test_load_tokens_unquotes_yaml_scalars() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.txt");
+        fs::write(
+            &path,
+            "<blank> 0\nthe 5\n'on' 21\n'no' 89\n'''s' 173\n'3' 666\n'30' 2978\n\
+             '''@@' 1268\n'''' 2221\nmeeting 900\nmon@@ 409\nday 410\nit 70\n",
+        )
+        .unwrap();
+        let tokens = load_tokens(&path).unwrap();
+
+        let ids = vec![5, 900, 21, 409, 410];
+        assert_eq!(tokens_to_text(&ids, &tokens), "the meeting on monday");
+        assert_eq!(tokens[&89], "no");
+        assert_eq!(tokens[&173], "'s");
+        assert_eq!(tokens[&666], "3");
+        assert_eq!(tokens[&2978], "30");
+        assert_eq!(tokens[&1268], "'@@");
+        assert_eq!(tokens[&2221], "'");
+        assert_eq!(tokens[&70], "it");
     }
 
     #[test]
@@ -660,13 +802,11 @@ mod tests {
         // Build a minimal Kaldi binary float matrix: 2 rows x 4 cols
         // Row 0: [10.0, 20.0, 30.0, 5.0]  (sums + count=5)
         // Row 1: [30.0, 100.0, 200.0, 0.0] (sum of squares)
-        let mut data: Vec<u8> = Vec::new();
-        data.push(0x00); // binary marker
-        data.push(b'B');
-        data.push(b'F'); // float matrix
-        data.push(b'M');
-        data.push(b' ');
-        data.push(4); // \4 before rows
+        let mut data: Vec<u8> = vec![
+            0x00, // binary marker
+            b'B', b'F', // float matrix
+            b'M', b' ', 4, // \4 before rows
+        ];
         data.extend_from_slice(&2i32.to_le_bytes());
         data.push(4); // \4 before cols
         data.extend_from_slice(&4i32.to_le_bytes());

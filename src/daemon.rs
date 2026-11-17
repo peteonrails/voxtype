@@ -13,20 +13,29 @@ use crate::hotkey::{self, HotkeyEvent};
 #[cfg(target_os = "macos")]
 use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
+use crate::model_catalog;
+use crate::model_catalog::override_config;
 use crate::model_manager::ModelManager;
 use crate::notification::{self, Lifetime};
+use crate::osd;
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
+use crate::text::vocabulary::Vocabulary;
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{signal, SignalKind};
+
+/// Runtime-directory marker holding the last model-load failure notified at
+/// startup, so a systemd restart loop doesn't repeat the same notice.
+const STARTUP_FAILURE_MARKER: &str = "startup_failure_notice";
 
 /// Send a desktop notification with optional engine icon
 async fn send_notification(
@@ -110,6 +119,31 @@ async fn end_recording_notification(
     }
 }
 
+/// Time left before `max_duration` stops a recording, when it is close
+/// enough to warn about: 30s ahead for caps of two minutes or more, 10s for
+/// shorter ones, and never for caps under 30s, where a warning would arrive
+/// within seconds of starting to speak.
+fn cap_warning_due(elapsed: Duration, max_duration: Duration) -> Option<Duration> {
+    let lead = if max_duration >= Duration::from_secs(120) {
+        Duration::from_secs(30)
+    } else if max_duration >= Duration::from_secs(30) {
+        Duration::from_secs(10)
+    } else {
+        return None;
+    };
+    let left = max_duration.saturating_sub(elapsed);
+    (left <= lead).then_some(left)
+}
+
+/// Whether a transcription task's `JoinError` means the engine that ran it
+/// is suspect. A `JoinError` has exactly two causes: the daemon aborted the
+/// task (a cancel — our own doing, the engine is fine) or the task panicked
+/// (the engine's internal state is whatever the panic left behind). Only the
+/// panic warrants discarding cached engine instances (#643).
+fn join_error_poisons_engine(e: &tokio::task::JoinError) -> bool {
+    !e.is_cancelled()
+}
+
 /// Write state to file for external integrations (e.g., Waybar)
 fn write_state_file(path: &PathBuf, state: &str) {
     // Ensure parent directory exists
@@ -120,8 +154,19 @@ fn write_state_file(path: &PathBuf, state: &str) {
         }
     }
 
-    if let Err(e) = std::fs::write(path, state) {
+    // Write to a sibling and rename, rather than writing in place.
+    // std::fs::write truncates before it writes, so a reader polling this
+    // file - waybar runs `voxtype status --follow` against it - can catch the
+    // empty window and read "" as the state. rename(2) is atomic within a
+    // filesystem, so a reader sees either the old contents or the new.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, state) {
         tracing::warn!("Failed to write state file: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        tracing::warn!("Failed to replace state file: {}", e);
+        let _ = std::fs::remove_file(&tmp);
     } else {
         tracing::trace!("State file updated: {}", state);
     }
@@ -212,6 +257,68 @@ fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
     false
 }
 
+/// Take the single-instance lock in `runtime_dir`, recovering a stale one
+/// left by a daemon that crashed.
+///
+/// This must be the daemon's first shared-state action. Everything else it
+/// touches at startup (PID file, OSD audio socket, cancel/override files,
+/// meeting state) belongs to whichever instance is already running, so a
+/// refused second instance has to leave before touching any of it.
+fn acquire_instance_lock(runtime_dir: &std::path::Path) -> Result<Pidlock> {
+    std::fs::create_dir_all(runtime_dir).map_err(|e| {
+        crate::error::VoxtypeError::Config(format!(
+            "Failed to create runtime directory {:?}: {}",
+            runtime_dir, e
+        ))
+    })?;
+
+    let lock_path = runtime_dir.join("voxtype.lock");
+    let lock_path_str = lock_path.to_string_lossy().to_string();
+    let mut pidlock = Pidlock::new(&lock_path_str);
+
+    if pidlock.acquire().is_ok() {
+        tracing::debug!("Acquired PID lock at {:?}", lock_path);
+        return Ok(pidlock);
+    }
+
+    #[cfg(unix)]
+    if cleanup_stale_lockfile(&lock_path) {
+        pidlock = Pidlock::new(&lock_path_str);
+        if let Err(e) = pidlock.acquire() {
+            tracing::error!("Failed to acquire lock after stale cleanup: {:?}", e);
+            return Err(crate::error::VoxtypeError::Config(format!(
+                "Another voxtype instance is already running (lock error: {:?})",
+                e
+            )));
+        }
+        tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
+        return Ok(pidlock);
+    }
+
+    tracing::error!("Failed to acquire lock: another voxtype instance is already running");
+    Err(crate::error::VoxtypeError::Config(
+        "Another voxtype instance is already running".to_string(),
+    ))
+}
+
+/// Return heap memory freed by a model unload to the kernel.
+///
+/// glibc keeps freed heap memory for reuse rather than giving it back, so an
+/// on-demand model left its full footprint resident after it was dropped.
+/// Measured with on-demand Parakeet on a CPU build: 1976 MB resident after two
+/// transcriptions, 52 MB after trimming. Memory a GPU runtime keeps for the
+/// life of the process (ROCm/MIGraphX libraries and staging buffers) is not
+/// heap and is unaffected; only a separate transcription process frees that,
+/// which today is Whisper's `gpu_isolation`.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap pages; it has no
+    // preconditions and does not touch live allocations.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// Remove PID file on shutdown
 fn cleanup_pid_file(path: &PathBuf) {
     if path.exists() {
@@ -233,12 +340,85 @@ fn check_cancel_requested() -> bool {
     }
 }
 
+/// Whether a pending `record cancel` has a session to act on. Idle and
+/// outputting states are left alone: a trigger written while idle is
+/// consumed when the next capture starts (#606), not by this path.
+fn cancel_applies_to(state: &State) -> bool {
+    state.is_recording() || matches!(state, State::Transcribing { .. })
+}
+
 /// Clean up any stale cancel file on startup
 fn cleanup_cancel_file() {
     let cancel_file = Config::runtime_dir().join("cancel");
     if cancel_file.exists() {
         let _ = std::fs::remove_file(&cancel_file);
     }
+}
+
+/// Written by `voxtype record start` (and a toggle that starts) just before
+/// it signals the daemon, stamped with [`trigger_stamp`].
+pub const START_REQUEST_FILE: &str = "start_requested";
+
+/// Wall-clock nanoseconds, the content of the `cancel` and
+/// [`START_REQUEST_FILE`] triggers. Both are written by separate CLI
+/// processes, so only the realtime clock orders them.
+pub fn trigger_stamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .to_string()
+}
+
+fn read_trigger_stamp(path: &std::path::Path) -> Option<u128> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// The start-request marker for the signal being handled. It stays on disk
+/// until this is dropped, after the start has run: while it exists a
+/// `record cancel` knows a start is in flight even though the state file
+/// does not say "recording" yet.
+struct StartRequest {
+    issued_at: Option<u128>,
+}
+
+impl StartRequest {
+    fn read() -> Self {
+        Self {
+            issued_at: read_trigger_stamp(&Config::runtime_dir().join(START_REQUEST_FILE)),
+        }
+    }
+}
+
+impl Drop for StartRequest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
+    }
+}
+
+/// Whether a cancel stamped `cancel_at` was issued for the start requested at
+/// `start_at`. A cancel from before the request, or one carrying no stamp,
+/// is a leftover from an idle `record cancel` and must not touch the new
+/// recording (#606).
+fn cancel_targets_start(start_at: Option<u128>, cancel_at: Option<u128>) -> bool {
+    matches!((start_at, cancel_at), (Some(start), Some(cancel)) if cancel >= start)
+}
+
+/// Drop a leftover cancel trigger before a recording starts, keeping one
+/// issued after this recording was requested. `record start; record cancel`
+/// sent back to back can put the cancel on disk before the daemon has acted
+/// on the start signal; the recording poll then applies it once capture is
+/// live.
+fn discard_stale_cancel(start_at: Option<u128>) {
+    let cancel_file = Config::runtime_dir().join("cancel");
+    if !cancel_file.exists() {
+        return;
+    }
+    if cancel_targets_start(start_at, read_trigger_stamp(&cancel_file)) {
+        tracing::debug!("Cancel was issued after this start request; applying it");
+        return;
+    }
+    let _ = std::fs::remove_file(&cancel_file);
 }
 
 /// Read and consume the output mode override file
@@ -340,10 +520,28 @@ fn read_output_mode_override() -> Option<OutputOverride> {
     }
 }
 
-/// Remove the output mode override file if it exists (for cleanup on cancel/error)
-fn cleanup_output_mode_override() {
-    let override_file = Config::runtime_dir().join("output_mode_override");
-    let _ = std::fs::remove_file(&override_file);
+/// Remove every per-recording override (`voxtype record start --file`,
+/// `--model`, `--profile`, `--auto-submit`, ...) when a recording is
+/// discarded. A normal stop, including a max-duration timeout, must leave
+/// them for the result handler, which reads them when it delivers the text.
+fn discard_recording_overrides() {
+    discard_recording_overrides_in(&Config::runtime_dir());
+}
+
+/// Every override file a single recording can carry, in the runtime dir.
+const RECORDING_OVERRIDE_FILES: [&str; 6] = [
+    "output_mode_override",
+    "model_override",
+    "profile_override",
+    "auto_submit_override",
+    "shift_enter_override",
+    "smart_auto_submit_override",
+];
+
+fn discard_recording_overrides_in(runtime_dir: &std::path::Path) {
+    for name in RECORDING_OVERRIDE_FILES {
+        let _ = std::fs::remove_file(runtime_dir.join(name));
+    }
 }
 
 /// Read and consume the profile override file
@@ -429,18 +627,14 @@ fn read_bool_override(name: &str) -> Option<bool> {
     }
 }
 
-/// Remove a boolean override file if it exists (for cleanup on cancel/error)
-fn cleanup_bool_override(name: &str) {
-    let override_file = Config::runtime_dir().join(format!("{}_override", name));
-    let _ = std::fs::remove_file(&override_file);
-}
-
 // === Meeting Mode IPC ===
 
-/// A pending meeting-start trigger with optional title and diarization override.
+/// A pending meeting-start trigger with optional title, diarization override
+/// and the engine, model, language and URL choices.
 struct MeetingStartTrigger {
     title: Option<String>,
     diarization: Option<String>,
+    options: crate::config::MeetingStartOptions,
 }
 
 /// Read a file and return its trimmed contents, or None if missing or empty.
@@ -468,7 +662,7 @@ fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
 
 /// Allowed diarization backend override values from the CLI handler. Kept in
 /// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
-const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
+const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml", "hybrid"];
 
 /// Validate a diarization backend override against the allowlist.
 ///
@@ -509,10 +703,33 @@ fn check_meeting_start() -> Option<MeetingStartTrigger> {
         read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
     let _ = std::fs::remove_file(&diarization_file);
 
-    // Remove the start trigger last to acknowledge the command.
-    let _ = std::fs::remove_file(&start_file);
+    // `meeting start --engine/--model/--language/--url`, written the same way.
+    let options_file = runtime_dir.join("meeting_start_options");
+    let options = read_trimmed_nonempty(&options_file)
+        .and_then(|json| match serde_json::from_str(&json) {
+            Ok(options) => Some(options),
+            Err(e) => {
+                tracing::warn!("Ignoring unreadable meeting start options: {}", e);
+                None
+            }
+        })
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&options_file);
 
-    Some(MeetingStartTrigger { title, diarization })
+    // The start trigger stays on disk until `ack_meeting_start`, once the
+    // meeting is recording or refused. While it exists a second
+    // `voxtype meeting start` sees a start in flight and refuses, which it
+    // cannot tell from the state file until the meeting is up.
+    Some(MeetingStartTrigger {
+        title,
+        diarization,
+        options,
+    })
+}
+
+/// Acknowledge a meeting start trigger read by `check_meeting_start`.
+fn ack_meeting_start() {
+    let _ = std::fs::remove_file(Config::runtime_dir().join("meeting_start"));
 }
 
 /// Check for meeting stop command (via file trigger)
@@ -548,15 +765,71 @@ fn check_meeting_resume() -> bool {
     }
 }
 
+/// Check for a `meeting reassign` or `meeting annotate` (via file trigger).
+/// The CLI has already stored the change; the daemon applies it to the
+/// running meeting.
+fn check_meeting_edit() -> bool {
+    take_trigger("meeting_edit")
+}
+
+/// Check for a change to the running meeting's notes (via file trigger).
+fn check_meeting_notes() -> bool {
+    take_trigger("meeting_notes")
+}
+
+/// A `voxtype meeting soundcheck` request, consumed.
+fn take_soundcheck_trigger() -> Option<meeting::soundcheck::Request> {
+    let file = Config::runtime_dir().join(meeting::soundcheck::TRIGGER);
+    let text = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    Some(meeting::soundcheck::Request::parse(&text))
+}
+
+/// A sound check the daemon is running.
+struct Soundcheck {
+    /// The meeting's capture, canceller and liveness guard included.
+    opened: meeting::soundcheck::MeetingCapture,
+    levels: Option<tokio::task::JoinHandle<()>>,
+    deadline: std::time::Instant,
+    /// The `running` event, re-sent when the check is extended.
+    running: meeting::soundcheck::SoundcheckEvent,
+}
+
+/// The meeting named by a `meeting_summary_updated` trigger, taken.
+fn take_summary_updated() -> Option<String> {
+    let file = Config::runtime_dir().join(meeting::SUMMARY_UPDATED_TRIGGER);
+    let id = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    meeting::MeetingId::parse(id.trim())
+        .ok()
+        .map(|id| id.to_string())
+}
+
+fn take_trigger(name: &str) -> bool {
+    let file = Config::runtime_dir().join(name);
+    if file.exists() {
+        let _ = std::fs::remove_file(&file);
+        true
+    } else {
+        false
+    }
+}
+
 /// Clean up any stale meeting command files on startup
 fn cleanup_meeting_files() {
     let runtime_dir = Config::runtime_dir();
     for name in &[
         "meeting_start",
         "meeting_start_diarization",
+        "meeting_start_options",
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
+        "meeting_edit",
+        "meeting_notes",
+        meeting::retitle::TRIGGER,
+        meeting::notice::ACK_TRIGGER,
+        meeting::SUMMARY_UPDATED_TRIGGER,
     ] {
         let file = runtime_dir.join(name);
         if file.exists() {
@@ -565,25 +838,32 @@ fn cleanup_meeting_files() {
     }
 }
 
-/// Mark any active/paused meetings as completed on daemon startup.
-/// This handles meetings orphaned by a crash or daemon restart.
-fn cleanup_stale_meetings(config: &Config) {
+/// Where meetings are stored, per `[meeting] storage_path`.
+fn meeting_storage_config(config: &Config) -> StorageConfig {
     let storage_path = if config.meeting.storage_path == "auto" {
         Config::data_dir().join("meetings")
     } else {
         std::path::PathBuf::from(&config.meeting.storage_path)
     };
-
-    let storage_config = StorageConfig {
+    StorageConfig {
         storage_path,
         retain_audio: config.meeting.retain_audio,
         max_meetings: 0,
-    };
+        my_name: config.meeting.my_name.clone(),
+    }
+}
 
-    match meeting::MeetingStorage::open(storage_config) {
-        Ok(storage) => match storage.complete_stale_meetings() {
+/// Mark meetings still active or paused as interrupted on daemon startup:
+/// the daemon that recorded them crashed or was killed, so none of them
+/// finished. `voxtype meeting recover` finishes or discards them.
+fn cleanup_stale_meetings(config: &Config) {
+    match meeting::MeetingStorage::open(meeting_storage_config(config)) {
+        Ok(storage) => match storage.interrupt_stale_meetings() {
             Ok(count) if count > 0 => {
-                tracing::info!("Marked {} orphaned meeting(s) as completed", count);
+                tracing::warn!(
+                    "{} meeting(s) never finished (the daemon stopped while recording); see voxtype meeting recover",
+                    count
+                );
                 // Reset meeting state file to idle
                 let state_file = Config::runtime_dir().join("meeting_state");
                 let _ = std::fs::write(&state_file, "idle");
@@ -718,8 +998,11 @@ async fn write_transcription_to_file(
         }
     }
 
-    // Ensure text ends with newline
-    let output_text = if text.ends_with('\n') {
+    // An empty transcript (post-processing returned nothing with
+    // fallback_on_empty off) writes nothing: overwrite still replaces the
+    // previous transcript, with an empty file, so a reader can't take the old
+    // text for this result, and append adds no blank line.
+    let output_text = if text.is_empty() || text.ends_with('\n') {
         text.to_string()
     } else {
         format!("{}\n", text)
@@ -739,6 +1022,7 @@ async fn write_transcription_to_file(
                 return Err(e);
             }
         }
+        FileMode::Append if output_text.is_empty() => {}
         FileMode::Append => {
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -746,10 +1030,80 @@ async fn write_transcription_to_file(
                 .open(path)
                 .await?;
             file.write_all(output_text.as_bytes()).await?;
+            // tokio completes the write on a background thread; without the
+            // flush a reader right after this returns can still see the old
+            // file, and dropping the handle doesn't wait for it.
+            file.flush().await?;
         }
     }
 
     Ok(())
+}
+
+/// Where a file-mode transcript ended up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileDelivery {
+    Written,
+    /// The write failed (error text) and the fallback chain took the text.
+    FellBack(String),
+    /// The write failed (error text) and nothing else could take the text.
+    Lost(String),
+}
+
+/// Deliver a transcript to `path`, wrapped in the pre/post output hooks like
+/// every other output mode, so a compositor submap entered for the recording
+/// is always reset. When the write fails, `fallback` (the clipboard chain,
+/// empty when `fallback_to_clipboard` is off) gets the text instead.
+async fn deliver_to_file(
+    path: &Path,
+    text: &str,
+    cfg: &crate::config::OutputConfig,
+    fallback: &[Box<dyn TextOutput>],
+) -> FileDelivery {
+    if let Some(cmd) = &cfg.pre_output_command {
+        if let Err(e) = output::run_hook(cmd, "pre_output").await {
+            tracing::warn!("{}", e);
+        }
+    }
+
+    let delivery = match write_transcription_to_file(path, text, &cfg.file_mode).await {
+        Ok(()) => FileDelivery::Written,
+        Err(e) => {
+            let err = e.to_string();
+            tracing::error!("Failed to write transcription to {:?}: {}", path, err);
+            let rescued = !fallback.is_empty()
+                && output::output_with_fallback(
+                    fallback,
+                    text,
+                    output::OutputOptions {
+                        pre_output_command: None,
+                        post_output_command: None,
+                        wait_for_modifier_release: false,
+                        modifier_release_timeout: Duration::ZERO,
+                    },
+                )
+                .await
+                .is_ok();
+            if rescued {
+                tracing::warn!(
+                    "Transcription for {:?} copied to the clipboard instead",
+                    path
+                );
+                FileDelivery::FellBack(err)
+            } else {
+                FileDelivery::Lost(err)
+            }
+        }
+    };
+
+    // Always, even when nothing was delivered, matching output_with_fallback.
+    if let Some(cmd) = &cfg.post_output_command {
+        if let Err(e) = output::run_hook(cmd, "post_output").await {
+            tracing::warn!("{}", e);
+        }
+    }
+
+    delivery
 }
 
 /// Read and consume the model override file
@@ -777,33 +1131,47 @@ fn read_model_override() -> Option<String> {
     if model.is_empty() {
         None
     } else {
-        tracing::info!("Using model override: {}", model);
+        tracing::info!("Model override requested: {}", model);
         Some(model)
     }
-}
-
-/// Remove the model override file if it exists (for cleanup on cancel/error)
-fn cleanup_model_override() {
-    let override_file = Config::runtime_dir().join("model_override");
-    let _ = std::fs::remove_file(&override_file);
 }
 
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
 
+/// Background construction of a transcriber.
+type TranscriberLoadTask = tokio::task::JoinHandle<
+    std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
+>;
+
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
+    pending_language: Option<Config>,
+    /// When the `record start` being handled was issued, while that start
+    /// runs. Lets a cancel racing the start signal survive the #606
+    /// stale-cancel sweep.
+    start_request: Option<u128>,
     config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
     pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
+    /// Vocabulary matchers prepared once at startup, keyed by profile name.
+    profile_vocabularies: HashMap<String, Vocabulary>,
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
     level_hub: Option<audio::levels::LevelHub>,
+    /// Meeting transcript/status broadcaster for the meeting HUD (None if bind failed)
+    meeting_event_hub: Option<meeting::MeetingEventHub>,
+    /// The daemon's current view of the active (or most recently ended)
+    /// meeting, mirrored into `meeting_event_hub`'s `hello` snapshot on every
+    /// transition. Source of truth for the HUD; independent of the meeting
+    /// state *file* (`write_meeting_state_file`), which exists for Waybar-
+    /// style consumers that only want the plain-text status.
+    meeting_hud: meeting::MeetingHudState,
     /// Active per-recording level emitter task; aborted when recording stops
     level_emitter_task: Option<tokio::task::JoinHandle<()>>,
     /// Tracks time-since-last-speech for the active recording, when
@@ -824,14 +1192,27 @@ pub struct Daemon {
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(target_os = "linux")]
+    tray: Option<crate::tray::TrayRuntime>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
+    // Rate-limits the notification for a microphone that won't open, so a
+    // hotkey pressed again and again doesn't stack identical notices.
+    capture_notices: crate::failure_notice::NoticeGate,
+    // Same for a model that won't load.
+    model_notices: crate::failure_notice::NoticeGate,
     // Background task for loading model on-demand
     model_load_task: Option<
         tokio::task::JoinHandle<
             std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
         >,
     >,
+    // Transcriber for the most recent `--model` override the active engine
+    // can't serve (see `model_catalog::OverrideRoute::Separate`), keyed by
+    // the override name. One slot: the default model stays loaded separately.
+    override_cache: Option<(String, Arc<dyn Transcriber>)>,
+    // Load of an override transcriber started when its recording began.
+    override_load_task: Option<(String, TranscriberLoadTask)>,
     // Background task that spawns and prepares the gpu_isolation subprocess
     // worker. Awaited before transcription so audio capture can start
     // immediately while the worker loads its model in parallel.
@@ -843,27 +1224,59 @@ pub struct Daemon {
     // keyboard-layout hints to eitype/dotool, see issue #180) after the task
     // completes. Cleared when transcription_task is taken.
     active_transcriber: Option<Arc<dyn Transcriber>>,
+    // Engine instance preloaded at startup when on_demand_loading is off.
+    // Whisper draws its transcriber from model_manager instead; every other
+    // engine clones from here. A field rather than a `run()` local so the
+    // panic recovery in handle_transcription_result can discard a poisoned
+    // instance (#643) — get_transcriber_for_recording re-creates it on the
+    // next recording when it finds this empty.
+    transcriber_preloaded: Option<Arc<dyn Transcriber>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
         tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>,
     )>,
     // Voice Activity Detection (filters silence-only recordings)
-    vad: Option<Box<dyn crate::vad::VoiceActivityDetector>>,
+    vad: Option<Arc<dyn crate::vad::VoiceActivityDetector>>,
     // Meeting mode daemon (optional, created when meeting starts)
     meeting_daemon: Option<MeetingDaemon>,
     // Meeting state file path
     meeting_state_file_path: Option<PathBuf>,
     // Audio capture for meeting mode (dual: mic + loopback)
     meeting_audio_capture: Option<audio::DualCapture>,
+    /// A running `voxtype meeting soundcheck`.
+    meeting_soundcheck: Option<Soundcheck>,
+    /// The meeting.sock level publisher and its "recording, not paused" flag.
+    meeting_levels: Option<(
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     // Chunk buffers for meeting mode (separate mic and loopback)
     meeting_mic_buffer: Vec<f32>,
     meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
     meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // The recording announcement's progress, while it runs
+    meeting_announce_rx: Option<tokio::sync::mpsc::Receiver<meeting::announce::Update>>,
+    meeting_announce_task: Option<tokio::task::JoinHandle<meeting::announce::Status>>,
+    // When the meeting's capture started: zero on its transcript timeline
+    meeting_capture_started: Option<std::time::Instant>,
+    // Missing-model notices already shown this run, so each pops up once
+    meeting_notices_shown: std::collections::HashSet<String>,
+    // Whether this meeting's first transcription error was already notified
+    meeting_error_notified: bool,
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
+    // Whether the running meeting's mic goes through GTCRN. The enhancer
+    // stays loaded between meetings; a meeting on the echo canceller skips it.
+    #[cfg_attr(not(feature = "onnx-common"), allow(dead_code))]
+    meeting_gtcrn: bool,
+    // PipeWire's echo canceller, while a meeting on speakers runs
+    meeting_echo_canceller: Option<audio::echo_cancel::EchoCanceller>,
+    // Watches the first seconds of the cancelled mic for a canceller that
+    // delivers nothing; set while that is still open
+    meeting_aec_liveness: Option<audio::echo_cancel::LivenessCheck>,
     // Media players that were paused when recording started (for resume on stop)
     paused_media_players: Vec<String>,
     // Audio streams that were ducked when recording started (for restore on recording stop)
@@ -872,6 +1285,19 @@ pub struct Daemon {
     // so the next duck/restore can serialize against it; see
     // `duck_media_streams` for why capturing originals mid-fade is unsafe.
     media_fade_task: Option<tokio::task::JoinHandle<()>>,
+    // Set when `max_duration_secs` ends the session in flight, so the
+    // outcome published for the OSD can say the limit stopped it.
+    osd_limit_reached: bool,
+    osd_session_started_at_ms: u64,
+    osd_session_suppressed: std::sync::atomic::AtomicBool,
+    // Whether this session's outcome has been published. The first one
+    // wins: some paths report a specific outcome (no speech) and then
+    // fall through a generic one (empty result) on the way to idle.
+    osd_outcome_sent: std::sync::atomic::AtomicBool,
+    // An accepted model upgrade still waiting for its first successful
+    // transcription, after which `setup migrate --cleanup` may delete the
+    // previous model. Read once at startup so the hot path does no I/O.
+    model_upgrade_pending: bool,
 }
 
 impl Daemon {
@@ -904,7 +1330,23 @@ impl Daemon {
         // words that are ordinary vocabulary there rather than disfluencies
         // (#566).
         let text_processor =
-            TextProcessor::new_for_language(&config.text, config.active_language());
+            TextProcessor::new_for_config(&config.text, config.active_language(), &config);
+        let profile_vocabularies = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| {
+                !profile.vocabulary.terms.is_empty() || profile.vocabulary.terms_file.is_some()
+            })
+            .filter_map(
+                |(name, profile)| match Vocabulary::load(&profile.vocabulary) {
+                    Ok(vocabulary) => Some((name.clone(), vocabulary)),
+                    Err(error) => {
+                        tracing::warn!(profile = %name, %error, "Profile vocabulary disabled");
+                        None
+                    }
+                },
+            )
+            .collect();
         if config.text.spoken_punctuation {
             tracing::info!("Spoken punctuation enabled");
         }
@@ -915,8 +1357,23 @@ impl Daemon {
             );
         }
 
+        if config.streaming_enabled() && config.output.post_process.is_some() {
+            // [text] rules no longer belong in this warning: since the #669
+            // fix they are applied when a streaming segment is committed, and
+            // warning that a working setting is ignored is worse than not
+            // warning at all. The LLM post_process hook is the one completed-
+            // transcript stage streaming still skips (see the note in
+            // output::streaming): incremental output would re-run it per
+            // segment and let it rewrite already-typed text.
+            tracing::warn!(
+                "Streaming is enabled, so output.post_process will NOT run. \
+                 The post-process command needs a completed transcript, which \
+                 streaming never produces. Disable streaming to use it."
+            );
+        }
+
         // Initialize post-processor if configured
-        let post_processor = config.output.post_process.as_ref().map(|cfg| {
+        let post_processor = config.output.active_post_process().map(|cfg| {
             tracing::info!(
                 "Post-processing enabled: command={:?}, timeout={}ms",
                 cfg.command,
@@ -927,18 +1384,23 @@ impl Daemon {
 
         // Initialize Voice Activity Detection if enabled
         let vad = match crate::vad::create_vad(&config) {
-            Ok(Some(vad)) => {
+            Ok(Some(init)) => {
                 tracing::info!(
-                    "Voice Activity Detection enabled (backend: {:?}, threshold: {:.2}, min_speech: {}ms)",
+                    "Voice Activity Detection enabled (backend: {:?}, configured: {:?}, threshold: {:.2}, min_speech: {}ms)",
+                    init.backend,
                     config.vad.backend,
                     config.vad.threshold,
                     config.vad.min_speech_duration_ms
                 );
-                Some(vad)
+                Some(Arc::from(init.detector))
             }
             Ok(None) => None,
             Err(e) => {
+                // Without VAD, silence reaches the model and can be typed as
+                // hallucinated text, so the user has to hear about it.
+                let (title, body) = crate::vad::unavailable_notice(&config.vad, &e);
                 tracing::warn!("Failed to initialize VAD, continuing without: {}", e);
+                crate::notification::send_sync(title, &body);
                 None
             }
         };
@@ -950,39 +1412,71 @@ impl Daemon {
             None
         };
 
+        let model_upgrade_pending = crate::model_upgrade::pending_first_success(
+            &crate::model_upgrade::state_path(),
+            config.model_name(),
+        );
+
         Self {
+            start_request: None,
             config,
             config_path,
             state_file_path,
             pid_file_path: None,
             audio_feedback,
             text_processor,
+            profile_vocabularies,
             post_processor,
             last_dictation: None,
             level_hub: None,
+            meeting_event_hub: None,
+            meeting_hud: meeting::MeetingHudState::idle(),
             level_emitter_task: None,
             silence_tracker: None,
             is_external_trigger: false,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
+            #[cfg(target_os = "linux")]
+            tray: None,
+            pending_language: None,
             model_manager: None,
+            capture_notices: Default::default(),
+            model_notices: Default::default(),
             model_load_task: None,
+            override_cache: None,
+            override_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
             active_transcriber: None,
+            transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
             meeting_state_file_path,
             meeting_audio_capture: None,
+            meeting_levels: None,
+            meeting_soundcheck: None,
             meeting_mic_buffer: Vec::new(),
             meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
+            meeting_announce_rx: None,
+            meeting_announce_task: None,
+            meeting_capture_started: None,
+            meeting_notices_shown: std::collections::HashSet::new(),
+            meeting_error_notified: false,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
+            meeting_gtcrn: false,
+            meeting_echo_canceller: None,
+            meeting_aec_liveness: None,
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
+            osd_limit_reached: false,
+            osd_session_started_at_ms: 0,
+            osd_session_suppressed: std::sync::atomic::AtomicBool::new(false),
+            osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
+            model_upgrade_pending,
         }
     }
 
@@ -1066,8 +1560,67 @@ impl Daemon {
         self.resume_media_players();
     }
 
+    /// Leave the failure visible until the next recording/state change, without
+    /// changing the public state-file protocol or requiring audio feedback.
+    fn queue_language(&mut self, language: &str) -> std::result::Result<(), String> {
+        let path = self
+            .config_path
+            .clone()
+            .or_else(Config::resolve_existing_path)
+            .ok_or("No configuration file is available")?;
+        self.pending_language = Some(crate::language_selection::persist(
+            &self.config,
+            &path,
+            language,
+        )?);
+        Ok(())
+    }
+
+    fn apply_pending_language(&mut self, idle: bool) -> bool {
+        if !idle {
+            return false;
+        }
+        let Some(next) = self.pending_language.take() else {
+            return false;
+        };
+        // No active capture/transcription is touched. All future construction,
+        // including resident workers and per-record overrides, uses this snapshot.
+        if let Some(task) = self.model_load_task.take() {
+            task.abort();
+        }
+        if let Some((_, task)) = self.override_load_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.whisper_prepare_task.take() {
+            task.abort();
+        }
+        self.transcriber_preloaded = None;
+        self.override_cache = None;
+        self.config = next;
+        self.model_manager = (self.config.engine == crate::config::TranscriptionEngine::Whisper)
+            .then(|| ModelManager::new(&self.config.whisper, self.config_path.clone()));
+        self.text_processor = TextProcessor::new_for_config(
+            &self.config.text,
+            self.config.active_language(),
+            &self.config,
+        );
+        tracing::info!(language = ?self.config.active_language(), "Tray language applied for next dictation");
+        true
+    }
+
+    fn show_tray_error(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update(crate::tray::TrayState::Error);
+        }
+    }
+
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update(crate::tray::TrayState::from_state_name(state_name));
+        }
         if let Some(ref path) = self.state_file_path {
             write_state_file(path, state_name);
         }
@@ -1079,13 +1632,131 @@ impl Daemon {
         // back to idle.
         match state_name {
             "recording" | "streaming" => {
-                if read_bool_override("no_osd").unwrap_or(false) {
-                    set_osd_suppressed(true);
+                let suppressed = read_bool_override("no_osd").unwrap_or(false);
+                self.osd_session_suppressed
+                    .store(suppressed, std::sync::atomic::Ordering::Relaxed);
+                set_osd_suppressed(suppressed);
+            }
+            "idle" | "stopped" => {
+                set_osd_suppressed(false);
+                if self.state_file_path.is_some() {
+                    osd::session::clear_session(&Config::runtime_dir());
                 }
             }
-            "idle" | "stopped" => set_osd_suppressed(false),
             _ => {}
         }
+    }
+
+    /// Resolve `[osd] frontend` (logging the choice and why, once) and
+    /// start the OSD supervisor. Returns the active frontend's name for
+    /// `voxtype status`, or "none" when nothing can run.
+    fn spawn_osd(&mut self) -> &'static str {
+        use osd::config::OsdFrontend;
+        let configured = osd::frontend::effective_configured(self.config.osd.frontend);
+        let resolution = osd::frontend::resolve(configured, &osd::frontend::SystemProbe);
+        // Tell the user once per start when the OSD they asked for by name
+        // won't be the one shown. The default `auto` never notifies, only
+        // logs below. Respawns don't repeat it. Off the runtime threads,
+        // since the notification is sent synchronously.
+        if let Some((title, body)) = osd::frontend::fallback_notice(&resolution) {
+            tokio::task::spawn_blocking(move || crate::notification::send_sync(&title, &body));
+        }
+        let Some(active) = resolution.active else {
+            tracing::warn!(
+                "OSD frontend: none ({}). Run `voxtype setup osd --status` for details, \
+                 or set [osd] enabled = false.",
+                resolution.reason
+            );
+            return "none";
+        };
+        tracing::info!("OSD frontend: {} ({})", active.as_str(), resolution.reason);
+        // Explicit values keep the launcher's own resolution, unchanged.
+        let forced = (configured == OsdFrontend::Auto).then_some(active);
+        self.osd_supervisor_task = Some(osd::supervisor::spawn(forced));
+        active.as_str()
+    }
+
+    /// Publish `recording.json` for the session `state` just started, so OSD
+    /// frontends can show elapsed time, the remaining time before
+    /// `max_duration_secs`, and which engine and model this recording uses.
+    /// Skipped when the state file is disabled, like every runtime file the
+    /// OSD reads.
+    fn begin_osd_session(&mut self, state: &State) {
+        self.osd_limit_reached = false;
+        self.osd_outcome_sent
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if self.state_file_path.is_none() {
+            return;
+        }
+        let (mode, model_override) = match state {
+            State::Recording { model_override, .. }
+            | State::EagerRecording { model_override, .. } => ("recording", model_override),
+            State::Streaming { model_override, .. } => ("streaming", model_override),
+            _ => return,
+        };
+        let (engine, model) = self.recording_engine_and_model(model_override.as_deref());
+        self.osd_session_started_at_ms = osd::session::now_unix_ms();
+        osd::session::write_session(
+            &Config::runtime_dir(),
+            &osd::session::OsdSession {
+                mode: mode.to_string(),
+                started_at_ms: self.osd_session_started_at_ms,
+                max_duration_secs: u64::from(self.config.audio.max_duration_secs),
+                engine,
+                model,
+            },
+        );
+    }
+
+    /// The engine and model that will serve a recording, after any
+    /// per-recording `--model` override.
+    fn recording_engine_and_model(&self, model_override: Option<&str>) -> (String, String) {
+        let engine = self.config.engine.to_string();
+        let Some(name) = model_override else {
+            return (engine, self.config.model_name().to_string());
+        };
+        match crate::model_catalog::override_route(&self.config, name) {
+            Ok(crate::model_catalog::OverrideRoute::Separate { engine, model }) => {
+                (engine.to_string(), model)
+            }
+            _ => (engine, name.to_string()),
+        }
+    }
+
+    /// Publish the outcome of a session that delivered `text`.
+    fn publish_osd_text_outcome(&self, text: &str) {
+        let chars = text.chars().count();
+        let kind = if chars == 0 {
+            osd::session::OutcomeKind::Empty
+        } else {
+            osd::session::OutcomeKind::Ok
+        };
+        self.publish_osd_outcome(kind, chars);
+    }
+
+    /// Publish `outcome.json` saying how the session just ended, for OSD
+    /// frontends to confirm the result.
+    fn publish_osd_outcome(&self, outcome: osd::session::OutcomeKind, chars: usize) {
+        if self.state_file_path.is_none()
+            || self
+                .osd_outcome_sent
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        osd::session::write_outcome(
+            &Config::runtime_dir(),
+            &osd::session::OsdOutcome {
+                outcome,
+                session_started_at_ms: self.osd_session_started_at_ms,
+                suppressed: self
+                    .osd_session_suppressed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                chars,
+                limit_reached: self.osd_limit_reached,
+                at_ms: osd::session::now_unix_ms(),
+            },
+        );
     }
 
     /// Build a `SpeechTracker` for silence-based auto-stop, if `armed` and
@@ -1127,8 +1798,9 @@ impl Daemon {
         // restarts forever. A stale trigger then kills this recording (and
         // each one after it) ~100-400ms in. Consume it here, at the single
         // point every recording path passes through, so a cancel can only
-        // ever apply to a recording that was live when it was issued (#606).
-        cleanup_cancel_file();
+        // ever apply to a recording that was live, or already requested,
+        // when it was issued (#606).
+        discard_stale_cancel(self.start_request);
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
@@ -1158,17 +1830,20 @@ impl Daemon {
                     if let Some(handle) = handle {
                         self.level_emitter_task = Some(handle);
                     }
+                    self.capture_notices.clear();
                     Ok(capture)
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
-                    self.play_feedback(SoundEvent::Error);
+                    self.show_tray_error();
+                    self.report_capture_failure(&e).await;
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
-                self.play_feedback(SoundEvent::Error);
+                self.show_tray_error();
+                self.report_capture_failure(&e).await;
                 Err(())
             }
         }
@@ -1182,6 +1857,46 @@ impl Daemon {
         if let Some(handle) = self.level_emitter_task.take() {
             handle.abort();
         }
+    }
+
+    /// File-mode delivery with the daemon's clipboard fallback. Tells the
+    /// user when the transcript didn't land at the path they asked for.
+    async fn deliver_file_output(&self, path: &Path, text: &str) -> FileDelivery {
+        let cfg = &self.config.output;
+        let fallback = if cfg.fallback_to_clipboard {
+            let mut clipboard = cfg.clone();
+            clipboard.mode = OutputMode::Clipboard;
+            output::create_output_chain(&clipboard)
+        } else {
+            Vec::new()
+        };
+        let delivery = deliver_to_file(path, text, cfg, &fallback).await;
+        match &delivery {
+            FileDelivery::Written => {}
+            FileDelivery::FellBack(err) => {
+                notification::send(
+                    "Voxtype",
+                    &format!(
+                        "Could not write {}: {}. Transcription copied to the clipboard instead.",
+                        path.display(),
+                        err
+                    ),
+                )
+                .await
+            }
+            FileDelivery::Lost(err) => {
+                notification::send(
+                    "Voxtype",
+                    &format!(
+                        "Could not write {}: {}. The transcription was not saved.",
+                        path.display(),
+                        err
+                    ),
+                )
+                .await
+            }
+        }
+        delivery
     }
 
     /// Resolve the file-output target path for a recording, if any.
@@ -1230,7 +1945,6 @@ impl Daemon {
     #[allow(clippy::too_many_arguments)]
     async fn try_start_streaming(
         &mut self,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         streaming_handle: &mut Option<StreamHandle>,
@@ -1242,8 +1956,20 @@ impl Daemon {
         // Same stale-trigger hazard as start_recording_capture: Streaming is
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
-        cleanup_cancel_file();
-        let Some(transcriber) = transcriber_preloaded.as_ref() else {
+        discard_stale_cancel(self.start_request);
+        // An override model has its own transcriber, which records in batch
+        // mode; streaming would run the default model instead.
+        if let Some(name) = model_override.as_deref() {
+            if matches!(
+                model_catalog::override_route(&self.config, name),
+                Ok(model_catalog::OverrideRoute::Separate { .. })
+            ) {
+                return false;
+            }
+        }
+        // Clone out of the field so the borrow doesn't overlap the
+        // `&mut self` capture start below.
+        let Some(transcriber) = self.transcriber_preloaded.clone() else {
             return false;
         };
         if transcriber.as_streaming().is_none() {
@@ -1289,6 +2015,7 @@ impl Daemon {
             file_output_path,
         };
         self.update_state("streaming");
+        self.begin_osd_session(state);
         self.play_feedback(SoundEvent::RecordingStart);
 
         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -1342,7 +2069,6 @@ impl Daemon {
     /// keybinding) and the silence-timeout auto-stop, which need identical
     /// per-state-variant stop behavior; the only difference between them is
     /// *why* the stop fired, not what happens next.
-    #[allow(clippy::too_many_arguments)]
     async fn stop_active_recording(
         &mut self,
         state: &mut State,
@@ -1350,7 +2076,6 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) {
         // Notify an external-trigger caller that this session is ending,
         // regardless of why (stop, silence timeout, hard timeout) — it may
@@ -1395,13 +2120,8 @@ impl Daemon {
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
 
-            self.start_transcription_task(
-                state,
-                audio_capture,
-                model_override,
-                transcriber_preloaded,
-            )
-            .await;
+            self.start_transcription_task(state, audio_capture, model_override)
+                .await;
         } else if state.is_eager_recording() {
             // Handle eager recording stop via external trigger - extract model_override first
             let model_override = match &*state {
@@ -1436,7 +2156,7 @@ impl Daemon {
             .await;
 
             let transcriber = match self
-                .get_transcriber_for_recording(model_override.as_deref(), transcriber_preloaded)
+                .get_transcriber_for_recording(model_override.as_deref())
                 .await
             {
                 Ok(t) => t,
@@ -1454,6 +2174,7 @@ impl Daemon {
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
+                self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                 self.reset_to_idle(state).await;
             }
             *eager_transcriber = None;
@@ -1533,9 +2254,8 @@ impl Daemon {
         // they went — see the event pump's `file_output` branch — so the
         // accumulated text only exists in the session. Write it out now,
         // before the session is dropped below. Mirrors the classic
-        // (non-streaming) path's file handling, including skipping
-        // post_output_command: file mode is a batch dump, not a
-        // live-typing operation the hook is meant to wrap around.
+        // (non-streaming) path's file handling: the output hooks wrap the
+        // write and a failed write falls back to the clipboard.
         let file_output_path = match &state {
             State::Streaming {
                 file_output_path, ..
@@ -1559,30 +2279,50 @@ impl Daemon {
             *streaming_session = None;
             *streaming_chain = None;
 
-            let file_mode = &self.config.output.file_mode;
-            match write_transcription_to_file(&output_path, &final_text, file_mode).await {
-                Ok(()) => {
-                    let mode_str = match file_mode {
+            // The session accumulated raw engine output (the event pump's
+            // file_output branches deliberately skip per-segment
+            // processing), so this is where the transcript becomes final:
+            // apply replacements and spoken punctuation over the whole
+            // text, same as the batch path does before writing (#669).
+            let vocabulary = read_profile_override()
+                .as_ref()
+                .and_then(|name| self.profile_vocabularies.get(name));
+            let final_text = self
+                .text_processor
+                .process_with_vocabulary(&final_text, vocabulary);
+
+            match self.deliver_file_output(&output_path, &final_text).await {
+                FileDelivery::Written => {
+                    let mode_str = match self.config.output.file_mode {
                         FileMode::Overwrite => "wrote",
                         FileMode::Append => "appended",
                     };
                     tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
+                    self.publish_osd_text_outcome(&final_text);
                     self.play_feedback(SoundEvent::TranscriptionComplete);
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to write streamed transcription to {:?}: {}",
-                        output_path,
-                        e
-                    );
+                FileDelivery::FellBack(_) => {
+                    self.publish_osd_text_outcome(&final_text);
+                    self.play_feedback(SoundEvent::TranscriptionComplete);
+                }
+                FileDelivery::Lost(_) => {
+                    self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
+                    self.play_feedback(SoundEvent::Error);
                 }
             }
+            output::deferred_notice::flush().await;
 
             *state = State::Idle;
             self.update_state("idle");
+            discard_recording_overrides();
             return;
         }
 
+        let streamed = streaming_session
+            .as_ref()
+            .map(|s| s.finalized_text().to_string())
+            .unwrap_or_default();
+        self.publish_osd_text_outcome(&streamed);
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1593,9 +2333,133 @@ impl Daemon {
                 tracing::warn!("{}", e);
             }
         }
+        output::deferred_notice::flush().await;
 
         *state = State::Idle;
         self.update_state("idle");
+        discard_recording_overrides();
+    }
+
+    /// Carry out a `voxtype record cancel` trigger against whatever session is
+    /// live: discard a recording (batch, eager, or streaming) or abort a
+    /// transcription. The caller has already consumed the trigger file.
+    #[allow(clippy::too_many_arguments)]
+    async fn cancel_requested_session(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
+    ) {
+        if state.is_streaming() {
+            tracing::info!("Recording cancelled");
+            self.end_external_session(true).await;
+            self.cancel_streaming_to_idle(
+                state,
+                audio_capture,
+                streaming_handle,
+                streaming_session,
+                streaming_chain,
+                "Recording discarded",
+            )
+            .await;
+            return;
+        }
+
+        if state.is_recording() {
+            tracing::info!("Recording cancelled");
+
+            // Stop recording and discard audio
+            if let Some(mut capture) = audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+            self.restore_recording_media();
+
+            // Cancel any pending model load task
+            if let Some(task) = self.model_load_task.take() {
+                task.abort();
+            }
+
+            // Cancel any pending eager chunk tasks
+            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                task.abort();
+            }
+
+            if let State::EagerRecording {
+                accumulated_audio,
+                chunk_results,
+                chunks_sent,
+                tasks_in_flight,
+                ..
+            } = state
+            {
+                accumulated_audio.clear();
+                chunk_results.clear();
+                *chunks_sent = 0;
+                *tasks_in_flight = 0;
+            }
+
+            discard_recording_overrides();
+            // A cancelled external-trigger session is still an ended
+            // session — tell the caller and disarm tracking.
+            self.end_external_session(true).await;
+            *state = State::Idle;
+            *eager_transcriber = None;
+            self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+            self.update_state("idle");
+            self.play_feedback(SoundEvent::Cancelled);
+
+            // Run post_output_command to reset compositor submap
+            if let Some(cmd) = &self.config.output.post_output_command {
+                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                    tracing::warn!("{}", e);
+                }
+            }
+
+            end_recording_notification(
+                "Cancelled",
+                "Recording discarded",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+            return;
+        }
+
+        if matches!(state, State::Transcribing { .. }) {
+            tracing::info!("Transcription cancelled");
+
+            // Abort the transcription task
+            if let Some(task) = self.transcription_task.take() {
+                task.abort();
+            }
+            // Drop the cloned transcriber Arc so it isn't held until the
+            // next transcription.
+            self.active_transcriber = None;
+
+            discard_recording_overrides();
+            *state = State::Idle;
+            self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+            self.update_state("idle");
+            self.play_feedback(SoundEvent::Cancelled);
+
+            // Run post_output_command to reset compositor submap
+            if let Some(cmd) = &self.config.output.post_output_command {
+                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                    tracing::warn!("{}", e);
+                }
+            }
+
+            end_recording_notification(
+                "Cancelled",
+                "Transcription aborted",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+        }
     }
 
     /// Cancel an active streaming session: signal the backend, drop capture,
@@ -1632,13 +2496,9 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        discard_recording_overrides();
         *state = State::Idle;
+        self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
@@ -1717,17 +2577,419 @@ impl Daemon {
                         })
                     };
                     self.level_emitter_task = Some(handle);
+                    self.capture_notices.clear();
                     Ok((capture, streaming_rx))
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
-                    self.play_feedback(SoundEvent::Error);
+                    self.show_tray_error();
+                    self.report_capture_failure(&e).await;
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
-                self.play_feedback(SoundEvent::Error);
+                self.show_tray_error();
+                self.report_capture_failure(&e).await;
+                Err(())
+            }
+        }
+    }
+
+    /// Get the model ready while the user speaks: start an on-demand load,
+    /// or warm the preloaded transcriber (spawning the gpu_isolation worker).
+    /// An override the active transcriber can't serve loads its own instead.
+    fn active_profile_vocabulary_terms(&self) -> Vec<String> {
+        read_profile_override()
+            .as_ref()
+            .and_then(|name| self.profile_vocabularies.get(name))
+            .map(|vocabulary| vocabulary.terms().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    fn prepare_for_recording(&mut self, model_override: Option<&str>) {
+        let vocabulary = self.active_profile_vocabulary_terms();
+        if let Some(name) = model_override {
+            if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
+                model_catalog::override_route(&self.config, name)
+            {
+                self.start_override_load(name, engine, &model, vocabulary);
+                return;
+            }
+        }
+
+        if self.config.on_demand_loading() {
+            // Start model loading in background
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    let config = self.config.whisper.clone();
+                    let config_path = self.config_path.clone();
+                    let model_to_load = model_override.map(str::to_string);
+                    let vocabulary = vocabulary.clone();
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        let mut temp_manager = ModelManager::new(&config, config_path);
+                        let transcriber = temp_manager.get_transcriber(model_to_load.as_deref())?;
+                        transcriber.set_vocabulary(&vocabulary);
+                        Ok(transcriber)
+                    }));
+                }
+                crate::config::TranscriptionEngine::Parakeet
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
+                | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Soniox => {
+                    let config = self.config.clone();
+                    let vocabulary = vocabulary.clone();
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        let transcriber: Arc<dyn Transcriber> =
+                            Arc::from(crate::transcribe::create_transcriber(&config)?);
+                        transcriber.set_vocabulary(&vocabulary);
+                        Ok(transcriber)
+                    }));
+                }
+            }
+            tracing::debug!("Started background model loading");
+        } else {
+            // Prepare model (spawns subprocess for gpu_isolation mode)
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    if let Some(ref mut mm) = self.model_manager {
+                        match mm.prepare_model(model_override, &vocabulary) {
+                            Ok(handle) => {
+                                self.whisper_prepare_task = handle;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to prepare model: {}", e);
+                            }
+                        }
+                    }
+                }
+                crate::config::TranscriptionEngine::Parakeet
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
+                | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Soniox => {
+                    if let Some(ref t) = self.transcriber_preloaded {
+                        let transcriber = t.clone();
+                        transcriber.set_vocabulary(&vocabulary);
+                        tokio::task::spawn_blocking(move || {
+                            transcriber.prepare();
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reject an unusable `--model` override before recording starts, so the
+    /// user hears the error now rather than after speaking.
+    async fn accept_model_override(&self, model_override: Option<&str>) -> bool {
+        let Some(name) = model_override else {
+            return true;
+        };
+        match model_catalog::override_route(&self.config, name) {
+            Ok(_) => true,
+            Err(problem) => {
+                self.report_override_problem(&problem).await;
+                false
+            }
+        }
+    }
+
+    /// Tell the user the recording will stop soon because of the cap.
+    async fn warn_recording_cap(&self, left: Duration, max_duration: Duration) {
+        tracing::info!(
+            "Recording reaches the {:.0}s limit in {:.0}s",
+            max_duration.as_secs_f32(),
+            left.as_secs_f32()
+        );
+        send_notification_with_lifetime(
+            "Recording Limit Approaching",
+            &format!(
+                "Recording stops in {:.0}s (limit: audio.max_duration_secs = {}).",
+                left.as_secs_f32().ceil(),
+                max_duration.as_secs()
+            ),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+            Lifetime::Millis(5000),
+        )
+        .await;
+    }
+
+    /// Tell the user the recording was cut off by the cap, not by them, and
+    /// how to raise it. Without this a long dictation just stopped.
+    async fn notify_recording_capped(&self, max_duration: Duration) {
+        send_notification_with_lifetime(
+            "Recording Limit Reached",
+            &format!(
+                "Stopped at {}s and transcribing what was captured. To record longer: \
+                 voxtype config set audio.max_duration_secs <SECS> (or --max-duration).",
+                max_duration.as_secs()
+            ),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "critical",
+            Lifetime::Millis(10000),
+        )
+        .await;
+    }
+
+    /// Save the audio of a recording whose transcription failed, so the
+    /// failure costs a retry instead of the whole dictation, and tell the
+    /// user where it is and how to retry it. With `[audio]
+    /// keep_failed_recordings` off nothing is written, and the notification
+    /// says so instead of naming a file.
+    async fn keep_failed_recording(&self, state: &State) {
+        let State::Transcribing { audio } = state else {
+            return;
+        };
+        if audio.is_empty() {
+            return;
+        }
+        let audio = audio.clone();
+        let keep = self.config.audio.keep_failed_recordings;
+        let saved =
+            tokio::task::spawn_blocking(move || crate::failed_recording::keep(keep, &audio))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r);
+        match saved {
+            Ok(saved) => {
+                // The retry command stays up until dismissed so it can be
+                // copied. With nothing to retry, the notice just times out.
+                let lifetime = match &saved {
+                    Some(path) => {
+                        tracing::error!(
+                            "Recording saved to {}. Retry with: voxtype transcribe {}",
+                            path.display(),
+                            path.display()
+                        );
+                        Lifetime::UntilClosed
+                    }
+                    None => {
+                        tracing::info!("Recording not kept: [audio] keep_failed_recordings is off");
+                        Lifetime::Millis(10000)
+                    }
+                };
+                send_notification_with_lifetime(
+                    "Transcription Failed",
+                    &crate::failed_recording::notice_body(saved.as_deref()),
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    "critical",
+                    lifetime,
+                )
+                .await;
+            }
+            Err(e) => tracing::error!("Could not save the failed recording: {}", e),
+        }
+    }
+
+    /// Tell the user a recording was discarded because VAD heard no speech.
+    /// Logged at info and notified (unless `on_no_speech` is off): at debug
+    /// it read as a hang, since nothing else happens after the stop.
+    async fn report_no_speech(&self, result: &crate::vad::VadResult) {
+        tracing::info!(
+            "No speech detected ({:.2}s above threshold, {:.1}% of the recording, avg rms {:.4}); \
+             discarding the recording",
+            result.speech_duration_secs,
+            result.speech_ratio * 100.0,
+            result.rms_energy
+        );
+        self.play_feedback(SoundEvent::Cancelled);
+        if self.config.output.notification.on_no_speech {
+            send_notification(
+                "Voxtype: No speech detected",
+                "Nothing was transcribed. If you were speaking, your microphone level may be too low.",
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                &self.config.output.notification.urgency,
+            )
+            .await;
+        }
+        self.publish_osd_outcome(osd::session::OutcomeKind::NoSpeech, 0);
+    }
+
+    async fn report_override_problem(&self, problem: &str) {
+        tracing::error!("Model override failed: {}", problem);
+        self.play_feedback(SoundEvent::Error);
+        send_notification(
+            "Voxtype: Model Override Failed",
+            problem,
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+        )
+        .await;
+    }
+
+    /// Post a failure notice for ten seconds: long enough to read the fix.
+    async fn post_failure_notice(&self, notice: &crate::failure_notice::Notice) {
+        send_notification_with_lifetime(
+            &notice.title,
+            &notice.body,
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+            Lifetime::Millis(10_000),
+        )
+        .await;
+    }
+
+    /// The microphone could not be opened. The error beep alone goes
+    /// through the same audio stack that may be broken, so say what failed
+    /// and how to fix it, once per distinct failure.
+    async fn report_capture_failure(&mut self, err: &crate::error::AudioError) {
+        self.play_feedback(SoundEvent::Error);
+        let device = self.config.audio.device.clone();
+        if self
+            .capture_notices
+            .should_notify(&format!("{device}|{err}"), Instant::now())
+        {
+            let notice = crate::failure_notice::capture_failed(&device, err);
+            self.post_failure_notice(&notice).await;
+        }
+    }
+
+    /// The model for this recording could not be loaded.
+    async fn report_model_failure(
+        &mut self,
+        model_override: Option<&str>,
+        err: &crate::error::TranscribeError,
+    ) {
+        self.play_feedback(SoundEvent::Error);
+        let model = model_override
+            .unwrap_or(self.config.model_name())
+            .to_string();
+        if self
+            .model_notices
+            .should_notify(&format!("{model}|{err}"), Instant::now())
+        {
+            let notice = crate::failure_notice::model_load_failed(&self.config, &model, err, false);
+            self.post_failure_notice(&notice).await;
+        }
+    }
+
+    /// Start building the override's transcriber in the background so it's
+    /// ready by the time the recording stops.
+    fn start_override_load(
+        &mut self,
+        name: &str,
+        engine: crate::config::TranscriptionEngine,
+        model: &str,
+        vocabulary: Vec<String>,
+    ) {
+        if let Some((cached, transcriber)) = &self.override_cache {
+            if cached == name {
+                let transcriber = transcriber.clone();
+                transcriber.set_vocabulary(&vocabulary);
+                tokio::task::spawn_blocking(move || transcriber.prepare());
+                return;
+            }
+        }
+        if matches!(&self.override_load_task, Some((pending, _)) if pending == name) {
+            return;
+        }
+        tracing::info!("Loading {:?} model '{}' for this recording", engine, model);
+        let config = override_config(&self.config, engine, model);
+        self.override_load_task = Some((
+            name.to_string(),
+            tokio::task::spawn_blocking(move || {
+                let transcriber: Arc<dyn Transcriber> =
+                    Arc::from(crate::transcribe::create_transcriber(&config)?);
+                transcriber.set_vocabulary(&vocabulary);
+                transcriber.prepare();
+                Ok(transcriber)
+            }),
+        ));
+    }
+
+    /// The override transcriber once it's loaded, without waiting for it.
+    /// Eager chunking polls this during recording.
+    async fn ready_override(&mut self, name: &str) -> Option<Arc<dyn Transcriber>> {
+        if let Some((cached, transcriber)) = &self.override_cache {
+            if cached == name {
+                return Some(transcriber.clone());
+            }
+        }
+        let finished = matches!(
+            &self.override_load_task,
+            Some((pending, task)) if pending == name && task.is_finished()
+        );
+        if !finished {
+            return None;
+        }
+        let (_, task) = self.override_load_task.take()?;
+        match task.await {
+            Ok(Ok(transcriber)) => {
+                self.override_cache = Some((name.to_string(), transcriber.clone()));
+                Some(transcriber)
+            }
+            // Recording stop retries the load and reports the failure once.
+            Ok(Err(e)) => {
+                tracing::debug!("Override model '{}' failed to load: {}", name, e);
+                None
+            }
+            Err(e) => {
+                tracing::debug!("Override model '{}' load task panicked: {}", name, e);
+                None
+            }
+        }
+    }
+
+    /// The transcriber for an override the active engine can't serve: the
+    /// cached one, the load started at recording start, or a fresh build.
+    async fn override_transcriber(
+        &mut self,
+        name: &str,
+        engine: crate::config::TranscriptionEngine,
+        model: &str,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let on_demand = self.config.on_demand_loading();
+        if matches!(&self.override_cache, Some((cached, _)) if cached == name) {
+            let (key, transcriber) = self.override_cache.take().expect("matched above");
+            if !on_demand {
+                self.override_cache = Some((key, transcriber.clone()));
+            }
+            return Ok(transcriber);
+        }
+        let task = match self.override_load_task.take() {
+            Some((pending, task)) if pending == name => task,
+            _ => {
+                let config = override_config(&self.config, engine, model);
+                tokio::task::spawn_blocking(move || {
+                    crate::transcribe::create_transcriber(&config).map(Arc::from)
+                })
+            }
+        };
+        match task.await {
+            Ok(Ok(transcriber)) => {
+                // On-demand loading frees models after use; honor that here.
+                if !on_demand {
+                    self.override_cache = Some((name.to_string(), transcriber.clone()));
+                }
+                Ok(transcriber)
+            }
+            Ok(Err(e)) => {
+                self.report_override_problem(&format!("Could not load model '{name}': {e}"))
+                    .await;
+                Err(())
+            }
+            Err(e) => {
+                self.report_override_problem(&format!("Loading model '{name}' panicked: {e}"))
+                    .await;
                 Err(())
             }
         }
@@ -1737,29 +2999,70 @@ impl Daemon {
     ///
     /// For on-demand loading: waits for the background model load task to complete
     /// For preloaded models: returns the preloaded transcriber (Parakeet) or gets from model manager (Whisper)
+    /// A `--model` override the active transcriber can't serve gets its own.
     ///
     /// Returns Ok(transcriber) on success, Err(()) if an error occurred and caller should skip to next iteration
+    /// `get_transcriber_for_recording_inner`, publishing an error outcome
+    /// for the OSD when no transcriber can serve the recording.
     async fn get_transcriber_for_recording(
         &mut self,
         model_override: Option<&str>,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let result = self
+            .get_transcriber_for_recording_inner(model_override)
+            .await;
+        if result.is_ok() {
+            self.model_notices.clear();
+        } else {
+            self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+        }
+        result
+    }
+
+    async fn get_transcriber_for_recording_inner(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let vocabulary = self.active_profile_vocabulary_terms();
+        if let Some(name) = model_override {
+            match model_catalog::override_route(&self.config, name) {
+                Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
+                    let transcriber = self.override_transcriber(name, engine, &model).await?;
+                    tracing::info!(
+                        "Transcribing with override model '{}' ({:?} engine)",
+                        name,
+                        engine
+                    );
+                    transcriber.set_vocabulary(&vocabulary);
+                    return Ok(transcriber);
+                }
+                Ok(_) => {}
+                Err(problem) => {
+                    self.report_override_problem(&problem).await;
+                    return Err(());
+                }
+            }
+        }
         if self.config.on_demand_loading() {
             // Wait for background model load task
             if let Some(task) = self.model_load_task.take() {
                 match task.await {
                     Ok(Ok(transcriber)) => {
                         tracing::info!("Model loaded successfully");
+                        transcriber.set_vocabulary(&vocabulary);
                         Ok(transcriber)
                     }
                     Ok(Err(e)) => {
                         tracing::error!("Model loading failed: {}", e);
-                        self.play_feedback(SoundEvent::Error);
+                        self.report_model_failure(model_override, &e).await;
                         Err(())
                     }
                     Err(e) => {
                         tracing::error!("Model loading task panicked: {}", e);
-                        self.play_feedback(SoundEvent::Error);
+                        let e = crate::error::TranscribeError::InitFailed(format!(
+                            "model loading panicked: {e}"
+                        ));
+                        self.report_model_failure(model_override, &e).await;
                         Err(())
                     }
                 }
@@ -1778,14 +3081,44 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Gguf
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
-                    if let Some(ref t) = transcriber_preloaded {
-                        Ok(t.clone())
+                    if let Some(t) = self.transcriber_preloaded.clone() {
+                        t.set_vocabulary(&vocabulary);
+                        Ok(t)
                     } else {
-                        tracing::error!("Parakeet transcriber not preloaded");
-                        self.play_feedback(SoundEvent::Error);
-                        Err(())
+                        // Empty on the non-on-demand path means the panic
+                        // recovery discarded a poisoned instance (#643).
+                        // Re-create rather than error so one bad recording
+                        // doesn't disable every one after it.
+                        tracing::info!("Transcriber not loaded; creating a fresh instance");
+                        let config = self.config.clone();
+                        let created = tokio::task::spawn_blocking(move || {
+                            crate::transcribe::create_transcriber(&config)
+                        })
+                        .await;
+                        match created {
+                            Ok(Ok(t)) => {
+                                let t: Arc<dyn Transcriber> = Arc::from(t);
+                                t.set_vocabulary(&vocabulary);
+                                self.transcriber_preloaded = Some(t.clone());
+                                Ok(t)
+                            }
+                            Ok(Err(e)) => {
+                                tracing::error!("Failed to re-create transcriber: {}", e);
+                                self.report_model_failure(model_override, &e).await;
+                                Err(())
+                            }
+                            Err(e) => {
+                                tracing::error!("Transcriber creation task panicked: {}", e);
+                                let e = crate::error::TranscribeError::InitFailed(format!(
+                                    "model loading panicked: {e}"
+                                ));
+                                self.report_model_failure(model_override, &e).await;
+                                Err(())
+                            }
+                        }
                     }
                 }
                 crate::config::TranscriptionEngine::Whisper => {
@@ -1800,10 +3133,13 @@ impl Daemon {
                     }
                     if let Some(ref mut mm) = self.model_manager {
                         match mm.get_prepared_transcriber(model_override) {
-                            Ok(t) => Ok(t),
+                            Ok(t) => {
+                                t.set_vocabulary(&vocabulary);
+                                Ok(t)
+                            }
                             Err(e) => {
                                 tracing::error!("Failed to get transcriber: {}", e);
-                                self.play_feedback(SoundEvent::Error);
+                                self.report_model_failure(model_override, &e).await;
                                 Err(())
                             }
                         }
@@ -1818,9 +3154,216 @@ impl Daemon {
     }
 
     /// Update the meeting state file if configured
-    fn update_meeting_state(&self, state_name: &str, meeting_id: Option<&str>) {
+    fn update_meeting_state(&mut self, state_name: &str, meeting_id: Option<&str>) {
         if let Some(ref path) = self.meeting_state_file_path {
             write_meeting_state_file(path, state_name, meeting_id);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update_meeting(crate::tray::MeetingTrayState::from_state_name(state_name));
+        }
+
+        // Mirror into the meeting HUD snapshot. "idle" always means the
+        // meeting fully ended (or none is running): reset everything so a
+        // HUD connecting afterwards doesn't see a stale title/transcript
+        // from the meeting that just finished.
+        if state_name == "idle" {
+            self.meeting_hud = meeting::MeetingHudState::idle();
+        } else {
+            self.meeting_hud.status = state_name.to_string();
+            if let Some(id) = meeting_id {
+                self.meeting_hud.meeting_id = Some(id.to_string());
+            }
+        }
+        // Read on every change, so views see an acknowledgement made from
+        // anywhere by the next status at the latest.
+        self.meeting_hud.recording_notice = meeting::notice::pending();
+
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+            hub.publish_status(state_name);
+        }
+    }
+
+    /// A meeting was retitled (`voxtype meeting title`, or from the
+    /// calendar), its storage already updated: bring the running meeting,
+    /// its speaker names and the meeting view up to date.
+    async fn apply_retitle(&mut self, retitle: meeting::retitle::Retitle) {
+        let live = self
+            .meeting_daemon
+            .as_ref()
+            .and_then(|d| d.current_meeting_id())
+            .is_some_and(|id| id.to_string() == retitle.meeting_id);
+        if live {
+            if let Some(ref mut daemon) = self.meeting_daemon {
+                daemon.retitle(&retitle.title, retitle.url.as_deref()).await;
+            }
+        } else {
+            // Stopped since: its last save may have kept the old title.
+            let storage = match self.meeting_daemon.as_ref() {
+                Some(d) => d.storage().config().clone(),
+                None => StorageConfig {
+                    storage_path: if self.config.meeting.storage_path == "auto" {
+                        Config::data_dir().join("meetings")
+                    } else {
+                        PathBuf::from(&self.config.meeting.storage_path)
+                    },
+                    retain_audio: self.config.meeting.retain_audio,
+                    max_meetings: 0,
+                    my_name: self.config.meeting.my_name.clone(),
+                },
+            };
+            let reapplied = Ok::<_, String>(storage).and_then(|config| {
+                let storage = meeting::MeetingStorage::open(config).map_err(|e| e.to_string())?;
+                let id = storage
+                    .resolve_meeting_id(&retitle.meeting_id)
+                    .map_err(|e| e.to_string())?;
+                meeting::retitle::retitle_stored(
+                    &storage,
+                    &id,
+                    &retitle.title,
+                    retitle.url.as_deref(),
+                    true,
+                )
+                .map_err(|e| e.to_string())
+            });
+            if let Err(e) = reapplied {
+                tracing::debug!("Retitle of a meeting no longer running: {}", e);
+            }
+        }
+        if self.meeting_hud.meeting_id.as_deref() == Some(retitle.meeting_id.as_str()) {
+            self.meeting_hud.title = Some(retitle.title.clone());
+        }
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+            hub.publish_title_changed(&retitle.meeting_id, &retitle.title);
+        }
+    }
+
+    /// Ask the calendar, off the event loop, what the meeting that just
+    /// started is called. A title found is stored and sent back through the
+    /// retitle trigger, unless the meeting got a real title meanwhile. Any
+    /// failure leaves the title as it is.
+    fn title_from_calendar(
+        &self,
+        meeting_id: meeting::MeetingId,
+        storage: StorageConfig,
+        started_title: Option<String>,
+    ) {
+        let lookup = meeting::calendar::Lookup::current(&self.config.meeting.calendar);
+        tokio::spawn(async move {
+            let Some(found) = lookup.title().await else {
+                return;
+            };
+            let source = found.source;
+            let stored = tokio::task::spawn_blocking(move || {
+                let storage = meeting::MeetingStorage::open(storage).map_err(|e| e.to_string())?;
+                let current = storage
+                    .get_meeting(&meeting_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("the meeting is gone")?;
+                // Retitled by hand meanwhile: that title stays.
+                if current.title != started_title {
+                    return Err(format!(
+                        "it was titled {:?} meanwhile",
+                        current.title.unwrap_or_default()
+                    ));
+                }
+                meeting::retitle::retitle_stored(
+                    &storage,
+                    &meeting_id,
+                    &found.title,
+                    found.url.as_deref(),
+                    false,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .await;
+            match stored {
+                Ok(Ok(done)) => {
+                    tracing::info!(
+                        "Meeting {} titled {:?} from {}",
+                        meeting_id,
+                        done.title,
+                        source
+                    );
+                    let trigger = meeting::retitle::Retitle {
+                        meeting_id: meeting_id.to_string(),
+                        title: done.title,
+                        url: done.url,
+                    };
+                    if let Err(e) =
+                        meeting::retitle::write_trigger(&Config::runtime_dir(), &trigger)
+                    {
+                        tracing::warn!("Could not hand the calendar title to the meeting: {}", e);
+                    }
+                }
+                Ok(Err(e)) => tracing::debug!("Calendar title not used: {}", e),
+                Err(e) => tracing::debug!("Calendar title not used: {}", e),
+            }
+        });
+    }
+
+    /// Add a processed chunk to the HUD snapshot and stream it on meeting.sock.
+    fn publish_meeting_chunk(&mut self, chunk_id: u32, segments: &[meeting::TranscriptSegment]) {
+        // The live view shows [meeting] my_name for "You", like the saved
+        // transcript does; a display label only, never saved.
+        let mut shown = meeting::Transcript {
+            segments: segments.to_vec(),
+            total_chunks: 0,
+            audio_ms: 0,
+        };
+        if let Some(name) = self.config.meeting.my_name.as_deref() {
+            shown.apply_my_name(name);
+        }
+        let segments = &shown.segments[..];
+        self.meeting_hud.push_segments(segments);
+        self.meeting_hud.chunk_count = chunk_id + 1;
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_segments(chunk_id, segments);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
+    /// Rename a speaker in the HUD snapshot and tell meeting.sock subscribers.
+    fn publish_meeting_rename(&mut self, from: &str, to: &str) {
+        self.meeting_hud.rename_speaker(from, to);
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_speaker_renamed(from, to);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
+    /// Replace a segment in the HUD snapshot and tell meeting.sock subscribers.
+    fn publish_segment_updated(&mut self, segment: &meeting::TranscriptSegment) {
+        self.meeting_hud.update_segment(segment);
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_segment_updated(segment);
+            hub.update_snapshot(&self.meeting_hud);
+        }
+    }
+
+    /// Dictation's loaded transcriber, when a meeting configured as `meeting`
+    /// can use it instead of loading its own copy.
+    fn resident_transcriber_for(&mut self, meeting: &Config) -> Option<Arc<dyn Transcriber>> {
+        if !meeting::start::shares_dictation_transcriber(&self.config, meeting) {
+            return None;
+        }
+        if self.config.engine == crate::config::TranscriptionEngine::Whisper {
+            self.model_manager.as_mut()?.get_transcriber(None).ok()
+        } else {
+            self.transcriber_preloaded.clone()
+        }
+    }
+
+    /// Drop a deleted segment from the HUD snapshot and tell meeting.sock
+    /// subscribers.
+    fn publish_segment_deleted(&mut self, segment_id: u32) {
+        self.meeting_hud.remove_segment(segment_id);
+        if let Some(ref hub) = self.meeting_event_hub {
+            let meeting_id = self.meeting_hud.meeting_id.clone().unwrap_or_default();
+            hub.publish_segment_deleted(&meeting_id, segment_id);
+            hub.update_snapshot(&self.meeting_hud);
         }
     }
 
@@ -1829,13 +3372,24 @@ impl Daemon {
         &mut self,
         title: Option<String>,
         diarization_override: Option<String>,
+        options: crate::config::MeetingStartOptions,
     ) -> Result<()> {
         if self.meeting_daemon.is_some() {
             tracing::warn!("Meeting already in progress");
             return Ok(());
         }
 
-        // CLI override (validated against ["simple", "ml"] by clap) wins over config.
+        // The CLI checked these before writing the trigger; check again, as
+        // anything can write the trigger file.
+        let meeting_app_config =
+            meeting::start::meeting_transcription_config(&self.config, &options).map_err(|e| {
+                tracing::error!("Refusing to start the meeting: {}", e);
+                crate::error::VoxtypeError::Config(e)
+            })?;
+        let announce_clip = meeting::announce::Clip::for_meeting(&self.config.meeting, &options);
+        let announces = announce_clip.is_some();
+
+        // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
         let backend = diarization_override
             .clone()
             .unwrap_or_else(|| self.config.meeting.diarization.backend.clone());
@@ -1863,6 +3417,19 @@ impl Daemon {
             None
         };
 
+        // Captured for the HUD snapshot before `diarization_config` and
+        // `title` are moved into `meeting_config` / `daemon.start()` below.
+        let (diar_enabled_for_hud, diar_backend_for_hud) = match &diarization_config {
+            Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
+            None => (false, None),
+        };
+        let title_for_hud = title.clone();
+
+        // A title from the call window, a detection placeholder or none at
+        // all gives way to the calendar's; one the user typed never does.
+        let calendar_title_wanted =
+            options.title_from_window || meeting::calendar::is_replaceable(title.as_deref());
+        let started_title = title.clone();
         let meeting_config = meeting::MeetingConfig {
             enabled: self.config.meeting.enabled,
             chunk_duration_secs: self.config.meeting.chunk_duration_secs,
@@ -1874,118 +3441,160 @@ impl Daemon {
                 },
                 retain_audio: self.config.meeting.retain_audio,
                 max_meetings: 0,
+                my_name: self.config.meeting.my_name.clone(),
             },
             retain_audio: self.config.meeting.retain_audio,
             max_duration_mins: self.config.meeting.max_duration_mins,
             vad_threshold: self.config.meeting.audio.vad_threshold,
             diarization: diarization_config,
+            echo_rules: (&self.config.meeting.audio).into(),
+            auto_label_from_title: self.config.meeting.auto_label_from_title,
         };
+
+        let storage_for_calendar = meeting_config.storage.clone();
+
+        // Start capturing before anything loads. Building the meeting daemon
+        // loads the transcription model (a GGUF worker, seconds on a CPU) and
+        // the diarizer, and `meeting start` has already returned, so anyone
+        // who starts talking then lost the opening of the meeting. The
+        // capture buffers what arrives meanwhile, and the first chunk holds it.
+        // A sound check holds the same devices; it gives way.
+        self.stop_soundcheck("meeting").await;
+        let opened = meeting::soundcheck::open_capture(&self.config)
+            .await
+            .map_err(crate::error::VoxtypeError::Audio)?;
+        let mut capture = opened.capture;
+        let echo_path = opened.echo_path;
+        let mut echo_canceller = opened.canceller;
+        let liveness = opened.liveness;
+        // Zero on the transcript's timeline: the first sample captured.
+        let capture_started = std::time::Instant::now();
+        if capture.has_loopback() {
+            tracing::info!("Dual audio capture: mic + loopback");
+        } else {
+            tracing::info!("Single audio capture: mic only");
+        }
 
         // Create event channel
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         self.meeting_event_rx = Some(rx);
 
-        // Create meeting daemon
-        match MeetingDaemon::new(meeting_config, &self.config, tx) {
+        // Create meeting daemon, on dictation's loaded model when it is the
+        // same one (#808: loading a second copy took most of a slow start).
+        let resident = self.resident_transcriber_for(&meeting_app_config);
+        match MeetingDaemon::new(meeting_config, &meeting_app_config, tx, resident) {
             Ok(mut daemon) => {
-                match daemon.start(title).await {
+                // What this meeting will be missing, told to the user in one
+                // notification once it is recording.
+                let mut notices: Vec<String> = Vec::new();
+                if let Some(notice) = daemon.diarization_notice() {
+                    if self.meeting_notices_shown.insert(notice.to_string()) {
+                        notices.push(notice.to_string());
+                    }
+                }
+                // Every meeting, not once: each one loses the remote side of
+                // the conversation.
+                if let Some(issue) = capture.loopback_issue() {
+                    notices.push(issue.message());
+                }
+                match daemon.start(title, options.url).await {
                     Ok(meeting_id) => {
                         let id_str = meeting_id.to_string();
+                        self.meeting_hud = meeting::MeetingHudState {
+                            status: "recording".to_string(),
+                            meeting_id: Some(id_str.clone()),
+                            title: title_for_hud,
+                            started_at: Some(chrono::Utc::now()),
+                            chunk_count: 0,
+                            diarization: meeting::DiarizationInfo {
+                                enabled: diar_enabled_for_hud,
+                                backend: diar_backend_for_hud,
+                            },
+                            // Set once GTCRN has loaded or not, below.
+                            echo_cancel: None,
+                            segments: Vec::new(),
+                            // Set from the notice's state in update_meeting_state.
+                            recording_notice: false,
+                            announcement: None,
+                            announces,
+                        };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
-
-                        // Start dual audio capture for meeting (mic + loopback)
-                        let loopback_device =
-                            match self.config.meeting.audio.loopback_device.as_str() {
-                                "disabled" | "" => None,
-                                other => Some(other),
-                            };
-                        let mut meeting_audio_config = self.config.audio.clone();
-                        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
-                        if !matches!(meeting_mic_device, "default" | "") {
-                            tracing::info!(
-                                "Meeting mic override: {} (dictation uses {})",
-                                meeting_mic_device,
-                                self.config.audio.device
+                        self.start_meeting_levels(capture.meters(), &id_str);
+                        if calendar_title_wanted {
+                            self.title_from_calendar(
+                                meeting_id,
+                                storage_for_calendar.clone(),
+                                started_title.clone(),
                             );
-                            meeting_audio_config.device =
-                                self.config.meeting.audio.mic_device.clone();
                         }
-                        match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
-                            Ok(mut capture) => {
-                                if let Err(e) = capture.start().await {
-                                    tracing::error!("Failed to start meeting audio: {}", e);
-                                    let _ = daemon.stop().await;
-                                    return Err(crate::error::VoxtypeError::Audio(e));
-                                }
-                                if capture.has_loopback() {
-                                    tracing::info!("Dual audio capture: mic + loopback");
-                                } else {
-                                    tracing::info!("Single audio capture: mic only");
-                                }
-                                self.meeting_audio_capture = Some(capture);
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to create meeting audio capture: {}", e);
-                                let _ = daemon.stop().await;
-                                return Err(crate::error::VoxtypeError::Audio(e));
-                            }
-                        }
+                        self.meeting_audio_capture = Some(capture);
 
-                        // Load GTCRN speech enhancer for echo cancellation
-                        #[cfg(feature = "onnx-common")]
-                        if self.speech_enhancer.is_none()
-                            && self.config.meeting.audio.echo_cancel != "disabled"
-                        {
-                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
-                            if model_path.exists() {
-                                match audio::enhance::GtcrnEnhancer::load(&model_path) {
-                                    Ok(enhancer) => {
-                                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
-                                        tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to load GTCRN enhancer, continuing without: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(
-                                    "GTCRN model not found at {:?}, skipping speech enhancement",
-                                    model_path
-                                );
-                            }
+                        let (used, echo_notice) = self.meeting_echo_path_in_use(echo_path);
+                        if let Some(notice) = echo_notice {
+                            notices.push(notice);
+                        }
+                        self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
+                        self.meeting_aec_liveness = liveness;
+                        self.meeting_echo_canceller = echo_canceller.take();
+                        tracing::info!("Meeting {} echo handling: {}", meeting_id, used.as_str());
+                        daemon.record_echo_cancel(used.as_str());
+                        self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
+                        if let Some(ref hub) = self.meeting_event_hub {
+                            hub.update_snapshot(&self.meeting_hud);
                         }
 
                         self.meeting_daemon = Some(daemon);
                         self.meeting_mic_buffer.clear();
                         self.meeting_loopback_buffer.clear();
+                        self.meeting_error_notified = false;
 
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
 
-                        // Notification
-                        if self.config.output.notification.on_recording_start {
-                            send_notification(
-                                "Meeting Started",
-                                &format!("ID: {}", meeting_id),
+                        // After the start cue, with capture up: the
+                        // announcement goes into the call once there is one.
+                        self.meeting_capture_started = Some(capture_started);
+                        if let Some(clip) = announce_clip {
+                            self.start_announcement(clip);
+                        }
+
+                        // Degradations replace the usual "started" notice
+                        // and are shown whatever on_recording_start or a
+                        // visible meeting view says: the user has to act on
+                        // them.
+                        if !notices.is_empty() {
+                            send_notification_with_lifetime(
+                                "Meeting started with limitations",
+                                &notices.join("\n\n"),
                                 false,
                                 self.config.engine,
-                                &self.config.output.notification.urgency,
+                                "normal",
+                                Lifetime::Millis(15000),
+                            )
+                            .await;
+                        } else {
+                            let title = meeting::status_notice::display_title(
+                                self.meeting_hud.title.as_deref(),
+                                self.meeting_hud.started_at,
+                            );
+                            self.meeting_status_notice(
+                                meeting::status_notice::MeetingNotice::Started { title },
+                                self.config.output.notification.on_recording_start,
                             )
                             .await;
                         }
                     }
                     Err(e) => {
                         tracing::error!("Failed to start meeting: {}", e);
+                        let _ = capture.stop().await;
                         return Err(e);
                     }
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to create meeting daemon: {}", e);
+                let _ = capture.stop().await;
                 return Err(e);
             }
         }
@@ -1993,9 +3602,217 @@ impl Daemon {
         Ok(())
     }
 
+    /// Publish the meeting's per-track levels on meeting.sock about ten
+    /// times a second, while a client is connected. The publisher only reads
+    /// the meters; the capture feeds them and never waits on it.
+    fn start_meeting_levels(&mut self, meters: meeting::levels::MeetingMeters, meeting_id: &str) {
+        self.stop_meeting_levels();
+        let Some(hub) = self.meeting_event_hub.clone() else {
+            return;
+        };
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let clients = hub.clone();
+        let task = tokio::spawn(meeting::levels::run_publisher(
+            meters,
+            Some(meeting_id.to_string()),
+            active.clone(),
+            move || clients.has_subscribers(),
+            move |levels| hub.publish_levels(levels),
+        ));
+        self.meeting_levels = Some((task, active));
+    }
+
+    /// Start a sound check: the meeting's capture, opened as a meeting
+    /// would, its levels on meeting.sock, nothing recorded. Asking again
+    /// while one runs gives it `seconds` more.
+    async fn start_soundcheck(&mut self, seconds: u64) {
+        use meeting::soundcheck::SoundcheckEvent;
+        if self.meeting_daemon.is_some() {
+            self.publish_soundcheck(SoundcheckEvent::stopped(
+                "meeting",
+                Some("A meeting is recording; its levels are already on meeting.sock.".into()),
+            ));
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+        if let Some(sc) = self.meeting_soundcheck.as_mut() {
+            sc.deadline = deadline;
+            sc.running.seconds = Some(seconds);
+            let event = sc.running.clone();
+            self.publish_soundcheck(event);
+            return;
+        }
+        match meeting::soundcheck::open_capture(&self.config).await {
+            Ok(opened) => {
+                let running = SoundcheckEvent::running(&opened, seconds);
+                tracing::info!(
+                    "Sound check for {} s: mic {}, echo path {}, loopback {}",
+                    seconds,
+                    opened.mic,
+                    running.echo_cancel.as_deref().unwrap_or("?"),
+                    opened.capture.has_loopback()
+                );
+                let levels = self.meeting_event_hub.clone().map(|hub| {
+                    let clients = hub.clone();
+                    tokio::spawn(meeting::levels::run_publisher(
+                        opened.capture.meters(),
+                        None,
+                        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        move || clients.has_subscribers(),
+                        move |l| hub.publish_levels(l),
+                    ))
+                });
+                self.meeting_soundcheck = Some(Soundcheck {
+                    opened,
+                    levels,
+                    deadline,
+                    running: running.clone(),
+                });
+                self.publish_soundcheck(running);
+            }
+            Err(e) => {
+                tracing::warn!("Sound check could not open the meeting audio: {}", e);
+                self.publish_soundcheck(SoundcheckEvent::stopped("error", Some(e.to_string())));
+            }
+        }
+    }
+
+    /// End a running sound check, saying why.
+    async fn stop_soundcheck(&mut self, reason: &str) {
+        let Some(mut sc) = self.meeting_soundcheck.take() else {
+            return;
+        };
+        if let Some(task) = sc.levels.take() {
+            task.abort();
+        }
+        let _ = sc.opened.capture.stop().await;
+        drop(sc);
+        tracing::info!("Sound check ended ({})", reason);
+        self.publish_soundcheck(meeting::soundcheck::SoundcheckEvent::stopped(reason, None));
+    }
+
+    /// Keep a sound check's capture from piling up audio nobody records,
+    /// and end it when its time is up.
+    async fn tick_soundcheck(&mut self) {
+        let Some(sc) = self.meeting_soundcheck.as_mut() else {
+            return;
+        };
+        // Nothing records this audio; the liveness guard still watches it,
+        // so the check moves off a silent canceller as a meeting would.
+        let (_, moved) = sc.opened.samples(&self.config).await;
+        if moved {
+            let left = sc
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            sc.running =
+                meeting::soundcheck::SoundcheckEvent::running(&sc.opened, left.as_secs().max(1));
+            let event = sc.running.clone();
+            self.publish_soundcheck(event);
+        }
+        let Some(sc) = self.meeting_soundcheck.as_ref() else {
+            return;
+        };
+        if std::time::Instant::now() >= sc.deadline {
+            self.stop_soundcheck("done").await;
+        }
+    }
+
+    fn publish_soundcheck(&self, event: meeting::soundcheck::SoundcheckEvent) {
+        if let Some(hub) = &self.meeting_event_hub {
+            hub.publish_soundcheck(event);
+        }
+    }
+
+    fn stop_meeting_levels(&mut self) {
+        if let Some((task, _)) = self.meeting_levels.take() {
+            task.abort();
+        }
+    }
+
+    /// Hold level events back while the meeting is paused.
+    fn set_meeting_levels_active(&self, on: bool) {
+        if let Some((_, active)) = &self.meeting_levels {
+            active.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Run the recording announcement beside the meeting that just started.
+    fn start_announcement(&mut self, clip: meeting::announce::Clip) {
+        let runtime_dir = Config::runtime_dir();
+        let _ = std::fs::remove_file(runtime_dir.join(meeting::announce::STATUS_FILE));
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let runner =
+            meeting::announce::Runner::new(clip, self.config.meeting.detect.clone(), runtime_dir);
+        self.meeting_announce_rx = Some(rx);
+        self.meeting_announce_task = Some(tokio::spawn(runner.run(tx)));
+    }
+
+    /// Stop an announcement still waiting for the call or playing.
+    fn end_announcement(&mut self) {
+        if let Some(task) = self.meeting_announce_task.take() {
+            // Dropping its players kills them, links and all.
+            task.abort();
+        }
+        self.meeting_announce_rx = None;
+        self.meeting_capture_started = None;
+        let _ = std::fs::remove_file(Config::runtime_dir().join(meeting::announce::STATUS_FILE));
+    }
+
+    /// The announcement's progress: keep it out of the transcript once it
+    /// plays, and tell `meeting status` and the views where it got to.
+    fn on_announcement_update(&mut self, update: meeting::announce::Update) {
+        use meeting::announce::{Update, Window};
+        let on_timeline = |at: std::time::Instant, started: Option<std::time::Instant>| {
+            started
+                .map(|s| at.saturating_duration_since(s).as_millis() as u64)
+                .unwrap_or(0)
+        };
+        let status = match update {
+            Update::Waiting => meeting::announce::Status::waiting(),
+            Update::Started {
+                at,
+                expected,
+                phrase,
+            } => {
+                let start_ms = on_timeline(at, self.meeting_capture_started);
+                if let Some(ref mut daemon) = self.meeting_daemon {
+                    daemon.set_announcement(Window {
+                        start_ms,
+                        end_ms: start_ms + expected.as_millis() as u64,
+                        phrase,
+                    });
+                }
+                return;
+            }
+            Update::Finished { status, ended_at } => {
+                let end_ms = on_timeline(ended_at, self.meeting_capture_started);
+                if let Some(ref mut daemon) = self.meeting_daemon {
+                    if let Some(mut window) = daemon.announcement().cloned() {
+                        window.end_ms = window.end_ms.max(end_ms);
+                        daemon.set_announcement(window);
+                    }
+                }
+                self.meeting_announce_rx = None;
+                self.meeting_announce_task = None;
+                status
+            }
+        };
+        let path = Config::runtime_dir().join(meeting::announce::STATUS_FILE);
+        if let Err(e) = std::fs::write(&path, status.to_json().to_string()) {
+            tracing::warn!("Cannot write {}: {}", path.display(), e);
+        }
+        self.meeting_hud.announcement = Some(status.clone());
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+            hub.publish_announcement(self.meeting_hud.meeting_id.as_deref(), &status);
+        }
+    }
+
     /// Stop the current meeting
     async fn stop_meeting(&mut self) -> Result<()> {
+        self.stop_meeting_levels();
         if self.meeting_daemon.is_some() {
+            self.end_announcement();
             // Stop audio capture and keep any samples that arrived since the last poll.
             if let Some(mut capture) = self.meeting_audio_capture.take() {
                 match capture.stop().await {
@@ -2008,9 +3825,67 @@ impl Daemon {
                     }
                 }
             }
+            if let Some(mut canceller) = self.meeting_echo_canceller.take() {
+                canceller.stop();
+            }
+            self.meeting_aec_liveness = None;
+            self.meeting_gtcrn = false;
+
+            // The tail flush below is where real wall-clock time is spent
+            // (transcribing the last partial chunk), yet the external state
+            // previously jumped straight from "recording" to "idle" with no
+            // wind-down in between. Surface "finalizing" first so a HUD (or
+            // any other consumer) doesn't read the daemon as hung, or
+            // disappear before the transcript is actually complete.
+            let meeting_id = self
+                .meeting_daemon
+                .as_ref()
+                .and_then(|d| d.current_meeting_id())
+                .map(|id| id.to_string());
+            self.update_meeting_state("finalizing", meeting_id.as_deref());
 
             // Flush the final partial chunk so speech near stop is not dropped.
             self.process_buffered_meeting_audio(true).await;
+
+            // The event channel is dropped below, so publish the tail chunk's
+            // segments now or meeting.sock never sees them.
+            let pending: Vec<MeetingEvent> = match self.meeting_event_rx.as_mut() {
+                Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+                None => Vec::new(),
+            };
+            for event in pending {
+                match event {
+                    MeetingEvent::ChunkProcessed { chunk_id, segments } => {
+                        self.publish_meeting_chunk(chunk_id, &segments);
+                    }
+                    MeetingEvent::SpeakerRenamed { from, to } => {
+                        self.publish_meeting_rename(&from, &to);
+                    }
+                    MeetingEvent::SegmentUpdated { segment } => {
+                        self.publish_segment_updated(&segment);
+                    }
+                    MeetingEvent::SegmentDeleted { segment_id } => {
+                        self.publish_segment_deleted(segment_id);
+                    }
+                    MeetingEvent::SummaryUpdated { meeting_id } => {
+                        if let Some(ref hub) = self.meeting_event_hub {
+                            hub.publish_summary_updated(&meeting_id.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Read before "idle" resets the HUD snapshot they come from.
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            let elapsed = self
+                .meeting_hud
+                .started_at
+                .and_then(|t| (chrono::Utc::now() - t).to_std().ok())
+                .unwrap_or_default();
 
             let mut daemon = self.meeting_daemon.take().expect("checked above");
             match daemon.stop().await {
@@ -2018,21 +3893,45 @@ impl Daemon {
                     self.update_meeting_state("idle", None);
                     tracing::info!("Meeting stopped: {}", meeting_id);
 
+                    // Summarize, then rewrite meeting.json and run
+                    // post_meeting_command, in the background: the meeting
+                    // is already saved, and a slow or failing agent or
+                    // command must not hold up the daemon or the next
+                    // meeting. The command runs after the summary so it
+                    // sees summary.md, and the manifest lists it.
+                    let summary = daemon.auto_summary(meeting_id);
+                    let post = daemon.post_meeting(meeting_id);
+                    let hub = self.meeting_event_hub.clone();
+                    tokio::spawn(async move {
+                        if let Some(job) = summary {
+                            job.run(move |event| {
+                                if let Some(ref hub) = hub {
+                                    hub.publish_summary_event(event);
+                                }
+                            })
+                            .await;
+                        }
+                        post.run().await;
+                    });
+
                     self.play_feedback(SoundEvent::RecordingStop);
 
-                    if self.config.output.notification.on_recording_stop {
-                        send_notification(
-                            "Meeting Ended",
-                            &format!("ID: {}", meeting_id),
-                            false,
-                            self.config.engine,
-                            &self.config.output.notification.urgency,
-                        )
-                        .await;
-                    }
+                    self.meeting_status_notice(
+                        meeting::status_notice::MeetingNotice::Ended { title, elapsed },
+                        self.config.output.notification.on_recording_stop,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::error!("Error stopping meeting: {}", e);
+                    send_notification(
+                        "Meeting Error",
+                        &format!("Could not stop the meeting cleanly: {}", e),
+                        false,
+                        self.config.engine,
+                        "critical",
+                    )
+                    .await;
                 }
             }
 
@@ -2044,24 +3943,49 @@ impl Daemon {
         Ok(())
     }
 
+    /// Post a meeting status notification, unless `[meeting]
+    /// status_notifications` says not to or (in auto mode) a meeting view is
+    /// already showing the same thing. Errors never come through here.
+    async fn meeting_status_notice(
+        &self,
+        notice: meeting::status_notice::MeetingNotice,
+        enabled: bool,
+    ) {
+        use meeting::status_notice::{should_notify, StatusMode};
+        let mode = StatusMode::parse(&self.config.meeting.status_notifications);
+        if !should_notify(mode, enabled, meeting::view_presence::view_visible) {
+            tracing::debug!(?notice, "Meeting status notification skipped");
+            return;
+        }
+        let (summary, body) = notice.text();
+        send_notification(
+            summary,
+            &body,
+            false,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+        )
+        .await;
+    }
+
     /// Pause the current meeting
     async fn pause_meeting(&mut self) -> Result<()> {
         if let Some(ref mut daemon) = self.meeting_daemon {
             daemon.pause().await?;
             let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+            self.set_meeting_levels_active(false);
             self.update_meeting_state("paused", meeting_id.as_deref());
             tracing::info!("Meeting paused");
 
-            if self.config.output.notification.on_recording_stop {
-                send_notification(
-                    "Meeting Paused",
-                    "Recording paused",
-                    false,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            self.meeting_status_notice(
+                meeting::status_notice::MeetingNotice::Paused { title },
+                self.config.output.notification.on_recording_stop,
+            )
+            .await;
         }
         Ok(())
     }
@@ -2071,21 +3995,283 @@ impl Daemon {
         if let Some(ref mut daemon) = self.meeting_daemon {
             daemon.resume().await?;
             let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+            self.set_meeting_levels_active(true);
             self.update_meeting_state("recording", meeting_id.as_deref());
             tracing::info!("Meeting resumed");
 
-            if self.config.output.notification.on_recording_start {
-                send_notification(
-                    "Meeting Resumed",
-                    "Recording resumed",
-                    false,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            let title = meeting::status_notice::display_title(
+                self.meeting_hud.title.as_deref(),
+                self.meeting_hud.started_at,
+            );
+            self.meeting_status_notice(
+                meeting::status_notice::MeetingNotice::Resumed { title },
+                self.config.output.notification.on_recording_start,
+            )
+            .await;
         }
         Ok(())
+    }
+
+    /// Act on pending meeting file triggers. Returns whether the meeting
+    /// changed state, so the audio branch can skip this tick's samples.
+    ///
+    /// Every trigger is consumed whether or not it applies, so a request the
+    /// daemon refused cannot fire later against a different meeting.
+    /// Tell meeting.sock which meetings never finished, for the recovery
+    /// card: at startup, and again when `meeting recover` finished or
+    /// discarded one.
+    fn announce_recoverable_meetings(&self) {
+        let Some(ref hub) = self.meeting_event_hub else {
+            return;
+        };
+        let running = self
+            .meeting_daemon
+            .as_ref()
+            .and_then(|d| d.current_meeting_id());
+        match meeting::MeetingStorage::open(meeting_storage_config(&self.config)).and_then(
+            |storage| {
+                meeting::recover::recoverable(
+                    &storage,
+                    running.as_ref(),
+                    self.config.meeting.chunk_duration_secs,
+                )
+            },
+        ) {
+            Ok(meetings) => {
+                if !meetings.is_empty() {
+                    tracing::info!("{} meeting(s) can be recovered", meetings.len());
+                }
+                hub.publish_recoverable(&meetings);
+            }
+            Err(e) => tracing::warn!("Could not list meetings to recover: {}", e),
+        }
+    }
+
+    /// At startup, a desktop notification for each meeting that never
+    /// finished and was not announced before, under the same
+    /// `status_notifications` rule as the other meeting notices. Its Finish
+    /// or Open button runs `voxtype meeting recover --finish` or
+    /// `voxtype meeting view`.
+    fn notify_interrupted_meetings(&self) {
+        use meeting::recover::notify;
+        use meeting::status_notice::{should_notify, StatusMode};
+        let current = match meeting::MeetingStorage::open(meeting_storage_config(&self.config))
+            .and_then(|storage| {
+                meeting::recover::recoverable(
+                    &storage,
+                    None,
+                    self.config.meeting.chunk_duration_secs,
+                )
+            }) {
+            Ok(current) => current,
+            Err(e) => {
+                tracing::warn!("Could not list meetings to recover: {}", e);
+                return;
+            }
+        };
+        // Recorded as announced whether or not it shows, so a later
+        // restart never brings the same meeting up again.
+        let new = notify::unannounced(&notify::state_path(), &current);
+        if new.is_empty() {
+            return;
+        }
+        let mode = StatusMode::parse(&self.config.meeting.status_notifications);
+        if !should_notify(mode, true, meeting::view_presence::view_visible) {
+            tracing::debug!("Interrupted meeting notification skipped");
+            return;
+        }
+        // Only Linux has the freedesktop notification action protocol. Other
+        // platforms use the existing native notifier and name the recovery CLI.
+        #[cfg(not(target_os = "linux"))]
+        tokio::spawn(async move {
+            let (summary, mut body, _) = notify::wording(&new);
+            body.push_str("\nRun: voxtype meeting recover");
+            crate::notification::send(&summary, &body).await;
+        });
+        #[cfg(target_os = "linux")]
+        tokio::spawn(async move {
+            let choice = match zbus::Connection::session().await {
+                Ok(conn) => notify::announce(&conn, &new).await,
+                Err(e) => Err(e.into()),
+            };
+            let choice = match choice {
+                Ok(Some(choice)) => choice,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!("Interrupted meeting notification unavailable: {}", e);
+                    return;
+                }
+            };
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("voxtype"));
+            match std::process::Command::new(exe)
+                .args(choice.args())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+                }
+                Err(e) => tracing::warn!("Could not run {:?}: {}", choice.args(), e),
+            }
+        });
+    }
+
+    async fn handle_meeting_triggers(&mut self) -> bool {
+        let mut changed = false;
+
+        let recover_trigger = Config::runtime_dir().join(meeting::recover::TRIGGER);
+        if recover_trigger.exists() {
+            let _ = std::fs::remove_file(&recover_trigger);
+            self.announce_recoverable_meetings();
+        }
+        if let Some(request) = take_soundcheck_trigger() {
+            match request {
+                meeting::soundcheck::Request::Start { seconds } => {
+                    self.start_soundcheck(seconds).await
+                }
+                meeting::soundcheck::Request::Stop => self.stop_soundcheck("stopped").await,
+            }
+        }
+        self.tick_soundcheck().await;
+
+        // `meeting notice --ack` ran: tell every view now, not at the next
+        // state change.
+        let ack = Config::runtime_dir().join(meeting::notice::ACK_TRIGGER);
+        if ack.exists() {
+            let _ = std::fs::remove_file(&ack);
+            self.meeting_hud.recording_notice = meeting::notice::pending();
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.update_snapshot(&self.meeting_hud);
+                hub.publish_status(&self.meeting_hud.status);
+            }
+        }
+
+        if let Some(trigger) = check_meeting_start() {
+            if !self.config.meeting.enabled {
+                tracing::warn!("Meeting mode is disabled in config");
+            } else if self.meeting_daemon.is_some() {
+                tracing::warn!("Meeting already in progress; ignoring start request");
+            } else {
+                tracing::debug!("Meeting start requested via file trigger");
+                if let Err(e) = self
+                    .start_meeting(trigger.title, trigger.diarization, trigger.options)
+                    .await
+                {
+                    tracing::error!("Failed to start meeting: {}", e);
+                    send_notification(
+                        "Meeting Error",
+                        &format!("The meeting could not start: {}", e),
+                        false,
+                        self.config.engine,
+                        "critical",
+                    )
+                    .await;
+                }
+                changed = true;
+            }
+            ack_meeting_start();
+        }
+
+        if check_meeting_stop() && self.meeting_daemon.is_some() {
+            tracing::debug!("Meeting stop requested via file trigger");
+            if let Err(e) = self.stop_meeting().await {
+                tracing::error!("Failed to stop meeting: {}", e);
+            }
+            changed = true;
+        }
+
+        if check_meeting_pause() && self.meeting_active() {
+            tracing::debug!("Meeting pause requested via file trigger");
+            if let Err(e) = self.pause_meeting().await {
+                tracing::error!("Failed to pause meeting: {}", e);
+            }
+            changed = true;
+        }
+
+        if check_meeting_edit() {
+            if let Some(ref mut daemon) = self.meeting_daemon {
+                tracing::debug!("Meeting transcript edit requested via file trigger");
+                daemon.apply_segment_edits().await;
+            }
+        }
+
+        if let Some(retitle) = meeting::retitle::take_trigger(&Config::runtime_dir()) {
+            self.apply_retitle(retitle).await;
+        }
+
+        // A summary changed in storage (`meeting label` moved its action
+        // items' owners): tell the views showing that meeting.
+        if let Some(id) = take_summary_updated() {
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.publish_summary_updated(&id);
+            }
+        }
+
+        if check_meeting_notes() {
+            let notes = self.meeting_daemon.as_ref().and_then(|daemon| {
+                let id = daemon.current_meeting_id()?;
+                daemon.storage().load_notes(&id).ok()
+            });
+            if let (Some(notes), Some(ref hub)) = (notes, &self.meeting_event_hub) {
+                hub.publish_notes_updated(&notes);
+            }
+        }
+
+        // `meeting import` or `meeting retranscribe` got a chunk further.
+        if take_trigger(meeting::import::PROGRESS_TRIGGER) {
+            if let (Some(progress), Some(ref hub)) = (
+                meeting::import::read_progress(&Config::runtime_dir()),
+                &self.meeting_event_hub,
+            ) {
+                hub.publish_import_progress(&progress);
+            }
+        }
+
+        // `meeting play` started or stopped, or a playback ran to its end.
+        if take_trigger(meeting::playback::TRIGGER) {
+            if let Some(ref hub) = self.meeting_event_hub {
+                hub.publish_playback(&meeting::playback::status(&Config::runtime_dir()));
+            }
+        }
+
+        if check_meeting_resume()
+            && self
+                .meeting_daemon
+                .as_ref()
+                .is_some_and(|d| d.state().is_paused())
+        {
+            tracing::debug!("Meeting resume requested via file trigger");
+            if let Err(e) = self.resume_meeting().await {
+                tracing::error!("Failed to resume meeting: {}", e);
+            }
+            changed = true;
+        }
+
+        changed
+    }
+
+    /// Tell the user a meeting is losing transcript, once per meeting: a
+    /// broken engine fails every chunk, and one notification per chunk would
+    /// bury the desktop. The log keeps every occurrence.
+    async fn notify_meeting_error(&mut self, error: &str) {
+        if std::mem::replace(&mut self.meeting_error_notified, true) {
+            return;
+        }
+        send_notification_with_lifetime(
+            "Meeting transcription failed",
+            &format!(
+                "{}\n\nThe meeting is still recording, but this part is missing from the \
+                 transcript. Later errors are only logged: journalctl --user -u voxtype",
+                error
+            ),
+            false,
+            self.config.engine,
+            "critical",
+            Lifetime::Millis(15000),
+        )
+        .await;
     }
 
     /// Check if a meeting is in progress
@@ -2093,6 +4279,112 @@ impl Daemon {
         self.meeting_daemon
             .as_ref()
             .is_some_and(|d| d.state().is_active())
+    }
+
+    /// The echo handling a meeting gets for `path`, loading GTCRN when it
+    /// is the one: none if its model is missing or this build lacks it.
+    /// The second value says why GTCRN is off, the first time it is.
+    fn meeting_echo_path_in_use(
+        &mut self,
+        path: audio::echo_cancel::EchoPath,
+    ) -> (audio::echo_cancel::EchoPath, Option<String>) {
+        // Why GTCRN was wanted but is off, once per daemon run: the model
+        // stays missing until the user fetches it.
+        #[cfg_attr(not(feature = "onnx-common"), allow(unused_mut))]
+        let mut notice: Option<String> = None;
+
+        // Load GTCRN speech enhancer for echo cancellation
+        #[cfg(feature = "onnx-common")]
+        if self.speech_enhancer.is_none() && path == audio::echo_cancel::EchoPath::Gtcrn {
+            let model_path = Config::models_dir().join(audio::echo_cancel::GTCRN_MODEL_FILE);
+            if model_path.exists() {
+                match audio::enhance::GtcrnEnhancer::load(&model_path) {
+                    Ok(enhancer) => {
+                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
+                        tracing::info!(
+                            "GTCRN speech enhancer loaded for meeting echo cancellation"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                        notice = Some(format!(
+                            "Echo cancellation is off: the GTCRN model failed to load ({}). \
+                             Delete it and download it again with: {}",
+                            e,
+                            crate::setup::model::gtcrn_download_command()
+                        ));
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "GTCRN model not found at {:?}, skipping speech enhancement",
+                    model_path
+                );
+                notice = Some(format!(
+                    "Echo cancellation is off: the GTCRN model is missing. Download it \
+                     with: {} (or set [meeting.audio] echo_cancel = \"disabled\")",
+                    crate::setup::model::gtcrn_download_command()
+                ));
+            }
+        }
+        let notice = notice.filter(|n| self.meeting_notices_shown.insert(n.clone()));
+
+        // What the meeting really uses: GTCRN only if its
+        // model loaded (and this build has it).
+        #[cfg(feature = "onnx-common")]
+        let gtcrn_loaded = self.speech_enhancer.is_some();
+        #[cfg(not(feature = "onnx-common"))]
+        let gtcrn_loaded = false;
+        (path.effective(gtcrn_loaded), notice)
+    }
+
+    /// The echo canceller has delivered only digital silence since the
+    /// meeting started: it is not hearing the mic, and every line of yours
+    /// would be lost. Record the mic directly instead, with GTCRN, as a
+    /// meeting does when the canceller cannot start.
+    async fn leave_silent_echo_canceller(&mut self) {
+        let rms = self
+            .meeting_aec_liveness
+            .take()
+            .map(|check| check.rms())
+            .unwrap_or_default();
+        let Some(capture) = self.meeting_audio_capture.as_mut() else {
+            return;
+        };
+        let Some(rest) = meeting::soundcheck::leave_silent_canceller(
+            &self.config,
+            capture,
+            &mut self.meeting_echo_canceller,
+            rms,
+        )
+        .await
+        else {
+            return;
+        };
+        self.meeting_mic_buffer.extend(rest.mic);
+        self.meeting_loopback_buffer.extend(rest.loopback);
+        let (used, echo_notice) =
+            self.meeting_echo_path_in_use(audio::echo_cancel::EchoPath::Gtcrn);
+        if let Some(notice) = echo_notice {
+            send_notification_with_lifetime(
+                "Meeting continues with limitations",
+                &notice,
+                false,
+                self.config.engine,
+                "normal",
+                Lifetime::Millis(15000),
+            )
+            .await;
+        }
+        self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
+        tracing::info!("Meeting echo handling: {}", used.as_str());
+        if let Some(ref mut daemon) = self.meeting_daemon {
+            daemon.record_echo_cancel(used.as_str());
+        }
+        self.meeting_hud.echo_cancel = Some(used.as_str().to_string());
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+        }
     }
 
     /// Get the chunk duration for meeting mode
@@ -2109,7 +4401,8 @@ impl Daemon {
         #[cfg(feature = "onnx-common")]
         {
             if !mic_chunk.is_empty() {
-                if let Some(ref enhancer) = self.speech_enhancer {
+                if let Some(enhancer) = self.speech_enhancer.as_ref().filter(|_| self.meeting_gtcrn)
+                {
                     match enhancer.enhance(&mic_chunk) {
                         Ok(enhanced) => {
                             tracing::debug!(
@@ -2126,60 +4419,12 @@ impl Daemon {
             }
         }
 
-        if let Some(ref mut daemon) = self.meeting_daemon {
-            let mut had_loopback = false;
-
-            if !mic_chunk.is_empty() {
-                match daemon
-                    .process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone)
-                    .await
-                {
-                    Ok(Some(segments)) => {
-                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::error!("Error processing mic chunk: {}", e);
-                    }
-                }
-            }
-
-            if !loopback_chunk.is_empty() {
-                match daemon
-                    .process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback)
-                    .await
-                {
-                    Ok(Some(segments)) => {
-                        tracing::debug!(
-                            "Processed loopback chunk with {} segments",
-                            segments.len()
-                        );
-                        if !segments.is_empty() {
-                            had_loopback = true;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::error!("Error processing loopback chunk: {}", e);
-                    }
-                }
-            }
-
-            // Reconcile per-source offsets so any source that received a short
-            // or skipped chunk this iteration catches up to wall-clock before
-            // the next one. Added in PR #330 to fix dual-source timestamp
-            // inflation in meeting mode.
-            daemon.sync_source_offsets();
-
-            // Dedup bleed-through: strip echoed phrases from mic segments
-            if had_loopback {
-                if let Some(ref mut meeting) = daemon.current_meeting_mut() {
-                    let removed = meeting.transcript.dedup_bleed_through();
-                    if removed > 0 {
-                        tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
-                    }
-                }
-            }
+        let chunk_error = match self.meeting_daemon {
+            Some(ref mut daemon) => daemon.process_pair(mic_chunk, loopback_chunk).await,
+            None => None,
+        };
+        if let Some(error) = chunk_error {
+            self.notify_meeting_error(&error).await;
         }
     }
 
@@ -2187,8 +4432,15 @@ impl Daemon {
         let chunk_samples = self.meeting_chunk_samples();
 
         while self.meeting_mic_buffer.len() >= chunk_samples {
-            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
-            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
+            let cut = meeting::chunk::chunk_cut_point(
+                &self.meeting_mic_buffer,
+                &self.meeting_loopback_buffer,
+                chunk_samples,
+                16000,
+                self.config.meeting.audio.vad_threshold,
+            );
+            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..cut).collect();
+            let loopback_len = self.meeting_loopback_buffer.len().min(cut);
             let loopback_chunk: Vec<f32> =
                 self.meeting_loopback_buffer.drain(..loopback_len).collect();
             self.process_meeting_audio_pair(mic_chunk, loopback_chunk)
@@ -2223,12 +4475,7 @@ impl Daemon {
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&mut self, state: &mut State) {
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        discard_recording_overrides();
         self.restore_recording_media();
         *state = State::Idle;
         self.update_state("idle");
@@ -2239,6 +4486,7 @@ impl Daemon {
                 tracing::warn!("{}", e);
             }
         }
+        output::deferred_notice::flush().await;
     }
 
     /// Spawn a transcription task for a single chunk (eager processing)
@@ -2254,7 +4502,23 @@ impl Daemon {
             chunk_audio.len() as f32 / 16000.0
         );
 
-        let task = tokio::task::spawn_blocking(move || transcriber.transcribe(&chunk_audio));
+        // A chunk with no speech is skipped rather than transcribed: engines
+        // like Whisper invent text for silence, and a silent chunk mid-way
+        // through a recording would otherwise land in the output.
+        let vad = self.vad.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            if let Some(vad) = vad {
+                match vad.detect(&chunk_audio) {
+                    Ok(result) if !result.has_speech => {
+                        tracing::debug!("Chunk {} has no speech, skipping", chunk_index);
+                        return Ok(String::new());
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("VAD failed on chunk {}: {}", chunk_index, e),
+                }
+            }
+            transcriber.transcribe(&chunk_audio)
+        });
 
         self.eager_chunk_tasks.push((chunk_index, task));
     }
@@ -2269,20 +4533,15 @@ impl Daemon {
         transcriber: &Arc<dyn Transcriber>,
     ) -> usize {
         let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
-        let complete_chunks = eager::count_complete_chunks(accumulated_audio.len(), &eager_config);
+        let boundaries = eager::chunk_boundaries(accumulated_audio, &eager_config);
 
         let mut spawned = 0;
-        while *chunks_sent < complete_chunks {
-            if let Some(chunk_audio) =
-                eager::extract_chunk(accumulated_audio, *chunks_sent, &eager_config)
-            {
-                self.spawn_chunk_transcription(*chunks_sent, chunk_audio, transcriber.clone());
-                *chunks_sent += 1;
-                *tasks_in_flight += 1;
-                spawned += 1;
-            } else {
-                break;
-            }
+        while let Some((start, end)) = eager::chunk_range(&boundaries, *chunks_sent) {
+            let chunk_audio = accumulated_audio[start..end].to_vec();
+            self.spawn_chunk_transcription(*chunks_sent, chunk_audio, transcriber.clone());
+            *chunks_sent += 1;
+            *tasks_in_flight += 1;
+            spawned += 1;
         }
 
         spawned
@@ -2384,48 +4643,71 @@ impl Daemon {
             chunk_results.len()
         );
 
+        // Whole-recording VAD, the same gate the batch path applies. It runs
+        // alongside the in-flight chunks and the tail so it adds no wait.
+        let vad_task = self.vad.clone().map(|vad| {
+            let audio = accumulated_audio.clone();
+            tokio::task::spawn_blocking(move || vad.detect(&audio))
+        });
+
         // Wait for any in-flight chunk tasks
         let mut waited_results = self.wait_for_chunk_tasks().await;
         chunk_results.append(&mut waited_results);
 
-        // Transcribe the tail (audio after last complete chunk)
+        // Transcribe the tail (audio after last complete chunk). Chunk
+        // boundaries depend only on the audio before them, so recomputing
+        // them over the final audio reproduces the bounds of every chunk sent.
         let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
+        let boundaries = eager::chunk_boundaries(&accumulated_audio, &eager_config);
         let chunks_sent = chunk_results
             .iter()
             .map(|r| r.chunk_index)
             .max()
             .map(|i| i + 1)
             .unwrap_or(0);
-        let tail_start = chunks_sent * eager_config.stride_samples();
+        let tail_start = eager::tail_start(&boundaries, chunks_sent);
 
-        if tail_start < accumulated_audio.len() {
+        let tail_task = (accumulated_audio.len().saturating_sub(tail_start) >= 4800).then(|| {
             let tail_audio = accumulated_audio[tail_start..].to_vec();
-            let tail_duration = tail_audio.len() as f32 / 16000.0;
+            tracing::debug!(
+                "Transcribing tail audio: {:.1}s (from sample {})",
+                tail_audio.len() as f32 / 16000.0,
+                tail_start
+            );
+            let tail_transcriber = transcriber.clone();
+            tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio))
+        });
 
-            if tail_duration >= 0.3 {
-                tracing::debug!(
-                    "Transcribing tail audio: {:.1}s (from sample {})",
-                    tail_duration,
-                    tail_start
-                );
+        if let Some(task) = vad_task {
+            match task.await {
+                Ok(Ok(result)) if !result.has_speech => {
+                    if let Some(task) = tail_task {
+                        task.abort();
+                    }
+                    self.report_no_speech(&result).await;
+                    self.publish_empty_outcome();
+                    return None;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("VAD failed, proceeding anyway: {}", e),
+                Err(e) => tracing::warn!("VAD task failed, proceeding anyway: {}", e),
+            }
+        }
 
-                let tail_transcriber = transcriber.clone();
-                match tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio))
-                    .await
-                {
-                    Ok(Ok(text)) => {
-                        tracing::debug!("Tail transcription: {:?}", text);
-                        chunk_results.push(ChunkResult {
-                            text,
-                            chunk_index: chunks_sent,
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!("Tail transcription failed: {}", e);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Tail transcription task panicked: {}", e);
-                    }
+        if let Some(task) = tail_task {
+            match task.await {
+                Ok(Ok(text)) => {
+                    tracing::debug!("Tail transcription: {:?}", text);
+                    chunk_results.push(ChunkResult {
+                        text,
+                        chunk_index: chunks_sent,
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Tail transcription failed: {}", e);
+                }
+                Err(e) => {
+                    tracing::warn!("Tail transcription task panicked: {}", e);
                 }
             }
         }
@@ -2448,7 +4730,6 @@ impl Daemon {
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         model_override: Option<String>,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) -> bool {
         let duration = state.recording_duration().unwrap_or_default();
         tracing::info!("Recording stopped ({:.1}s)", duration.as_secs_f32());
@@ -2464,16 +4745,13 @@ impl Daemon {
 
             self.play_feedback(SoundEvent::RecordingStop);
 
-            if self.config.output.notification.on_recording_stop {
-                send_notification(
-                    "Recording Stopped",
-                    "Transcribing...",
-                    self.config.output.notification.show_engine_icon,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            end_recording_notification(
+                "Recording Stopped",
+                "Transcribing...",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
 
             match stop_result {
                 Ok(samples) => {
@@ -2483,6 +4761,7 @@ impl Daemon {
                     if audio_duration < 0.3 {
                         tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.publish_empty_outcome();
+                        self.publish_osd_outcome(osd::session::OutcomeKind::TooShort, 0);
                         self.reset_to_idle(state).await;
                         return false;
                     }
@@ -2491,12 +4770,7 @@ impl Daemon {
                     if let Some(ref vad) = self.vad {
                         match vad.detect(&samples) {
                             Ok(result) if !result.has_speech => {
-                                tracing::debug!(
-                                    "No speech detected (speech={:.1}%, rms={:.4}), skipping transcription",
-                                    result.speech_ratio * 100.0,
-                                    result.rms_energy
-                                );
-                                self.play_feedback(SoundEvent::Cancelled);
+                                self.report_no_speech(&result).await;
                                 self.publish_empty_outcome();
                                 self.reset_to_idle(state).await;
                                 return false;
@@ -2522,10 +4796,7 @@ impl Daemon {
                     self.update_state("transcribing");
 
                     let transcriber = match self
-                        .get_transcriber_for_recording(
-                            model_override.as_deref(),
-                            transcriber_preloaded,
-                        )
+                        .get_transcriber_for_recording(model_override.as_deref())
                         .await
                     {
                         Ok(transcriber) => transcriber,
@@ -2548,6 +4819,7 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                     self.reset_to_idle(state).await;
                     false
                 }
@@ -2559,8 +4831,67 @@ impl Daemon {
         }
     }
 
+    /// Mark an accepted model upgrade as proven by a successful transcription.
+    fn record_model_upgrade_success(&mut self) {
+        if !self.model_upgrade_pending {
+            return;
+        }
+        self.model_upgrade_pending = false;
+        match crate::model_upgrade::record_first_success(
+            &crate::model_upgrade::state_path(),
+            self.config.model_name(),
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    "First transcription with the upgraded model succeeded; the previous model can be removed with `voxtype setup migrate --cleanup`"
+                );
+                // The tray reads offers once at startup; push the cleanup
+                // offer now so "Remove old model files" appears without a
+                // daemon restart.
+                self.refresh_tray_upgrade();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "Could not record the model upgrade success"),
+        }
+    }
+
+    fn refresh_tray_upgrade(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            match serde_json::to_value(crate::model_upgrade::status_for_config(&self.config)) {
+                Ok(value) => {
+                    tray.update_upgrade(crate::tray::UpgradeMenu::from_status_value(&value))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Could not refresh the tray's model upgrade menu")
+                }
+            }
+        }
+    }
+
     /// Handle transcription completion (called when transcription_task completes)
     async fn handle_transcription_result(
+        &mut self,
+        state: &mut State,
+        result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
+    ) {
+        let failed = match &result {
+            Ok(Err(_)) => true,
+            Err(error) => !error.is_cancelled(),
+            _ => false,
+        };
+        self.handle_transcription_result_inner(state, result).await;
+        if failed {
+            self.show_tray_error();
+        }
+        // The inner handler owns the last reference to an on-demand
+        // transcriber, so by here the model has been dropped.
+        if self.config.on_demand_loading() {
+            release_freed_memory();
+        }
+    }
+
+    async fn handle_transcription_result_inner(
         &mut self,
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
@@ -2574,12 +4905,35 @@ impl Daemon {
             Ok(Ok(text)) => {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
+                    self.record_model_upgrade_success();
+
+                    // Resolve the profile before cleanup because vocabulary is
+                    // the first profile-aware stage in the cleanup pipeline.
+                    let profile_override = read_profile_override();
+                    let active_profile = profile_override
+                        .as_ref()
+                        .and_then(|name| self.config.get_profile(name));
+
+                    if let Some(profile_name) = &profile_override {
+                        if active_profile.is_none() {
+                            tracing::warn!(
+                                "Profile '{}' not found in config, using default settings",
+                                profile_name
+                            );
+                        }
+                    }
 
                     // Apply text processing (replacements, punctuation)
-                    let processed_text = self.text_processor.process(&text);
+                    let vocabulary = profile_override
+                        .as_ref()
+                        .and_then(|name| self.profile_vocabularies.get(name));
+                    let processed_text = self
+                        .text_processor
+                        .process_with_vocabulary(&text, vocabulary);
                     if processed_text != text {
                         tracing::debug!("After text processing: {:?}", processed_text);
                     }
@@ -2595,21 +4949,6 @@ impl Daemon {
                             "Smart auto-submit triggered, stripped text: {:?}",
                             processed_text
                         );
-                    }
-
-                    // Check for profile override from CLI flags
-                    let profile_override = read_profile_override();
-                    let active_profile = profile_override
-                        .as_ref()
-                        .and_then(|name| self.config.get_profile(name));
-
-                    if let Some(profile_name) = &profile_override {
-                        if active_profile.is_none() {
-                            tracing::warn!(
-                                "Profile '{}' not found in config, using default settings",
-                                profile_name
-                            );
-                        }
                     }
 
                     // Get context from last dictation if within 60 seconds
@@ -2629,11 +4968,19 @@ impl Daemon {
                                 timeout_ms,
                                 trim: true,
                                 fallback_on_empty: true,
+                                edit_list: self
+                                    .config
+                                    .output
+                                    .post_process
+                                    .as_ref()
+                                    .is_some_and(|config| config.edit_list),
                             };
-                            let profile_processor = PostProcessor::new(&profile_config);
+                            let profile_name = profile_override.as_deref().unwrap_or_default();
+                            let profile_processor =
+                                PostProcessor::new(&profile_config).for_profile(profile_name);
                             tracing::info!(
                                 "Post-processing with profile: {:?}, has_context: {}",
-                                profile_override.as_ref().unwrap(),
+                                profile_name,
                                 recent_context.is_some()
                             );
                             tracing::debug!("Post-processing context: {:?}", recent_context);
@@ -2725,34 +5072,42 @@ impl Daemon {
                             text: final_text.clone(),
                         };
 
-                        let file_mode = &self.config.output.file_mode;
-                        match write_transcription_to_file(&output_path, &final_text, file_mode)
-                            .await
-                        {
-                            Ok(()) => {
-                                let mode_str = match file_mode {
+                        match self.deliver_file_output(&output_path, &final_text).await {
+                            FileDelivery::Written => {
+                                let mode_str = match self.config.output.file_mode {
                                     FileMode::Overwrite => "wrote",
                                     FileMode::Append => "appended",
                                 };
                                 tracing::info!("{} transcription to {:?}", mode_str, output_path);
-                                write_result_sidecar(
-                                    &output_path,
-                                    &TranscriptOutcome::ok(final_text.chars().count()),
-                                );
+                                let outcome = if final_text.is_empty() {
+                                    TranscriptOutcome::empty()
+                                } else {
+                                    TranscriptOutcome::ok(final_text.chars().count())
+                                };
+                                write_result_sidecar(&output_path, &outcome);
+                                self.publish_osd_text_outcome(&final_text);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to write transcription to {:?}: {}",
-                                    output_path,
-                                    e
-                                );
+                            FileDelivery::FellBack(err) => {
                                 write_result_sidecar(
                                     &output_path,
-                                    &TranscriptOutcome::error(&e.to_string()),
+                                    &TranscriptOutcome::error(&format!(
+                                        "{err}; copied to the clipboard instead"
+                                    )),
                                 );
+                                self.publish_osd_text_outcome(&final_text);
+                                self.play_feedback(SoundEvent::TranscriptionComplete);
+                            }
+                            FileDelivery::Lost(err) => {
+                                write_result_sidecar(&output_path, &TranscriptOutcome::error(&err));
+                                self.publish_osd_outcome(
+                                    osd::session::OutcomeKind::OutputFailed,
+                                    0,
+                                );
+                                self.play_feedback(SoundEvent::Error);
                             }
                         }
+                        output::deferred_notice::flush().await;
 
                         *state = State::Idle;
                         self.update_state("idle");
@@ -2862,25 +5217,38 @@ impl Daemon {
                         ),
                     };
 
-                    if let Err(e) =
-                        output::output_with_fallback(&output_chain, &final_text, output_options)
-                            .await
-                    {
+                    let (report, result) = output::output_with_fallback_report(
+                        &output_chain,
+                        &final_text,
+                        output_options,
+                    )
+                    .await;
+                    if let Err(e) = result {
                         tracing::error!("Output failed: {}", e);
+                        self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
+                        // Nothing typed or copied: keep the text recoverable.
+                        output::fallback::notify_failed(&report, &e, &final_text).await;
                     } else {
+                        self.publish_osd_text_outcome(&final_text);
                         self.play_feedback(SoundEvent::TranscriptionComplete);
-
-                        if self.config.output.notification.on_transcription {
-                            // Send notification on successful output
-                            output::send_transcription_notification(
-                                &final_text,
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                &self.config.output.notification.urgency,
-                            )
-                            .await;
-                        }
+                        // Says "copied to clipboard" (and why, once) when
+                        // typing fell back to the clipboard.
+                        output::fallback::notify_delivered(
+                            &report,
+                            &final_text,
+                            self.config
+                                .output
+                                .notification
+                                .show_edits
+                                .then_some(text.as_str()),
+                            &self.config.output.notification,
+                            self.config.engine,
+                        )
+                        .await;
                     }
+                    // After the "Transcribed" notification, which would
+                    // otherwise replace a post-process or hook failure notice.
+                    output::deferred_notice::flush().await;
 
                     *state = State::Idle;
                     self.update_state("idle");
@@ -2888,29 +5256,126 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+                self.keep_failed_recording(state).await;
                 self.reset_to_idle(state).await;
             }
             Err(e) => {
                 // JoinError - task was cancelled or panicked
-                if e.is_cancelled() {
+                if !join_error_poisons_engine(&e) {
                     tracing::debug!("Transcription task was cancelled");
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+                    self.keep_failed_recording(state).await;
+
+                    // spawn_blocking already kept the panic from reaching the
+                    // daemon, so this is not about survival. It is about not
+                    // reusing an engine whose internal state is whatever the
+                    // panic left behind: drop the cached model so the next
+                    // recording loads a clean one (#643).
+                    //
+                    // Only on a real panic. A cancellation is our own doing
+                    // and leaves the engine perfectly usable.
+                    if let Some(ref mut mm) = self.model_manager {
+                        let dropped = mm.drop_loaded_models();
+                        if dropped > 0 {
+                            tracing::warn!(
+                                "Dropped {} cached model(s) after the panic; \
+                                 the next recording will reload",
+                                dropped
+                            );
+                        }
+                    }
+                    // model_manager only covers Whisper. Every other engine
+                    // clones from transcriber_preloaded, so a poisoned
+                    // instance there has to be discarded the same way;
+                    // get_transcriber_for_recording re-creates it on the
+                    // next recording.
+                    if self.transcriber_preloaded.take().is_some() {
+                        tracing::warn!(
+                            "Dropped the preloaded transcriber after the panic; \
+                             the next recording will re-create it"
+                        );
+                    }
                 }
                 self.reset_to_idle(state).await;
             }
         }
     }
 
+    /// Load the transcription model at startup (on_demand_loading off).
+    fn preload_transcriber(
+        &mut self,
+        model_manager: &mut ModelManager,
+    ) -> std::result::Result<(), crate::error::TranscribeError> {
+        match self.config.engine {
+            crate::config::TranscriptionEngine::Whisper => {
+                if self.config.whisper.streaming {
+                    // Streaming needs the transcriber in `transcriber_preloaded`
+                    // so try_start_streaming can find it. The factory returns
+                    // the sliding-window wrapper when [whisper] streaming = true.
+                    if self.config.whisper.on_demand_loading {
+                        tracing::warn!(
+                            "[whisper] streaming requires on_demand_loading = false; \
+                             streaming will be unavailable"
+                        );
+                    }
+                    self.transcriber_preloaded = Some(Arc::from(
+                        crate::transcribe::create_transcriber(&self.config)?,
+                    ));
+                } else {
+                    // Use model manager for Whisper
+                    model_manager.preload_primary()?;
+                }
+            }
+            crate::config::TranscriptionEngine::Parakeet
+            | crate::config::TranscriptionEngine::Moonshine
+            | crate::config::TranscriptionEngine::SenseVoice
+            | crate::config::TranscriptionEngine::Paraformer
+            | crate::config::TranscriptionEngine::Dolphin
+            | crate::config::TranscriptionEngine::Omnilingual
+            | crate::config::TranscriptionEngine::Cohere
+            | crate::config::TranscriptionEngine::Gguf
+            | crate::config::TranscriptionEngine::OpenVino
+            | crate::config::TranscriptionEngine::Soniox => {
+                // Non-Whisper engines do their own setup; Soniox just validates
+                // API key + endpoint at construction (no model to download).
+                self.transcriber_preloaded = Some(Arc::from(
+                    crate::transcribe::create_transcriber(&self.config)?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The model failed to load at startup and the daemon is about to exit.
+    /// Under systemd it is restarted every few seconds and fails the same
+    /// way, so the notice is posted once per distinct failure: a marker in
+    /// the runtime directory remembers the last one until a start succeeds.
+    async fn notify_startup_model_failure(&self, err: &crate::error::TranscribeError) {
+        let model = self.config.model_name();
+        let key = format!("{}|{}|{}", self.config.engine.name(), model, err);
+        let marker = Config::runtime_dir().join(STARTUP_FAILURE_MARKER);
+        if std::fs::read_to_string(&marker).ok().as_deref() == Some(key.as_str()) {
+            tracing::debug!("Startup failure already notified; not repeating it");
+            return;
+        }
+        let _ = std::fs::write(&marker, &key);
+        let notice = crate::failure_notice::model_load_failed(&self.config, model, err, true);
+        self.post_failure_notice(&notice).await;
+    }
+
     /// Fire a desktop notification when the running binary can't service
     /// the configured engine (e.g. `engine = "parakeet"` but the wrapper
     /// dispatches to a CPU Whisper variant — the Ryan case from #450).
     /// Logged at WARN regardless, so journalctl users see it too.
-    fn warn_on_variant_mismatch(&self) {
+    /// Returns whether it notified.
+    fn warn_on_variant_mismatch(&self) -> bool {
         let inventory = crate::setup::binary::inventory();
         let Some(mismatch) = crate::setup::variant_check::detect_mismatch(&self.config, &inventory)
         else {
-            return;
+            return false;
         };
 
         let active = mismatch
@@ -2918,21 +5383,7 @@ impl Daemon {
             .as_deref()
             .unwrap_or("the running binary");
         let title = format!("Voxtype: {} unavailable", mismatch.configured_engine);
-        let body = match &mismatch.remediation {
-            crate::setup::variant_check::Remediation::SwitchToVariant { target } => format!(
-                "{} was built without --features {}. \
-                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
-                 to switch to {}.",
-                active,
-                mismatch.required_feature,
-                target.binary_name(),
-            ),
-            crate::setup::variant_check::Remediation::Rebuild { feature } => format!(
-                "This source build was compiled without --features {}. \
-                 Rebuild voxtype with that feature to enable the {} engine.",
-                feature, mismatch.configured_engine,
-            ),
-        };
+        let body = mismatch.explanation();
 
         tracing::warn!(
             engine = mismatch.configured_engine,
@@ -2942,11 +5393,70 @@ impl Daemon {
             body
         );
         crate::notification::send_sync(&title, &body);
+        true
+    }
+
+    /// Fire a desktop notification when the daemon has no WAYLAND_DISPLAY or
+    /// DISPLAY, which is how a systemd service started before the compositor
+    /// imported its environment looks: every typing and clipboard tool fails
+    /// and dictation goes nowhere. Not needed when output goes to a file.
+    #[cfg(target_os = "linux")]
+    fn warn_on_missing_display_env(&self) {
+        let out = &self.config.output;
+        if out.mode == crate::config::OutputMode::File && out.file_path.is_some() {
+            return;
+        }
+        if !output::session::display_env_missing() {
+            return;
+        }
+        let under_systemd = std::env::var_os("INVOCATION_ID").is_some();
+        let (title, body) = output::session::display_env_notice(under_systemd);
+        tracing::warn!("{}: {}", title, body.replace('\n', " "));
+        crate::notification::send_sync(&title, &body);
+    }
+
+    /// Say loudly, once per start, when this is a GPU build whose execution
+    /// provider cannot load (e.g. cuDNN missing for voxtype-onnx-cuda).
+    /// ONNX Runtime would otherwise fall back to CPU with only a raw dlopen
+    /// error in the journal, and dictation would just be slow for no
+    /// visible reason. Dictation keeps working on CPU either way.
+    fn warn_on_unloadable_gpu_provider(&self) {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let Some(missing) = crate::setup::gpu::unresolved_provider_deps_at(&exe) else {
+            return;
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let binary = exe
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let fix = crate::setup::gpu::provider_fix_lines(&binary, &missing);
+        tracing::error!(
+            "GPU acceleration unavailable: {} cannot load its GPU execution provider \
+             (missing {}), falling back to CPU. {}",
+            binary,
+            missing.join(", "),
+            fix.join(" ")
+        );
+        crate::notification::send_sync(
+            "Voxtype: GPU unavailable, using CPU",
+            &format!("Missing {}.\n{}", missing.join(", "), fix.join("\n")),
+        );
     }
 
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
+
+        // Single-instance lock before anything else. Pidlock has no Drop
+        // impl, so holding the binding for run()'s lifetime keeps it; a
+        // crashed daemon's leftover lockfile is recovered as stale on the
+        // next start.
+        let _instance_lock = acquire_instance_lock(&Config::runtime_dir())?;
 
         // Engine-vs-binary mismatch check at startup so users see a desktop
         // notification before the first transcription attempt would fail.
@@ -2954,7 +5464,23 @@ impl Daemon {
         // but logs go to journald and most users never see them. A
         // notify-send pops up where the user is actually looking. See
         // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
-        self.warn_on_variant_mismatch();
+        let variant_mismatch_notified = self.warn_on_variant_mismatch();
+        #[cfg(target_os = "linux")]
+        self.warn_on_missing_display_env();
+        self.warn_on_unloadable_gpu_provider();
+
+        // On Omarchy, link the packaged Settings panel on first start and
+        // rescan it after a package upgrade. Runs on its own thread; it never
+        // blocks startup or fails the daemon.
+        crate::setup::omarchy::spawn_auto_link(&self.config);
+
+        // Everything else the config depends on (model, VAD model, output
+        // tools, display env, OSD, meeting tools): one grouped notification
+        // for errors, warnings to the log. Stats, PATH lookups and env reads
+        // only, and before model loading so a missing model is reported
+        // even though the load below then fails. `voxtype doctor` runs the
+        // full set.
+        crate::setup::doctor::startup_summary(&self.config).await;
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
@@ -2979,6 +5505,11 @@ impl Daemon {
 
         // Clean up any stale cancel and profile override files from previous runs
         cleanup_cancel_file();
+        // The GGUF worker rewrites this once it has bound a backend; a report
+        // from a previous daemon must not describe this one.
+        let _ =
+            std::fs::remove_file(Config::runtime_dir().join(crate::status_json::GGUF_STATUS_FILE));
+        let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
         cleanup_profile_override();
 
         // Clean up any stale meeting command files
@@ -2986,6 +5517,10 @@ impl Daemon {
 
         // Mark any orphaned active meetings as completed
         cleanup_stale_meetings(&self.config);
+
+        // A predecessor's acceleration state describes a model this daemon
+        // has not loaded yet.
+        crate::setup::accel::clear();
 
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
@@ -3027,56 +5562,61 @@ impl Daemon {
         // Spawn the OSD child if enabled and the level socket bound. Without
         // the socket the frontend has nothing to render, so skip the spawn
         // rather than burning a slot in the launcher's restart logic.
-        if self.config.osd.enabled && self.level_hub.is_some() {
-            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
+        let osd_active = if self.config.osd.enabled && self.level_hub.is_some() {
+            self.spawn_osd()
+        } else {
+            "none"
+        };
+        osd::frontend::publish_active(&Config::runtime_dir(), osd_active);
+
+        // The single-instance lock is already held. Never register a duplicate tray.
+        #[cfg(target_os = "linux")]
+        if self.tray.is_none() {
+            self.tray =
+                crate::tray::TrayRuntime::start_for_daemon(&self.config, self.config_path.clone());
         }
 
-        // Check if another instance is already running (single-instance safeguard)
-        let lock_path = Config::runtime_dir().join("voxtype.lock");
-        let lock_path_str = lock_path.to_string_lossy().to_string();
-        let mut pidlock = Pidlock::new(&lock_path_str);
-
-        match pidlock.acquire() {
-            Ok(_) => {
-                tracing::debug!("Acquired PID lock at {:?}", lock_path);
+        // Start the meeting-event broadcaster for the meeting HUD. Bound
+        // unconditionally (like the audio level socket) regardless of
+        // whether meeting mode is enabled in config, so a HUD can always
+        // connect and simply see the idle snapshot when no meeting is
+        // running. Failure to bind is not fatal.
+        let meeting_socket = meeting::events::default_socket_path();
+        match meeting::MeetingEventHub::start(meeting_socket.clone()).await {
+            Ok(hub) => {
+                tracing::info!("Meeting event socket: {:?}", hub.socket_path());
+                self.meeting_hud.recording_notice = meeting::notice::pending();
+                hub.update_snapshot(&self.meeting_hud);
+                self.meeting_event_hub = Some(hub);
+                self.announce_recoverable_meetings();
+                self.notify_interrupted_meetings();
             }
-            Err(_) => {
-                // Check if the lock is stale (previous daemon crashed)
-                #[cfg(unix)]
-                if cleanup_stale_lockfile(&lock_path) {
-                    // Try again after removing stale lock
-                    pidlock = Pidlock::new(&lock_path_str);
-                    if let Err(e) = pidlock.acquire() {
-                        tracing::error!("Failed to acquire lock after stale cleanup: {:?}", e);
-                        return Err(crate::error::VoxtypeError::Config(format!(
-                            "Another voxtype instance is already running (lock error: {:?})",
-                            e
-                        )));
-                    }
-                    tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
-                } else {
-                    tracing::error!(
-                        "Failed to acquire lock: another voxtype instance is already running"
-                    );
-                    return Err(crate::error::VoxtypeError::Config(
-                        "Another voxtype instance is already running".to_string(),
-                    ));
-                }
-                #[cfg(not(unix))]
-                {
-                    tracing::error!(
-                        "Failed to acquire lock: another voxtype instance is already running"
-                    );
-                    return Err(crate::error::VoxtypeError::Config(
-                        "Another voxtype instance is already running".to_string(),
-                    )
-                    .into());
-                }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not start meeting event socket at {:?}: {}",
+                    meeting_socket,
+                    e
+                );
             }
         }
 
-        // Only now that the lock is ours: a refused second instance must not
-        // overwrite the running daemon's answer with its own version.
+        // Offer to record calls as they start ([meeting.detect]). Held for
+        // run()'s lifetime; dropping it stops the watcher.
+        #[cfg(target_os = "linux")]
+        let _meeting_detector =
+            meeting::detect::runner::spawn_in_daemon(&self.config, self.config_path.clone());
+
+        // Keep the calendar link's events fresh for meeting titles. It does
+        // nothing until `voxtype meeting calendar set-ics` sets a link.
+        let calendar_refresh = self.config.meeting.enabled.then(|| {
+            tokio::spawn(meeting::calendar::refresh_forever(
+                meeting::calendar::source::Store::new(
+                    meeting::calendar::source::Store::default_dir(),
+                ),
+            ))
+        });
+        let _calendar_refresh = AbortOnDrop(calendar_refresh);
+
         crate::daemon_status::publish_version();
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);
@@ -3167,52 +5707,22 @@ impl Daemon {
         let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
 
         // Pre-load transcription model if on_demand_loading is disabled
-        let mut transcriber_preloaded: Option<Arc<dyn Transcriber>> = None;
         if !self.config.on_demand_loading() {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
-            match self.config.engine {
-                crate::config::TranscriptionEngine::Whisper => {
-                    if self.config.whisper.streaming {
-                        // Streaming needs the transcriber in `transcriber_preloaded`
-                        // so try_start_streaming can find it. The factory returns
-                        // the sliding-window wrapper when [whisper] streaming = true.
-                        if self.config.whisper.on_demand_loading {
-                            tracing::warn!(
-                                "[whisper] streaming requires on_demand_loading = false; \
-                                 streaming will be unavailable"
-                            );
-                        }
-                        transcriber_preloaded = Some(Arc::from(
-                            crate::transcribe::create_transcriber(&self.config)?,
-                        ));
-                    } else {
-                        // Use model manager for Whisper
-                        if let Err(e) = model_manager.preload_primary() {
-                            tracing::error!("Failed to preload model: {}", e);
-                            return Err(crate::error::VoxtypeError::Transcribe(e));
-                        }
-                    }
+            if let Err(e) = self.preload_transcriber(&mut model_manager) {
+                tracing::error!("Failed to preload model: {}", e);
+                // A variant mismatch was already explained; this failure is
+                // its consequence, and a second notice would replace the fix.
+                if !variant_mismatch_notified {
+                    self.notify_startup_model_failure(&e).await;
                 }
-                crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine
-                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                    // Non-Whisper engines do their own setup; Soniox just validates
-                    // API key + endpoint at construction (no model to download).
-                    transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
-                        &self.config,
-                    )?));
-                }
+                return Err(crate::error::VoxtypeError::Transcribe(e));
             }
             tracing::info!("Model loaded, ready for voice input");
         } else {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
         }
+        let _ = std::fs::remove_file(Config::runtime_dir().join(STARTUP_FAILURE_MARKER));
 
         // Log secondary model if configured
         if let Some(ref secondary) = self.config.whisper.secondary_model {
@@ -3228,9 +5738,26 @@ impl Daemon {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
             match listener.start() {
-                Ok(rx) => Some(rx),
+                Ok(rx) => {
+                    // A keyboard opened: a later failure is news again.
+                    #[cfg(target_os = "linux")]
+                    hotkey::access::clear_notice(&hotkey::access::notice_marker_path());
+                    Some(rx)
+                }
                 Err(e) => {
-                    tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
+                    tracing::warn!("Failed to start hotkey listener: {}\n  Until then, use 'voxtype record' commands.", e);
+                    // The daemon keeps running for `voxtype record`, so
+                    // without this the built-in hotkey just does nothing.
+                    // Notified once per install, not on every start: people
+                    // who use compositor keybindings never needed it. The
+                    // warning above is logged every time.
+                    #[cfg(target_os = "linux")]
+                    if let Some((title, body)) =
+                        hotkey::access::notify_once(&e, &hotkey::access::notice_marker_path())
+                    {
+                        notification::send_status(title, &body, "normal", Lifetime::Millis(15000))
+                            .await;
+                    }
                     None
                 }
             }
@@ -3250,7 +5777,7 @@ impl Daemon {
         let max_duration = Duration::from_secs(self.config.audio.max_duration_secs as u64);
 
         let activation_mode = self.config.hotkey.mode;
-        if self.config.hotkey.enabled {
+        if hotkey_rx.is_some() {
             let mode_desc = match activation_mode {
                 ActivationMode::PushToTalk => "hold to record, release to transcribe",
                 ActivationMode::Toggle => "press to start/stop recording",
@@ -3274,8 +5801,54 @@ impl Daemon {
         let mut streaming_session: Option<StreamingSession> = None;
         let mut streaming_chain: Option<Vec<Box<dyn TextOutput>>> = None;
 
+        // Persistent poll timers for the recording and transcribing arms. A
+        // `sleep()` arm is rebuilt every loop iteration, so it competes with
+        // the unconditional 100ms poll below: both are due on the same tick,
+        // select! picks one at random, and the loser starts over. That turned
+        // the cancel check into a coin flip every 100ms (observed 0.1-0.5s
+        // before a `record cancel` took effect). An Interval keeps its
+        // deadline across iterations, so a missed tick fires on the next one.
+        let mut recording_poll = tokio::time::interval(Duration::from_millis(100));
+        recording_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Whether the current recording was already warned that it is nearing
+        // max_duration_secs. Re-arms whenever a recording is further than the
+        // warning lead from the cap, so it needs no per-session reset.
+        let mut cap_warned = false;
+        let mut transcribing_poll = tokio::time::interval(Duration::from_millis(100));
+        transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
+            self.apply_pending_language(state.is_idle());
             tokio::select! {
+                Some(language) = async {
+                    #[cfg(target_os = "linux")]
+                    if let Some(tray) = &mut self.tray { return tray.next_language().await; }
+                    std::future::pending::<Option<&'static str>>().await
+                } => {
+                    match self.queue_language(language) {
+                        Ok(()) => {
+                            #[cfg(target_os = "linux")]
+                            if let (Some(tray), Some(next)) = (&self.tray, &self.pending_language) {
+                                let mut menu = crate::language_selection::LanguageMenu::for_config(next);
+                                menu.explanation = "Saved: applies to the next dictation, not the current utterance".into();
+                                tray.update_language(menu);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "Tray language selection failed");
+                            #[cfg(target_os = "linux")]
+                            if let Some(tray) = &self.tray {
+                                let mut menu = crate::language_selection::LanguageMenu::for_config(
+                                    self.pending_language.as_ref().unwrap_or(&self.config));
+                                menu.explanation = format!("Language change failed: {error}");
+                                tray.update_language(menu);
+                            }
+                            send_notification("Voxtype: Language change failed", &error,
+                                self.config.output.notification.show_engine_icon, self.config.engine,
+                                &self.config.output.notification.urgency).await;
+                        }
+                    }
+                }
                 // Handle hotkey events (only if hotkey listener is enabled)
                 Some(hotkey_event) = async {
                     match &mut hotkey_rx {
@@ -3289,6 +5862,9 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
                             if state.is_idle() {
+                                if !self.accept_model_override(model_override.as_deref()).await {
+                                    continue;
+                                }
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
@@ -3302,67 +5878,7 @@ impl Daemon {
                                 }
 
                                 // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            let config = self.config.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
+                                self.prepare_for_recording(model_override.as_deref());
 
                                 // Pause or duck playback before either capture path opens
                                 // the microphone.
@@ -3371,7 +5887,6 @@ impl Daemon {
                                 // Try streaming first; fall through to batch if the engine
                                 // doesn't support streaming or setup fails.
                                 if self.try_start_streaming(
-                                    &transcriber_preloaded,
                                     &mut state,
                                     &mut audio_capture,
                                     &mut streaming_handle,
@@ -3407,6 +5922,7 @@ impl Daemon {
                                                 };
                                             }
                                             self.update_state("recording");
+                                            self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -3444,7 +5960,6 @@ impl Daemon {
                                     &mut state,
                                     &mut audio_capture,
                                     model_override,
-                                    &transcriber_preloaded,
                                 ).await;
                             } else if state.is_eager_recording() {
                                 // Handle eager recording stop - extract model_override first
@@ -3473,7 +5988,6 @@ impl Daemon {
 
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
-                                    &transcriber_preloaded,
                                 ).await {
                                     Ok(t) => t,
                                     Err(()) => {
@@ -3491,6 +6005,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
+                                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                     self.reset_to_idle(&mut state).await;
                                 }
                                 eager_transcriber = None;
@@ -3503,6 +6018,9 @@ impl Daemon {
                                 state.is_idle(), state.is_recording(), model_override, profile_override);
 
                             if state.is_idle() {
+                                if !self.accept_model_override(model_override.as_deref()).await {
+                                    continue;
+                                }
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
@@ -3516,72 +6034,11 @@ impl Daemon {
                                 }
 
                                 // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            let config = self.config.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
+                                self.prepare_for_recording(model_override.as_deref());
 
                                 self.suppress_recording_media().await;
 
                                 if self.try_start_streaming(
-                                    &transcriber_preloaded,
                                     &mut state,
                                     &mut audio_capture,
                                     &mut streaming_handle,
@@ -3614,6 +6071,7 @@ impl Daemon {
                                                 };
                                             }
                                             self.update_state("recording");
+                                            self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -3641,7 +6099,6 @@ impl Daemon {
                                     &mut state,
                                     &mut audio_capture,
                                     model_override,
-                                    &transcriber_preloaded,
                                 ).await;
                             } else if state.is_eager_recording() {
                                 // Handle eager recording stop in toggle mode - extract model_override first
@@ -3669,7 +6126,6 @@ impl Daemon {
 
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
-                                    &transcriber_preloaded,
                                 ).await {
                                     Ok(t) => t,
                                     Err(()) => {
@@ -3686,6 +6142,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
+                                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                     self.reset_to_idle(&mut state).await;
                                 }
                                 eager_transcriber = None;
@@ -3735,11 +6192,9 @@ impl Daemon {
                                     task.abort();
                                 }
 
-                                cleanup_output_mode_override();
-                                cleanup_model_override();
-                                cleanup_profile_override();
-                                cleanup_bool_override("smart_auto_submit");
+                                discard_recording_overrides();
                                 state = State::Idle;
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
 
@@ -3762,11 +6217,9 @@ impl Daemon {
                                 // held until the next transcription.
                                 self.active_transcriber = None;
 
-                                cleanup_output_mode_override();
-                                cleanup_model_override();
-                                cleanup_profile_override();
-                                cleanup_bool_override("smart_auto_submit");
+                                discard_recording_overrides();
                                 state = State::Idle;
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
 
@@ -3786,73 +6239,44 @@ impl Daemon {
                 }
 
                 // Check for recording timeout and cancel requests
-                _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
+                _ = recording_poll.tick(), if state.is_recording() => {
                     // Check for cancel request first
                     if check_cancel_requested() {
-                        tracing::info!("Recording cancelled");
-
-                        // Stop recording and discard audio
-                        if let Some(mut capture) = audio_capture.take() {
-                            let _ = capture.stop().await;
-                        }
-                        self.restore_recording_media();
-
-                        // Cancel any pending model load task
-                        if let Some(task) = self.model_load_task.take() {
-                            task.abort();
-                        }
-
-                        // Cancel any pending eager chunk tasks
-                        for (_, task) in self.eager_chunk_tasks.drain(..) {
-                            task.abort();
-                        }
-
-                        if let State::EagerRecording {
-                            accumulated_audio,
-                            chunk_results,
-                            chunks_sent,
-                            tasks_in_flight,
-                            ..
-                        } = &mut state
-                        {
-                            accumulated_audio.clear();
-                            chunk_results.clear();
-                            *chunks_sent = 0;
-                            *tasks_in_flight = 0;
-                        }
-
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
-                        // A cancelled external-trigger session is still an
-                        // ended session — tell the caller and disarm tracking.
-                        self.end_external_session(state.is_recording()).await;
-                        state = State::Idle;
-                        eager_transcriber = None;
-                        self.update_state("idle");
-                        self.play_feedback(SoundEvent::Cancelled);
-
-                        // Run post_output_command to reset compositor submap
-                        if let Some(cmd) = &self.config.output.post_output_command {
-                            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                tracing::warn!("{}", e);
-                            }
-                        }
-
-                        end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
-
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
                         continue;
                     }
 
                     // Populate eager transcriber cache on first poll
                     if eager_transcriber.is_none() && state.is_eager_recording() {
                         let model_override = match &state {
-                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                            State::EagerRecording { model_override, .. } => model_override.clone(),
                             _ => None,
                         };
-                        eager_transcriber = transcriber_preloaded.clone();
-                        if eager_transcriber.is_none()
+                        let separate_override = model_override.as_deref().is_some_and(|name| {
+                            matches!(
+                                model_catalog::override_route(&self.config, name),
+                                Ok(model_catalog::OverrideRoute::Separate { .. })
+                            )
+                        });
+                        let model_override = model_override.as_deref();
+                        if separate_override {
+                            // Chunks wait until the override model has loaded;
+                            // whatever is left over is transcribed at stop.
+                            if let Some(name) = model_override {
+                                eager_transcriber = self.ready_override(name).await;
+                            }
+                        } else {
+                            eager_transcriber = self.transcriber_preloaded.clone();
+                        }
+                        if !separate_override
+                            && eager_transcriber.is_none()
                             && self.config.engine
                                 == crate::config::TranscriptionEngine::Whisper
                         {
@@ -3928,7 +6352,6 @@ impl Daemon {
                                         &mut streaming_session,
                                         &mut streaming_chain,
                                         &mut eager_transcriber,
-                                        &transcriber_preloaded,
                                     )
                                     .await;
                                     continue;
@@ -3941,9 +6364,23 @@ impl Daemon {
                     // already gone so we don't re-fire cleanup on every 100ms
                     // tick while the streaming session drains server-side
                     // (state stays Streaming until Ended arrives).
+                    if let (true, Some(elapsed)) =
+                        (audio_capture.is_some(), state.recording_duration())
+                    {
+                        match cap_warning_due(elapsed, max_duration) {
+                            Some(left) if !cap_warned => {
+                                cap_warned = true;
+                                self.warn_recording_cap(left, max_duration).await;
+                            }
+                            Some(_) => {}
+                            None => cap_warned = false,
+                        }
+                    }
+
                     let timeout_fired = audio_capture.is_some()
                         && state.recording_duration().is_some_and(|d| d > max_duration);
                     if timeout_fired {
+                        self.osd_limit_reached = true;
                         // A hard-capped session is ending on voxtype's own
                         // initiative (not the caller's `record stop`) — end
                         // it as an external-trigger session so the caller is
@@ -3960,6 +6397,7 @@ impl Daemon {
                                 max_duration.as_secs_f32()
                             );
                             self.stop_streaming_capture(&mut audio_capture).await;
+                            self.notify_recording_capped(max_duration).await;
                             continue;
                         }
 
@@ -3968,10 +6406,6 @@ impl Daemon {
                             max_duration.as_secs_f32()
                         );
 
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
 
                         let model_override = match &state {
                             State::Recording { model_override, .. } => model_override.clone(),
@@ -3991,7 +6425,6 @@ impl Daemon {
 
                             let transcriber = match self.get_transcriber_for_recording(
                                 model_override.as_deref(),
-                                &transcriber_preloaded,
                             ).await {
                                 Ok(transcriber) => transcriber,
                                 Err(()) => {
@@ -4001,12 +6434,14 @@ impl Daemon {
                             };
 
                             self.update_state("transcribing");
+                            self.notify_recording_capped(max_duration).await;
 
                             if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
                                 state = State::Transcribing { audio: Vec::new() };
                                 self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                             } else {
                                 tracing::debug!("Eager recording timeout produced empty result");
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                 self.reset_to_idle(&mut state).await;
                             }
                             eager_transcriber = None;
@@ -4015,12 +6450,15 @@ impl Daemon {
                                 task.abort();
                             }
 
-                            self.start_transcription_task(
+                            // After the "Recording Stopped" notification this
+                            // posts, so it is not replaced by that one.
+                            if self.start_transcription_task(
                                 &mut state,
                                 &mut audio_capture,
                                 model_override,
-                                &transcriber_preloaded,
-                            ).await;
+                            ).await {
+                                self.notify_recording_capped(max_duration).await;
+                            }
                         }
                     }
                 }
@@ -4028,9 +6466,32 @@ impl Daemon {
                 // Handle SIGUSR1 - start recording (for compositor keybindings)
                 _ = sigusr1.recv() => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
-                    if state.is_idle() {
+                    let start_request = StartRequest::read();
+                    // A `record cancel` sent just before this start is still
+                    // waiting for its poll tick. Apply it first so commands
+                    // take effect in the order they were issued; otherwise
+                    // this start lands on the still-live session and is lost.
+                    if cancel_applies_to(&state) && check_cancel_requested() {
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
+                    }
+                    if !state.is_idle() {
+                        tracing::info!(
+                            "Ignoring start request: daemon is {} (stop or cancel it first)",
+                            state
+                        );
+                    } else {
                         // Read model override from file (set by `voxtype record start --model X`)
                         let model_override = read_model_override();
+                        if !self.accept_model_override(model_override.as_deref()).await {
+                            continue;
+                        }
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
@@ -4038,71 +6499,14 @@ impl Daemon {
                         }
 
                         // Prepare model for transcription
-                        if self.config.on_demand_loading() {
-                            // Start model loading in background
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    let config = self.config.whisper.clone();
-                                    let config_path = self.config_path.clone();
-                                    let model_to_load = model_override.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        let mut temp_manager = ModelManager::new(&config, config_path);
-                                        temp_manager.get_transcriber(model_to_load.as_deref())
-                                    }));
-                                }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                    let config = self.config.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                    }));
-                                }
-                            }
-                        } else {
-                            // Prepare model (spawns subprocess for gpu_isolation mode)
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    if let Some(ref mut mm) = self.model_manager {
-                                        match mm.prepare_model(model_override.as_deref()) {
-                                            Ok(handle) => {
-                                                self.whisper_prepare_task = handle;
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Failed to prepare model: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                    if let Some(ref t) = transcriber_preloaded {
-                                        let transcriber = t.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            transcriber.prepare();
-                                        });
-                                    }
-                                }
-                            }
-                        }
+                        self.prepare_for_recording(model_override.as_deref());
 
                         self.suppress_recording_media().await;
 
+                        // A start request scopes the stale-cancel check to
+                        // this start; hotkey starts carry none.
+                        self.start_request = start_request.issued_at;
                         if self.try_start_streaming(
-                            &transcriber_preloaded,
                             &mut state,
                             &mut audio_capture,
                             &mut streaming_handle,
@@ -4135,6 +6539,7 @@ impl Daemon {
                                         };
                                     }
                                     self.update_state("recording");
+                                    self.begin_osd_session(&state);
                                     self.play_feedback(SoundEvent::RecordingStart);
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -4150,19 +6555,32 @@ impl Daemon {
                                 }
                             }
                         }
+                        self.start_request = None;
                     }
                 }
 
                 // Handle SIGUSR2 - stop recording (for compositor keybindings)
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
+                    // Same ordering rule as SIGUSR1: a cancel issued before
+                    // this stop discards the recording instead of the stop
+                    // transcribing it.
+                    if cancel_applies_to(&state) && check_cancel_requested() {
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
+                    }
                     self.stop_active_recording(
                         &mut state,
                         &mut audio_capture,
                         &mut streaming_session,
                         &mut streaming_chain,
                         &mut eager_transcriber,
-                        &transcriber_preloaded,
                     ).await;
                 }
 
@@ -4217,13 +6635,19 @@ impl Daemon {
                         Some(StreamingEvent::Final { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
+                                    // Raw on purpose: file-mode text is
+                                    // processed once, whole, at write time
+                                    // in end_streaming — that also catches
+                                    // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
-                                    let pp = self.post_processor.as_ref();
+                                    let vocabulary = read_profile_override()
+                                        .as_ref()
+                                        .and_then(|name| self.profile_vocabularies.get(name));
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
-                                        pp,
+                                        Some((&self.text_processor, vocabulary)),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {
@@ -4241,12 +6665,17 @@ impl Daemon {
                         Some(StreamingEvent::Replace { backspace, text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
+                                    // Raw on purpose — see the Final arm.
                                     s.replace_and_commit_silent(backspace, &text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
+                                    let vocabulary = read_profile_override()
+                                        .as_ref()
+                                        .and_then(|name| self.profile_vocabularies.get(name));
                                     if let Err(e) = s.replace_and_commit(
                                         chain,
                                         backspace,
                                         &text,
+                                        Some((&self.text_processor, vocabulary)),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {
@@ -4290,41 +6719,26 @@ impl Daemon {
                 }
 
                 // Check for cancel during transcription
-                _ = tokio::time::sleep(Duration::from_millis(100)), if matches!(state, State::Transcribing { .. }) => {
+                _ = transcribing_poll.tick(), if matches!(state, State::Transcribing { .. }) => {
                     if check_cancel_requested() {
-                        tracing::info!("Transcription cancelled");
-
-                        // Abort the transcription task
-                        if let Some(task) = self.transcription_task.take() {
-                            task.abort();
-                        }
-                        // Drop the cloned transcriber Arc so it isn't held
-                        // until the next transcription.
-                        self.active_transcriber = None;
-
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
-                        state = State::Idle;
-                        self.update_state("idle");
-                        self.play_feedback(SoundEvent::Cancelled);
-
-                        // Run post_output_command to reset compositor submap
-                        if let Some(cmd) = &self.config.output.post_output_command {
-                            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                tracing::warn!("{}", e);
-                            }
-                        }
-
-                        end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
                     }
                 }
 
                 // Clean up stale cancel file when idle and evict idle models
                 _ = tokio::time::sleep(Duration::from_millis(500)), if matches!(state, State::Idle) => {
-                    // Silently consume any stale cancel request
-                    let _ = check_cancel_requested();
+                    // Silently consume any stale cancel request, unless it
+                    // may belong to a start signal that has not landed yet.
+                    if !Config::runtime_dir().join(START_REQUEST_FILE).exists() {
+                        let _ = check_cancel_requested();
+                    }
 
                 }
 
@@ -4354,81 +6768,38 @@ impl Daemon {
                         }
                     }
 
-                    // Check for meeting start command
-                    if let Some(trigger) = check_meeting_start() {
-                        if self.config.meeting.enabled && self.meeting_daemon.is_none() {
-                            tracing::debug!("Meeting start requested via file trigger");
-                            if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
-                                tracing::error!("Failed to start meeting: {}", e);
-                            }
-                        } else if !self.config.meeting.enabled {
-                            tracing::warn!("Meeting mode is disabled in config");
-                        } else {
-                            tracing::warn!("Meeting already in progress");
-                        }
-                    }
-
-                    // Check for meeting stop command
-                    if check_meeting_stop()
-                        && self.meeting_daemon.is_some() {
-                            tracing::debug!("Meeting stop requested via file trigger");
-                            if let Err(e) = self.stop_meeting().await {
-                                tracing::error!("Failed to stop meeting: {}", e);
-                            }
-                        }
-
-                    // Check for meeting pause command
-                    if check_meeting_pause()
-                        && self.meeting_active() {
-                            tracing::debug!("Meeting pause requested via file trigger");
-                            if let Err(e) = self.pause_meeting().await {
-                                tracing::error!("Failed to pause meeting: {}", e);
-                            }
-                        }
-
-                    // Check for meeting resume command
-                    if check_meeting_resume()
-                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused()) {
-                            tracing::debug!("Meeting resume requested via file trigger");
-                            if let Err(e) = self.resume_meeting().await {
-                                tracing::error!("Failed to resume meeting: {}", e);
-                            }
-                        }
+                    self.handle_meeting_triggers().await;
                 }
 
                 // Process meeting audio chunks
                 _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting_active() => {
-                    // Check for meeting stop/pause/resume while active
-                    // (the 100ms polling branch is starved by this faster 50ms branch)
-                    if check_meeting_stop() && self.meeting_daemon.is_some() {
-                        tracing::debug!("Meeting stop requested via file trigger");
-                        if let Err(e) = self.stop_meeting().await {
-                            tracing::error!("Failed to stop meeting: {}", e);
-                        }
-                        continue;
-                    }
-                    if check_meeting_pause() && self.meeting_active() {
-                        tracing::debug!("Meeting pause requested via file trigger");
-                        if let Err(e) = self.pause_meeting().await {
-                            tracing::error!("Failed to pause meeting: {}", e);
-                        }
-                        continue;
-                    }
-                    if check_meeting_resume()
-                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused())
-                    {
-                        tracing::debug!("Meeting resume requested via file trigger");
-                        if let Err(e) = self.resume_meeting().await {
-                            tracing::error!("Failed to resume meeting: {}", e);
-                        }
+                    // The 100ms polling branch is starved by this faster one
+                    // while a meeting records, so every meeting trigger is
+                    // handled here too. A start that went unread here used to
+                    // sit on disk and begin a second meeting the moment this
+                    // one stopped.
+                    if self.handle_meeting_triggers().await {
                         continue;
                     }
 
                     // Get samples from dual audio capture
                     if let Some(ref mut capture) = self.meeting_audio_capture {
                         let dual_samples = capture.get_samples().await;
+                        let liveness = self
+                            .meeting_aec_liveness
+                            .as_mut()
+                            .map(|check| check.feed(&dual_samples.mic));
                         self.meeting_mic_buffer.extend(dual_samples.mic);
                         self.meeting_loopback_buffer.extend(dual_samples.loopback);
+                        match liveness {
+                            Some(audio::echo_cancel::Liveness::Alive) => {
+                                self.meeting_aec_liveness = None;
+                            }
+                            Some(audio::echo_cancel::Liveness::Silent) => {
+                                self.leave_silent_echo_canceller().await;
+                            }
+                            _ => {}
+                        }
 
                         self.process_buffered_meeting_audio(false).await;
                     }
@@ -4460,30 +6831,81 @@ impl Daemon {
                     }
                 }, if self.meeting_event_rx.is_some() => {
                     match event {
-                        Some(MeetingEvent::Started { meeting_id }) => {
+                        Some(MeetingEvent::Started { meeting_id, .. }) => {
+                            // The HUD snapshot for this transition is already
+                            // set synchronously in `start_meeting` (title,
+                            // diarization info, started_at), ahead of this
+                            // event reaching the select loop. Nothing to do.
                             tracing::info!("Meeting event: started {}", meeting_id);
+                            #[cfg(unix)]
+                            {
+                                let view = self.config.meeting.view.clone();
+                                let show = self.config.meeting.show_view_on_start;
+                                tokio::task::spawn_blocking(move || {
+                                    let what = crate::meeting::view::frontend::open_on_start(&view, show);
+                                    tracing::info!("Meeting view on start: {}", what);
+                                });
+                            }
                         }
                         Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
                             tracing::debug!("Meeting event: chunk {} processed with {} segments",
                                 chunk_id, segments.len());
+                            self.publish_meeting_chunk(chunk_id, &segments);
+                        }
+                        Some(MeetingEvent::SpeakerRenamed { from, to }) => {
+                            self.publish_meeting_rename(&from, &to);
+                        }
+                        Some(MeetingEvent::SegmentUpdated { segment }) => {
+                            self.publish_segment_updated(&segment);
+                        }
+                        Some(MeetingEvent::SegmentDeleted { segment_id }) => {
+                            self.publish_segment_deleted(segment_id);
+                        }
+                        Some(MeetingEvent::SummaryUpdated { meeting_id }) => {
+                            if let Some(ref hub) = self.meeting_event_hub {
+                                hub.publish_summary_updated(&meeting_id.to_string());
+                            }
                         }
                         Some(MeetingEvent::Paused) => {
+                            // `pause_meeting` already published this via
+                            // `update_meeting_state("paused", ...)`.
                             tracing::info!("Meeting event: paused");
                         }
                         Some(MeetingEvent::Resumed) => {
+                            // `resume_meeting` already published this via
+                            // `update_meeting_state("recording", ...)`.
                             tracing::info!("Meeting event: resumed");
                         }
                         Some(MeetingEvent::Stopped { meeting_id }) => {
+                            // `stop_meeting` already published the "idle"
+                            // transition via `update_meeting_state`.
                             tracing::info!("Meeting event: stopped {}", meeting_id);
                         }
                         Some(MeetingEvent::Error(msg)) => {
                             tracing::error!("Meeting error: {}", msg);
+                            if let Some(ref hub) = self.meeting_event_hub {
+                                hub.publish_error(&msg);
+                            }
+                            self.notify_meeting_error(&msg).await;
                         }
                         None => {
                             // Channel closed
                             tracing::debug!("Meeting event channel closed");
                             self.meeting_event_rx = None;
                         }
+                    }
+                }
+
+                // The recording announcement's progress
+                update = async {
+                    match self.meeting_announce_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.meeting_announce_rx.is_some() => {
+                    match update {
+                        Some(update) => self.on_announcement_update(update),
+                        None => self.meeting_announce_rx = None,
                     }
                 }
 
@@ -4555,6 +6977,8 @@ impl Daemon {
             cleanup_state_file(path);
         }
 
+        crate::setup::accel::clear();
+
         // Remove PID file on shutdown
         if let Some(ref path) = self.pid_file_path {
             cleanup_pid_file(path);
@@ -4564,6 +6988,16 @@ impl Daemon {
         // confuse the next daemon start.
         if let Some(ref hub) = self.level_hub {
             hub.cleanup();
+        }
+
+        // Same for the meeting event socket.
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.cleanup();
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = self.tray.take() {
+            tray.shutdown().await;
         }
 
         tracing::info!("Daemon stopped");
@@ -4597,11 +7031,405 @@ impl Daemon {
     }
 }
 
+/// Stops a background task when the daemon's run ends.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "linux", feature = "cohere-gguf"))]
+    #[tokio::test]
+    async fn tray_language_next_backend_receives_hint_resident_and_on_demand() {
+        if std::env::var_os("VOXTYPE_LANGUAGE_BACKEND_CHILD").is_none() {
+            let fixture = tempfile::tempdir().unwrap();
+            let worker = fixture.path().join("worker.py");
+            let python = std::process::Command::new("python3")
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output()
+                .expect("python3 is required for the isolated protocol fixture");
+            assert!(python.status.success());
+            crate::test_support::write_script(
+                &worker,
+                &format!(
+                    "#!{}\n{}",
+                    String::from_utf8(python.stdout).unwrap().trim(),
+                    r#"import sys,json,struct
+config=json.loads(sys.argv[sys.argv.index('--config-json')+1])
+print('READY',flush=True)
+while True:
+    count=sys.stdin.buffer.read(4)
+    if not count: break
+    size=struct.unpack('<I',count)[0]*4
+    data=b''
+    while len(data)<size: data+=sys.stdin.buffer.read(size-len(data))
+    print(json.dumps({'ok':True,'text':'CONFIG_HINT:'+config['language']}),flush=True)
+"#
+                ),
+            );
+
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "daemon::tests::tray_language_next_backend_receives_hint_resident_and_on_demand", "--nocapture"])
+                .env("VOXTYPE_LANGUAGE_BACKEND_CHILD", "1")
+                .env("VOXTYPE_GGUF_WORKER", &worker).status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        for on_demand in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let model = dir.path().join("cohere-transcribe-03-2026-Q4_K_M.gguf");
+            std::fs::write(&model, b"protocol fixture, not a model").unwrap();
+            let mut cfg = crate::config::Config::default();
+            cfg.set_model_for(
+                crate::config::TranscriptionEngine::Cohere,
+                model.to_str().unwrap(),
+            );
+            cfg.cohere.as_mut().unwrap().on_demand_loading = on_demand;
+            cfg.audio.feedback.enabled = false;
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+            let mut daemon = super::Daemon::new(cfg, Some(path));
+            daemon.prepare_for_recording(None);
+            let old = daemon.get_transcriber_for_recording(None).await.unwrap();
+            assert_eq!(old.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:en");
+            daemon.queue_language("fr").unwrap();
+            assert!(!daemon.apply_pending_language(false));
+            assert_eq!(old.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:en");
+            assert!(daemon.apply_pending_language(true));
+            daemon.prepare_for_recording(None);
+            let next = daemon.get_transcriber_for_recording(None).await.unwrap();
+            assert_eq!(next.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:fr");
+            assert_eq!(old.transcribe(&[0.0; 16]).unwrap(), "CONFIG_HINT:en");
+        }
+        println!("BACKEND_HINT_PASS: real daemon construction + GGUF client/protocol, resident/on-demand, in-flight immutable; fixture worker, not inference");
+    }
+
+    #[test]
+    fn tray_language_is_deferred_and_rebuilds_cached_runtime_only_at_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[whisper]\nmodel = \"base\"\nlanguage = \"en\"\n").unwrap();
+        let config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut daemon = super::Daemon::new(config, Some(path));
+        daemon.queue_language("fr").unwrap();
+        assert_eq!(daemon.config.active_language(), Some("en"));
+        assert!(!daemon.apply_pending_language(false));
+        assert_eq!(daemon.config.active_language(), Some("en"));
+        assert!(daemon.apply_pending_language(true));
+        assert_eq!(daemon.config.active_language(), Some("fr"));
+        assert!(daemon.transcriber_preloaded.is_none());
+        assert!(daemon.override_cache.is_none());
+        assert!(daemon.model_manager.is_some());
+        assert!(!daemon.apply_pending_language(true));
+    }
+
     use super::*;
+    use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
     use tempfile::TempDir;
+
+    /// Fallback output that records what it was handed.
+    struct RecordingOutput {
+        got: Arc<std::sync::Mutex<Option<String>>>,
+        succeed: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TextOutput for RecordingOutput {
+        async fn output(&self, text: &str) -> std::result::Result<(), crate::error::OutputError> {
+            *self.got.lock().unwrap() = Some(text.to_string());
+            if self.succeed {
+                Ok(())
+            } else {
+                Err(crate::error::OutputError::AllMethodsFailed)
+            }
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    /// Output config whose hooks log to `log`, noting whether `target`
+    /// existed when each ran, so tests can see order relative to the write.
+    fn hooked_output_config(log: &Path, target: &Path) -> crate::config::OutputConfig {
+        let hook = |name: &str| {
+            format!(
+                "if [ -e '{t}' ]; then echo {name}:file >> '{l}'; else echo {name}:nofile >> '{l}'; fi",
+                t = target.display(),
+                l = log.display()
+            )
+        };
+        crate::config::OutputConfig {
+            pre_output_command: Some(hook("pre")),
+            post_output_command: Some(hook("post")),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_runs_the_hooks_around_the_write() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("out.txt");
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &target);
+
+        let delivery = deliver_to_file(&target, "hello", &cfg, &[]).await;
+
+        assert_eq!(delivery, FileDelivery::Written);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
+        // pre ran before the file existed, post after it was written.
+        assert_eq!(fs::read_to_string(&log).unwrap(), "pre:nofile\npost:file\n");
+    }
+
+    #[tokio::test]
+    async fn failed_file_write_falls_back_and_still_resets_the_submap() {
+        let dir = TempDir::new().unwrap();
+        // A parent that is a regular file fails even for root, unlike a
+        // read-only directory.
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, "").unwrap();
+        let target = blocker.join("out.txt");
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &target);
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let fallback: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: true,
+        })];
+
+        let delivery = deliver_to_file(&target, "rescue me", &cfg, &fallback).await;
+
+        assert!(
+            matches!(delivery, FileDelivery::FellBack(_)),
+            "{delivery:?}"
+        );
+        assert_eq!(got.lock().unwrap().as_deref(), Some("rescue me"));
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "pre:nofile\npost:nofile\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_file_write_without_fallback_reports_the_loss() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, "").unwrap();
+        let target = blocker.join("out.txt");
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &target);
+
+        let delivery = deliver_to_file(&target, "gone", &cfg, &[]).await;
+
+        assert!(matches!(delivery, FileDelivery::Lost(_)), "{delivery:?}");
+        // The post hook runs even when nothing was delivered.
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "pre:nofile\npost:nofile\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_file_write_with_failing_fallback_reports_the_loss() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, "").unwrap();
+        let target = blocker.join("out.txt");
+        let cfg = crate::config::OutputConfig::default();
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let fallback: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: false,
+        })];
+
+        let delivery = deliver_to_file(&target, "gone", &cfg, &fallback).await;
+
+        assert!(matches!(delivery, FileDelivery::Lost(_)), "{delivery:?}");
+        assert_eq!(got.lock().unwrap().as_deref(), Some("gone"));
+    }
+
+    /// A cancel issued before a start/stop signal is applied first when the
+    /// daemon has a live session, so `record cancel; record start` records
+    /// again instead of the start landing on the session being cancelled.
+    #[test]
+    fn pending_cancel_applies_to_live_sessions_only() {
+        let now = std::time::Instant::now();
+        let live = [
+            State::Recording {
+                started_at: now,
+                model_override: None,
+            },
+            State::EagerRecording {
+                started_at: now,
+                model_override: None,
+                accumulated_audio: Vec::new(),
+                chunks_sent: 0,
+                chunk_results: Vec::new(),
+                tasks_in_flight: 0,
+            },
+            State::Streaming {
+                started_at: now,
+                model_override: None,
+                partial_buffer: String::new(),
+                finalized_text: String::new(),
+                typed_chars: 0,
+                file_output_path: None,
+            },
+            State::Transcribing { audio: Vec::new() },
+        ];
+        for state in &live {
+            assert!(cancel_applies_to(state), "{state}");
+        }
+
+        // Idle triggers are consumed at the next capture start (#606);
+        // output is already on its way and has no cancel path.
+        assert!(!cancel_applies_to(&State::Idle));
+        assert!(!cancel_applies_to(&State::Outputting {
+            text: String::new()
+        }));
+    }
+
+    struct FixedTranscriber(&'static str);
+
+    impl Transcriber for FixedTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> TranscriptionResult {
+            Ok(self.0.to_string())
+        }
+    }
+
+    fn parakeet_daemon(on_demand: bool) -> Daemon {
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        config.parakeet.as_mut().unwrap().on_demand_loading = on_demand;
+        Daemon::new(config, None)
+    }
+
+    #[test]
+    fn override_config_swaps_the_engine_and_turns_off_streaming() {
+        let mut base = Config::default();
+        base.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        base.parakeet.as_mut().unwrap().streaming = true;
+        base.whisper.streaming = true;
+
+        let whisper = override_config(&base, TranscriptionEngine::Whisper, "base.en");
+        assert_eq!(whisper.engine, TranscriptionEngine::Whisper);
+        assert_eq!(whisper.whisper.model, "base.en");
+        assert!(!whisper.whisper.streaming);
+        assert_eq!(whisper.whisper.remote_model, None);
+
+        let parakeet =
+            override_config(&base, TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
+        let section = parakeet.parakeet.unwrap();
+        assert_eq!(section.model, "parakeet-tdt-0.6b-v3");
+        assert!(!section.streaming);
+
+        // The daemon's own config is untouched.
+        assert_eq!(base.engine, TranscriptionEngine::Parakeet);
+        assert!(base.whisper.streaming);
+    }
+
+    #[test]
+    fn remote_whisper_override_names_the_remote_model() {
+        let mut base = Config::default();
+        base.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        base.whisper.mode = Some(WhisperMode::Remote);
+        let config = override_config(&base, TranscriptionEngine::Whisper, "large-v3");
+        assert_eq!(config.whisper.remote_model.as_deref(), Some("large-v3"));
+    }
+
+    #[tokio::test]
+    async fn override_transcriber_reuses_the_cached_instance() {
+        let mut daemon = parakeet_daemon(false);
+        let cached: Arc<dyn Transcriber> = Arc::new(FixedTranscriber("cached"));
+        daemon.override_cache = Some(("base.en".to_string(), cached.clone()));
+
+        let got = daemon
+            .override_transcriber("base.en", TranscriptionEngine::Whisper, "base.en")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&got, &cached));
+        assert!(
+            daemon.override_cache.is_some(),
+            "kept loaded for the next override"
+        );
+
+        // Starting another recording with the same override doesn't reload.
+        daemon.start_override_load("base.en", TranscriptionEngine::Whisper, "base.en", vec![]);
+        assert!(daemon.override_load_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn on_demand_override_is_released_after_use() {
+        let mut daemon = parakeet_daemon(true);
+        let cached: Arc<dyn Transcriber> = Arc::new(FixedTranscriber("cached"));
+        daemon.override_cache = Some(("base.en".to_string(), cached.clone()));
+
+        let got = daemon
+            .override_transcriber("base.en", TranscriptionEngine::Whisper, "base.en")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&got, &cached));
+        assert!(daemon.override_cache.is_none());
+    }
+
+    #[tokio::test]
+    async fn eager_chunks_pick_up_a_finished_override_load() {
+        let mut daemon = parakeet_daemon(false);
+        let task: TranscriberLoadTask = tokio::task::spawn_blocking(|| {
+            Ok(Arc::new(FixedTranscriber("loaded")) as Arc<dyn Transcriber>)
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        daemon.override_load_task = Some(("base.en".to_string(), task));
+
+        // A different override's load isn't touched.
+        assert!(daemon.ready_override("small.en").await.is_none());
+        assert!(daemon.override_load_task.is_some());
+
+        let ready = daemon.ready_override("base.en").await.unwrap();
+        assert_eq!(ready.transcribe(&[]).unwrap(), "loaded");
+        assert!(daemon.override_load_task.is_none());
+        assert!(matches!(&daemon.override_cache, Some((name, _)) if name == "base.en"));
+    }
+
+    /// #643: the panic-recovery arm in handle_transcription_result must fire
+    /// only for a real panic. Both JoinError flavors are constructed for real
+    /// here — a task that panics and a task that gets aborted — because the
+    /// two are indistinguishable by type and only differ in what
+    /// `is_cancelled`/`is_panic` report.
+    #[tokio::test]
+    async fn join_error_distinguishes_panic_from_abort() {
+        // Keep the spawned panic from printing a backtrace into test output.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panic_err = tokio::spawn(async { panic!("engine blew up") })
+            .await
+            .expect_err("a panicking task must yield a JoinError");
+        std::panic::set_hook(prev_hook);
+        assert!(panic_err.is_panic());
+        assert!(join_error_poisons_engine(&panic_err));
+
+        let aborted = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        aborted.abort();
+        let abort_err = aborted
+            .await
+            .expect_err("an aborted task must yield a JoinError");
+        assert!(abort_err.is_cancelled());
+        assert!(!join_error_poisons_engine(&abort_err));
+    }
 
     // Helper to create a test runtime directory and set it up
     fn with_test_runtime_dir<F, R>(f: F) -> R
@@ -4614,6 +7442,81 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    #[test]
+    fn discarding_a_recording_clears_every_override_it_can_carry() {
+        // The cancel paths used to clear four of these and leave
+        // auto_submit/shift_enter behind for the next recording.
+        let dir = TempDir::new().unwrap();
+        for name in RECORDING_OVERRIDE_FILES {
+            fs::write(dir.path().join(name), "x").unwrap();
+        }
+        fs::write(dir.path().join("unrelated"), "keep").unwrap();
+        discard_recording_overrides_in(dir.path());
+        for name in RECORDING_OVERRIDE_FILES {
+            assert!(!dir.path().join(name).exists(), "{name} survived");
+        }
+        assert!(dir.path().join("unrelated").exists());
+    }
+
+    #[test]
+    fn override_file_list_matches_the_readers() {
+        // Every per-recording override the daemon reads must be discarded.
+        for name in [
+            "output_mode",
+            "model",
+            "profile",
+            "auto_submit",
+            "shift_enter",
+            "smart_auto_submit",
+        ] {
+            assert!(
+                RECORDING_OVERRIDE_FILES.contains(&format!("{name}_override").as_str()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_transcript_leaves_no_newline_behind() {
+        let dir = TempDir::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Overwrite still replaces the previous transcript, with nothing.
+        let overwrite = dir.path().join("overwrite.txt");
+        fs::write(&overwrite, "previous transcript\n").unwrap();
+        runtime
+            .block_on(write_transcription_to_file(
+                &overwrite,
+                "",
+                &FileMode::Overwrite,
+            ))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&overwrite).unwrap(), "");
+
+        // Append adds nothing and doesn't create a missing file.
+        let append = dir.path().join("append.txt");
+        fs::write(&append, "first\n").unwrap();
+        runtime
+            .block_on(write_transcription_to_file(&append, "", &FileMode::Append))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&append).unwrap(), "first\n");
+        let missing = dir.path().join("missing.txt");
+        runtime
+            .block_on(write_transcription_to_file(&missing, "", &FileMode::Append))
+            .unwrap();
+        assert!(!missing.exists());
+
+        // Non-empty text keeps its trailing newline.
+        runtime
+            .block_on(write_transcription_to_file(
+                &append,
+                "second",
+                &FileMode::Append,
+            ))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&append).unwrap(), "first\nsecond\n");
     }
 
     #[test]
@@ -4738,7 +7641,7 @@ mod tests {
         // Pin the allowlist contents so a future expansion of the CLI's
         // `value_parser` requires touching this test, keeping the daemon
         // and CLI surfaces in sync.
-        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml"]);
+        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml", "hybrid"]);
     }
 
     /// #636: the OSD suppression marker is created and removed, never
@@ -4764,6 +7667,38 @@ mod tests {
             set_osd_suppressed_at(&marker, false);
             assert!(!marker.exists());
         });
+    }
+
+    #[test]
+    fn cancel_issued_after_a_start_request_targets_it() {
+        // `record start; record cancel` back to back.
+        assert!(cancel_targets_start(Some(100), Some(150)));
+        assert!(cancel_targets_start(Some(100), Some(100)));
+    }
+
+    #[test]
+    fn leftover_cancels_never_target_a_start() {
+        // An idle `record cancel`, then a start: #606's stale trigger.
+        assert!(!cancel_targets_start(Some(200), Some(150)));
+        // Hotkey starts carry no request.
+        assert!(!cancel_targets_start(None, Some(150)));
+        // Cancels from an older CLI carry no stamp.
+        assert!(!cancel_targets_start(Some(100), None));
+        assert!(!cancel_targets_start(None, None));
+    }
+
+    #[test]
+    fn trigger_stamps_round_trip_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancel");
+        let first = trigger_stamp();
+        std::fs::write(&path, &first).unwrap();
+        assert_eq!(read_trigger_stamp(&path), first.parse().ok());
+        assert!(trigger_stamp().parse::<u128>().unwrap() >= first.parse::<u128>().unwrap());
+
+        std::fs::write(&path, "cancel").unwrap();
+        assert_eq!(read_trigger_stamp(&path), None);
+        assert_eq!(read_trigger_stamp(&dir.path().join("missing")), None);
     }
 
     #[test]
@@ -5019,6 +7954,52 @@ mod tests {
             let cleaned = cleanup_stale_lockfile(&lock_path);
             assert!(!cleaned, "Lockfile with running PID should not be cleaned");
             assert!(lock_path.exists(), "Lockfile should still exist");
+        });
+    }
+
+    #[test]
+    fn cap_warning_comes_once_the_lead_is_reached() {
+        let secs = Duration::from_secs;
+        // 600s cap: warn from 30s left.
+        assert_eq!(cap_warning_due(secs(500), secs(600)), None);
+        assert_eq!(cap_warning_due(secs(570), secs(600)), Some(secs(30)));
+        assert_eq!(cap_warning_due(secs(590), secs(600)), Some(secs(10)));
+        assert_eq!(cap_warning_due(secs(700), secs(600)), Some(secs(0)));
+        // Default 60s cap: warn from 10s left.
+        assert_eq!(cap_warning_due(secs(45), secs(60)), None);
+        assert_eq!(cap_warning_due(secs(50), secs(60)), Some(secs(10)));
+        // Very short caps never warn.
+        assert_eq!(cap_warning_due(secs(15), secs(20)), None);
+    }
+
+    #[test]
+    fn instance_lock_creates_a_missing_runtime_dir() {
+        with_test_runtime_dir(|dir| {
+            let runtime = dir.join("voxtype");
+            assert!(acquire_instance_lock(&runtime).is_ok());
+            assert!(runtime.join("voxtype.lock").exists());
+        });
+    }
+
+    #[test]
+    fn instance_lock_refuses_a_live_holder_and_leaves_its_lockfile() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+            let live = std::process::id().to_string();
+            std::fs::write(&lock_path, &live).unwrap();
+
+            assert!(acquire_instance_lock(dir).is_err());
+            assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), live);
+        });
+    }
+
+    #[test]
+    fn instance_lock_recovers_a_stale_lockfile() {
+        with_test_runtime_dir(|dir| {
+            std::fs::write(dir.join("voxtype.lock"), "99999999").unwrap();
+            assert!(acquire_instance_lock(dir).is_ok());
+            let holder = std::fs::read_to_string(dir.join("voxtype.lock")).unwrap();
+            assert_eq!(holder.trim(), std::process::id().to_string());
         });
     }
 }

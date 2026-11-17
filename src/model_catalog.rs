@@ -23,6 +23,7 @@ pub const CATALOG_ENGINES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gguf",
     "openvino",
 ];
 
@@ -30,21 +31,43 @@ pub const CATALOG_ENGINES: &[&str] = &[
 pub fn model_catalog(engine: &str) -> Vec<&'static str> {
     match engine {
         "whisper" => model::valid_model_names(),
-        "parakeet" => model::valid_parakeet_model_names(),
+        "parakeet" => {
+            let mut models = model::valid_parakeet_model_names();
+            models.extend(model::parakeet_gguf_models().iter().map(|entry| entry.name));
+            models
+        }
         "moonshine" => model::valid_moonshine_model_names(),
         "sensevoice" => model::valid_sensevoice_model_names(),
         "paraformer" => vec!["paraformer-zh", "paraformer-en"],
         "dolphin" => vec!["dolphin-base"],
         "omnilingual" => vec!["omnilingual-300m"],
-        "cohere" => vec![
-            "cohere-transcribe-q4f16",
-            "cohere-transcribe-q4",
-            "cohere-transcribe-int8",
-            "cohere-transcribe-fp16",
-        ],
+        "cohere" => {
+            let mut models = vec![
+                "cohere-transcribe-q4f16",
+                "cohere-transcribe-q4",
+                "cohere-transcribe-int8",
+                "cohere-transcribe-fp16",
+            ];
+            models.extend(model::cohere_gguf_models().iter().map(|entry| entry.name));
+            models
+        }
+        "gguf" => model::handy_gguf_models()
+            .iter()
+            .map(|entry| entry.name)
+            .collect(),
         "openvino" => model::valid_openvino_model_names(),
         _ => Vec::new(),
     }
+}
+
+/// Choices runnable by this application's compiled backend, not the full registry.
+pub fn supported_model_catalog(engine: &str) -> Vec<&'static str> {
+    model_catalog(engine)
+        .into_iter()
+        .filter(|model| {
+            crate::model_selection::BackendCapabilities::compiled().supports(engine, model)
+        })
+        .collect()
 }
 
 /// Default model name baked into voxtype for each engine. Used when a fresh
@@ -53,13 +76,16 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
 pub const fn default_model(engine: &str) -> &'static str {
     match engine.as_bytes() {
         b"whisper" => "base.en",
+        b"parakeet" if cfg!(feature = "parakeet-gguf") => "parakeet-ultra-Q8_0.gguf",
         b"parakeet" => "parakeet-tdt-0.6b-v3",
         b"moonshine" => "base",
         b"sensevoice" => "sensevoice-small",
         b"paraformer" => "paraformer-zh",
         b"dolphin" => "dolphin-base",
         b"omnilingual" => "omnilingual-300m",
+        b"cohere" if cfg!(feature = "cohere-gguf") => "cohere-transcribe-03-2026-Q4_K_M.gguf",
         b"cohere" => "cohere-transcribe-q4f16",
+        b"gguf" => "Qwen3-ASR-0.6B-Q8_0.gguf",
         b"openvino" => "base.en-int8",
         _ => "",
     }
@@ -87,26 +113,37 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 
 /// The `--model` value that downloads this catalog entry.
 ///
-/// `None` means `voxtype setup --download` can't fetch it: `run_setup` only
-/// routes Whisper, Parakeet, SenseVoice, and OpenVINO names, so the other
-/// ONNX engines
-/// are reachable only through the interactive picker (`voxtype setup model`).
-/// A UI should not offer a Download button for those.
+/// Every catalog engine resolves to one (#687); `None` only for engines that
+/// have no catalog at all.
 ///
-/// SenseVoice returns its directory name rather than its config value,
-/// because `small` is also a Whisper model name and Whisper wins that
-/// collision in `setup --model`.
+/// SenseVoice and Moonshine return their directory names rather than their
+/// config values, because the short forms (`small`, `base`, `tiny`) are also
+/// Whisper model names and Whisper wins those collisions in `setup --model`.
+/// The remaining engines' catalog names are already directory names.
 pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     match engine {
-        "whisper" | "parakeet" | "openvino" => Some(model.to_string()),
-        "sensevoice" => Some(model_dir_name(engine, model)),
+        "whisper" | "parakeet" | "openvino" | "gguf" => Some(model.to_string()),
+        "sensevoice" | "moonshine" => Some(model_dir_name(engine, model)),
+        "paraformer" | "dolphin" | "omnilingual" | "cohere" => Some(model.to_string()),
         _ => None,
     }
 }
 
-/// On-disk location of a model: a single `ggml-<name>.bin` file for whisper,
+/// The command that fetches `model` for `engine`, for missing-model errors.
+/// ONNX and OpenVINO models are served from models.voxtype.io with
+/// verified manifests, so errors point here rather than at an upstream
+/// HuggingFace repo whose layout voxtype doesn't control.
+pub fn download_command(engine: &str, model: &str) -> String {
+    let arg = download_arg(engine, model).unwrap_or_else(|| model.to_string());
+    format!("voxtype setup --download --model {arg}")
+}
+
+/// On-disk location of a model: a single file for Whisper and GGUF models,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
+    if engine == "gguf" {
+        return crate::model_selection::model_path_in(models_dir, model);
+    }
     if engine == "whisper" {
         models_dir.join(format!("ggml-{}.bin", model))
     } else {
@@ -152,10 +189,12 @@ pub enum ModelVerification {
 /// - Older ONNX installs have no cached manifest. Their expected file *names*
 ///   are still known, so a missing file is detectable; sizes are not, because
 ///   the compiled-in numbers have drifted from upstream.
-/// - Whisper models have no manifest anywhere (they come from HuggingFace, not
-///   the R2 mirror). The ggml file magic is the one exact check available, and
-///   it catches the common failure of an error page saved under a `.bin` name.
-///   A truncated whisper model with intact magic reads as healthy here.
+/// - Whisper models are single flat files with no cached manifest beside them
+///   (the download verifies them against the mirror's manifest, but nothing
+///   is kept on disk to re-check later). The ggml file magic is the one exact
+///   check available offline, and it catches the common failure of an error
+///   page saved under a `.bin` name. A truncated whisper model with intact
+///   magic reads as healthy here.
 pub fn model_health(engine: &str, model: &str) -> ModelHealth {
     model_health_in(&Config::models_dir(), engine, model)
 }
@@ -168,6 +207,13 @@ pub(crate) fn model_health_in(models_dir: &Path, engine: &str, model: &str) -> M
 
     if engine == "whisper" {
         return match model::validate_download(&path, None, model::ContentCheck::Ggml) {
+            Ok(()) => ModelHealth::Present,
+            Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
+    }
+
+    if let Some(gguf) = model::find_gguf_model(model).filter(|gguf| gguf.engine == engine) {
+        return match model::validate_gguf_model(&path, gguf) {
             Ok(()) => ModelHealth::Present,
             Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
         };
@@ -239,6 +285,13 @@ pub(crate) fn verify_model_in(models_dir: &Path, engine: &str, model: &str) -> M
         );
     }
 
+    if let Some(gguf) = model::find_gguf_model(model).filter(|gguf| gguf.engine == engine) {
+        return match model::verify_gguf_model(&path, gguf) {
+            Ok(()) => ModelVerification::Ok,
+            Err(e) => ModelVerification::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
+    }
+
     let Some(manifest) = read_cached_manifest(&path) else {
         return ModelVerification::Unverifiable(
             "no manifest was recorded when this model was downloaded; \
@@ -291,6 +344,165 @@ pub fn installed_models_for(engine: &str) -> Vec<String> {
         .filter(|name| model_installed(engine, name))
         .map(|s| s.to_string())
         .collect()
+}
+
+/// The engine that owns a model name, and the value that engine's
+/// `[section].model` expects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModel {
+    pub engine: &'static str,
+    pub model: String,
+}
+
+/// Resolve a model name (as passed to `--model`) to the engine that owns it.
+///
+/// Whisper registry names win collisions, as they do for `setup --model`:
+/// Moonshine's `base`/`tiny` and SenseVoice's `small` are also Whisper
+/// names, so their prefixed directory forms (`moonshine-base`) are how the
+/// other engines are reached. A path to a `.bin` file is a Whisper model.
+/// Returns `None` for a name no catalog knows.
+pub fn resolve_model(name: &str) -> Option<ResolvedModel> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if model::is_valid_model(name) || name.ends_with(".bin") || name.contains('/') {
+        return Some(ResolvedModel {
+            engine: "whisper",
+            model: name.to_string(),
+        });
+    }
+    CATALOG_ENGINES
+        .iter()
+        .filter(|&&engine| engine != "whisper")
+        .find_map(|&engine| {
+            model_catalog(engine)
+                .into_iter()
+                .find(|entry| *entry == name || model_dir_name(engine, entry) == name)
+                .map(|entry| ResolvedModel {
+                    engine,
+                    model: entry.to_string(),
+                })
+        })
+}
+
+/// How the daemon serves a per-recording `--model` override.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverrideRoute {
+    /// Whisper is the active engine and the name isn't another engine's:
+    /// Whisper's model manager serves it, as it always has. That includes
+    /// names only a remote or CLI backend understands.
+    WhisperManager,
+    /// The override names the model the active engine already runs.
+    Active,
+    /// A model the active transcriber can't serve: another engine's, or a
+    /// different model of the active non-Whisper engine.
+    Separate {
+        engine: crate::config::TranscriptionEngine,
+        model: String,
+    },
+}
+
+/// Decide how a `--model` override is served, or why it can't be.
+pub fn override_route(config: &Config, name: &str) -> Result<OverrideRoute, String> {
+    override_route_in(&Config::models_dir(), config, name)
+}
+
+pub(crate) fn override_route_in(
+    models_dir: &Path,
+    config: &Config,
+    name: &str,
+) -> Result<OverrideRoute, String> {
+    use crate::config::TranscriptionEngine;
+
+    let resolved = resolve_model(name);
+    if config.engine == TranscriptionEngine::Whisper
+        && resolved.as_ref().is_none_or(|r| r.engine == "whisper")
+    {
+        if config.whisper.effective_mode() == crate::config::WhisperMode::Local {
+            if resolved.is_none() && crate::transcribe::whisper::model_filename(name).is_none() {
+                return Err(format!(
+                    "Unknown model '{name}'. Run `voxtype info models` to list available models."
+                ));
+            }
+            crate::transcribe::whisper::resolve_model_path_in(models_dir, name).map_err(|e| {
+                if model::is_valid_model(name) {
+                    format!("{e}\nRun: voxtype setup --download --model {name}")
+                } else {
+                    format!("{e}\nCheck the model file path or run `voxtype info models` to list available models.")
+                }
+            })?;
+        }
+        return Ok(OverrideRoute::WhisperManager);
+    }
+    if let Some(problem) = override_problem_in(models_dir, config, name) {
+        return Err(problem);
+    }
+    let resolved = resolved.expect("override_problem rejects unresolvable names");
+    let engine: TranscriptionEngine = resolved
+        .engine
+        .parse()
+        .map_err(|_| format!("Model '{name}' belongs to an unknown engine"))?;
+    if engine == config.engine && resolved.model == config.model_name() {
+        return Ok(OverrideRoute::Active);
+    }
+    Ok(OverrideRoute::Separate {
+        engine,
+        model: resolved.model,
+    })
+}
+
+/// Why a model override can't be used, phrased as a user-facing hint.
+fn override_problem_in(models_dir: &Path, config: &Config, name: &str) -> Option<String> {
+    let Some(resolved) = resolve_model(name) else {
+        return Some(format!(
+            "Unknown model '{name}'. Run `voxtype info models` to list available models."
+        ));
+    };
+    // A Whisper path, or a name a remote/CLI backend resolves itself, can't
+    // be checked against the local models directory.
+    if resolved.engine == "whisper"
+        && (!model::is_valid_model(&resolved.model)
+            || config.whisper.effective_mode() != crate::config::WhisperMode::Local)
+    {
+        return None;
+    }
+    if model_installed_in(models_dir, resolved.engine, &resolved.model) {
+        return None;
+    }
+    let download =
+        download_arg(resolved.engine, &resolved.model).unwrap_or_else(|| resolved.model.clone());
+    Some(format!(
+        "Model '{name}' ({} engine) is not downloaded. Run: voxtype setup --download --model {download}",
+        resolved.engine
+    ))
+}
+
+/// Config for a transcriber serving a `--model` override: the user's
+/// settings with `engine` and its model swapped in. Streaming is switched
+/// off because override recordings take the batch path.
+pub fn override_config(
+    base: &Config,
+    engine: crate::config::TranscriptionEngine,
+    model: &str,
+) -> Config {
+    let mut config = base.clone();
+    config.set_model_for(engine, model);
+    config.whisper.streaming = false;
+    if let Some(parakeet) = config.parakeet.as_mut() {
+        parakeet.streaming = false;
+    }
+    if let Some(openvino) = config.openvino.as_mut() {
+        openvino.streaming = false;
+    }
+    if engine == crate::config::TranscriptionEngine::Whisper
+        && config.whisper.effective_mode() == crate::config::WhisperMode::Remote
+    {
+        // The remote backend sends `remote_model`, not `model`, the same
+        // substitution the Whisper model manager makes for its overrides.
+        config.whisper.remote_model = Some(model.to_string());
+    }
+    config
 }
 
 #[cfg(test)]
@@ -429,6 +641,45 @@ mod tests {
         assert!(!model_installed_in(tmp.path(), "whisper", "tiny"));
     }
 
+    /// A Parakeet GGUF is one file, checked by its header and pinned size,
+    /// and listed under the parakeet engine only. Without the GGUF branch the
+    /// ONNX checks would look for encoder files inside it and call it corrupt.
+    #[test]
+    fn parakeet_gguf_health_rests_on_header_and_size() {
+        let name = "parakeet-tdt-0.6b-v3-Q8_0.gguf";
+        assert!(model_catalog("parakeet").contains(&name));
+        assert!(!model_catalog("cohere").contains(&name));
+        assert_eq!(
+            resolve_model(name),
+            Some(ResolvedModel {
+                engine: "parakeet",
+                model: name.to_string(),
+            })
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Missing
+        );
+
+        // Sparse, so the test does not write the real 740 MB.
+        let size = model::find_gguf_model(name).unwrap().size;
+        let file = std::fs::File::create(tmp.path().join(name)).unwrap();
+        std::io::Write::write_all(&mut &file, b"GGUF").unwrap();
+        file.set_len(size).unwrap();
+        assert_eq!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Present
+        );
+
+        file.set_len(size - 1).unwrap();
+        assert!(matches!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Corrupt(_)
+        ));
+    }
+
     /// Why the slow tier exists: content can rot without the size changing,
     /// and only hashing sees that.
     #[test]
@@ -485,6 +736,27 @@ mod tests {
                 assert!(why.contains("without checksums"), "{}", why)
             }
             other => panic!("expected unverifiable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fresh_engine_defaults_match_compiled_backends() {
+        for (engine, gguf_enabled, gguf, legacy) in [
+            (
+                "cohere",
+                cfg!(feature = "cohere-gguf"),
+                "cohere-transcribe-03-2026-Q4_K_M.gguf",
+                "cohere-transcribe-q4f16",
+            ),
+            (
+                "parakeet",
+                cfg!(feature = "parakeet-gguf"),
+                "parakeet-ultra-Q8_0.gguf",
+                "parakeet-tdt-0.6b-v3",
+            ),
+        ] {
+            let expected = if gguf_enabled { gguf } else { legacy };
+            assert_eq!(default_model(engine), expected, "{engine}");
         }
     }
 
@@ -581,5 +853,127 @@ mod tests {
     fn unknown_engine_has_an_empty_catalog() {
         assert!(model_catalog("nope").is_empty());
         assert_eq!(default_model("nope"), "");
+    }
+
+    fn install_whisper_model(models_dir: &Path, model: &str) {
+        // The ggml magic is what the cheap health check looks for.
+        std::fs::write(models_dir.join(format!("ggml-{model}.bin")), b"lmggweights").unwrap();
+    }
+
+    fn parakeet_config(model: &str) -> Config {
+        let mut config = Config::default();
+        config.set_model_for(crate::config::TranscriptionEngine::Parakeet, model);
+        config
+    }
+
+    #[test]
+    fn resolve_model_finds_the_owning_engine() {
+        let whisper = resolve_model("large-v3-turbo").unwrap();
+        assert_eq!(
+            (whisper.engine, whisper.model.as_str()),
+            ("whisper", "large-v3-turbo")
+        );
+
+        let parakeet = resolve_model("parakeet-tdt-0.6b-v2").unwrap();
+        assert_eq!(parakeet.engine, "parakeet");
+
+        let cohere = resolve_model("cohere-transcribe-q4").unwrap();
+        assert_eq!(cohere.engine, "cohere");
+
+        // A Whisper model file given by path.
+        assert_eq!(
+            resolve_model("/models/custom.bin").unwrap().engine,
+            "whisper"
+        );
+
+        assert_eq!(resolve_model("no-such-model"), None);
+        assert_eq!(resolve_model("  "), None);
+    }
+
+    #[test]
+    fn whisper_wins_short_name_collisions() {
+        // `base` is both a Whisper and a Moonshine name; Whisper wins, and the
+        // directory form reaches Moonshine with its config value.
+        assert_eq!(resolve_model("base").unwrap().engine, "whisper");
+        let moonshine = resolve_model("moonshine-base").unwrap();
+        assert_eq!(
+            (moonshine.engine, moonshine.model.as_str()),
+            ("moonshine", "base")
+        );
+    }
+
+    #[test]
+    fn local_whisper_rejects_unknown_override_before_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let problem = override_route_in(tmp.path(), &Config::default(), "nonexistent")
+            .expect_err("unknown local models must not reach recording");
+        assert!(problem.contains("nonexistent"), "{problem}");
+        assert!(problem.contains("voxtype info models"), "{problem}");
+    }
+
+    #[test]
+    fn remote_whisper_engine_keeps_its_model_manager_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.whisper.mode = Some(crate::config::WhisperMode::Remote);
+        assert_eq!(config.engine, crate::config::TranscriptionEngine::Whisper);
+        // Remote model names do not require local files.
+        for name in ["large-v3", "gpt-4o-transcribe"] {
+            assert_eq!(
+                override_route_in(tmp.path(), &config, name),
+                Ok(OverrideRoute::WhisperManager),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_engine_override_gets_its_own_transcriber() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_whisper_model(tmp.path(), "base.en");
+        let config = parakeet_config("parakeet-tdt-0.6b-v2");
+        assert_eq!(
+            override_route_in(tmp.path(), &config, "base.en"),
+            Ok(OverrideRoute::Separate {
+                engine: crate::config::TranscriptionEngine::Whisper,
+                model: "base.en".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn overriding_with_the_active_model_needs_nothing_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_onnx_model(
+            tmp.path(),
+            "parakeet",
+            "parakeet-tdt-0.6b-v2",
+            &[("encoder-model.onnx", b"e"), ("vocab.txt", b"v")],
+        );
+        let config = parakeet_config("parakeet-tdt-0.6b-v2");
+        assert_eq!(
+            override_route_in(tmp.path(), &config, "parakeet-tdt-0.6b-v2"),
+            Ok(OverrideRoute::Active)
+        );
+    }
+
+    #[test]
+    fn unusable_overrides_fail_with_a_remedy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = parakeet_config("parakeet-tdt-0.6b-v2");
+
+        let unknown = override_route_in(tmp.path(), &config, "no-such-model").unwrap_err();
+        assert!(
+            unknown.contains("Unknown model 'no-such-model'"),
+            "{unknown}"
+        );
+        assert!(unknown.contains("voxtype info models"), "{unknown}");
+
+        let missing = override_route_in(tmp.path(), &config, "moonshine-base").unwrap_err();
+        assert!(missing.contains("not downloaded"), "{missing}");
+        assert!(
+            missing.contains("voxtype setup --download --model moonshine-base"),
+            "{missing}"
+        );
     }
 }

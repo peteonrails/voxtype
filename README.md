@@ -161,6 +161,8 @@ Config file location: `~/.config/voxtype/config.toml`
 
 See [`config/default.toml`](config/default.toml) for the full annotated default configuration.
 
+If you use a coding agent such as Claude Code or Codex, run `voxtype setup skill` to install the [`voxtype-setup`](skills/README.md) skill, then ask the agent to set up voxtype for your machine. It inspects your hardware and tunes the engine, model, GPU acceleration, memory and output settings, asking before it changes anything.
+
 ```toml
 # State file for Waybar/polybar integration (enabled by default)
 state_file = "auto"  # Or custom path, or "disabled" to turn off
@@ -547,29 +549,10 @@ ONNX engines require the corresponding Cargo feature at build time. Without it, 
 `engine = "parakeet"` in your config will fail with an error. The prebuilt release binaries
 (`-onnx-avx2`, `-onnx-cuda`, etc.) include all ONNX engines.
 
-## AppImage (Universal)
+## AppImage
 
-AppImage works on any Linux distribution without installation:
-
-```bash
-# Download the appropriate AppImage from the GitHub release
-chmod +x voxtype-*-x86_64.AppImage
-
-# Move to a permanent location
-mv voxtype-*-x86_64.AppImage ~/.local/bin/voxtype
-
-# Run setup (downloads model, configures service)
-~/.local/bin/voxtype setup
-```
-
-Available AppImage variants:
-- `voxtype-{ver}-x86_64.AppImage` - Whisper engine with CPU and Vulkan GPU support (recommended)
-- `voxtype-{ver}-onnx-x86_64.AppImage` - ONNX engines (Parakeet, Moonshine, etc.) + Vulkan Whisper
-- `voxtype-{ver}-onnx-cuda-x86_64.AppImage` - ONNX engines with NVIDIA CUDA + Vulkan Whisper
-
-Each ONNX AppImage also includes the Vulkan Whisper binary, so you can switch between
-engines via `engine = "whisper"` or `engine = "parakeet"` in your config without changing
-AppImages. For GPU-accelerated Whisper in the Whisper-only AppImage, set `VOXTYPE_GPU=1`.
+AppImage builds are not currently published. Use one of the packages above or
+build from source; see [docs/INSTALL.md](docs/INSTALL.md#appimage).
 
 ## Waybar Integration
 

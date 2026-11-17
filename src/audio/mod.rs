@@ -6,6 +6,7 @@
 pub mod cpal_capture;
 pub mod devices;
 pub mod dual_capture;
+pub mod echo_cancel;
 #[cfg(feature = "onnx-common")]
 pub mod enhance;
 pub mod feedback;
@@ -21,6 +22,10 @@ use tokio::sync::mpsc;
 
 /// Trait for audio capture implementations
 #[async_trait::async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds #[must_use] to methods returning must-use futures"
+)]
 pub trait AudioCapture: Send + Sync {
     /// Start capturing audio
     /// Returns a channel receiver for audio chunks (f32 samples, mono, 16kHz)

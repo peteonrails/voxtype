@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Configuration for CTC greedy decoding
+#[derive(Default)]
 pub struct CtcConfig {
     /// Token ID used for CTC blank (usually 0)
     pub blank_id: u32,
@@ -20,16 +21,6 @@ pub struct CtcConfig {
     pub num_metadata_tokens: usize,
     /// Replace SentencePiece word boundary markers (U+2581) with spaces
     pub sentencepiece_cleanup: bool,
-}
-
-impl Default for CtcConfig {
-    fn default() -> Self {
-        Self {
-            blank_id: 0,
-            num_metadata_tokens: 0,
-            sentencepiece_cleanup: false,
-        }
-    }
 }
 
 impl CtcConfig {
@@ -140,8 +131,12 @@ pub fn load_tokens(path: &Path) -> Result<HashMap<u32, String>, TranscribeError>
 
     let mut tokens = HashMap::new();
     for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+        // Only strip the line ending: a vocab can map a token that IS
+        // whitespace (Omnilingual's word delimiter is the line "  4", a
+        // space token). Trimming both ends turned it into "4" and silently
+        // dropped every word boundary from the output.
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
             continue;
         }
         // Split from the right to handle tokens containing spaces
@@ -179,6 +174,27 @@ mod tests {
         assert_eq!(tokens.get(&0), Some(&"<blank>".to_string()));
         assert_eq!(tokens.get(&2), Some(&"hello".to_string()));
         assert_eq!(tokens.get(&3), Some(&"world".to_string()));
+    }
+
+    /// Omnilingual's vocab maps its word delimiter, a literal space, on the
+    /// line "  4". It must load as " " so decoded text keeps its spaces.
+    #[test]
+    fn test_load_tokens_keeps_a_whitespace_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let tokens_path = temp_dir.path().join("tokens.txt");
+        fs::write(&tokens_path, "<s> 0\n<pad> 1\n  4\nh 5\ni 6\r\n\n").unwrap();
+
+        let tokens = load_tokens(&tokens_path).unwrap();
+        assert_eq!(tokens.get(&4), Some(&" ".to_string()));
+        assert_eq!(tokens.get(&6), Some(&"i".to_string()));
+
+        let config = CtcConfig {
+            blank_id: 0,
+            num_metadata_tokens: 0,
+            sentencepiece_cleanup: false,
+        };
+        let ids = [5.0, 6.0, 4.0, 5.0, 6.0];
+        assert_eq!(decode_pre_argmax(&ids, &tokens, &config), "hi hi");
     }
 
     #[test]
@@ -257,8 +273,8 @@ mod tests {
         let time_steps = 2;
         let mut logits = vec![0.0f32; time_steps * vocab_size];
 
-        logits[0 * vocab_size + 1] = 10.0; // hello
-        logits[1 * vocab_size + 2] = 10.0; // world
+        logits[1] = 10.0; // t=0: hello
+        logits[vocab_size + 2] = 10.0; // t=1: world
 
         let config = CtcConfig {
             sentencepiece_cleanup: true,

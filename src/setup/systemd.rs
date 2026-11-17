@@ -101,6 +101,27 @@ pub async fn install() -> anyhow::Result<()> {
         println!("    Check logs with: journalctl --user -u voxtype");
     }
 
+    // The unit inherits its display from the user manager. If the compositor
+    // never imported WAYLAND_DISPLAY/DISPLAY there, the daemon can't type.
+    if let Ok(env) = Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+        .await
+    {
+        if env.status.success() && manager_env_lacks_display(&String::from_utf8_lossy(&env.stdout))
+        {
+            print_failure("The systemd user manager has no WAYLAND_DISPLAY or DISPLAY");
+            println!("    voxtype will not be able to type or copy text. Fix it now with:");
+            println!(
+                "      systemctl --user import-environment WAYLAND_DISPLAY DISPLAY && systemctl --user restart voxtype"
+            );
+            println!("    and make it permanent by running the import when your compositor starts");
+            println!(
+                "    (Hyprland: exec-once = systemctl --user import-environment WAYLAND_DISPLAY DISPLAY)"
+            );
+        }
+    }
+
     // Show status
     println!("\n---");
     println!("Service installed successfully!\n");
@@ -185,4 +206,30 @@ pub fn regenerate_service_file() -> anyhow::Result<bool> {
     let content = generate_service_file();
     std::fs::write(&service_path, &content)?;
     Ok(true)
+}
+
+/// `systemctl --user show-environment` output with neither WAYLAND_DISPLAY nor
+/// DISPLAY set, so services started by the user manager have no display.
+fn manager_env_lacks_display(show_env: &str) -> bool {
+    !show_env.lines().any(|line| {
+        line.split_once('=')
+            .is_some_and(|(k, v)| (k == "WAYLAND_DISPLAY" || k == "DISPLAY") && !v.is_empty())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_env_lacks_display_reads_show_environment() {
+        assert!(manager_env_lacks_display(
+            "HOME=/home/u\nXDG_RUNTIME_DIR=/run/user/1000\n"
+        ));
+        assert!(manager_env_lacks_display("WAYLAND_DISPLAY=\n"));
+        assert!(!manager_env_lacks_display(
+            "HOME=/home/u\nWAYLAND_DISPLAY=wayland-1\n"
+        ));
+        assert!(!manager_env_lacks_display("DISPLAY=:0\n"));
+    }
 }

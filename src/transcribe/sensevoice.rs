@@ -57,8 +57,9 @@ impl SenseVoiceTranscriber {
                 return Err(TranscribeError::ModelNotFound(format!(
                     "SenseVoice model not found in {:?}\n  \
                      Expected model.int8.onnx or model.onnx\n  \
-                     Download from: https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
-                    model_dir
+                     Run: {}",
+                    model_dir,
+                    crate::model_catalog::download_command("sensevoice", &config.model)
                 )));
             }
         };
@@ -124,6 +125,10 @@ impl SenseVoiceTranscriber {
 }
 
 impl Transcriber for SenseVoiceTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -389,18 +394,13 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
          - {}\n  \
          - {}\n  \
          - {}\n\n\
-         Manual download:\n  \
-         mkdir -p {}\n  \
-         cd {} && wget https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx\n  \
-         cd {} && wget https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
+         Run: {}",
         model,
         model_path.display(),
         alt_path.display(),
         cwd_path.display(),
         local_models_path.display(),
-        model_path.display(),
-        model_path.display(),
-        model_path.display(),
+        crate::model_catalog::download_command("sensevoice", model),
     )))
 }
 

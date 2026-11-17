@@ -13,3 +13,20 @@ pub(crate) fn reset_sigpipe() {
 pub(crate) fn reset_sigpipe() {
     // No-op on non-Unix platforms
 }
+
+/// Ignore SIGPIPE for the daemon. The default disposition suits short CLI
+/// commands piped into `head`, but the daemon writes into the stdin of
+/// helpers it spawns (wl-copy, xclip, paste helpers, the post-process
+/// command, dotool), and one that exits before reading, such as wl-copy
+/// with no Wayland session, would kill the whole daemon silently. Ignored,
+/// the write fails with EPIPE, which each output method already turns into
+/// an error and a fallback.
+#[cfg(unix)]
+pub(crate) fn ignore_sigpipe() {
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ignore_sigpipe() {}

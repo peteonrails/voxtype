@@ -1,10 +1,10 @@
 //! Interactive model selection and download
 
-use super::manifest::{ExpectedFile, ModelArtifact};
+use super::manifest::{ExpectedFile, MirroredFile, ModelArtifact};
 use super::progress::{self, FileProgress};
 use super::{print_failure, print_info, print_success, print_warning};
 use crate::config::{Config, OpenVinoConfig, TranscriptionEngine};
-use crate::transcribe::whisper::{get_model_filename, get_model_url};
+use crate::transcribe::whisper::get_model_filename;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -309,40 +309,15 @@ const MOONSHINE_MODELS: &[MoonshineModelInfo] = &[
         ],
         huggingface_repo: "onnx-community/moonshine-base-zh-ONNX",
     },
-    MoonshineModelInfo {
-        name: "tiny-ja",
-        dir_name: "moonshine-tiny-ja",
-        size_mb: 100,
-        description: "Japanese (tiny)",
-        language: "ja",
-        license: "Community",
-        files: &[
-            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            (
-                "onnx/decoder_model_merged.onnx",
-                "decoder_model_merged.onnx",
-            ),
-            ("tokenizer.json", "tokenizer.json"),
-        ],
-        huggingface_repo: "onnx-community/moonshine-tiny-ja-ONNX",
-    },
-    MoonshineModelInfo {
-        name: "tiny-zh",
-        dir_name: "moonshine-tiny-zh",
-        size_mb: 100,
-        description: "Mandarin Chinese (tiny)",
-        language: "zh",
-        license: "Community",
-        files: &[
-            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            (
-                "onnx/decoder_model_merged.onnx",
-                "decoder_model_merged.onnx",
-            ),
-            ("tokenizer.json", "tokenizer.json"),
-        ],
-        huggingface_repo: "onnx-community/moonshine-tiny-zh-ONNX",
-    },
+    // tiny-ja and tiny-zh are deliberately absent (#694). Their upstream
+    // repos (onnx-community/moonshine-tiny-{ja,zh}-ONNX) were published
+    // without a decoder_model_merged.onnx export — only the plain no-past
+    // decoder, in any revision — and the transcriber drives the merged
+    // graph's use_cache_branch/past_key_values contract, so there is no
+    // upstream file it can run. They were also never mirrored to R2, so
+    // every download of them 404ed on the manifest. Restore them only if
+    // upstream adds a merged export (compare moonshine-base-ja-ONNX, which
+    // has one).
     MoonshineModelInfo {
         name: "tiny-ko",
         dir_name: "moonshine-tiny-ko",
@@ -512,6 +487,24 @@ const OMNILINGUAL_MODELS: &[OmnilingualModelInfo] = &[OmnilingualModelInfo {
 }];
 
 // =============================================================================
+// Punctuation / true-casing model definition
+// =============================================================================
+
+/// Apache-2.0 multilingual token classifier selected for cleanup stage 3 in
+/// #696. The ONNX graph is pinned by the R2 manifest hashes. Its repository
+/// ships a raw SentencePiece model; Voxtype mirrors the byte-compatible
+/// XLM-R tokenizer.json from FacebookAI/xlm-roberta-base so release binaries
+/// keep using the existing pure-Rust tokenizer stack.
+struct PunctuationModelInfo;
+
+const PUNCTUATION_MODEL: PunctuationModelInfo = PunctuationModelInfo;
+const PUNCTUATION_MODEL_NAME: &str = "xlm-roberta-punctuation-fullstop-truecase";
+const PUNCTUATION_UPSTREAM: &str = "1-800-BAD-CODE/xlm-roberta_punctuation_fullstop_truecase";
+const PUNCTUATION_UPSTREAM_REVISION: &str = "d1769a597ce8dfaa070d436bc67d4ee761f58884";
+const PUNCTUATION_TOKENIZER_UPSTREAM: &str = "FacebookAI/xlm-roberta-base";
+const PUNCTUATION_TOKENIZER_REVISION: &str = "e73636d4f797dec63c3081bb6ed5c7b0bb3f2089";
+
+// =============================================================================
 // Cohere Transcribe Model Definitions
 // =============================================================================
 // Encoder-decoder ASR via ONNX Runtime, Whisper-style task tokens. Currently
@@ -668,6 +661,384 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         huggingface_repo: "onnx-community/cohere-transcribe-03-2026-ONNX",
     },
 ];
+
+/// One curated transcribe.cpp GGUF file. The repository revision and SHA-256
+/// values come from the official handy-computer Hugging Face file metadata.
+/// Other published quantizations are still usable by path.
+pub(crate) struct GgufModelInfo {
+    /// Engine whose `[section] model` this file is, and its R2 prefix.
+    pub engine: &'static str,
+    pub name: &'static str,
+    /// R2 directory under the engine's prefix. Spelled out rather than
+    /// derived from `name` so the mirrored layout stays greppable.
+    pub r2_dir: &'static str,
+    /// Explicit pinned upstream source for approved, not-yet-mirrored models.
+    pub upstream_url: Option<&'static str>,
+    pub size: u64,
+    pub sha256: &'static str,
+    /// Weights license, shown before the download is confirmed.
+    pub license: &'static str,
+    pub description: &'static str,
+}
+
+/// Durable origin and readiness inventory for every approved Handy conversion.
+/// Entries become runnable only after both publication and inference gates pass.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingGgufModelInfo {
+    pub name: &'static str,
+    pub arch: &'static str,
+    pub origin_repo: &'static str,
+    pub origin_revision: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub r2_dir: Option<&'static str>,
+    pub runnable: bool,
+    pub license_gated: bool,
+    pub languages: &'static [&'static str],
+}
+
+const HANDY_PENDING_GGUF_MODELS: &[PendingGgufModelInfo] = &[
+    PendingGgufModelInfo {
+        name: "Qwen3-ASR-0.6B-Q8_0.gguf",
+        arch: "qwen3_asr",
+        origin_repo: "handy-computer/Qwen3-ASR-0.6B-gguf",
+        origin_revision: "7e7c69a577fa2725dfedbe34b5e999336e30a19b",
+        size: 850_423_456,
+        sha256: "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+        r2_dir: Some("qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b"),
+        runnable: true,
+        license_gated: false,
+        languages: &[
+            "auto", "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th",
+            "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el",
+            "ro", "hu", "mk",
+        ],
+    },
+    PendingGgufModelInfo {
+        name: "Qwen3-ASR-1.7B-Q8_0.gguf",
+        arch: "qwen3_asr",
+        origin_repo: "handy-computer/Qwen3-ASR-1.7B-gguf",
+        origin_revision: "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
+        size: 2_185_030_624,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+        r2_dir: Some("qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f"),
+        runnable: true,
+        license_gated: false,
+        languages: &[
+            "auto", "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th",
+            "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el",
+            "ro", "hu", "mk",
+        ],
+    },
+    PendingGgufModelInfo {
+        name: "moonshine-base-ja-Q8_0.gguf",
+        arch: "moonshine",
+        origin_repo: "handy-computer/moonshine-base-ja-gguf",
+        origin_revision: "1674f5f93b7655000951d25d496dcfac947b3968",
+        size: 77_476_544,
+        sha256: "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
+        r2_dir: Some("moonshine-base-ja-q8_0-1674f5f93b7655000951d25d496dcfac947b3968"),
+        runnable: true,
+        license_gated: false,
+        languages: &["auto", "ja"],
+    },
+    PendingGgufModelInfo {
+        name: "SenseVoiceSmall-Q8_0.gguf",
+        arch: "sensevoice",
+        origin_repo: "handy-computer/SenseVoiceSmall-gguf",
+        origin_revision: "ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b",
+        size: 252_684_608,
+        sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
+        r2_dir: Some("sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b"),
+        runnable: true,
+        license_gated: false,
+        languages: &["auto", "zh", "yue", "en", "ja", "ko"],
+    },
+    PendingGgufModelInfo {
+        name: "moonshine-streaming-small-Q8_0.gguf",
+        arch: "moonshine_streaming",
+        origin_repo: "handy-computer/moonshine-streaming-small-gguf",
+        origin_revision: "e53f28b0cb90308390c852068b950a1aadd238b0",
+        size: 198_506_848,
+        sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+        r2_dir: Some("moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0"),
+        runnable: true,
+        license_gated: false,
+        languages: &["auto", "en"],
+    },
+    PendingGgufModelInfo {
+        name: "gigaam-v3-e2e-rnnt-Q8_0.gguf",
+        arch: "gigaam",
+        origin_repo: "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+        origin_revision: "3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d",
+        size: 273_724_832,
+        sha256: "78d63b47723b7f8d78c6113a6ef983b5a86e2a86f6c273e1f5cb6967b1c4467a",
+        r2_dir: Some("gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d"),
+        runnable: true,
+        license_gated: false,
+        languages: &["auto", "ru"],
+    },
+    PendingGgufModelInfo {
+        name: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+        arch: "parakeet",
+        origin_repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        origin_revision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
+        size: 751_094_240,
+        sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+        r2_dir: Some(
+            "nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd",
+        ),
+        runnable: true,
+        license_gated: false,
+        languages: &[
+            "auto", "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR",
+            "pt-PT", "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR",
+            "vi-VN", "uk-UA", "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI",
+            "hr-HR", "sk-SK", "zh-CN", "hu-HU", "ro-RO", "et-EE",
+        ],
+    },
+];
+
+pub fn handy_pending_gguf_models() -> &'static [PendingGgufModelInfo] {
+    HANDY_PENDING_GGUF_MODELS
+}
+
+pub(crate) fn find_pending_gguf_model(name: &str) -> Option<&'static PendingGgufModelInfo> {
+    let basename = std::path::Path::new(name)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or(name);
+    HANDY_PENDING_GGUF_MODELS
+        .iter()
+        .find(|model| model.name == basename)
+}
+
+impl GgufModelInfo {
+    /// Cargo feature that compiles this engine's GGUF runtime.
+    pub(crate) fn feature(&self) -> &'static str {
+        match self.engine {
+            "parakeet" => "parakeet-gguf",
+            "gguf" => "gguf",
+            _ => "cohere-gguf",
+        }
+    }
+
+    /// Whether this binary can load the file.
+    // Each arm folds to a constant per feature set, which clippy then reads
+    // as a `matches!`; the per-engine arms are the point.
+    #[allow(clippy::match_like_matches_macro)]
+    pub(crate) fn compiled(&self) -> bool {
+        match self.engine {
+            "parakeet" => cfg!(feature = "parakeet-gguf"),
+            "gguf" => cfg!(feature = "gguf"),
+            _ => cfg!(feature = "cohere-gguf"),
+        }
+    }
+}
+
+/// Upstream these were mirrored from, and the revision the pinned sha256s
+/// below were taken at. The runtime never fetches from here - downloads go
+/// to R2 - but whoever re-mirrors needs to know the source of truth.
+#[allow(dead_code)]
+const COHERE_GGUF_REPO: &str = "handy-computer/cohere-transcribe-03-2026-gguf";
+#[allow(dead_code)]
+const COHERE_GGUF_REVISION: &str = "ab667acedcb5d8d56837ef3ed3568c3ad50dde47";
+/// Q4_K_M is the small, Vulkan-tested default; Q8_0 is the larger reference
+/// quantization. The intermediate and 4 GB variants are usable by path.
+static COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
+    GgufModelInfo {
+        engine: "cohere",
+        name: "cohere-transcribe-03-2026-Q4_K_M.gguf",
+        r2_dir: "cohere-transcribe-03-2026-q4_k_m-gguf",
+        upstream_url: None,
+        size: 1_558_162_944,
+        sha256: "0ea56826d8bd5d74b7143a4a04e022dc1bb75452cfae49d98b6acb0c1d16a1fb",
+        license: "Apache-2.0",
+        description: "Q4_K_M, smaller and tested on Intel Vulkan",
+    },
+    GgufModelInfo {
+        engine: "cohere",
+        name: "cohere-transcribe-03-2026-Q8_0.gguf",
+        r2_dir: "cohere-transcribe-03-2026-q8_0-gguf",
+        upstream_url: None,
+        size: 2_410_655_232,
+        sha256: "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
+        license: "Apache-2.0",
+        description: "Q8_0, larger reference quantization",
+    },
+];
+
+/// Upstream of the Parakeet GGUF entries and the revision their sha256s were
+/// taken at, kept for whoever mirrors them to R2, as for Cohere's above.
+#[allow(dead_code)]
+const PARAKEET_GGUF_REPO: &str = "handy-computer/parakeet-tdt-0.6b-v3-gguf";
+#[allow(dead_code)]
+const PARAKEET_GGUF_REVISION: &str = "d8d8c32cb2017c57e5307767343e97870f8a7f53";
+/// F16 is the reference precision; Q8_0 is the smaller download and matched
+/// its LibriSpeech WER and Vulkan speed in our tests. The F32 and 4-6 bit
+/// variants are usable by path.
+static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-tdt-0.6b-v3-F16.gguf",
+        r2_dir: "parakeet-tdt-0.6b-v3-f16-gguf",
+        upstream_url: None,
+        size: 1_255_869_856,
+        sha256: "d9ec7e2c39da7b4fec3e01e71e82c7f7bbe97741e08c0c054091bf3d520a41d3",
+        license: "CC-BY-4.0",
+        description: "F16, reference precision for Vulkan GPUs",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+        r2_dir: "parakeet-tdt-0.6b-v3-q8_0-gguf",
+        upstream_url: None,
+        size: 739_508_576,
+        sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
+        license: "CC-BY-4.0",
+        description: "Q8_0, smaller with the same accuracy in our tests",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-ultra-F16.gguf",
+        r2_dir: "parakeet-ultra-f16-a1539be1b849ea7463b88343e5277b373d0c4ea9",
+        upstream_url: None,
+        size: 1_256_724_448,
+        sha256: "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
+        license: "CC-BY-4.0",
+        description: "Ultra F16, full precision; 25 European languages, automatic language",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-ultra-Q8_0.gguf",
+        r2_dir: "parakeet-ultra-q8_0-a1539be1b849ea7463b88343e5277b373d0c4ea9",
+        upstream_url: None,
+        size: 740_363_168,
+        sha256: "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
+        license: "CC-BY-4.0",
+        description: "Ultra Q8_0, recommended for new GGUF selections; 25 European languages",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-ultra-Q4_K_M.gguf",
+        r2_dir: "parakeet-ultra-q4_k_m-a1539be1b849ea7463b88343e5277b373d0c4ea9",
+        upstream_url: None,
+        size: 486_280_096,
+        sha256: "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
+        license: "CC-BY-4.0",
+        description: "Ultra Q4_K_M, smaller quantization; 25 European languages",
+    },
+];
+
+static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
+    GgufModelInfo {
+        engine: "gguf",
+        name: "Qwen3-ASR-0.6B-Q8_0.gguf",
+        r2_dir: "qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b",
+        upstream_url: None,
+        size: 850_423_456,
+        sha256: "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+        license: "Apache-2.0",
+        description: "Qwen3 ASR 0.6B Q8, multilingual",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "Qwen3-ASR-1.7B-Q8_0.gguf",
+        r2_dir: "qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
+        upstream_url: None,
+        size: 2_185_030_624,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+        license: "Apache-2.0",
+        description: "Qwen3 ASR 1.7B Q8, multilingual",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "moonshine-streaming-small-Q8_0.gguf",
+        r2_dir: "moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0",
+        upstream_url: None,
+        size: 198_506_848,
+        sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+        license: "MIT",
+        description: "Moonshine Streaming Small Q8, offline English inference",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "gigaam-v3-e2e-rnnt-Q8_0.gguf",
+        r2_dir: "gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d",
+        upstream_url: None,
+        size: 273_724_832,
+        sha256: "78d63b47723b7f8d78c6113a6ef983b5a86e2a86f6c273e1f5cb6967b1c4467a",
+        license: "MIT",
+        description: "GigaAM v3 Q8, Russian only",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+        r2_dir: "nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd",
+        upstream_url: None,
+        size: 751_094_240,
+        sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+        license: "OpenMDW-1.1",
+        description: "Nemotron 3.5 ASR 0.6B Q8, offline multilingual inference",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "moonshine-base-ja-Q8_0.gguf",
+        r2_dir: "moonshine-base-ja-q8_0-1674f5f93b7655000951d25d496dcfac947b3968",
+        upstream_url: None,
+        size: 77_476_544,
+        sha256: "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
+        license: "Moonshine AI Community License",
+        description: "Moonshine Base Japanese Q8, Japanese",
+    },
+    GgufModelInfo {
+        engine: "gguf",
+        name: "SenseVoiceSmall-Q8_0.gguf",
+        r2_dir: "sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b",
+        upstream_url: None,
+        size: 252_684_608,
+        sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
+        license: "FunASR Model Open Source License 1.1",
+        description: "SenseVoice Small Q8, Chinese, Cantonese, English, Japanese, Korean",
+    },
+];
+
+pub(crate) fn cohere_gguf_models() -> &'static [GgufModelInfo] {
+    COHERE_GGUF_MODELS
+}
+
+pub(crate) fn parakeet_gguf_models() -> &'static [GgufModelInfo] {
+    PARAKEET_GGUF_MODELS
+}
+
+pub(crate) fn handy_gguf_models() -> &'static [GgufModelInfo] {
+    HANDY_GGUF_MODELS
+}
+
+/// A curated GGUF of any engine, by file name.
+pub(crate) fn find_gguf_model(name: &str) -> Option<&'static GgufModelInfo> {
+    COHERE_GGUF_MODELS
+        .iter()
+        .chain(PARAKEET_GGUF_MODELS)
+        .chain(HANDY_GGUF_MODELS)
+        .find(|model| model.name == name)
+}
+
+/// Every curated GGUF downloads from its R2 mirror. `upstream_url` stays as an
+/// escape hatch for a pinned model whose mirror is not populated yet; never
+/// construct an unpopulated R2 URL.
+fn gguf_url(model: &GgufModelInfo) -> String {
+    if let Some(url) = model.upstream_url {
+        return url.to_string();
+    }
+    format!(
+        "{}/{}/{}/{}",
+        crate::setup::manifest::MODELS_BASE_URL,
+        model.engine,
+        model.r2_dir,
+        model.name
+    )
+}
 
 // =============================================================================
 // ModelArtifact implementations
@@ -831,6 +1202,33 @@ impl ModelArtifact for OmnilingualModelInfo {
     }
 }
 
+impl ModelArtifact for OpenVinoModelInfo {
+    // Intentional: the trait method is `name()` but the struct field that
+    // serves as the canonical identifier is `dir_name`. Clippy's
+    // misnamed_getters lint fires on the mismatch; it's not a bug.
+    #[allow(clippy::misnamed_getters)]
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "openvino"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        // Every OpenVINO Whisper repo ships the same file set; the manifest
+        // is authoritative for sizes, so size 0 here like the other engines.
+        OPENVINO_MODEL_FILES
+            .iter()
+            .map(|f| ExpectedFile {
+                path: (*f).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
 impl ModelArtifact for CohereModelInfo {
     // Intentional: the trait method is `name()` but the struct field that
     // serves as the canonical identifier is `dir_name`. Clippy's
@@ -853,6 +1251,30 @@ impl ModelArtifact for CohereModelInfo {
                 size: 0,
             })
             .collect()
+    }
+}
+
+impl ModelArtifact for PunctuationModelInfo {
+    fn name(&self) -> &str {
+        PUNCTUATION_MODEL_NAME
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "punctuation"
+    }
+    fn upstream_repo(&self) -> &str {
+        PUNCTUATION_UPSTREAM
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        vec![
+            ExpectedFile {
+                path: "model.onnx".to_string(),
+                size: 1_112_481_438,
+            },
+            ExpectedFile {
+                path: "tokenizer.json".to_string(),
+                size: 9_096_718,
+            },
+        ]
     }
 }
 
@@ -879,6 +1301,10 @@ pub struct RegistryEntry {
 pub struct RegistryFile {
     pub upstream_path: String,
     pub local_path: String,
+    /// Override the entry's repository for a file assembled from a second
+    /// provenance source (currently the punctuation tokenizer only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_repo: Option<String>,
 }
 
 /// Files an ONNX model is expected to have on disk, by engine and model name.
@@ -919,6 +1345,7 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(f, _)| RegistryFile {
                     upstream_path: (*f).to_string(),
                     local_path: (*f).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
@@ -934,6 +1361,7 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
@@ -949,6 +1377,7 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
@@ -964,6 +1393,7 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
@@ -979,6 +1409,7 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
@@ -994,6 +1425,7 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
@@ -1009,11 +1441,124 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                    upstream_repo: None,
                 })
                 .collect(),
         });
     }
+    // OpenVINO Whisper conversions (Intel's official HF org). Keyed by
+    // dir_name like moonshine/sensevoice, since that is the on-disk layout
+    // download_artifact writes and the R2 tree must mirror byte-for-byte.
+    // Every repo ships the same file set; preprocessor_config.json differs
+    // per model (mel bin count) so it is fetched per-repo, never shared.
+    // Licenses verified 2026-09-01: whisper-* are Apache-2.0,
+    // distil-whisper-* are MIT (#692).
+    for m in OPENVINO_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "openvino",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: OPENVINO_MODEL_FILES
+                .iter()
+                .map(|f| RegistryFile {
+                    upstream_path: (*f).to_string(),
+                    local_path: (*f).to_string(),
+                    upstream_repo: None,
+                })
+                .collect(),
+        });
+    }
+    out.push(RegistryEntry {
+        engine_prefix: "punctuation",
+        name: PUNCTUATION_MODEL_NAME.to_string(),
+        upstream_repo: PUNCTUATION_UPSTREAM.to_string(),
+        files: vec![
+            RegistryFile {
+                upstream_path: format!("resolve/{PUNCTUATION_UPSTREAM_REVISION}/model.onnx"),
+                local_path: "model.onnx".to_string(),
+                upstream_repo: None,
+            },
+            RegistryFile {
+                upstream_path: format!("resolve/{PUNCTUATION_TOKENIZER_REVISION}/tokenizer.json"),
+                local_path: "tokenizer.json".to_string(),
+                upstream_repo: Some(PUNCTUATION_TOKENIZER_UPSTREAM.to_string()),
+            },
+        ],
+    });
     out
+}
+
+/// One downloadable GGUF from the curated catalog, as the R2 audit sees it.
+/// Emitted by `voxtype-mirror-registry --gguf` for
+/// `scripts/mirror-models-to-r2.sh --gguf-audit`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GgufRegistryEntry {
+    pub engine: &'static str,
+    pub name: &'static str,
+    pub r2_dir: &'static str,
+    /// The URL the runtime downloads from today.
+    pub url: String,
+    /// True when `url` is the R2 mirror rather than a pinned upstream.
+    pub mirrored: bool,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub license: &'static str,
+}
+
+/// Every downloadable GGUF across engines, deduplicated by name (the Handy
+/// models are listed under more than one picker but are one file).
+pub fn gguf_registry_snapshot() -> Vec<GgufRegistryEntry> {
+    let mut out: Vec<GgufRegistryEntry> = Vec::new();
+    for model in COHERE_GGUF_MODELS
+        .iter()
+        .chain(PARAKEET_GGUF_MODELS)
+        .chain(HANDY_GGUF_MODELS)
+    {
+        if out.iter().any(|entry| entry.name == model.name) {
+            continue;
+        }
+        out.push(GgufRegistryEntry {
+            engine: model.engine,
+            name: model.name,
+            r2_dir: model.r2_dir,
+            url: gguf_url(model),
+            mirrored: model.upstream_url.is_none(),
+            size: model.size,
+            sha256: model.sha256,
+            license: model.license,
+        });
+    }
+    out
+}
+
+/// Where a model row's license link points. Standard licenses link to their
+/// canonical text; custom model licenses link to the copy shipped in the
+/// model's R2 bundle, the exact terms voxtype redistributes under.
+pub fn gguf_license(name: &str) -> Option<(&'static str, String)> {
+    let model = find_gguf_model(name)?;
+    let url = match model.license {
+        "Apache-2.0" => "https://www.apache.org/licenses/LICENSE-2.0".to_string(),
+        "CC-BY-4.0" => "https://creativecommons.org/licenses/by/4.0/".to_string(),
+        "MIT" => "https://opensource.org/license/mit".to_string(),
+        _ => format!(
+            "{}/{}/{}/LICENSE",
+            crate::setup::manifest::MODELS_BASE_URL,
+            model.engine,
+            model.r2_dir
+        ),
+    };
+    Some((model.license, url))
+}
+
+/// Download the punctuation/casing classifier from Voxtype's hash-verified
+/// R2 mirror. It is a shared cleanup model, not an ASR model, so activation
+/// remains controlled by `[text] punctuation_casing`.
+pub fn download_punctuation_model() -> anyhow::Result<()> {
+    download_artifact(&PUNCTUATION_MODEL, &Config::models_dir())
+}
+
+pub fn punctuation_model_path() -> std::path::PathBuf {
+    Config::models_dir().join(PUNCTUATION_MODEL_NAME)
 }
 
 // =============================================================================
@@ -1037,26 +1582,10 @@ pub fn download_artifact<T: ModelArtifact + ?Sized>(
     artifact: &T,
     models_dir: &Path,
 ) -> anyhow::Result<()> {
-    use super::manifest::{file_url, manifest_url, validate_manifest, Manifest};
-
     let model_dir = models_dir.join(artifact.name());
     std::fs::create_dir_all(&model_dir)?;
 
-    let manifest_url_str = manifest_url(artifact);
-    let manifest_json = curl_fetch_text(&manifest_url_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to fetch manifest from {}: {}.\n  \
-             If this persists, check models.voxtype.io status: \
-             https://www.cloudflarestatus.com/",
-            manifest_url_str,
-            e
-        )
-    })?;
-
-    let manifest: Manifest = serde_json::from_str(&manifest_json).map_err(|e| {
-        anyhow::anyhow!("Manifest at {} is not valid JSON: {}", manifest_url_str, e)
-    })?;
-    validate_manifest(&manifest, artifact)?;
+    let (manifest, manifest_url_str) = fetch_manifest(artifact)?;
 
     let human = !progress::is_json();
     if human {
@@ -1098,30 +1627,11 @@ pub fn download_artifact<T: ModelArtifact + ?Sized>(
             std::fs::create_dir_all(parent)?;
         }
 
-        let url = file_url(artifact, &file.path);
+        let url = super::manifest::file_url(artifact, &file.path);
         if human {
             println!("Downloading {}...", file.path);
         }
-        let part = download_to_part(&url, &dest, artifact.name(), &file.path, Some(file.size))?;
-
-        // Hash the part file, not the destination: a file only reaches its
-        // final name once it has matched the manifest.
-        let observed = sha256_file(&part).map_err(|e| {
-            let _ = std::fs::remove_file(&part);
-            anyhow::anyhow!("Failed to hash {}: {}", file.path, e)
-        })?;
-        let expected = file.sha256.to_lowercase();
-        if observed != expected {
-            let _ = std::fs::remove_file(&part);
-            anyhow::bail!(
-                "sha256 mismatch for {} (downloaded from {}): expected {}, got {}",
-                file.path,
-                url,
-                expected,
-                observed,
-            );
-        }
-        promote_part(&part, &dest)?;
+        fetch_verified(&url, &dest, artifact.name(), &file.path, file)?;
     }
 
     // Leave the manifest behind so later integrity checks have the publisher's
@@ -1136,6 +1646,99 @@ pub fn download_artifact<T: ModelArtifact + ?Sized>(
         ));
     }
     Ok(())
+}
+
+/// Fetch a model's `manifest.json` from the mirror and check it describes the
+/// artifact asking for it. Returns the manifest and the URL it came from.
+fn fetch_manifest<T: ModelArtifact + ?Sized>(
+    artifact: &T,
+) -> anyhow::Result<(super::manifest::Manifest, String)> {
+    use super::manifest::{manifest_url, validate_manifest, Manifest};
+
+    let url = manifest_url(artifact);
+    let json = curl_fetch_text(&url).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to fetch manifest from {}: {}.\n  \
+             If this persists, check models.voxtype.io status: \
+             https://www.cloudflarestatus.com/",
+            url,
+            e
+        )
+    })?;
+    let manifest: Manifest = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("Manifest at {} is not valid JSON: {}", url, e))?;
+    validate_manifest(&manifest, artifact)?;
+    Ok((manifest, url))
+}
+
+/// Download `url` to `dest`, and give it that name only once its size and
+/// sha256 match the manifest entry. A file that fails the check is deleted,
+/// so nothing unverified ever sits where a loader would find it.
+///
+/// `label` and `file_label` are the model and file names reported in
+/// progress events.
+fn fetch_verified(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    file_label: &str,
+    entry: &super::manifest::ManifestFile,
+) -> anyhow::Result<()> {
+    let part = download_to_part(url, dest, label, file_label, Some(entry.size))?;
+    // Check the part file, not the destination: a file only reaches its
+    // final name once it has matched the manifest.
+    if let Err(e) = super::manifest::verify_file(&part, entry) {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("{} (downloaded from {})", e, url);
+    }
+    promote_part(&part, dest)
+}
+
+/// Install one file of a mirrored model at `dest`, verified against the
+/// mirror's manifest.
+///
+/// For the models that live as single flat files in the models directory
+/// (whisper, Silero VAD, ECAPA-TDNN, GTCRN). `dest` keeps the name the
+/// loaders have always looked for, so an existing install is found where it
+/// was. A file already at `dest` that matches the manifest is left alone.
+///
+/// Like [`download_artifact`], there is no fallback to the upstream host: a
+/// model that is not on the mirror fails with the mirror's error.
+pub(crate) fn download_mirrored_file(
+    artifact: &super::manifest::MirroredFile,
+    dest: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
+    let (manifest, _) = fetch_manifest(artifact)?;
+    let entry = super::manifest::manifest_entry(&manifest, &artifact.file)?;
+    let file_label = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| artifact.file.clone());
+    let human = !progress::is_json();
+
+    if dest.exists() {
+        if super::manifest::verify_file(dest, entry).is_ok() {
+            if human {
+                println!("  {} already verified, skipping", file_label);
+            }
+            progress::file_already_complete(label, &file_label, entry.size);
+            return Ok(());
+        }
+        if human {
+            println!("  {} present but unverified, re-downloading", file_label);
+        }
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let url = artifact.url();
+    if human {
+        println!("URL: {}", url);
+    }
+    // The verified part file replaces any damaged copy in one rename.
+    fetch_verified(&url, dest, label, &file_label, entry)
 }
 
 /// Fetch a small text body via curl. Used for `manifest.json`.
@@ -1231,9 +1834,7 @@ fn curl_download(url: &str, dest: &Path) -> anyhow::Result<std::path::PathBuf> {
                 s.code().unwrap_or(-1)
             ));
             anyhow::bail!(
-                "Download failed for {} from {}.\n  \
-                 If this persists, check models.voxtype.io status: \
-                 https://www.cloudflarestatus.com/",
+                "Download failed for {} from {}. Check the source and network connection.",
                 dest.display(),
                 url
             )
@@ -1305,9 +1906,8 @@ fn download_to_part(
             Some(status) => {
                 let _ = std::fs::remove_file(&part);
                 anyhow::bail!(
-                    "Download failed for {} from {} (curl exited with code {}).\n  \
-                     If this persists, check models.voxtype.io status: \
-                     https://www.cloudflarestatus.com/",
+                    "Download failed for {} from {} (curl exited with code {}). \
+                     Check the source and network connection.",
                     dest.display(),
                     url,
                     status.code().unwrap_or(-1)
@@ -1383,6 +1983,219 @@ pub fn valid_model_names() -> Vec<&'static str> {
     MODELS.iter().map(|m| m.name).collect()
 }
 
+/// The checkpoint's canonical language scope, or None for an unknown/custom model.
+pub fn whisper_model_english_only(name: &str) -> Option<bool> {
+    MODELS
+        .iter()
+        .find(|model| model.name == name)
+        .map(|model| model.english_only)
+}
+
+/// Which engines this binary lists in the interactive picker.
+#[derive(Debug, Clone, Copy)]
+struct PickerAvailability {
+    parakeet: bool,
+    moonshine: bool,
+    sensevoice: bool,
+    paraformer: bool,
+    dolphin: bool,
+    omnilingual: bool,
+    cohere: bool,
+    cohere_gguf: bool,
+    parakeet_gguf: bool,
+    gguf: bool,
+    openvino: bool,
+}
+
+impl PickerAvailability {
+    const fn compiled() -> Self {
+        Self {
+            parakeet: cfg!(feature = "parakeet"),
+            moonshine: cfg!(feature = "moonshine"),
+            sensevoice: cfg!(feature = "sensevoice"),
+            paraformer: cfg!(feature = "paraformer"),
+            dolphin: cfg!(feature = "dolphin"),
+            omnilingual: cfg!(feature = "omnilingual"),
+            cohere: cfg!(feature = "cohere"),
+            cohere_gguf: cfg!(feature = "cohere-gguf"),
+            parakeet_gguf: cfg!(feature = "parakeet-gguf"),
+            gguf: cfg!(feature = "gguf"),
+            openvino: cfg!(feature = "openvino-whisper"),
+        }
+    }
+
+    /// Selection number of the first Parakeet GGUF row, minus one. Mirrors
+    /// the running offsets in `interactive_select`.
+    fn parakeet_gguf_offset(&self) -> usize {
+        let count = |available: bool, count: usize| if available { count } else { 0 };
+        MODELS.len()
+            + count(self.parakeet, PARAKEET_MODELS.len())
+            + count(self.moonshine, MOONSHINE_MODELS.len())
+            + count(self.sensevoice, SENSEVOICE_MODELS.len())
+            + count(self.paraformer, PARAFORMER_MODELS.len())
+            + count(self.dolphin, DOLPHIN_MODELS.len())
+            + count(self.omnilingual, OMNILINGUAL_MODELS.len())
+            + count(self.cohere, COHERE_MODELS.len())
+            + count(self.cohere_gguf, COHERE_GGUF_MODELS.len())
+    }
+}
+
+/// The picker's sections, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerSection {
+    Whisper,
+    Parakeet,
+    Moonshine,
+    SenseVoice,
+    Paraformer,
+    Dolphin,
+    Omnilingual,
+    Cohere,
+    CohereGguf,
+    ParakeetGguf,
+    HandyGguf,
+    OpenVino,
+}
+
+impl PickerSection {
+    #[cfg(test)]
+    const ALL: [PickerSection; 12] = [
+        PickerSection::Whisper,
+        PickerSection::Parakeet,
+        PickerSection::Moonshine,
+        PickerSection::SenseVoice,
+        PickerSection::Paraformer,
+        PickerSection::Dolphin,
+        PickerSection::Omnilingual,
+        PickerSection::Cohere,
+        PickerSection::CohereGguf,
+        PickerSection::ParakeetGguf,
+        PickerSection::HandyGguf,
+        PickerSection::OpenVino,
+    ];
+
+    fn title(self, amd_tag: &str) -> String {
+        match self {
+            PickerSection::Whisper => "--- Whisper (OpenAI, 99+ languages) ---".into(),
+            PickerSection::Parakeet => "--- Parakeet (NVIDIA FastConformer, English) ---".into(),
+            PickerSection::Moonshine => {
+                format!("--- Moonshine (Moonshine AI, encoder-decoder ASR){amd_tag} ---")
+            }
+            PickerSection::SenseVoice => {
+                format!("--- SenseVoice (Alibaba FunAudioLLM, CJK + English){amd_tag} ---")
+            }
+            PickerSection::Paraformer => {
+                format!("--- Paraformer (FunASR, Chinese + English){amd_tag} ---")
+            }
+            PickerSection::Dolphin => format!("--- Dolphin (dictation-optimized CTC){amd_tag} ---"),
+            PickerSection::Omnilingual => {
+                format!("--- Omnilingual (FunASR, 50+ languages){amd_tag} ---")
+            }
+            PickerSection::Cohere => format!("--- Cohere Transcribe ONNX{amd_tag} ---"),
+            PickerSection::CohereGguf => {
+                "--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---".into()
+            }
+            PickerSection::ParakeetGguf => {
+                "--- Parakeet GGUF (transcribe.cpp, Vulkan-capable) ---".into()
+            }
+            PickerSection::HandyGguf => {
+                "--- Handy GGUF families (offline transcribe.cpp) ---".into()
+            }
+            PickerSection::OpenVino => {
+                "--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---".into()
+            }
+        }
+    }
+
+    /// The Cargo feature that puts this section's engine in a binary.
+    fn feature(self) -> Option<&'static str> {
+        match self {
+            PickerSection::Whisper => None,
+            PickerSection::Parakeet => Some("parakeet"),
+            PickerSection::Moonshine => Some("moonshine"),
+            PickerSection::SenseVoice => Some("sensevoice"),
+            PickerSection::Paraformer => Some("paraformer"),
+            PickerSection::Dolphin => Some("dolphin"),
+            PickerSection::Omnilingual => Some("omnilingual"),
+            PickerSection::Cohere => Some("cohere"),
+            PickerSection::CohereGguf => Some("cohere-gguf"),
+            PickerSection::ParakeetGguf => Some("parakeet-gguf"),
+            PickerSection::HandyGguf => Some("gguf"),
+            PickerSection::OpenVino => Some("openvino-whisper"),
+        }
+    }
+
+    fn available(self, a: &PickerAvailability) -> bool {
+        match self {
+            PickerSection::Whisper => true,
+            PickerSection::Parakeet => a.parakeet,
+            PickerSection::Moonshine => a.moonshine,
+            PickerSection::SenseVoice => a.sensevoice,
+            PickerSection::Paraformer => a.paraformer,
+            PickerSection::Dolphin => a.dolphin,
+            PickerSection::Omnilingual => a.omnilingual,
+            PickerSection::Cohere => a.cohere,
+            PickerSection::CohereGguf => a.cohere_gguf,
+            PickerSection::ParakeetGguf => a.parakeet_gguf,
+            PickerSection::HandyGguf => a.gguf,
+            PickerSection::OpenVino => a.openvino,
+        }
+    }
+
+    /// The section header and, when this binary lacks the engine, the lines
+    /// shown instead of its rows: where the same engine is listed as GGUF,
+    /// and how to get the missing build for this install.
+    fn intro(
+        self,
+        availability: &PickerAvailability,
+        host: &super::install_hint::Host,
+        amd_tag: &str,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self != PickerSection::Whisper {
+            lines.push(String::new());
+        }
+        lines.push(self.title(amd_tag));
+        lines.push(String::new());
+        if self.available(availability) {
+            return lines;
+        }
+        let Some(feature) = self.feature() else {
+            return lines;
+        };
+        let hint = host.hint(super::install_hint::Need::Feature(feature));
+        let gray = |text: String| format!("  \x1b[90m{text}\x1b[0m");
+        match self {
+            PickerSection::Parakeet if availability.parakeet_gguf => {
+                lines.push(gray(
+                    "This binary runs Parakeet as GGUF. Pick one of these, also listed under Parakeet GGUF below:"
+                        .into(),
+                ));
+                let offset = availability.parakeet_gguf_offset();
+                for (i, model) in PARAKEET_GGUF_MODELS.iter().enumerate() {
+                    lines.push(gray(format!("  [{:>2}] {}", offset + i + 1, model.name)));
+                }
+                lines.push(gray(format!("(ONNX Parakeet models: {hint})")));
+            }
+            PickerSection::Cohere if availability.cohere_gguf => {
+                lines.push(gray(
+                    "This binary runs Cohere Transcribe as GGUF; see Cohere Transcribe GGUF below."
+                        .into(),
+                ));
+                lines.push(gray(format!("(ONNX Cohere models: {hint})")));
+            }
+            _ => lines.push(gray(format!("(not available - {hint})"))),
+        }
+        lines
+    }
+}
+
+fn print_lines(lines: &[String]) {
+    for line in lines {
+        println!("{line}");
+    }
+}
+
 /// Run interactive model selection (single menu with all models)
 pub async fn interactive_select() -> anyhow::Result<()> {
     println!("Voxtype Model Selection\n");
@@ -1402,6 +2215,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_dolphin_engine = matches!(config.engine, TranscriptionEngine::Dolphin);
     let is_omnilingual_engine = matches!(config.engine, TranscriptionEngine::Omnilingual);
     let is_cohere_engine = matches!(config.engine, TranscriptionEngine::Cohere);
+    let is_gguf_engine = matches!(config.engine, TranscriptionEngine::Gguf);
     let is_openvino_engine = matches!(config.engine, TranscriptionEngine::OpenVino);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
@@ -1411,15 +2225,24 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_dolphin_model = config.dolphin.as_ref().map(|d| d.model.as_str());
     let current_omnilingual_model = config.omnilingual.as_ref().map(|o| o.model.as_str());
     let current_cohere_model = config.cohere.as_ref().map(|c| c.model.as_str());
+    let current_gguf_model = config.gguf.as_ref().map(|g| g.model.as_str());
     let current_openvino_model = config.openvino.as_ref().map(|o| o.model.as_str());
-    let parakeet_available = cfg!(feature = "parakeet");
-    let moonshine_available = cfg!(feature = "moonshine");
-    let sensevoice_available = cfg!(feature = "sensevoice");
-    let paraformer_available = cfg!(feature = "paraformer");
-    let dolphin_available = cfg!(feature = "dolphin");
-    let omnilingual_available = cfg!(feature = "omnilingual");
-    let cohere_available = cfg!(feature = "cohere");
-    let openvino_available = cfg!(feature = "openvino-whisper");
+    let availability = PickerAvailability::compiled();
+    let host = super::install_hint::Host::system();
+    let intro = |section: PickerSection| {
+        print_lines(&section.intro(&availability, &host, AMD_CPU_ONLY_TAG));
+    };
+    let parakeet_available = availability.parakeet;
+    let moonshine_available = availability.moonshine;
+    let sensevoice_available = availability.sensevoice;
+    let paraformer_available = availability.paraformer;
+    let dolphin_available = availability.dolphin;
+    let omnilingual_available = availability.omnilingual;
+    let cohere_available = availability.cohere;
+    let cohere_gguf_available = availability.cohere_gguf;
+    let parakeet_gguf_available = availability.parakeet_gguf;
+    let gguf_available = availability.gguf;
+    let openvino_available = availability.openvino;
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
@@ -1428,6 +2251,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_count = DOLPHIN_MODELS.len();
     let omnilingual_count = OMNILINGUAL_MODELS.len();
     let cohere_count = COHERE_MODELS.len();
+    let cohere_gguf_count = COHERE_GGUF_MODELS.len();
+    let parakeet_gguf_count = PARAKEET_GGUF_MODELS.len();
+    let gguf_count = HANDY_GGUF_MODELS.len();
     let openvino_count = OPENVINO_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
@@ -1439,10 +2265,13 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(dolphin_available, dolphin_count)
         + available_count(omnilingual_available, omnilingual_count)
         + available_count(cohere_available, cohere_count)
+        + available_count(cohere_gguf_available, cohere_gguf_count)
+        + available_count(parakeet_gguf_available, parakeet_gguf_count)
+        + available_count(gguf_available, gguf_count)
         + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
-    println!("--- Whisper (OpenAI, 99+ languages) ---\n");
+    intro(PickerSection::Whisper);
 
     for (i, model) in MODELS.iter().enumerate() {
         let filename = get_model_filename(model.name);
@@ -1473,7 +2302,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // --- Parakeet Section ---
-    println!("\n--- Parakeet (NVIDIA FastConformer, English) ---\n");
+    intro(PickerSection::Parakeet);
 
     if parakeet_available {
         for (i, model) in PARAKEET_MODELS.iter().enumerate() {
@@ -1499,8 +2328,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features parakeet)\x1b[0m");
     }
 
     // --- Moonshine Section ---
@@ -1510,10 +2337,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         } else {
             0
         };
-    println!(
-        "\n--- Moonshine (Moonshine AI, encoder-decoder ASR){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Moonshine);
 
     if moonshine_available {
         for (i, model) in MOONSHINE_MODELS.iter().enumerate() {
@@ -1547,8 +2371,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features moonshine)\x1b[0m");
     }
 
     // --- SenseVoice Section ---
@@ -1558,10 +2380,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         } else {
             0
         };
-    println!(
-        "\n--- SenseVoice (Alibaba FunAudioLLM, CJK + English){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::SenseVoice);
 
     if sensevoice_available {
         for (i, model) in SENSEVOICE_MODELS.iter().enumerate() {
@@ -1588,17 +2407,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features sensevoice)\x1b[0m");
     }
 
     // --- Paraformer Section ---
     let paraformer_offset =
         sensevoice_offset + available_count(sensevoice_available, sensevoice_count);
-    println!(
-        "\n--- Paraformer (FunASR, Chinese + English){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Paraformer);
 
     if paraformer_available {
         for (i, model) in PARAFORMER_MODELS.iter().enumerate() {
@@ -1625,17 +2439,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features paraformer)\x1b[0m");
     }
 
     // --- Dolphin Section ---
     let dolphin_offset =
         paraformer_offset + available_count(paraformer_available, paraformer_count);
-    println!(
-        "\n--- Dolphin (dictation-optimized CTC){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Dolphin);
 
     if dolphin_available {
         for (i, model) in DOLPHIN_MODELS.iter().enumerate() {
@@ -1662,16 +2471,11 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features dolphin)\x1b[0m");
     }
 
     // --- Omnilingual Section ---
     let omnilingual_offset = dolphin_offset + available_count(dolphin_available, dolphin_count);
-    println!(
-        "\n--- Omnilingual (FunASR, 50+ languages){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Omnilingual);
 
     if omnilingual_available {
         for (i, model) in OMNILINGUAL_MODELS.iter().enumerate() {
@@ -1698,17 +2502,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features omnilingual)\x1b[0m");
     }
 
     // --- Cohere Section ---
     let cohere_offset =
         omnilingual_offset + available_count(omnilingual_available, omnilingual_count);
-    println!(
-        "\n--- Cohere Transcribe (Cohere Labs, #1 Open ASR Leaderboard){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    intro(PickerSection::Cohere);
 
     if cohere_available {
         for (i, model) in COHERE_MODELS.iter().enumerate() {
@@ -1735,13 +2534,42 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features cohere)\x1b[0m");
     }
 
+    let cohere_gguf_offset = cohere_offset + available_count(cohere_available, cohere_count);
+    intro(PickerSection::CohereGguf);
+    print_gguf_section(
+        COHERE_GGUF_MODELS,
+        cohere_gguf_available,
+        cohere_gguf_offset,
+        is_cohere_engine.then_some(current_cohere_model).flatten(),
+    );
+
+    let parakeet_gguf_offset =
+        cohere_gguf_offset + available_count(cohere_gguf_available, cohere_gguf_count);
+    intro(PickerSection::ParakeetGguf);
+    print_gguf_section(
+        PARAKEET_GGUF_MODELS,
+        parakeet_gguf_available,
+        parakeet_gguf_offset,
+        is_parakeet_engine
+            .then_some(current_parakeet_model)
+            .flatten(),
+    );
+
+    let gguf_offset =
+        parakeet_gguf_offset + available_count(parakeet_gguf_available, parakeet_gguf_count);
+    intro(PickerSection::HandyGguf);
+    print_gguf_section(
+        HANDY_GGUF_MODELS,
+        gguf_available,
+        gguf_offset,
+        is_gguf_engine.then_some(current_gguf_model).flatten(),
+    );
+
     // --- OpenVINO Section ---
-    let openvino_offset = cohere_offset + available_count(cohere_available, cohere_count);
-    println!("\n--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---\n");
+    let openvino_offset = gguf_offset + available_count(gguf_available, gguf_count);
+    intro(PickerSection::OpenVino);
 
     if openvino_available {
         for (i, model) in OPENVINO_MODELS.iter().enumerate() {
@@ -1774,8 +2602,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
                 status
             );
         }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features openvino-whisper)\x1b[0m");
     }
 
     println!("\n  [ 0] Cancel\n");
@@ -1824,12 +2650,59 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if cohere_available && selection <= cohere_offset + cohere_count {
         let idx = selection - cohere_offset;
         handle_cohere_selection(idx).await
+    } else if cohere_gguf_available && selection <= cohere_gguf_offset + cohere_gguf_count {
+        let idx = selection - cohere_gguf_offset;
+        handle_gguf_selection(COHERE_GGUF_MODELS, idx).await
+    } else if parakeet_gguf_available && selection <= parakeet_gguf_offset + parakeet_gguf_count {
+        let idx = selection - parakeet_gguf_offset;
+        handle_gguf_selection(PARAKEET_GGUF_MODELS, idx).await
+    } else if gguf_available && selection <= gguf_offset + gguf_count {
+        let idx = selection - gguf_offset;
+        handle_gguf_selection(HANDY_GGUF_MODELS, idx).await
     } else if openvino_available && selection <= openvino_offset + openvino_count {
         let idx = selection - openvino_offset;
         handle_openvino_selection(idx, &config).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
+    }
+}
+
+/// One GGUF section of the interactive picker, numbered from `offset + 1`.
+/// `current` is the configured model when its engine is the active one.
+fn print_gguf_section(
+    models: &[GgufModelInfo],
+    available: bool,
+    offset: usize,
+    current: Option<&str>,
+) {
+    // The section intro already said how to get this engine.
+    if !available {
+        return;
+    }
+    let models_dir = Config::models_dir();
+    for (i, model) in models.iter().enumerate() {
+        let path = models_dir.join(model.name);
+        let installed = validate_gguf_model(&path, model).is_ok();
+        let star = if current == Some(model.name) {
+            "*"
+        } else {
+            " "
+        };
+        let status = if installed {
+            "\x1b[32m[installed]\x1b[0m"
+        } else {
+            ""
+        };
+        println!(
+            " {}[{:>2}] {:<44} ({:.2} GB) {} {}",
+            star,
+            offset + i + 1,
+            model.name,
+            model.size as f64 / 1_000_000_000.0,
+            model.description,
+            status
+        );
     }
 }
 
@@ -2015,6 +2888,13 @@ async fn handle_moonshine_selection(selection: usize) -> anyhow::Result<()> {
 
 /// Restart the voxtype daemon if it's running
 async fn restart_daemon_if_running() {
+    let validation = Config::default_path()
+        .ok_or_else(|| "Cannot determine config path".to_string())
+        .and_then(|path| crate::model_selection::validate_saved_for_restart(&path));
+    if let Err(error) = validation {
+        print_warning(&format!("Not restarting voxtype: {error}"));
+        return;
+    }
     // Check if daemon is running via systemd
     let status = tokio::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", "voxtype"])
@@ -2052,23 +2932,23 @@ async fn restart_daemon_if_running() {
 /// (`0x67676d6c`) written little-endian.
 const GGML_MAGIC: [u8; 4] = *b"lmgg";
 
-/// What a finished download has to look like before it may take its final
-/// name. None of these files are on the R2 mirror, so there is no published
-/// sha256 to compare against and this is the whole of their validation.
+/// Cheap format check for a model already on disk, used by listings and
+/// readiness checks that must not hash multi-gigabyte files. Downloads are
+/// verified against their manifest's sha256 instead (see
+/// [`download_mirrored_file`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContentCheck {
     /// ggml container: whisper models and the Silero VAD model.
     Ggml,
-    /// No format marker worth checking (ONNX protobufs); completeness only.
-    SizeOnly,
+    /// GGUF container used by transcribe.cpp models.
+    Gguf,
 }
 
-/// Check a freshly downloaded file before it takes the name the loader reads.
+/// Check a model file without hashing it.
 ///
-/// The two signals available without a manifest are the server's
-/// `Content-Length` and the file's own magic, which between them catch the
-/// realistic failures: a truncated transfer, and an HTML error page saved
-/// under a `.bin` name.
+/// The two signals available without a hash are an expected length and the
+/// file's own magic, which between them catch the realistic failures: a
+/// truncated transfer, and an HTML error page saved under a `.bin` name.
 pub(crate) fn validate_download(
     path: &Path,
     expected_len: Option<u64>,
@@ -2088,71 +2968,64 @@ pub(crate) fn validate_download(
         }
     }
 
-    if check == ContentCheck::Ggml {
-        let mut magic = [0u8; 4];
-        std::fs::File::open(path)
-            .and_then(|mut f| f.read_exact(&mut magic))
-            .map_err(|e| anyhow::anyhow!("could not read the download: {}", e))?;
-        if magic != GGML_MAGIC {
-            anyhow::bail!(
-                "not a ggml model: expected magic {:02x?}, got {:02x?}. \
-                 The server likely returned an error page instead of the model.",
-                GGML_MAGIC,
-                magic
-            );
-        }
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map_err(|e| anyhow::anyhow!("could not read the download: {}", e))?;
+    let expected_magic = if check == ContentCheck::Gguf {
+        *b"GGUF"
+    } else {
+        GGML_MAGIC
+    };
+    if magic != expected_magic {
+        let format = if check == ContentCheck::Gguf {
+            "not a GGUF model"
+        } else {
+            "not a ggml model"
+        };
+        anyhow::bail!(
+            "{}: expected magic {:02x?}, got {:02x?}. \
+             The server likely returned an error page instead of the model.",
+            format,
+            expected_magic,
+            magic
+        );
     }
     Ok(())
 }
 
-/// Download one file to `dest` without ever exposing a partial one there.
-///
-/// Bytes land on a `.part` sibling, get checked for completeness (and format,
-/// per `check`), and only then take the final name via an atomic rename. Used
-/// by every single-file download that has no R2 manifest behind it: whisper
-/// models, the Silero VAD model, and the auxiliary meeting-mode models.
-///
-/// `label` is the name reported in progress events.
-pub(crate) fn download_atomically(
-    url: &str,
-    dest: &Path,
-    label: &str,
-    check: ContentCheck,
-) -> anyhow::Result<()> {
-    let file = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| label.to_string());
-
-    // Ask the server for the size, since there's no manifest to read it from.
-    // Best effort: a server that refuses HEAD just leaves the size check out.
-    let expected_len = content_length(url);
-
-    let part = download_to_part(url, dest, label, &file, expected_len)?;
-    validate_download(&part, expected_len, check).map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        anyhow::anyhow!("Downloaded file '{}' is not usable: {}", file, e)
-    })?;
-    promote_part(&part, dest)
+/// Where a Whisper model is mirrored. `None` for anything that is not a
+/// catalogue name, such as a path to a custom `.bin`, which has nowhere to
+/// be downloaded from.
+pub fn whisper_mirror_file(model_name: &str) -> Option<MirroredFile> {
+    let model = MODELS.iter().find(|m| m.name == model_name)?;
+    Some(MirroredFile {
+        engine: "whisper",
+        model: model.name.to_string(),
+        file: get_model_filename(model.name),
+        upstream_repo: "ggerganov/whisper.cpp",
+    })
 }
 
-/// Download a specific Whisper model using curl
+/// Download a Whisper model from the Voxtype model mirror, verified against
+/// its manifest, to `ggml-<model>.bin` in the models directory.
 pub fn download_model(model_name: &str) -> anyhow::Result<()> {
+    let artifact = whisper_mirror_file(model_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "'{}' is not a downloadable Whisper model. Available: {}",
+            model_name,
+            valid_model_names().join(", ")
+        )
+    })?;
     let models_dir = Config::models_dir();
-    let filename = get_model_filename(model_name);
-    let model_path = models_dir.join(&filename);
-
-    // Ensure directory exists
+    let model_path = models_dir.join(&artifact.file);
     std::fs::create_dir_all(&models_dir)?;
-
-    let url = get_model_url(model_name);
 
     if !progress::is_json() {
         println!("\nDownloading {}...", model_name);
-        println!("URL: {}", url);
     }
 
-    download_atomically(&url, &model_path, model_name, ContentCheck::Ggml)?;
+    download_mirrored_file(&artifact, &model_path, model_name)?;
 
     if !progress::is_json() {
         print_success(&format!("Saved to {:?}", model_path));
@@ -2160,14 +3033,53 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// GTCRN speech enhancement model URL and filename
-const GTCRN_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx";
+/// GTCRN speech enhancement model, used by meeting-mode echo cancellation.
 const GTCRN_MODEL_FILENAME: &str = "gtcrn_simple.onnx";
 
-/// ECAPA-TDNN speaker embedding model URL and filename
-const ECAPA_MODEL_URL: &str =
-    "https://huggingface.co/pranjal-pravesh/ecapa_tdnn_onnx/resolve/main/ecapa_tdnn.onnx";
+fn gtcrn_mirror_file() -> MirroredFile {
+    MirroredFile {
+        engine: "enhancement",
+        model: "gtcrn-simple".to_string(),
+        file: GTCRN_MODEL_FILENAME.to_string(),
+        upstream_repo: "k2-fsa/sherpa-onnx",
+    }
+}
+
+/// ECAPA-TDNN speaker embedding model, used by ML diarization.
 const ECAPA_MODEL_FILENAME: &str = "ecapa_tdnn.onnx";
+
+fn ecapa_mirror_file() -> MirroredFile {
+    MirroredFile {
+        engine: "diarization",
+        model: "ecapa-tdnn".to_string(),
+        file: ECAPA_MODEL_FILENAME.to_string(),
+        upstream_repo: "pranjal-pravesh/ecapa_tdnn_onnx",
+    }
+}
+
+/// Shell command that downloads a model file into the models directory.
+#[cfg(any(feature = "onnx-common", feature = "ml-diarization"))]
+fn model_download_command(url: String, filename: &str) -> String {
+    format!(
+        "curl -L --create-dirs -o '{}' {}",
+        Config::models_dir().join(filename).display(),
+        url
+    )
+}
+
+/// Command that installs the GTCRN echo-cancellation model by hand, for
+/// when the automatic download failed.
+#[cfg(feature = "onnx-common")]
+pub fn gtcrn_download_command() -> String {
+    model_download_command(gtcrn_mirror_file().url(), GTCRN_MODEL_FILENAME)
+}
+
+/// Command that installs the ECAPA-TDNN speaker model by hand, for when
+/// the automatic download failed.
+#[cfg(feature = "ml-diarization")]
+pub fn ecapa_download_command() -> String {
+    model_download_command(ecapa_mirror_file().url(), ECAPA_MODEL_FILENAME)
+}
 
 /// Ensure the GTCRN speech enhancement model is downloaded.
 /// Returns the path to the model file if available, or None if download fails.
@@ -2185,17 +3097,12 @@ pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
         return None;
     }
 
-    println!("Downloading GTCRN speech enhancement model (523 KB)...");
+    println!("Downloading GTCRN speech enhancement model (536 KB)...");
 
     // These `ensure_*` helpers treat "the file exists" as "the model is
     // installed" and never re-download, so a partial file here is permanent.
-    // The atomic path is what keeps that from happening.
-    match download_atomically(
-        GTCRN_MODEL_URL,
-        &model_path,
-        "gtcrn",
-        ContentCheck::SizeOnly,
-    ) {
+    // The verified part-file path is what keeps that from happening.
+    match download_mirrored_file(&gtcrn_mirror_file(), &model_path, "gtcrn") {
         Ok(()) => {
             println!("Speech enhancement model downloaded.");
             Some(model_path)
@@ -2224,14 +3131,9 @@ pub fn ensure_ecapa_model() -> Option<std::path::PathBuf> {
         return None;
     }
 
-    println!("Downloading ECAPA-TDNN speaker embedding model (~26 MB)...");
+    println!("Downloading ECAPA-TDNN speaker embedding model (84 MB)...");
 
-    match download_atomically(
-        ECAPA_MODEL_URL,
-        &model_path,
-        "ecapa-tdnn",
-        ContentCheck::SizeOnly,
-    ) {
+    match download_mirrored_file(&ecapa_mirror_file(), &model_path, "ecapa-tdnn") {
         Ok(()) => {
             println!("Speaker embedding model downloaded.");
             Some(model_path)
@@ -2333,6 +3235,9 @@ pub async fn set_model(model_name: &str, restart: bool) -> anyhow::Result<()> {
     }
 
     if restart {
+        let path = Config::default_path()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine config path"))?;
+        crate::model_selection::validate_saved_for_restart(&path).map_err(anyhow::Error::msg)?;
         println!("  Restarting daemon...");
         let status = tokio::process::Command::new("systemctl")
             .args(["--user", "restart", "voxtype"])
@@ -2430,7 +3335,7 @@ fn update_config_model(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_model_in_config(&content, model_name);
+            let updated = update_model_in_config(&content, model_name)?;
             std::fs::write(&config_path, updated)?;
             print_success(&format!("Config updated to use '{}' model", model_name));
             Ok(())
@@ -2448,7 +3353,7 @@ pub fn set_model_config(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_model_in_config(&content, model_name);
+            let updated = update_model_in_config(&content, model_name)?;
             std::fs::write(&config_path, updated)?;
         }
         // Silently succeed if config doesn't exist yet - setup will create it
@@ -2458,45 +3363,45 @@ pub fn set_model_config(model_name: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Update the model setting in a config string (also sets engine to whisper)
-fn update_model_in_config(config: &str, model_name: &str) -> String {
-    // Simple regex-free replacement for the model line
-    let mut result = String::new();
-    let mut in_whisper_section = false;
-    let mut engine_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        // Track if we're in a section
-        if trimmed.starts_with('[') {
-            in_whisper_section = trimmed == "[whisper]";
+/// Set `[whisper] model`, and point `engine` at whisper when the config names
+/// one (whisper is the default, so an absent `engine` stays absent).
+fn update_model_in_config(config: &str, model_name: &str) -> anyhow::Result<String> {
+    edit_config(config, |doc| {
+        if doc.contains_key("engine") {
+            set_str(&mut doc["engine"], "whisper");
         }
+        set_str(&mut section(doc, "whisper")["model"], model_name);
+    })
+}
 
-        // Update engine line to whisper (at top level, before any section)
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str("engine = \"whisper\"\n");
-            engine_updated = true;
-        }
-        // Replace model line in whisper section
-        else if in_whisper_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
+/// Parse `config`, apply `edit`, and render it back.
+fn edit_config(
+    config: &str,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut),
+) -> anyhow::Result<String> {
+    let mut doc: toml_edit::DocumentMut = config
+        .parse()
+        .map_err(|e| anyhow::anyhow!("config.toml is not valid TOML, leaving it unchanged: {e}"))?;
+    edit(&mut doc);
+    Ok(doc.to_string())
+}
+
+/// The `[name]` table, created as a real section header when absent (indexing a
+/// missing key would otherwise produce a root-level dotted `name.model` key).
+fn section<'a>(doc: &'a mut toml_edit::DocumentMut, name: &str) -> &'a mut toml_edit::Item {
+    if !doc.contains_key(name) {
+        doc[name] = toml_edit::table();
     }
+    &mut doc[name]
+}
 
-    // If no engine line existed, we don't need to add one (whisper is the default)
-    // But if engine was set to something else, we've already updated it above
-    let _ = engine_updated; // suppress unused warning
-
-    // Remove trailing newline if original didn't have one
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
+/// Replace a string value, keeping any comment or spacing around the old one.
+fn set_str(item: &mut toml_edit::Item, value: &str) {
+    let mut new = toml_edit::Value::from(value);
+    if let Some(old) = item.as_value() {
+        *new.decor_mut() = old.decor().clone();
     }
-
-    result
+    *item = toml_edit::Item::Value(new);
 }
 
 // =============================================================================
@@ -2571,115 +3476,16 @@ pub fn download_parakeet_model(model_name: &str) -> anyhow::Result<()> {
 
 /// Update config to use Parakeet engine and a specific model (with status messages)
 fn update_config_parakeet(model_name: &str) -> anyhow::Result<()> {
-    if let Some(config_path) = Config::default_path() {
-        if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_parakeet_in_config(&content, model_name);
-            std::fs::write(&config_path, updated)?;
-            print_success(&format!(
-                "Config updated: engine = \"parakeet\", model = \"{}\"",
-                model_name
-            ));
-            Ok(())
-        } else {
-            print_info("No config file found. Run 'voxtype setup' first.");
-            Ok(())
-        }
-    } else {
-        anyhow::bail!("Could not determine config path")
-    }
+    set_engine_model_config("parakeet", model_name)?;
+    print_success(&format!(
+        "Config updated: engine = \"parakeet\", model = \"{model_name}\""
+    ));
+    Ok(())
 }
 
 /// Update config to use Parakeet engine and a specific model (quiet, no output)
 pub fn set_parakeet_config(model_name: &str) -> anyhow::Result<()> {
-    if let Some(config_path) = Config::default_path() {
-        if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_parakeet_in_config(&content, model_name);
-            std::fs::write(&config_path, updated)?;
-        }
-        Ok(())
-    } else {
-        anyhow::bail!("Could not determine config path")
-    }
-}
-
-/// Update the config to use Parakeet engine with a specific model
-fn update_parakeet_in_config(config: &str, model_name: &str) -> String {
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_parakeet_section = false;
-    let mut in_parakeet_section = false;
-    let mut parakeet_model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        // Track sections
-        if trimmed.starts_with('[') {
-            // If we were in parakeet section and didn't update model, add it
-            if in_parakeet_section && !parakeet_model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                parakeet_model_updated = true;
-            }
-            in_parakeet_section = trimmed == "[parakeet]";
-            if in_parakeet_section {
-                has_parakeet_section = true;
-            }
-        }
-
-        // Update or add engine line at the top level
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str("engine = \"parakeet\"\n");
-            has_engine_line = true;
-        }
-        // Update model line in parakeet section
-        else if in_parakeet_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            parakeet_model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // If we were in parakeet section at EOF and didn't update model, add it
-    if in_parakeet_section && !parakeet_model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    // Add engine line if not present (at the very beginning after any comments)
-    if !has_engine_line {
-        // Find first non-comment, non-empty line or section
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str("engine = \"parakeet\"\n\n");
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        result = new_result;
-    }
-
-    // Add [parakeet] section if not present
-    if !has_parakeet_section {
-        result.push_str(&format!("\n[parakeet]\nmodel = \"{}\"\n", model_name));
-    }
-
-    // Remove trailing newline if original didn't have one
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
+    set_engine_model_config("parakeet", model_name)
 }
 
 /// List installed Parakeet models
@@ -2725,14 +3531,33 @@ pub fn list_installed_parakeet() {
 // Moonshine Model Functions
 // =============================================================================
 
+fn find_moonshine_model(name: &str) -> Option<&'static MoonshineModelInfo> {
+    MOONSHINE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
 /// Check if a model name is a Moonshine model
 pub fn is_moonshine_model(name: &str) -> bool {
-    MOONSHINE_MODELS.iter().any(|m| m.name == name)
+    find_moonshine_model(name).is_some()
 }
 
 /// Get list of valid Moonshine model names
 pub fn valid_moonshine_model_names() -> Vec<&'static str> {
     MOONSHINE_MODELS.iter().map(|m| m.name).collect()
+}
+
+/// Moonshine names to show for `voxtype setup --model`. Uses the directory
+/// form so the suggestion can't be swallowed by the Whisper table (`base`
+/// and `tiny` are Whisper names too).
+pub fn moonshine_setup_model_names() -> Vec<&'static str> {
+    MOONSHINE_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Config value for a Moonshine model: the short name, matching what the
+/// interactive picker writes and the `[moonshine]` default.
+pub fn moonshine_config_name(name: &str) -> Option<&'static str> {
+    find_moonshine_model(name).map(|m| m.name)
 }
 
 /// Directory name for a Moonshine model.
@@ -2783,9 +3608,7 @@ pub fn validate_moonshine_model(path: &Path) -> anyhow::Result<()> {
 /// after to guard against publisher errors that the sha256 check can't
 /// catch.
 pub fn download_moonshine_model(model_name: &str) -> anyhow::Result<()> {
-    let model = MOONSHINE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_moonshine_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Moonshine model: {}", model_name))?;
 
     let models_dir = Config::models_dir();
@@ -2797,6 +3620,42 @@ pub fn download_moonshine_model(model_name: &str) -> anyhow::Result<()> {
 // =============================================================================
 // Cohere Transcribe Functions
 // =============================================================================
+
+fn find_cohere_model(name: &str) -> Option<&'static CohereModelInfo> {
+    COHERE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Cohere model
+pub fn is_cohere_model(name: &str) -> bool {
+    find_cohere_model(name).is_some()
+}
+
+/// Directory name for a Cohere model. Also its config value: the picker,
+/// the catalog, and the `[cohere]` default all use the directory form.
+pub fn cohere_dir_name(name: &str) -> Option<&'static str> {
+    find_cohere_model(name).map(|m| m.dir_name)
+}
+
+/// Cohere names to show for `voxtype setup --model`.
+pub fn cohere_setup_model_names() -> Vec<&'static str> {
+    COHERE_MODELS
+        .iter()
+        .map(|m| m.dir_name)
+        .chain(COHERE_GGUF_MODELS.iter().map(|m| m.name))
+        .collect()
+}
+
+/// Parakeet names to show for `voxtype setup --model`: the ONNX models, then
+/// the curated GGUF files.
+pub fn parakeet_setup_model_names() -> Vec<&'static str> {
+    PARAKEET_MODELS
+        .iter()
+        .map(|m| m.name)
+        .chain(PARAKEET_GGUF_MODELS.iter().map(|m| m.name))
+        .collect()
+}
 
 /// Validate that a Cohere model directory has the required files.
 ///
@@ -2843,9 +3702,7 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
 /// the unified downloader takes over so users don't wonder why their
 /// disk is filling.
 pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
-    let model = COHERE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_cohere_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Cohere model: {}", model_name))?;
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
@@ -2864,6 +3721,116 @@ pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
     );
     download_artifact(model, &models_dir)?;
     validate_cohere_model(&model_path)?;
+    Ok(())
+}
+
+/// Cheap GGUF presence check for catalog listings; full verification hashes
+/// the file and is used before setup skips a download or activates a model.
+pub(crate) fn validate_gguf_model(path: &Path, model: &GgufModelInfo) -> anyhow::Result<()> {
+    validate_download(path, Some(model.size), ContentCheck::Gguf)
+}
+
+pub(crate) fn verify_gguf_model(path: &Path, model: &GgufModelInfo) -> anyhow::Result<()> {
+    validate_gguf_model(path, model)?;
+    let observed = sha256_file(path)?;
+    if observed != model.sha256 {
+        anyhow::bail!(
+            "sha256 mismatch for {}: expected {}, got {}",
+            model.name,
+            model.sha256,
+            observed
+        );
+    }
+    Ok(())
+}
+
+/// Download one pinned, checksum-verified GGUF from its R2 mirror. These are
+/// single files with a pinned publisher hash, so they bypass the manifest
+/// downloader the ONNX model directories use.
+pub fn download_gguf_model(name: &str) -> anyhow::Result<()> {
+    let model =
+        find_gguf_model(name).ok_or_else(|| anyhow::anyhow!("Unknown GGUF model: {name}"))?;
+    let models_dir = Config::models_dir();
+    std::fs::create_dir_all(&models_dir)?;
+    let dest = models_dir.join(model.name);
+    let url = gguf_url(model);
+    if !progress::is_json() {
+        println!(
+            "\nDownloading {} ({:.2} GB)...",
+            model.name,
+            model.size as f64 / 1_000_000_000.0
+        );
+    }
+    let part = download_to_part(&url, &dest, model.name, model.name, Some(model.size))?;
+    if let Err(e) = verify_gguf_model(&part, model) {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("Downloaded GGUF failed verification: {e}");
+    }
+    promote_part(&part, &dest)?;
+    if !progress::is_json() {
+        print_success(&format!("Model '{}' downloaded to {:?}", model.name, dest));
+    }
+    Ok(())
+}
+
+/// Write `engine = "<model's engine>"` and its `[section] model`.
+fn update_config_gguf(model: &GgufModelInfo) -> anyhow::Result<()> {
+    match model.engine {
+        "parakeet" => update_config_parakeet(model.name),
+        "cohere" => update_config_cohere(model.name),
+        "gguf" => set_engine_model_config("gguf", model.name),
+        _ => unreachable!(),
+    }
+}
+
+async fn handle_gguf_selection(models: &[GgufModelInfo], selection: usize) -> anyhow::Result<()> {
+    let Some(model) = selection.checked_sub(1).and_then(|index| models.get(index)) else {
+        println!("\nCancelled.");
+        return Ok(());
+    };
+    let path = Config::models_dir().join(model.name);
+    crate::model_selection::validate_backend(model.engine, model.name)
+        .map_err(anyhow::Error::msg)?;
+    if verify_gguf_model(&path, model).is_ok() {
+        println!("\nModel '{}' is already installed.\n", model.name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+        print!("Select option [1]: ");
+        io::stdout().flush()?;
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        match choice.trim() {
+            "" | "1" => {
+                update_config_gguf(model)?;
+                restart_daemon_if_running().await;
+                return Ok(());
+            }
+            "2" => {}
+            _ => return Ok(()),
+        }
+    }
+    println!();
+    print_warning(&format!(
+        "{} requires {:.2} GB of disk space.",
+        model.name,
+        model.size as f64 / 1_000_000_000.0
+    ));
+    print_info(&format!(
+        "This {} model runs entirely on your device.",
+        model.license
+    ));
+    print!("Continue? [Y/n]: ");
+    io::stdout().flush()?;
+    let mut confirm = String::new();
+    io::stdin().read_line(&mut confirm)?;
+    if matches!(confirm.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    download_gguf_model(model.name)?;
+    update_config_gguf(model)?;
+    restart_daemon_if_running().await;
     Ok(())
 }
 
@@ -2934,95 +3901,11 @@ async fn handle_cohere_selection(selection: usize) -> anyhow::Result<()> {
 
 /// Update config to use Cohere engine with a specific model (status messages).
 fn update_config_cohere(model_name: &str) -> anyhow::Result<()> {
-    if let Some(config_path) = Config::default_path() {
-        if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_cohere_in_config(&content, model_name);
-            std::fs::write(&config_path, updated)?;
-            print_success(&format!(
-                "Config updated: engine = \"cohere\", model = \"{}\"",
-                model_name
-            ));
-            Ok(())
-        } else {
-            print_info("No config file found. Run 'voxtype setup' first.");
-            Ok(())
-        }
-    } else {
-        anyhow::bail!("Could not determine config path")
-    }
-}
-
-/// Update the config to use Cohere engine with a specific model. Mirrors
-/// `update_moonshine_in_config` exactly — the only difference is the engine
-/// name and section name. If the section doesn't exist, append a stub at EOF.
-fn update_cohere_in_config(config: &str, model_name: &str) -> String {
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_cohere_section = false;
-    let mut in_cohere_section = false;
-    let mut cohere_model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with('[') {
-            if in_cohere_section && !cohere_model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                cohere_model_updated = true;
-            }
-            in_cohere_section = trimmed == "[cohere]";
-            if in_cohere_section {
-                has_cohere_section = true;
-            }
-        }
-
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str("engine = \"cohere\"\n");
-            has_engine_line = true;
-        } else if in_cohere_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            cohere_model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    if in_cohere_section && !cohere_model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    if !has_engine_line {
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str("engine = \"cohere\"\n\n");
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        if !engine_added {
-            new_result.push_str("engine = \"cohere\"\n");
-        }
-        result = new_result;
-    }
-
-    if !has_cohere_section {
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
-        result.push_str(&format!("\n[cohere]\nmodel = \"{}\"\n", model_name));
-    }
-
-    result
+    set_engine_model_config("cohere", model_name)?;
+    print_success(&format!(
+        "Config updated: engine = \"cohere\", model = \"{model_name}\""
+    ));
+    Ok(())
 }
 
 /// Update config to use Moonshine engine and a specific model (with status messages)
@@ -3030,7 +3913,7 @@ fn update_config_moonshine(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_moonshine_in_config(&content, model_name);
+            let updated = update_engine_in_config(&content, "moonshine", model_name)?;
             std::fs::write(&config_path, updated)?;
             print_success(&format!(
                 "Config updated: engine = \"moonshine\", model = \"{}\"",
@@ -3044,83 +3927,6 @@ fn update_config_moonshine(model_name: &str) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("Could not determine config path")
     }
-}
-
-/// Update the config to use Moonshine engine with a specific model
-fn update_moonshine_in_config(config: &str, model_name: &str) -> String {
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_moonshine_section = false;
-    let mut in_moonshine_section = false;
-    let mut moonshine_model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        // Track sections
-        if trimmed.starts_with('[') {
-            // If we were in moonshine section and didn't update model, add it
-            if in_moonshine_section && !moonshine_model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                moonshine_model_updated = true;
-            }
-            in_moonshine_section = trimmed == "[moonshine]";
-            if in_moonshine_section {
-                has_moonshine_section = true;
-            }
-        }
-
-        // Update or add engine line at the top level
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str("engine = \"moonshine\"\n");
-            has_engine_line = true;
-        }
-        // Update model line in moonshine section
-        else if in_moonshine_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            moonshine_model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // If we were in moonshine section at EOF and didn't update model, add it
-    if in_moonshine_section && !moonshine_model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    // Add engine line if not present
-    if !has_engine_line {
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str("engine = \"moonshine\"\n\n");
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        result = new_result;
-    }
-
-    // Add [moonshine] section if not present
-    if !has_moonshine_section {
-        result.push_str(&format!("\n[moonshine]\nmodel = \"{}\"\n", model_name));
-    }
-
-    // Remove trailing newline if original didn't have one
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
 }
 
 /// Handle SenseVoice model selection (download/config)
@@ -3305,7 +4111,7 @@ fn update_config_sensevoice(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_sensevoice_in_config(&content, model_name);
+            let updated = update_engine_in_config(&content, "sensevoice", model_name)?;
             std::fs::write(&config_path, updated)?;
             print_success(&format!(
                 "Config updated: engine = \"sensevoice\", model = \"{}\"",
@@ -3319,82 +4125,6 @@ fn update_config_sensevoice(model_name: &str) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("Could not determine config path")
     }
-}
-
-/// Update the config to use SenseVoice engine with a specific model
-fn update_sensevoice_in_config(config: &str, model_name: &str) -> String {
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_sensevoice_section = false;
-    let mut in_sensevoice_section = false;
-    let mut sensevoice_model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        // Track sections
-        if trimmed.starts_with('[') {
-            if in_sensevoice_section && !sensevoice_model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                sensevoice_model_updated = true;
-            }
-            in_sensevoice_section = trimmed == "[sensevoice]";
-            if in_sensevoice_section {
-                has_sensevoice_section = true;
-            }
-        }
-
-        // Update or add engine line at the top level
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str("engine = \"sensevoice\"\n");
-            has_engine_line = true;
-        }
-        // Update model line in sensevoice section
-        else if in_sensevoice_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            sensevoice_model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // If we were in sensevoice section at EOF and didn't update model, add it
-    if in_sensevoice_section && !sensevoice_model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    // Add engine line if not present
-    if !has_engine_line {
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str("engine = \"sensevoice\"\n\n");
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        result = new_result;
-    }
-
-    // Add [sensevoice] section if not present
-    if !has_sensevoice_section {
-        result.push_str(&format!("\n[sensevoice]\nmodel = \"{}\"\n", model_name));
-    }
-
-    // Remove trailing newline if original didn't have one
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
 }
 
 /// List installed SenseVoice models
@@ -3444,7 +4174,7 @@ pub fn list_installed_sensevoice() {
 // =============================================================================
 
 /// Validate a CTC-based ONNX model directory (model.int8.onnx or model.onnx + tokens.txt)
-fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
@@ -3464,6 +4194,133 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
         }
         anyhow::bail!("Incomplete model, missing: {}", missing.join(", "))
     }
+}
+
+fn find_paraformer_model(name: &str) -> Option<&'static ParaformerModelInfo> {
+    PARAFORMER_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Paraformer model
+pub fn is_paraformer_model(name: &str) -> bool {
+    find_paraformer_model(name).is_some()
+}
+
+/// Directory name for a Paraformer model. Also its config value: the catalog
+/// and the `[paraformer]` default use the directory form, and the runtime
+/// resolver accepts it.
+pub fn paraformer_dir_name(name: &str) -> Option<&'static str> {
+    find_paraformer_model(name).map(|m| m.dir_name)
+}
+
+/// Paraformer names to show for `voxtype setup --model`.
+pub fn paraformer_setup_model_names() -> Vec<&'static str> {
+    PARAFORMER_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download a Paraformer model by name (public API for run_setup).
+pub fn download_paraformer_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_paraformer_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Paraformer model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+fn find_dolphin_model(name: &str) -> Option<&'static DolphinModelInfo> {
+    DOLPHIN_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Dolphin model
+pub fn is_dolphin_model(name: &str) -> bool {
+    find_dolphin_model(name).is_some()
+}
+
+/// Directory name for a Dolphin model. Also its config value.
+pub fn dolphin_dir_name(name: &str) -> Option<&'static str> {
+    find_dolphin_model(name).map(|m| m.dir_name)
+}
+
+/// Dolphin names to show for `voxtype setup --model`. Uses the directory
+/// form so the suggestion can't be swallowed by the Whisper table (`base`
+/// is a Whisper name too).
+pub fn dolphin_setup_model_names() -> Vec<&'static str> {
+    DOLPHIN_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download a Dolphin model by name (public API for run_setup).
+pub fn download_dolphin_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_dolphin_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Dolphin model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+fn find_omnilingual_model(name: &str) -> Option<&'static OmnilingualModelInfo> {
+    OMNILINGUAL_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is an Omnilingual model
+pub fn is_omnilingual_model(name: &str) -> bool {
+    find_omnilingual_model(name).is_some()
+}
+
+/// Directory name for an Omnilingual model. Also its config value.
+pub fn omnilingual_dir_name(name: &str) -> Option<&'static str> {
+    find_omnilingual_model(name).map(|m| m.dir_name)
+}
+
+/// Omnilingual names to show for `voxtype setup --model`.
+pub fn omnilingual_setup_model_names() -> Vec<&'static str> {
+    OMNILINGUAL_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download an Omnilingual model by name (public API for run_setup).
+pub fn download_omnilingual_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_omnilingual_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Omnilingual model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+/// Silently point the config at `engine` + `model_name`, like
+/// `set_parakeet_config`: no status output, so `run_setup` can print its own
+/// confirmation while honoring --quiet.
+pub(crate) fn set_engine_model_config(engine: &str, model_name: &str) -> anyhow::Result<()> {
+    let path =
+        Config::default_path().ok_or_else(|| anyhow::anyhow!("Could not determine config path"))?;
+    crate::model_selection::validate_ready(engine, model_name).map_err(anyhow::Error::msg)?;
+    let mut editor = crate::tui::ConfigEditor::load_from_path(path)?;
+    if engine == "gguf" {
+        let metadata = find_pending_gguf_model(model_name)
+            .filter(|entry| entry.runnable)
+            .ok_or_else(|| anyhow::anyhow!("GGUF model '{model_name}' is not runnable"))?;
+        let language = metadata.languages.first().copied().unwrap_or("auto");
+        crate::model_selection::validate_gguf_choice(model_name, metadata.arch, language, false)
+            .map_err(anyhow::Error::msg)?;
+        editor.set_string("gguf", "architecture", metadata.arch);
+        editor.set_string("gguf", "language", language);
+    }
+    crate::model_selection::validate_mode(
+        engine,
+        model_name,
+        editor.get_bool(engine, "streaming").unwrap_or(false),
+    )
+    .map_err(anyhow::Error::msg)?;
+    editor.set_string("", "engine", engine);
+    editor.set_string(engine, "model", model_name);
+    editor.save()?;
+    Ok(())
 }
 
 /// Handle OpenVINO model selection (download/config).
@@ -3515,7 +4372,7 @@ fn update_config_openvino(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_openvino_in_config(&content, model_name);
+            let updated = update_engine_in_config(&content, "openvino", model_name)?;
             std::fs::write(&config_path, &updated)?;
             print_success(&format!(
                 "Config updated: engine = \"openvino\", model = \"{}\"",
@@ -3616,7 +4473,7 @@ fn update_config_engine(engine_name: &str, model_name: &str) -> anyhow::Result<(
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_engine_in_config(&content, engine_name, model_name);
+            let updated = update_engine_in_config(&content, engine_name, model_name)?;
             std::fs::write(&config_path, updated)?;
             print_success(&format!(
                 "Config updated: engine = \"{}\", model = \"{}\"",
@@ -3632,76 +4489,20 @@ fn update_config_engine(engine_name: &str, model_name: &str) -> anyhow::Result<(
     }
 }
 
-/// Update a config string to use a specific engine and model
-fn update_engine_in_config(config: &str, engine_name: &str, model_name: &str) -> String {
-    let section_name = format!("[{}]", engine_name);
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_section = false;
-    let mut in_section = false;
-    let mut model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with('[') {
-            if in_section && !model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                model_updated = true;
-            }
-            in_section = trimmed == section_name;
-            if in_section {
-                has_section = true;
-            }
-        }
-
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str(&format!("engine = \"{}\"\n", engine_name));
-            has_engine_line = true;
-        } else if in_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    if in_section && !model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    if !has_engine_line {
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str(&format!("engine = \"{}\"\n\n", engine_name));
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        result = new_result;
-    }
-
-    if !has_section {
-        result.push_str(&format!(
-            "\n[{}]\nmodel = \"{}\"\n",
-            engine_name, model_name
-        ));
-    }
-
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
+/// Point the config at `engine_name` and set its `[engine_name] model`.
+///
+/// Edits the TOML in place with toml_edit, so comments, key order, and
+/// neighbouring keys such as `[parakeet] model_type` survive untouched and a
+/// second `model =` key can never be written.
+fn update_engine_in_config(
+    config: &str,
+    engine_name: &str,
+    model_name: &str,
+) -> anyhow::Result<String> {
+    edit_config(config, |doc| {
+        set_str(&mut doc["engine"], engine_name);
+        set_str(&mut section(doc, engine_name)["model"], model_name);
+    })
 }
 
 // --- OpenVINO Whisper Models ---
@@ -3752,17 +4553,6 @@ const OPENVINO_REQUIRED_MODEL_FILES: &[&str] = &[
     "tokenizer.json",
     "preprocessor_config.json",
 ];
-
-fn openvino_download_command(file_path: &std::path::Path, url: &str) -> Command {
-    let mut command = Command::new("curl");
-    command
-        .arg("-fL")
-        .arg("--progress-bar")
-        .arg("-o")
-        .arg(file_path)
-        .arg(url);
-    command
-}
 
 const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
     // --- Tiny models ---
@@ -4109,11 +4899,18 @@ pub fn prepare_openvino_model(model_name: &str, config: &Config) {
     }
 }
 
-/// Download an OpenVINO Whisper model by name
+/// Download an OpenVINO Whisper model by name.
+///
+/// Routes through the unified R2 downloader (#692) - manifest fetch, per-file
+/// sha256 verification, resume, and stall detection - replacing a per-file
+/// curl loop that fetched straight from huggingface.co with no integrity
+/// checking and skipped any file already on disk, however truncated.
+/// `validate_openvino_model` still runs after, as the inference-time check
+/// for the files OpenVINO GenAI actually loads.
 pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     let model = OPENVINO_MODELS
         .iter()
-        .find(|m| m.name == model_name)
+        .find(|m| m.name == model_name || m.dir_name == model_name)
         .ok_or_else(|| {
             let valid: Vec<&str> = OPENVINO_MODELS.iter().map(|m| m.name).collect();
             anyhow::anyhow!(
@@ -4126,49 +4923,13 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
 
-    std::fs::create_dir_all(&model_path)?;
-
     println!(
-        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...\n",
+        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...",
         model.name, model.size_mb, model.quantization
     );
 
-    for filename in OPENVINO_MODEL_FILES {
-        let file_path = model_path.join(filename);
+    download_artifact(model, &models_dir)?;
 
-        if file_path.exists() {
-            println!("  {} already exists, skipping", filename);
-            continue;
-        }
-
-        let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            model.huggingface_repo, filename
-        );
-
-        println!("  Downloading {}...", filename);
-
-        let status = openvino_download_command(&file_path, &url).status();
-
-        match status {
-            Ok(exit_status) if exit_status.success() => {}
-            Ok(exit_status) => {
-                print_failure(&format!(
-                    "Download failed: curl exited with code {}",
-                    exit_status.code().unwrap_or(-1)
-                ));
-                let _ = std::fs::remove_file(&file_path);
-                anyhow::bail!("Download failed for {}", filename)
-            }
-            Err(e) => {
-                print_failure(&format!("Failed to run curl: {}", e));
-                print_info("Please ensure curl is installed");
-                anyhow::bail!("curl not available: {}", e)
-            }
-        }
-    }
-
-    // Validate critical files
     validate_openvino_model(&model_path).inspect_err(|_| {
         print_failure("Model download incomplete. Missing required files.");
     })?;
@@ -4231,90 +4992,13 @@ pub fn set_openvino_config(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_openvino_in_config(&content, model_name);
+            let updated = update_engine_in_config(&content, "openvino", model_name)?;
             std::fs::write(&config_path, updated)?;
         }
         Ok(())
     } else {
         anyhow::bail!("Could not determine config path")
     }
-}
-
-/// Update the config to use OpenVINO engine with a specific model
-fn update_openvino_in_config(config: &str, model_name: &str) -> String {
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_openvino_section = false;
-    let mut in_openvino_section = false;
-    let mut openvino_model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        // Track sections
-        if trimmed.starts_with('[') {
-            // If we were in openvino section and didn't update model, add it
-            if in_openvino_section && !openvino_model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                openvino_model_updated = true;
-            }
-            in_openvino_section = trimmed == "[openvino]";
-            if in_openvino_section {
-                has_openvino_section = true;
-            }
-        }
-
-        // Update or add engine line at the top level
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str("engine = \"openvino\"\n");
-            has_engine_line = true;
-        }
-        // Update model line in openvino section
-        else if in_openvino_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            openvino_model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // If we were in openvino section at EOF and didn't update model, add it
-    if in_openvino_section && !openvino_model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    // Add engine line if not present
-    if !has_engine_line {
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str("engine = \"openvino\"\n\n");
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        result = new_result;
-    }
-
-    // Add [openvino] section if not present
-    if !has_openvino_section {
-        result.push_str(&format!("\n[openvino]\nmodel = \"{}\"\n", model_name));
-    }
-
-    // Remove trailing newline if original didn't have one
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -4373,22 +5057,96 @@ mod tests {
         );
     }
 
+    /// The OpenVINO download goes through `download_artifact` (#692), so its
+    /// artifacts must speak the manifest contract: R2 URL under the
+    /// `openvino` prefix keyed by directory name, and a manifest that
+    /// enumerates every file the runtime expects.
     #[test]
-    fn openvino_downloads_fail_on_http_errors() {
-        let command = openvino_download_command(
-            std::path::Path::new("/tmp/openvino-model-file"),
-            "https://example.invalid/model-file",
-        );
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+    fn openvino_artifacts_follow_the_r2_manifest_contract() {
+        use super::super::manifest::{
+            manifest_url, validate_manifest, Manifest, ManifestFile, MANIFEST_SCHEMA_VERSION,
+        };
 
-        assert!(
-            args.iter()
-                .any(|arg| arg.starts_with('-') && arg[1..].contains('f')),
-            "curl must fail on HTTP errors instead of saving an error page: {args:?}"
+        let model = OPENVINO_MODELS
+            .iter()
+            .find(|m| m.name == "base.en-int8")
+            .unwrap();
+        assert_eq!(
+            manifest_url(model),
+            "https://models.voxtype.io/openvino/openvino-whisper-base.en-int8-ov/manifest.json"
         );
+
+        // A manifest listing exactly the published file set validates.
+        let good = Manifest {
+            version: MANIFEST_SCHEMA_VERSION,
+            model: model.dir_name.to_string(),
+            engine: "openvino".to_string(),
+            files: OPENVINO_MODEL_FILES
+                .iter()
+                .map(|f| ManifestFile {
+                    path: (*f).to_string(),
+                    size: 1,
+                    sha256: "aa".to_string(),
+                })
+                .collect(),
+        };
+        validate_manifest(&good, model).unwrap();
+
+        // A publisher who forgets a file (and so would never sha256-verify
+        // it) is rejected before anything lands on disk.
+        let mut incomplete = good.clone();
+        incomplete
+            .files
+            .retain(|f| f.path != "preprocessor_config.json");
+        let err = validate_manifest(&incomplete, model)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("preprocessor_config.json"), "{}", err);
+
+        // A manifest uploaded under the wrong prefix fails fast.
+        let mut misrouted = good.clone();
+        misrouted.engine = "moonshine".to_string();
+        assert!(validate_manifest(&misrouted, model).is_err());
+    }
+
+    /// Every catalog entry must have a registry entry keyed by its directory
+    /// name, or the mirror script can't publish it and the runtime download
+    /// 404s on the manifest - exactly how moonshine tiny-ja/tiny-zh shipped
+    /// broken (#694).
+    #[test]
+    fn every_openvino_model_is_in_the_mirror_registry() {
+        let registry = registry_snapshot();
+        for model in OPENVINO_MODELS {
+            let entry = registry
+                .iter()
+                .find(|e| e.engine_prefix == "openvino" && e.name == model.dir_name)
+                .unwrap_or_else(|| panic!("'{}' has no registry entry", model.dir_name));
+            let paths: Vec<&str> = entry.files.iter().map(|f| f.local_path.as_str()).collect();
+            for file in OPENVINO_MODEL_FILES {
+                assert!(
+                    paths.contains(file),
+                    "registry entry for '{}' is missing {}",
+                    model.dir_name,
+                    file
+                );
+            }
+        }
+    }
+
+    /// `download_openvino_model` is called with short names by `run_setup`
+    /// and the picker, and with directory names by anything holding a
+    /// catalog entry; both must resolve to the same artifact.
+    #[test]
+    fn openvino_models_resolve_by_short_and_directory_name() {
+        for model in OPENVINO_MODELS {
+            for name in [model.name, model.dir_name] {
+                let found = OPENVINO_MODELS
+                    .iter()
+                    .find(|m| m.name == name || m.dir_name == name)
+                    .unwrap_or_else(|| panic!("'{}' did not resolve", name));
+                assert_eq!(found.dir_name, model.dir_name);
+            }
+        }
     }
 
     #[test]
@@ -4414,13 +5172,88 @@ mod tests {
             .expect("model should validate once preprocessor_config.json exists");
     }
 
+    /// `setup model --set` matched any line starting with "model", so a
+    /// `[parakeet] model_type` line was overwritten and a second `model =`
+    /// written, leaving a config the daemon could not parse.
+    #[test]
+    fn setting_a_model_keeps_model_type_and_never_duplicates_model() {
+        let config = r#"engine = "parakeet"
+
+[parakeet]
+# TDT is the default decoder
+model = "parakeet-tdt-0.6b-v2"
+model_type = "tdt"   # keep this
+
+[whisper]
+model = "small"
+"#;
+        let result = update_engine_in_config(config, "parakeet", "parakeet-tdt-0.6b-v3").unwrap();
+        let parsed: toml::Table = toml::from_str(&result).expect("result must parse");
+        let parakeet = parsed["parakeet"].as_table().unwrap();
+        assert_eq!(parakeet["model"].as_str(), Some("parakeet-tdt-0.6b-v3"));
+        assert_eq!(parakeet["model_type"].as_str(), Some("tdt"));
+        assert_eq!(parsed["whisper"]["model"].as_str(), Some("small"));
+        assert_eq!(result.matches("model =").count(), 2, "one per section");
+        assert!(result.contains("# TDT is the default decoder"));
+        assert!(result.contains("# keep this"));
+    }
+
+    #[test]
+    fn every_engine_setter_leaves_other_keys_alone() {
+        for engine in [
+            "parakeet",
+            "cohere",
+            "moonshine",
+            "sensevoice",
+            "openvino",
+            "dolphin",
+        ] {
+            let config = format!(
+                "engine = \"whisper\"\n\n[{engine}]\nmodel_hint = \"x\"\nmodel = \"old\"\n\n[hotkey]\nmodel_modifier = \"LEFTSHIFT\"\n"
+            );
+            let result = update_engine_in_config(&config, engine, "new").unwrap();
+            let parsed: toml::Table = toml::from_str(&result).expect("result must parse");
+            assert_eq!(parsed["engine"].as_str(), Some(engine));
+            assert_eq!(parsed[engine]["model"].as_str(), Some("new"));
+            assert_eq!(parsed[engine]["model_hint"].as_str(), Some("x"));
+            assert_eq!(
+                parsed["hotkey"]["model_modifier"].as_str(),
+                Some("LEFTSHIFT")
+            );
+        }
+    }
+
+    #[test]
+    fn engine_setter_adds_engine_and_section_when_missing() {
+        let config = "[hotkey]\nkey = \"F12\"\n";
+        let result = update_engine_in_config(config, "moonshine", "base").unwrap();
+        let parsed: toml::Table = toml::from_str(&result).unwrap();
+        assert_eq!(parsed["engine"].as_str(), Some("moonshine"));
+        assert_eq!(parsed["moonshine"]["model"].as_str(), Some("base"));
+        assert_eq!(parsed["hotkey"]["key"].as_str(), Some("F12"));
+    }
+
+    #[test]
+    fn whisper_setter_creates_its_section_and_leaves_absent_engine_absent() {
+        let result = update_model_in_config("[hotkey]\nkey = \"F12\"\n", "base.en").unwrap();
+        let parsed: toml::Table = toml::from_str(&result).unwrap();
+        assert_eq!(parsed["whisper"]["model"].as_str(), Some("base.en"));
+        assert!(parsed.get("engine").is_none());
+    }
+
+    #[test]
+    fn setters_refuse_to_rewrite_invalid_toml() {
+        assert!(update_engine_in_config("model = [[[", "parakeet", "x").is_err());
+        assert!(update_model_in_config("model = [[[", "base").is_err());
+    }
+
     #[test]
     fn test_update_model_in_config_basic() {
         let config = r#"[whisper]
 model = "base.en"
 language = "en"
 "#;
-        let result = update_model_in_config(config, "large-v3");
+        let result = update_model_in_config(config, "large-v3").unwrap();
         assert!(result.contains(r#"model = "large-v3""#));
         assert!(!result.contains("base.en"));
     }
@@ -4436,7 +5269,7 @@ model = "small"
 [parakeet]
 model = "parakeet-tdt-0.6b-v3"
 "#;
-        let result = update_model_in_config(config, "base.en");
+        let result = update_model_in_config(config, "base.en").unwrap();
         // Engine should now be whisper
         assert!(result.contains(r#"engine = "whisper""#));
         assert!(!result.contains(r#"engine = "parakeet""#));
@@ -4459,7 +5292,7 @@ language = "en"
 [output]
 mode = "type"
 "#;
-        let result = update_model_in_config(config, "small.en");
+        let result = update_model_in_config(config, "small.en").unwrap();
         assert!(result.contains(r#"model = "small.en""#));
         assert!(result.contains(r#"key = "SCROLLLOCK""#));
         assert!(result.contains(r#"mode = "type""#));
@@ -4476,7 +5309,7 @@ model = "should_not_change"
 [whisper]
 model = "base.en"
 "#;
-        let result = update_model_in_config(config, "large-v3");
+        let result = update_model_in_config(config, "large-v3").unwrap();
         assert!(result.contains(r#"model = "should_not_change""#));
         assert!(result.contains(r#"model = "large-v3""#));
     }
@@ -4489,7 +5322,7 @@ model = "base.en"
 # Language setting
 language = "en"
 "#;
-        let result = update_model_in_config(config, "medium.en");
+        let result = update_model_in_config(config, "medium.en").unwrap();
         assert!(result.contains(r#"model = "medium.en""#));
         assert!(result.contains("# Model to use"));
         assert!(result.contains("# Language setting"));
@@ -4635,7 +5468,7 @@ language = "en"
 [output]
 mode = "type"
 "#;
-        let result = update_parakeet_in_config(config, "parakeet-tdt-0.6b-v3");
+        let result = update_engine_in_config(config, "parakeet", "parakeet-tdt-0.6b-v3").unwrap();
 
         // Should add engine = "parakeet"
         assert!(result.contains(r#"engine = "parakeet""#));
@@ -4694,7 +5527,8 @@ model = "old-model"
 [output]
 mode = "type"
 "#;
-        let result = update_parakeet_in_config(config, "parakeet-tdt-0.6b-v3-int8");
+        let result =
+            update_engine_in_config(config, "parakeet", "parakeet-tdt-0.6b-v3-int8").unwrap();
 
         // Should update engine to parakeet
         assert!(result.contains(r#"engine = "parakeet""#));
@@ -4711,7 +5545,7 @@ model = "large-v3"
 language = "en"
 translate = false
 "#;
-        let result = update_parakeet_in_config(config, "parakeet-tdt-0.6b-v3");
+        let result = update_engine_in_config(config, "parakeet", "parakeet-tdt-0.6b-v3").unwrap();
 
         // Whisper section should be preserved
         assert!(result.contains("[whisper]"));
@@ -4957,7 +5791,7 @@ language = "en"
 [output]
 mode = "type"
 "#;
-        let result = update_moonshine_in_config(config, "base");
+        let result = update_engine_in_config(config, "moonshine", "base").unwrap();
 
         // Should update engine to moonshine
         assert!(result.contains(r#"engine = "moonshine""#));
@@ -4984,7 +5818,7 @@ quantized = false
 [output]
 mode = "type"
 "#;
-        let result = update_moonshine_in_config(config, "base-ja");
+        let result = update_engine_in_config(config, "moonshine", "base-ja").unwrap();
 
         // Should update engine to moonshine
         assert!(result.contains(r#"engine = "moonshine""#));
@@ -5174,6 +6008,174 @@ mode = "type"
         assert!(err.to_string().contains("empty"), "got: {}", err);
     }
 
+    #[test]
+    fn ultra_catalog_has_three_pinned_precisions_and_real_download_urls() {
+        for (name, size, sha256) in [
+            (
+                "parakeet-ultra-F16.gguf",
+                1_256_724_448,
+                "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
+            ),
+            (
+                "parakeet-ultra-Q8_0.gguf",
+                740_363_168,
+                "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
+            ),
+            (
+                "parakeet-ultra-Q4_K_M.gguf",
+                486_280_096,
+                "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
+            ),
+        ] {
+            let model = find_gguf_model(name).expect("Ultra checkpoint must be catalogued");
+            assert_eq!((model.size, model.sha256), (size, sha256));
+            assert_eq!(model.license, "CC-BY-4.0");
+            assert_eq!(model.engine, "parakeet");
+            assert!(model.upstream_url.is_none(), "{name} must download from R2");
+            assert_eq!(
+                gguf_url(model),
+                format!(
+                    "{}/parakeet/{}/{name}",
+                    crate::setup::manifest::MODELS_BASE_URL,
+                    model.r2_dir
+                )
+            );
+            assert!(
+                model
+                    .r2_dir
+                    .ends_with("-a1539be1b849ea7463b88343e5277b373d0c4ea9"),
+                "{name} R2 dir pins the conversion revision"
+            );
+            assert!(parakeet_setup_model_names().contains(&name));
+        }
+    }
+
+    #[test]
+    fn cohere_gguf_validation_checks_size_magic_and_publisher_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cohere.gguf");
+        let model = GgufModelInfo {
+            engine: "cohere",
+            name: "cohere.gguf",
+            r2_dir: "cohere-gguf-test",
+            upstream_url: None,
+            size: 11,
+            sha256: "70d5523972d92139e4d1f62ee3d7cd79054f08ac90b5ba3b87df19c08adb3b17",
+            license: "test",
+            description: "test fixture",
+        };
+
+        std::fs::write(&path, b"GGUFpayload").unwrap();
+        verify_gguf_model(&path, &model).unwrap();
+
+        std::fs::write(&path, b"GGUFshort").unwrap();
+        assert!(validate_gguf_model(&path, &model).is_err());
+
+        std::fs::write(&path, b"HTMLpayload").unwrap();
+        assert!(validate_gguf_model(&path, &model)
+            .unwrap_err()
+            .to_string()
+            .contains("not a GGUF model"));
+
+        std::fs::write(&path, b"GGUFpayloae").unwrap();
+        validate_gguf_model(&path, &model).unwrap();
+        assert!(verify_gguf_model(&path, &model)
+            .unwrap_err()
+            .to_string()
+            .contains("sha256 mismatch"));
+    }
+
+    /// Model rows link to the license: canonical text for standard licenses,
+    /// the mirrored copy for custom model licenses.
+    #[test]
+    fn gguf_license_links_standard_and_custom_licenses() {
+        let (license, url) = gguf_license("parakeet-ultra-Q8_0.gguf").unwrap();
+        assert_eq!(license, "CC-BY-4.0");
+        assert_eq!(url, "https://creativecommons.org/licenses/by/4.0/");
+        let (license, url) = gguf_license("SenseVoiceSmall-Q8_0.gguf").unwrap();
+        assert_eq!(license, "FunASR Model Open Source License 1.1");
+        assert_eq!(
+            url,
+            format!(
+                "{}/gguf/sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/LICENSE",
+                crate::setup::manifest::MODELS_BASE_URL
+            )
+        );
+        assert!(gguf_license("moonshine-base-ja-Q8_0.gguf")
+            .unwrap()
+            .1
+            .ends_with("/LICENSE"));
+        assert!(gguf_license("parakeet-tdt-0.6b-v3").is_none());
+        for entry in gguf_registry_snapshot() {
+            let (_, url) = gguf_license(entry.name).unwrap();
+            assert!(url.starts_with("https://"), "{url}");
+        }
+    }
+
+    /// The R2 audit must see every curated GGUF once, and every one of them
+    /// must download from the mirror: an upstream-only entry is a gap the
+    /// audit reports, so the shipped catalog has none.
+    #[test]
+    fn gguf_registry_snapshot_covers_the_catalog_and_is_fully_mirrored() {
+        let snapshot = gguf_registry_snapshot();
+        let mut names: Vec<_> = snapshot.iter().map(|entry| entry.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), snapshot.len(), "duplicate GGUF in snapshot");
+        for model in COHERE_GGUF_MODELS
+            .iter()
+            .chain(PARAKEET_GGUF_MODELS)
+            .chain(HANDY_GGUF_MODELS)
+        {
+            assert!(names.contains(&model.name), "{} missing", model.name);
+        }
+        for entry in &snapshot {
+            assert!(entry.mirrored, "{} is not mirrored to R2", entry.name);
+            assert!(
+                entry
+                    .url
+                    .starts_with(crate::setup::manifest::MODELS_BASE_URL),
+                "{}",
+                entry.url
+            );
+            assert_eq!(entry.sha256.len(), 64, "{}", entry.name);
+        }
+    }
+
+    /// The curated Parakeet GGUFs download from R2 under the `parakeet`
+    /// prefix, stay out of the ONNX name list (they have no registry entry
+    /// or directory), and are found by the same lookup as Cohere's.
+    #[test]
+    fn parakeet_gguf_entries_are_single_files_under_the_parakeet_prefix() {
+        assert_eq!(parakeet_gguf_models().len(), 5);
+        for model in parakeet_gguf_models() {
+            assert_eq!(model.engine, "parakeet");
+            assert!(model.name.ends_with(".gguf"), "{}", model.name);
+            assert_eq!(model.sha256.len(), 64, "{}", model.name);
+            assert_eq!(model.feature(), "parakeet-gguf");
+            assert!(std::ptr::eq(find_gguf_model(model.name).unwrap(), model));
+            assert!(!is_parakeet_model(model.name), "{}", model.name);
+            assert!(parakeet_setup_model_names().contains(&model.name));
+            if model.upstream_url.is_none() {
+                assert_eq!(
+                    gguf_url(model),
+                    format!(
+                        "{}/parakeet/{}/{}",
+                        crate::setup::manifest::MODELS_BASE_URL,
+                        model.r2_dir,
+                        model.name
+                    )
+                );
+            }
+        }
+        // Cohere's URLs keep the layout 2f3d95e mirrored them under.
+        let cohere = find_gguf_model("cohere-transcribe-03-2026-Q8_0.gguf").unwrap();
+        assert!(gguf_url(cohere).ends_with(
+            "/cohere/cohere-transcribe-03-2026-q8_0-gguf/cohere-transcribe-03-2026-Q8_0.gguf"
+        ));
+        assert_eq!(cohere.feature(), "cohere-gguf");
+    }
+
     /// The whole staging sequence, offline: bytes land on the `.part` path,
     /// the destination stays absent until validation passes, and the promote
     /// is what makes the model visible.
@@ -5269,42 +6271,143 @@ mode = "type"
         assert!(!part_path(&dest).exists(), "part file should be cleaned up");
     }
 
-    /// The whisper path end to end against the real host: the `HEAD` that
-    /// sizes the transfer, the ggml magic check, and the rename. Downloads
-    /// into a temp dir, so it never touches the user's models directory.
-    ///
-    /// ```text
-    /// cargo test --lib whisper_download_is_atomic -- --ignored --nocapture
-    /// ```
+    fn manifest_entry_for(bytes: &[u8]) -> crate::setup::manifest::ManifestFile {
+        use sha2::{Digest, Sha256};
+        crate::setup::manifest::ManifestFile {
+            path: "ggml-test.bin".to_string(),
+            size: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    /// A download whose bytes match the manifest takes its final name; the
+    /// part file is gone afterwards.
     #[test]
-    #[ignore = "downloads a model from huggingface.co"]
-    fn whisper_download_is_atomic_end_to_end() {
+    fn fetch_verified_promotes_bytes_that_match_the_manifest() {
         if !curl_available() {
             eprintln!("skipping: curl is not on PATH");
             return;
         }
         let _json = progress::json_mode_for_test();
         let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("ggml-tiny.en.bin");
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"lmggweights").unwrap();
+        let dest = dir.path().join("ggml-test.bin");
+        let url = format!("file://{}", source.display());
 
-        download_atomically(
-            &get_model_url("tiny.en"),
+        fetch_verified(
+            &url,
             &dest,
-            "tiny.en",
-            ContentCheck::Ggml,
+            "test",
+            "ggml-test.bin",
+            &manifest_entry_for(b"lmggweights"),
         )
-        .expect("tiny.en should download");
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"lmggweights");
+        assert!(!part_path(&dest).exists());
+    }
+
+    /// A download that does not match the manifest is deleted and never
+    /// reaches the name a loader reads, and an existing copy is left as is.
+    #[test]
+    fn fetch_verified_rejects_bytes_that_do_not_match_the_manifest() {
+        if !curl_available() {
+            eprintln!("skipping: curl is not on PATH");
+            return;
+        }
+        let _json = progress::json_mode_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"<html>error</html>").unwrap();
+        let dest = dir.path().join("ggml-test.bin");
+        let url = format!("file://{}", source.display());
+
+        // Same length as the source, different bytes: only the hash catches it.
+        let mut entry = manifest_entry_for(b"lmggweights-goodbytes");
+        entry.size = b"<html>error</html>".len() as u64;
+        let err = fetch_verified(&url, &dest, "test", "ggml-test.bin", &entry).unwrap_err();
+        assert!(err.to_string().contains("sha256 mismatch"), "{err}");
+        assert!(!dest.exists(), "an unverified file must not be promoted");
+        assert!(!part_path(&dest).exists(), "the part file must be removed");
+
+        let err = fetch_verified(
+            &url,
+            &dest,
+            "test",
+            "ggml-test.bin",
+            &manifest_entry_for(b"lmggweights"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("size mismatch"), "{err}");
+        assert!(!dest.exists());
+    }
+
+    /// Every flat-file model downloads from the Voxtype mirror, under the
+    /// layout the mirror script published, and keeps its historical local
+    /// file name.
+    #[test]
+    fn flat_file_models_download_from_the_mirror() {
+        for name in valid_model_names() {
+            let artifact = whisper_mirror_file(name).unwrap();
+            assert_eq!(
+                artifact.url(),
+                format!("https://models.voxtype.io/whisper/{name}/ggml-{name}.bin")
+            );
+            assert_eq!(artifact.file, get_model_filename(name));
+            assert_eq!(
+                crate::setup::manifest::manifest_url(&artifact),
+                format!("https://models.voxtype.io/whisper/{name}/manifest.json")
+            );
+        }
+        assert!(whisper_mirror_file("/models/custom.bin").is_none());
+        assert!(whisper_mirror_file("parakeet-tdt-0.6b-v3").is_none());
+
+        assert_eq!(
+            gtcrn_mirror_file().url(),
+            "https://models.voxtype.io/enhancement/gtcrn-simple/gtcrn_simple.onnx"
+        );
+        assert_eq!(
+            ecapa_mirror_file().url(),
+            "https://models.voxtype.io/diarization/ecapa-tdnn/ecapa_tdnn.onnx"
+        );
+    }
+
+    #[test]
+    fn download_model_refuses_names_with_no_mirror_entry() {
+        let err = download_model("/models/custom.bin").unwrap_err();
+        assert!(err.to_string().contains("not a downloadable Whisper model"));
+    }
+
+    /// The whisper path end to end against the real mirror: manifest fetch,
+    /// size and sha256 verification, and the rename. Downloads into a temp
+    /// dir, so it never touches the user's models directory.
+    ///
+    /// ```text
+    /// cargo test --lib whisper_download_from_mirror -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "downloads a model from models.voxtype.io"]
+    fn whisper_download_from_mirror_end_to_end() {
+        if !curl_available() {
+            eprintln!("skipping: curl is not on PATH");
+            return;
+        }
+        let _json = progress::json_mode_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = whisper_mirror_file("tiny.en").unwrap();
+        let dest = dir.path().join(&artifact.file);
+
+        download_mirrored_file(&artifact, &dest, "tiny.en").expect("tiny.en should download");
 
         assert!(dest.exists(), "the model should be in place");
         assert!(!part_path(&dest).exists(), "no part file should survive");
-        // Whatever landed passed the magic check, so re-reading it is a
-        // check that the promote moved the validated bytes.
-        validate_download(
-            &dest,
-            content_length(&get_model_url("tiny.en")),
-            ContentCheck::Ggml,
-        )
-        .unwrap();
+        assert_eq!(
+            sha256_file(&dest).unwrap(),
+            "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f"
+        );
+        // A second call finds the verified file and downloads nothing.
+        download_mirrored_file(&artifact, &dest, "tiny.en").unwrap();
     }
 
     /// Multi-file models must report progress per file, and the `file` field
@@ -5388,7 +6491,8 @@ model = \"base.en\"
 model = \"parakeet-tdt-0.6b-v3-int8\"
 on_demand_loading = false
 ";
-        let after = update_parakeet_in_config(before, "parakeet-tdt-0.6b-v2-int8");
+        let after =
+            update_engine_in_config(before, "parakeet", "parakeet-tdt-0.6b-v2-int8").unwrap();
         assert!(after.contains("engine = \"parakeet\""), "{}", after);
         assert!(
             after.contains("model = \"parakeet-tdt-0.6b-v2-int8\""),
@@ -5415,5 +6519,214 @@ on_demand_loading = false
             got,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+
+    #[test]
+    fn handy_conversions_keep_publication_and_license_readiness_explicit() {
+        let models = handy_pending_gguf_models();
+        assert_eq!(models.len(), 7);
+        assert_eq!(
+            models.iter().map(|model| model.arch).collect::<Vec<_>>(),
+            [
+                "qwen3_asr",
+                "qwen3_asr",
+                "moonshine",
+                "sensevoice",
+                "moonshine_streaming",
+                "gigaam",
+                "parakeet",
+            ]
+        );
+        assert_eq!(models.iter().filter(|model| model.runnable).count(), 7);
+        assert!(models
+            .iter()
+            .filter(|model| model.runnable)
+            .all(|model| model.r2_dir.is_some()));
+        assert!(models
+            .iter()
+            .filter(|model| model.license_gated)
+            .all(|model| !model.runnable && model.r2_dir.is_none()));
+        assert_eq!(handy_gguf_models().len(), 7);
+        let expected_urls = [
+            "https://models.voxtype.io/gguf/qwen3-asr-0.6b-q8_0-7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/qwen3-asr-1.7b-q8_0-0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/moonshine-streaming-small-q8_0-e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/gigaam-v3-e2e-rnnt-q8_0-3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/nemotron-3.5-asr-streaming-0.6b-q8_0-53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/moonshine-base-ja-q8_0-1674f5f93b7655000951d25d496dcfac947b3968/moonshine-base-ja-Q8_0.gguf",
+            "https://models.voxtype.io/gguf/sensevoicesmall-q8_0-ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-Q8_0.gguf",
+        ];
+        for (model, expected_url) in handy_gguf_models().iter().zip(expected_urls) {
+            assert_eq!(model.engine, "gguf");
+            assert!(model.r2_dir.contains('-'));
+            assert!(std::ptr::eq(find_gguf_model(model.name).unwrap(), model));
+            assert_eq!(gguf_url(model), expected_url);
+        }
+        assert!(
+            models.iter().all(|model| !model.license_gated),
+            "every approved conversion is cleared for redistribution"
+        );
+        for model in models.iter().filter(|model| model.runnable) {
+            let entry = find_gguf_model(model.name).expect("runnable conversion is downloadable");
+            assert_eq!(
+                (entry.size, entry.sha256),
+                (model.size, model.sha256),
+                "{}",
+                model.name
+            );
+            assert_eq!(Some(entry.r2_dir), model.r2_dir, "{}", model.name);
+        }
+    }
+
+    struct NoPackageManager;
+
+    impl crate::model_upgrade::CommandRunner for NoPackageManager {
+        fn output(&self, _program: &str, _args: &[&str]) -> Option<String> {
+            None
+        }
+    }
+
+    fn pick_avx512() -> crate::setup::binary::Variant {
+        crate::setup::binary::Variant::OnnxAvx512
+    }
+
+    /// What every release Whisper binary is built with since 1.2.0: the GGUF
+    /// clients, no ONNX engines.
+    const WHISPER_PACKAGE: PickerAvailability = PickerAvailability {
+        parakeet: false,
+        moonshine: false,
+        sensevoice: false,
+        paraformer: false,
+        dolphin: false,
+        omnilingual: false,
+        cohere: false,
+        cohere_gguf: true,
+        parakeet_gguf: true,
+        gguf: true,
+        openvino: false,
+    };
+
+    /// Section headers and notes, without the color codes. Model rows are
+    /// not part of the intro, so this is the picker minus its rows.
+    fn picker_outline(
+        availability: &PickerAvailability,
+        installed: &[crate::setup::binary::Variant],
+        record: Option<&str>,
+    ) -> String {
+        use crate::setup::binary::Variant;
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        for variant in std::iter::once(&Variant::WhisperAvx2).chain(installed) {
+            std::fs::write(lib.join(variant.binary_name()), []).unwrap();
+        }
+        if let Some(record) = record {
+            std::fs::write(
+                lib.join(crate::setup::install_hint::PACKAGE_VARIANTS_FILE),
+                record,
+            )
+            .unwrap();
+        }
+        let host = crate::setup::install_hint::Host::new(
+            lib.join(Variant::WhisperAvx2.binary_name()),
+            lib.clone(),
+            &NoPackageManager,
+            pick_avx512,
+        );
+        PickerSection::ALL
+            .iter()
+            .flat_map(|section| section.intro(availability, &host, ""))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("\x1b[90m", "")
+            .replace("\x1b[0m", "")
+    }
+
+    /// The Whisper package picker outline, with `fix` as the remediation
+    /// for every engine the binary lacks.
+    fn whisper_package_outline(fix: &str) -> String {
+        format!(
+            "\
+--- Whisper (OpenAI, 99+ languages) ---
+
+
+--- Parakeet (NVIDIA FastConformer, English) ---
+
+  This binary runs Parakeet as GGUF. Pick one of these, also listed under Parakeet GGUF below:
+    [13] parakeet-tdt-0.6b-v3-F16.gguf
+    [14] parakeet-tdt-0.6b-v3-Q8_0.gguf
+    [15] parakeet-ultra-F16.gguf
+    [16] parakeet-ultra-Q8_0.gguf
+    [17] parakeet-ultra-Q4_K_M.gguf
+  (ONNX Parakeet models: {fix})
+
+--- Moonshine (Moonshine AI, encoder-decoder ASR) ---
+
+  (not available - {fix})
+
+--- SenseVoice (Alibaba FunAudioLLM, CJK + English) ---
+
+  (not available - {fix})
+
+--- Paraformer (FunASR, Chinese + English) ---
+
+  (not available - {fix})
+
+--- Dolphin (dictation-optimized CTC) ---
+
+  (not available - {fix})
+
+--- Omnilingual (FunASR, 50+ languages) ---
+
+  (not available - {fix})
+
+--- Cohere Transcribe ONNX ---
+
+  This binary runs Cohere Transcribe as GGUF; see Cohere Transcribe GGUF below.
+  (ONNX Cohere models: {fix})
+
+--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---
+
+
+--- Parakeet GGUF (transcribe.cpp, Vulkan-capable) ---
+
+
+--- Handy GGUF families (offline transcribe.cpp) ---
+
+
+--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---
+
+  (not available - {fix})"
+        )
+    }
+
+    #[test]
+    fn whisper_package_picker_points_at_gguf_and_the_onnx_switch() {
+        let outline = picker_outline(
+            &WHISPER_PACKAGE,
+            &[crate::setup::binary::Variant::OnnxAvx512],
+            None,
+        );
+        let expected = whisper_package_outline("run `sudo voxtype setup onnx --enable`");
+        assert_eq!(outline, expected, "\n{outline}");
+        assert_eq!(
+            WHISPER_PACKAGE.parakeet_gguf_offset(),
+            MODELS.len() + COHERE_GGUF_MODELS.len()
+        );
+    }
+
+    #[test]
+    fn aur_whisper_package_picker_names_the_missing_variant() {
+        let outline = picker_outline(
+            &WHISPER_PACKAGE,
+            &[],
+            Some("install_method=aur-bin\nincluded=avx2 baseline vulkan\n"),
+        );
+        let expected = whisper_package_outline(
+            "rebuild voxtype-bin with the onnx-avx512 variant, which this build left out: \
+             `VOXTYPE_VARIANTS=onnx-avx512 yay -S --rebuild voxtype-bin` \
+             (or `VOXTYPE_VARIANTS=onnx-avx512 makepkg -si` in a clone of the AUR repo)",
+        );
+        assert_eq!(outline, expected, "\n{outline}");
     }
 }

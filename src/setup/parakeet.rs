@@ -93,9 +93,23 @@ fn detect_current_whisper_variant() -> Option<Variant> {
 
 /// Pick the best ONNX variant for this system.
 fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
-    let inv = binary::inventory();
-    let installed_onnx: Vec<&binary::VariantStatus> = inv
-        .variants
+    // Read the package layout directly rather than `binary::inventory()`,
+    // which lists no variants when this command runs from outside it (the
+    // `/usr/local/bin` wrapper case) even though the switch targets it.
+    let statuses = binary::variant_statuses(
+        Path::new(binary::LIB_DIR),
+        &binary::detect_cpu(),
+        &binary::detect_gpus(),
+        binary::active_variant(),
+    );
+    pick_best_backend(&statuses, detect_cuda_runtime_major())
+}
+
+fn pick_best_backend(
+    statuses: &[binary::VariantStatus],
+    host_cuda: Option<i32>,
+) -> Option<ParakeetBackend> {
+    let installed_onnx: Vec<&binary::VariantStatus> = statuses
         .iter()
         .filter(|s| s.installed && s.variant.family() == EngineFamily::Onnx)
         .collect();
@@ -108,7 +122,6 @@ fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
     // ONNX Runtime prebuilt they bundle (libcudart.so.12 vs .13); pick the one
     // matching the host's runtime so the EP doesn't fail to register and
     // silently fall back to CPU.
-    let host_cuda = detect_cuda_runtime_major();
     let cuda_pref: &[Variant] = match host_cuda {
         Some(13) => &[Variant::OnnxCuda13, Variant::OnnxCuda, Variant::OnnxCuda12],
         Some(12) => &[Variant::OnnxCuda12, Variant::OnnxCuda, Variant::OnnxCuda13],
@@ -180,6 +193,72 @@ pub fn detect_cuda_runtime_major() -> Option<i32> {
     Some(version / 1000)
 }
 
+/// How to install cuDNN, which ONNX Runtime's CUDA execution provider links
+/// against (`libcudnn.so.9`) but the CUDA toolkit does not include.
+pub const CUDNN_INSTALL_HINT: &str = "Install cuDNN 9:\n  \
+     Arch: sudo pacman -S cudnn\n  \
+     Debian/Ubuntu/Fedora: install libcudnn9-cuda-12 or libcudnn9-cuda-13 \
+     (matching your voxtype-onnx-cuda variant) from NVIDIA's CUDA repository";
+
+/// Whether `libcudnn.so.9` can be loaded the way ONNX Runtime's CUDA provider
+/// will load it: through the normal library search path, or from the
+/// directory of the running binary, where the provider libraries live.
+pub fn cudnn_available() -> bool {
+    use std::ffi::CString;
+    let beside_binary = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().map(|dir| dir.join("libcudnn.so.9")))
+        .is_some_and(|lib| lib.exists());
+    if beside_binary {
+        return true;
+    }
+    ["libcudnn.so.9", "libcudnn.so"].iter().any(|name| {
+        let Ok(cstr) = CString::new(*name) else {
+            return false;
+        };
+        let handle = unsafe { libc::dlopen(cstr.as_ptr(), libc::RTLD_LAZY) };
+        if handle.is_null() {
+            return false;
+        }
+        unsafe { libc::dlclose(handle) };
+        true
+    })
+}
+
+/// Check for cuDNN before registering the CUDA execution provider. Without
+/// it ONNX Runtime prints a raw "libcudnn.so.9: cannot open shared object
+/// file" and silently runs on CPU; this says so plainly, once per process,
+/// with the fix. Returns whether the CUDA provider can load.
+pub fn cudnn_present_or_warn() -> bool {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let present = cudnn_available();
+    if !present {
+        WARNED.call_once(|| {
+            tracing::error!(
+                "CUDA is installed but cuDNN (libcudnn.so.9) is missing, so the CUDA \
+                 execution provider cannot load: falling back to CPU. {}",
+                CUDNN_INSTALL_HINT
+            );
+        });
+    }
+    present
+}
+
+/// Print the binary the running daemon executes, as `setup gpu --status`
+/// does. The package path is only what the next launch would use, and it is
+/// wrong when a wrapper or manual install points somewhere else.
+fn print_binary(next_launch: &Path) {
+    let daemon = crate::daemon_status::read_pid_if_alive();
+    match (daemon.and_then(binary::running_binary_path), daemon) {
+        (Some(path), Some(pid)) => println!("  Binary: {} (daemon pid {})", path.display(), pid),
+        _ => println!(
+            "  Binary: {} (next launch, no daemon running)",
+            next_launch.display()
+        ),
+    }
+}
+
 pub fn show_status() {
     println!("=== Voxtype ONNX Engine Status ===\n");
 
@@ -187,22 +266,12 @@ pub fn show_status() {
         if let Some(backend) = detect_current_parakeet_backend() {
             println!("Active engine: Parakeet");
             println!("  Backend: {}", backend.display_name());
-            println!(
-                "  Binary: {}",
-                Path::new(binary::LIB_DIR)
-                    .join(backend.variant().binary_name())
-                    .display()
-            );
+            print_binary(&Path::new(binary::LIB_DIR).join(backend.variant().binary_name()));
         }
     } else {
         println!("Active engine: Whisper");
         if let Some(variant) = detect_current_whisper_variant() {
-            println!(
-                "  Binary: {}",
-                Path::new(binary::LIB_DIR)
-                    .join(variant.binary_name())
-                    .display()
-            );
+            print_binary(&Path::new(binary::LIB_DIR).join(variant.binary_name()));
         }
     }
 
@@ -212,7 +281,10 @@ pub fn show_status() {
 
     if available.is_empty() {
         println!("  No ONNX binaries installed.");
-        println!("\n  Install an ONNX-enabled voxtype package to use this feature.");
+        println!(
+            "\n  To use ONNX engines, {}.",
+            super::install_hint::onnx_variant_hint()
+        );
     } else {
         for backend in [
             ParakeetBackend::Avx2,
@@ -270,7 +342,8 @@ pub fn enable() -> anyhow::Result<()> {
     if available.is_empty() {
         anyhow::bail!(
             "No ONNX binaries installed.\n\
-             Install an ONNX-enabled voxtype package first."
+             To fix this, {}.",
+            super::install_hint::onnx_variant_hint()
         );
     }
 
@@ -412,6 +485,86 @@ mod tests {
         ] {
             assert_eq!(b.whisper_equivalent().family(), EngineFamily::Whisper);
         }
+    }
+
+    /// A package layout in a tempdir with the given variant binaries present.
+    fn lib_dir_with(variants: &[Variant]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for v in variants {
+            std::fs::write(dir.path().join(v.binary_name()), b"").unwrap();
+        }
+        dir
+    }
+
+    fn statuses(
+        dir: &tempfile::TempDir,
+        avx512: bool,
+        amd: bool,
+        nvidia: bool,
+    ) -> Vec<binary::VariantStatus> {
+        binary::variant_statuses(
+            dir.path(),
+            &binary::Cpu { avx2: true, avx512 },
+            &binary::Gpus { nvidia, amd },
+            Some(Variant::WhisperAvx512),
+        )
+    }
+
+    #[test]
+    fn best_backend_found_from_package_layout_alone() {
+        // `setup onnx --enable` run through a /usr/local wrapper: the running
+        // binary is outside the package, but the package layout still holds
+        // the variants the switch can target.
+        let dir = lib_dir_with(&[
+            Variant::WhisperAvx512,
+            Variant::OnnxAvx2,
+            Variant::OnnxAvx512,
+            Variant::OnnxMigraphx,
+        ]);
+        assert_eq!(
+            pick_best_backend(&statuses(&dir, true, true, false), None),
+            Some(ParakeetBackend::Migraphx)
+        );
+    }
+
+    #[test]
+    fn best_backend_skips_gpu_variant_without_its_gpu() {
+        let dir = lib_dir_with(&[
+            Variant::OnnxAvx2,
+            Variant::OnnxAvx512,
+            Variant::OnnxMigraphx,
+        ]);
+        assert_eq!(
+            pick_best_backend(&statuses(&dir, true, false, false), None),
+            Some(ParakeetBackend::Avx512)
+        );
+        assert_eq!(
+            pick_best_backend(&statuses(&dir, false, false, false), None),
+            Some(ParakeetBackend::Avx2)
+        );
+    }
+
+    #[test]
+    fn best_backend_matches_host_cuda_major() {
+        let dir = lib_dir_with(&[Variant::OnnxAvx2, Variant::OnnxCuda12, Variant::OnnxCuda13]);
+        let s = statuses(&dir, true, false, true);
+        assert_eq!(
+            pick_best_backend(&s, Some(12)),
+            Some(ParakeetBackend::Cuda12)
+        );
+        assert_eq!(
+            pick_best_backend(&s, Some(13)),
+            Some(ParakeetBackend::Cuda13)
+        );
+    }
+
+    #[test]
+    fn best_backend_none_without_onnx_binaries() {
+        let dir = lib_dir_with(&[Variant::WhisperAvx2, Variant::WhisperVulkan]);
+        assert_eq!(
+            pick_best_backend(&statuses(&dir, true, true, true), None),
+            None
+        );
     }
 
     #[test]

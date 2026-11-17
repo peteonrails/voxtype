@@ -1,0 +1,24 @@
+name = "aura"
+version = "0.1.0"
+description = "Aura: a pill with a living gradient edge and voice-assistant dots."
+palette = "omarchy"
+layout = "pill"
+
+[frame]
+background = "background"
+border = "aura"
+glow = false
+halo = false
+
+[[visual.layers]]
+type = "dots"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0

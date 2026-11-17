@@ -9,6 +9,7 @@
 //! 1. Worker starts, loads model
 //! 2. Worker writes "READY\n" to stdout (signals model is loaded)
 //! 3. Parent sends audio via stdin: [u32 sample_count (LE)][f32 samples (LE)...]
+//!    The top bit of the count ([`TIMED_FLAG`]) asks for timed segments.
 //! 4. Worker transcribes and writes JSON response to stdout
 //! 5. Worker exits
 //!
@@ -23,6 +24,11 @@ use ureq::serde_json;
 /// Ready signal sent after model is loaded
 pub const READY_SIGNAL: &str = "READY";
 
+/// Set in the sample-count word to ask for [`Transcriber::transcribe_timed`]
+/// instead of `transcribe`. Counts are capped far below it, and the worker is
+/// always the parent's own binary, so the two ends agree on the format.
+pub const TIMED_FLAG: u32 = 1 << 31;
+
 /// JSON response from the worker
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
@@ -36,6 +42,9 @@ pub enum WorkerResponse {
         /// parents that ignore the field simply skip the hint.
         #[serde(skip_serializing_if = "Option::is_none")]
         language: Option<String>,
+        /// Whisper's timed segments, present when the parent asked for them
+        #[serde(skip_serializing_if = "Option::is_none")]
+        segments: Option<Vec<crate::transcribe::TimedSegment>>,
     },
     Error {
         ok: bool,
@@ -49,6 +58,21 @@ impl WorkerResponse {
             ok: true,
             text,
             language,
+            segments: None,
+        }
+    }
+
+    pub fn timed(segments: Vec<crate::transcribe::TimedSegment>, language: Option<String>) -> Self {
+        let text = segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        WorkerResponse::Success {
+            ok: true,
+            text,
+            language,
+            segments: Some(segments),
         }
     }
 
@@ -107,7 +131,9 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let sample_count = u32::from_le_bytes(count_buf) as usize;
+    let count_word = u32::from_le_bytes(count_buf);
+    let timed = count_word & TIMED_FLAG != 0;
+    let sample_count = (count_word & !TIMED_FLAG) as usize;
 
     // Validate sample count (prevent OOM from malformed input)
     // Max 10 minutes at 16kHz = 9,600,000 samples = ~38MB
@@ -157,6 +183,25 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
     // Step 4: Transcribe
     eprintln!("[worker] Starting transcription...");
     let transcribe_start = std::time::Instant::now();
+    if timed {
+        match transcriber.transcribe_timed(&samples) {
+            Ok(segments) => {
+                eprintln!(
+                    "[worker] Timed transcription complete in {:.2}s: {} segment(s)",
+                    transcribe_start.elapsed().as_secs_f32(),
+                    segments.len()
+                );
+                let language = transcriber.last_detected_language();
+                write_response_to(&mut stdout_lock, WorkerResponse::timed(segments, language));
+            }
+            Err(e) => {
+                eprintln!("[worker] Transcription failed: {}", e);
+                write_response_to(&mut stdout_lock, WorkerResponse::error(e.to_string()));
+            }
+        }
+        return Ok(());
+    }
+
     let result = transcriber.transcribe(&samples);
 
     match result {
@@ -215,6 +260,23 @@ mod tests {
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""language":"ru""#));
+    }
+
+    #[test]
+    fn timed_responses_carry_segments_and_joined_text() {
+        let seg = |text: &str, a: f32, b: f32| crate::transcribe::TimedSegment {
+            text: text.to_string(),
+            start_secs: a,
+            end_secs: b,
+        };
+        let r = WorkerResponse::timed(vec![seg("One.", 0.0, 1.5), seg("Two.", 2.0, 3.0)], None);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""text":"One. Two.""#), "{json}");
+        assert!(
+            json.contains(r#""segments":[{"text":"One.","start_secs":0.0,"end_secs":1.5}"#),
+            "{json}"
+        );
+        assert!(TIMED_FLAG as usize > 16000 * 60 * 10);
     }
 
     #[test]

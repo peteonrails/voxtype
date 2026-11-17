@@ -33,6 +33,7 @@ use ort::session::builder::{BuilderResult, SessionBuilder};
 /// the modified builder; if no EPs are compiled in or registration
 /// fails, falls through unchanged and ort uses the CPU EP.
 #[cfg(feature = "onnx-common")]
+#[allow(clippy::result_large_err)] // ort owns the public BuilderResult error shape.
 pub fn register_gpu_eps(
     builder: SessionBuilder,
     engine_label: &str,
@@ -53,19 +54,24 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
     #[allow(unused_mut)]
     let mut providers: Vec<(&'static str, ExecutionProviderDispatch)> = Vec::new();
 
+    // Both NVIDIA EPs link against cuDNN. Without it ort only logs a raw
+    // dlopen error and runs on CPU, so skip them and say why instead.
+    #[cfg(any(feature = "onnx-tensorrt-enabled", feature = "onnx-cuda-enabled"))]
+    let cudnn = crate::setup::parakeet::cudnn_present_or_warn();
+
     #[cfg(feature = "onnx-tensorrt-enabled")]
-    {
-        use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
+    if cudnn {
+        use ort::execution_providers::TensorRTExecutionProvider;
         providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-cuda-enabled")]
-    {
-        use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
+    if cudnn {
+        use ort::execution_providers::CUDAExecutionProvider;
         providers.push(("CUDA", CUDAExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-migraphx-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, MIGraphXExecutionProvider};
+        use ort::execution_providers::MIGraphXExecutionProvider;
         providers.push(("MIGraphX", MIGraphXExecutionProvider::default().build()));
     }
 

@@ -20,7 +20,7 @@ cp ~/.config/voxtype/config.toml ~/.config/voxtype/config.toml.bak
 
 cat >> ~/.config/voxtype/config.toml <<'EOF'
 
-[post_process]
+[output.post_process]
 command = "sed 's/$/   /'"
 trim = true
 fallback_on_empty = true
@@ -49,7 +49,7 @@ systemctl --user restart voxtype
 # 1. Configure a post-process command that always returns empty.
 cat >> ~/.config/voxtype/config.toml <<'EOF'
 
-[post_process]
+[output.post_process]
 command = "true"   # exit 0, emit nothing
 trim = true
 fallback_on_empty = true
@@ -74,7 +74,7 @@ cat /tmp/voxtype-fallback.txt
 # 1. Same command, but flip fallback off.
 cat >> ~/.config/voxtype/config.toml <<'EOF'
 
-[post_process]
+[output.post_process]
 command = "true"
 trim = true
 fallback_on_empty = false

@@ -103,30 +103,31 @@ impl OllamaSummarizer {
         let response = client
             .post(&generate_url)
             .send_json(&request)
-            .map_err(|e| match e {
-                ureq::Error::Transport(ref t) => {
-                    let msg = t.to_string();
-                    if msg.contains("timed out") || msg.contains("timeout") {
-                        SummaryError::Request("Request timed out - try a shorter transcript".into())
-                    } else if msg.contains("connection") {
-                        SummaryError::OllamaUnavailable(format!("{}: connection failed", self.url))
-                    } else {
-                        SummaryError::Request(e.to_string())
-                    }
-                }
-                _ => SummaryError::Request(e.to_string()),
+            .map_err(|e| {
+                SummaryError::Backend(crate::meeting::assistant::local::describe_ollama_error(
+                    &self.url,
+                    &self.model,
+                    e,
+                ))
             })?;
 
         #[derive(Deserialize)]
         struct GenerateResponse {
+            #[serde(default)]
             response: String,
-            #[allow(dead_code)]
-            done: bool,
+            #[serde(default)]
+            error: Option<String>,
         }
 
         let gen_response: GenerateResponse = response.into_json().map_err(|e| {
             SummaryError::Parse(format!("Failed to parse generate response: {}", e))
         })?;
+        if let Some(error) = gen_response.error {
+            return Err(SummaryError::Backend(format!(
+                "{} returned an error: {error}",
+                crate::meeting::assistant::local::ollama_label(&self.url, &self.model)
+            )));
+        }
 
         Ok(gen_response.response)
     }

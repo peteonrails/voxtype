@@ -1,4 +1,4 @@
-use super::parse::parse_config_with_defaults;
+use super::parse::parse_config_salvaging;
 use super::{
     Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
 };
@@ -9,6 +9,22 @@ use std::path::{Path, PathBuf};
 /// Only "1" and "true" (case-insensitive) are truthy; everything else is falsy.
 fn parse_bool_env(val: &str) -> bool {
     val == "1" || val.eq_ignore_ascii_case("true")
+}
+
+/// Top-level tables that voxtype only reads nested elsewhere, as
+/// `(name, where it belongs)`. Serde ignores them silently, which is how a
+/// `[post_process]` meant for `[output.post_process]` never ran.
+fn misplaced_sections(contents: &str) -> Vec<(String, String)> {
+    let Ok(table) = contents.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter(|(_, value)| value.is_table())
+        .filter_map(|(name, _)| {
+            super::schema::misplaced_section_home(name).map(|home| (name.clone(), home))
+        })
+        .collect()
 }
 
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
@@ -34,13 +50,61 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             let contents = std::fs::read_to_string(path)
                 .map_err(|e| VoxtypeError::Config(format!("Failed to read config: {}", e)))?;
 
-            config = parse_config_with_defaults(&contents)
+            // Salvage per section rather than refusing to start: one bad
+            // value used to cost the user every other setting they had
+            // (#646). A TOML syntax error is still fatal, because there is
+            // nothing to salvage from a file we cannot parse at all.
+            let (parsed, rejected) = parse_config_salvaging(&contents)
                 .map_err(|e| VoxtypeError::Config(format!("Invalid config: {}", e)))?;
+            config = parsed;
+
+            for key in &rejected {
+                // Names only. These sections hold API keys for the remote and
+                // Soniox backends, so the values must never reach the log.
+                tracing::warn!(
+                    "Config section '{}' could not be read and is using defaults. \
+                     Check it against `voxtype config schema`.",
+                    key
+                );
+            }
+            if !rejected.is_empty() {
+                tracing::warn!(
+                    "{} config section(s) were skipped: {}",
+                    rejected.len(),
+                    rejected.join(", ")
+                );
+            }
+            for (name, home) in misplaced_sections(&contents) {
+                tracing::warn!(
+                    "Config section [{}] is ignored at the top level. \
+                     Voxtype reads it as {}; move it there.",
+                    name,
+                    home
+                );
+            }
+            if config.text.format_numbers && !cfg!(feature = "itn") {
+                tracing::warn!(
+                    "[text] format_numbers is set, but this build was compiled \
+                     without the `itn` feature, so numbers are left as spoken. \
+                     Rebuild with `--features itn` to use it."
+                );
+            }
+            // No punctuation_casing capability check here: helper binaries
+            // such as voxtype-osd-quickshell load this config without the
+            // engine features, so their build says nothing about the
+            // engine's. TextProcessor warns from the transcribing binary.
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
     } else {
         tracing::debug!("No config file found at user or system path, using built-in defaults");
+    }
+
+    if let Ok(value) = std::env::var("VOXTYPE_TRAY_ENABLED") {
+        config.tray.enabled = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN") {
+        config.omarchy.link_settings_plugin = parse_bool_env(&value);
     }
 
     // Override from environment variables
@@ -64,6 +128,38 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             Ok(e) => config.engine = e,
             Err(_) => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
+    }
+    if let Ok(model) = std::env::var("VOXTYPE_GGUF_MODEL") {
+        config.gguf.get_or_insert_with(Default::default).model = model;
+    }
+    if let Ok(architecture) = std::env::var("VOXTYPE_GGUF_ARCHITECTURE") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .architecture = architecture;
+    }
+    if let Ok(language) = std::env::var("VOXTYPE_GGUF_LANGUAGE") {
+        config.gguf.get_or_insert_with(Default::default).language = language;
+    }
+    if let Ok(backend) = std::env::var("VOXTYPE_GGUF_BACKEND") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .gguf_backend = backend;
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_THREADS") {
+        if let Ok(threads) = value.parse::<usize>() {
+            config.gguf.get_or_insert_with(Default::default).threads = Some(threads);
+        }
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_ON_DEMAND_LOADING") {
+        config
+            .gguf
+            .get_or_insert_with(Default::default)
+            .on_demand_loading = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_GGUF_STREAMING") {
+        config.gguf.get_or_insert_with(Default::default).streaming = parse_bool_env(&value);
     }
     if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
         config.whisper.language = LanguageConfig::from_comma_separated(&lang);
@@ -108,6 +204,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_AUDIO_FEEDBACK") {
         config.audio.feedback.enabled = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_KEEP_FAILED_RECORDINGS") {
+        config.audio.keep_failed_recordings = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_PAUSE_MEDIA") {
         config.audio.pause_media = parse_bool_env(&val);
@@ -166,8 +265,29 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_SPOKEN_PUNCTUATION") {
         config.text.spoken_punctuation = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_MEETING_ANNOUNCE_RECORDING") {
+        config.meeting.announce_recording = parse_bool_env(&val);
+    }
+    if let Ok(voice) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_VOICE") {
+        config.meeting.announcement_voice = voice.trim().to_lowercase();
+    }
+    if let Ok(path) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_FILE") {
+        config.meeting.announcement_file = Some(path).filter(|p| !p.trim().is_empty());
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_LARD_DISFLUENCY") {
+        config.text.lard_disfluency = parse_bool_env(&val);
+    }
+    if let Some(path) = std::env::var_os("VOXTYPE_LARD_MODEL_PATH") {
+        config.text.lard_model_path = Some(path.into());
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_PUNCTUATION_CASING") {
+        config.text.punctuation_casing = parse_bool_env(&val);
+    }
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
+    }
+    if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS_TERMINAL") {
+        config.output.paste_keys_terminal = Some(keys);
     }
     if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
         config.output.dotool_xkb_layout = Some(layout);
@@ -211,6 +331,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_FILTER_FILLERS") {
         config.text.filter_filler_words = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_COLLAPSE_RESTARTS") {
+        config.text.collapse_restarts = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_REPAIR_SENTENCE_BREAKS") {
+        config.text.repair_sentence_breaks = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_FORMAT_NUMBERS") {
+        config.text.format_numbers = parse_bool_env(&val);
+    }
 
     Ok(config)
 }
@@ -236,6 +365,38 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_level_post_process_is_flagged_with_its_real_home() {
+        let config = "[output]\nmode = \"type\"\n\n[post_process]\ncommand = \"sed 's/uh, //g'\"\n";
+        assert_eq!(
+            misplaced_sections(config),
+            vec![(
+                "post_process".to_string(),
+                "[output.post_process]".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn real_and_unknown_sections_are_not_flagged() {
+        // [audio] is a real top-level section even though [meeting.audio]
+        // also exists; an unknown section stays silently ignored as before.
+        let config = "[audio]\ndevice = \"default\"\n\n[output.post_process]\ncommand = \"cat\"\n\n[meeting.audio]\nloopback_device = \"auto\"\n\n[some_removed_section]\nx = 1\n";
+        assert!(misplaced_sections(config).is_empty());
+    }
+
+    #[test]
+    fn misplaced_nested_sections_name_their_parent() {
+        assert_eq!(
+            super::super::schema::misplaced_section_home("notification").as_deref(),
+            Some("[output.notification]")
+        );
+        assert_eq!(
+            super::super::schema::misplaced_section_home("whisper"),
+            None
+        );
+    }
 
     #[test]
     fn test_load_config_explicit_path() {
@@ -267,5 +428,85 @@ mod tests {
         assert_eq!(config.hotkey.key, "F12");
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
+    }
+
+    /// Helper binaries load the same config with none of the engine
+    /// features: the release voxtype-osd-quickshell is built with only
+    /// `osd-gtk4` and logs into the daemon's journal, because the daemon
+    /// spawns it. A capability check here therefore reported the
+    /// launcher's build, not the engine's, and told an ONNX user that
+    /// punctuation casing was missing while it ran. The engine-aware check
+    /// lives in `TextProcessor`, which only the transcribing binary builds.
+    #[test]
+    fn load_config_does_not_judge_punctuation_casing_by_the_loading_binary() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "engine = \"paraformer\"\n\n[text]\npunctuation_casing = true\n",
+        )
+        .unwrap();
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let config = tracing::subscriber::with_default(subscriber, || {
+            load_config(Some(&config_path)).unwrap()
+        });
+        assert!(config.text.punctuation_casing);
+
+        let logged = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !logged.contains("punctuation"),
+            "config loading must not report punctuation-casing capability: {logged}"
+        );
+    }
+
+    /// #646's user-facing contract: a config file with one broken section
+    /// still loads. Before the salvage path, `load_config` returned Err here
+    /// and the daemon refused to start, costing the user every setting they
+    /// had over one bad value.
+    #[test]
+    fn load_config_warns_but_succeeds_on_a_partially_bad_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+                [hotkey]
+                key = "F13"
+
+                [audio]
+                max_duration_secs = "not a number"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path))
+            .expect("a partially bad config must load, not refuse to start (#646)");
+        assert_eq!(config.hotkey.key, "F13", "the good section must survive");
+        assert_eq!(
+            config.audio.max_duration_secs,
+            Config::default().audio.max_duration_secs,
+            "the bad section falls back to its default"
+        );
     }
 }

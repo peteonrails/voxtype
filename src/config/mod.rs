@@ -13,6 +13,7 @@ mod hotkey;
 mod language;
 mod load;
 mod meeting;
+mod meeting_detect;
 mod notification;
 mod output;
 mod parse;
@@ -28,23 +29,28 @@ mod whisper;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
-    ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
-    TranscriptionEngine,
+    openvino_driver_packages, CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig,
+    OmnilingualConfig, OpenVinoConfig, ParaformerConfig, ParakeetConfig, ParakeetModelType,
+    SenseVoiceConfig, SonioxConfig, TranscriptionEngine,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
-pub use language::LanguageConfig;
+pub use language::{LanguageConfig, COHERE_LANGUAGES};
 pub use load::{load_config, save_config};
 pub use meeting::{
-    MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingSummaryConfig,
+    MeetingActionsConfig, MeetingAudioConfig, MeetingCalendarConfig, MeetingConfig,
+    MeetingDiarizationConfig, MeetingShareConfig, MeetingStartOptions, MeetingSummaryConfig,
+};
+pub use meeting_detect::{
+    default_apps as default_call_apps, CallAppPattern, CallEnd, MeetingDetectConfig,
+    CALL_END_CHOICES,
 };
 pub use notification::NotificationConfig;
 pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,
     OutputMode,
 };
-pub use profile::{PostProcessConfig, Profile};
-pub use root::Config;
+pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
+pub use root::{Config, OmarchyConfig, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;

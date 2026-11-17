@@ -134,6 +134,29 @@ test_binary_exists() {
     fi
 }
 
+test_gguf_worker_exists() {
+    if [[ -x /usr/lib/voxtype/voxtype-gguf-worker || -x /usr/bin/voxtype-gguf-worker ]]; then
+        log_pass "GGUF worker is installed beside voxtype"
+    else
+        log_fail "GGUF worker is missing from the package"
+        return 1
+    fi
+
+    # The vulkan and ONNX variants ship their own (Vulkan-capable) worker,
+    # installed beside the real binary: GPU ONNX binaries live in provider
+    # subdirectories, so look there as well as in the top-level directories.
+    local binary name
+    for binary in /usr/lib/voxtype/voxtype-vulkan /usr/lib/voxtype/voxtype-onnx-* \
+        /usr/lib/voxtype/*/voxtype-onnx-* /usr/bin/voxtype-vulkan /usr/bin/voxtype-onnx-*; do
+        [[ -f "$binary" && ! -L "$binary" && -x "$binary" ]] || continue
+        name="${binary##*/}"
+        if [[ ! -x "${binary%/*}/voxtype-gguf-worker-${name#voxtype-}" ]]; then
+            log_fail "GGUF worker voxtype-gguf-worker-${name#voxtype-} is missing or not executable beside $binary"
+            return 1
+        fi
+    done
+}
+
 # Test 3: Binary runs without SIGILL
 test_binary_runs() {
     log_info "Testing binary execution (checking for SIGILL)..."
@@ -242,6 +265,7 @@ main() {
 
     echo "--- Binary Tests ---"
     test_binary_exists
+    test_gguf_worker_exists
     test_binary_runs
     test_help_command
     test_binary_variant

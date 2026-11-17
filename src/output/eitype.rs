@@ -133,8 +133,8 @@ impl EitypeOutput {
         debug_args.push(format!("\"{}\"", text.chars().take(20).collect::<String>()));
         tracing::debug!("Running: {}", debug_args.join(" "));
 
+        push_text_arg(&mut cmd, text);
         let output = cmd
-            .arg(text)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
@@ -214,6 +214,13 @@ impl EitypeOutput {
 
         Ok(())
     }
+}
+
+/// Append the text to type after a `--` end-of-options separator, so text
+/// that starts with a dash (`- list item`) is typed rather than parsed as a
+/// flag. wtype and ydotool already guard their text the same way.
+fn push_text_arg(cmd: &mut Command, text: &str) {
+    cmd.arg("--").arg(text);
 }
 
 #[async_trait::async_trait]
@@ -377,6 +384,15 @@ mod tests {
         output.apply_layout_args(&mut cmd, &mut debug_args);
         assert!(debug_args.iter().any(|s| s == "-l de"));
         assert!(debug_args.iter().any(|s| s == "--variant nodeadkeys"));
+    }
+
+    #[test]
+    fn test_text_arg_follows_end_of_options_separator() {
+        let mut cmd = Command::new("eitype");
+        cmd.arg("-d").arg("5");
+        push_text_arg(&mut cmd, "- list item");
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args, ["-d", "5", "--", "- list item"]);
     }
 
     #[test]

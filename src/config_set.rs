@@ -55,6 +55,16 @@ pub enum ConfigSetError {
     #[error("{0}")]
     BadValue(#[from] ValueError),
 
+    #[error("{0}")]
+    IncompatibleModel(String),
+
+    /// An engine this binary was built without, with the fix for how this
+    /// copy of voxtype was installed (see `crate::setup::install_hint`).
+    #[error(
+        "engine '{engine}' is not compiled into this binary. To use it, {hint}. Config unchanged."
+    )]
+    EngineNotCompiled { engine: String, hint: String },
+
     #[error(
         "'{key}' belongs to the '{feature}' engine, which is not compiled into \
          this binary.\n  Install a variant that includes it (see \
@@ -79,6 +89,8 @@ impl ConfigSetError {
             | ConfigSetError::FeatureNotCompiled(_)
             | ConfigSetError::UnknownKey(_)
             | ConfigSetError::BadValue(_)
+            | ConfigSetError::IncompatibleModel(_)
+            | ConfigSetError::EngineNotCompiled { .. }
             | ConfigSetError::KeyFeatureNotCompiled { .. } => 2,
             ConfigSetError::Editor(_) => 1,
         }
@@ -100,6 +112,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gguf",
     "openvino",
 ];
 
@@ -134,13 +147,16 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     match engine {
         TranscriptionEngine::Whisper => true,
         TranscriptionEngine::Soniox => true,
-        TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
+        TranscriptionEngine::Parakeet => {
+            cfg!(any(feature = "parakeet", feature = "parakeet-gguf"))
+        }
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),
         TranscriptionEngine::Paraformer => cfg!(feature = "paraformer"),
         TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
-        TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
+        TranscriptionEngine::Cohere => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
+        TranscriptionEngine::Gguf => cfg!(feature = "gguf"),
         TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
     }
 }
@@ -150,8 +166,20 @@ pub fn engine_feature_compiled(name: &str) -> bool {
 /// Validates the name and the compiled-feature gate before touching disk.
 /// If the file doesn't exist, an empty document is created and `engine = ".."`
 /// is written at the root. If it exists, `toml_edit` updates only the
-/// `engine` key, preserving comments and other fields.
+/// `engine` key and seeds the model only when absent, preserving explicit
+/// models, comments and other fields.
 pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> {
+    set_engine_with_models(path, name, &crate::config::Config::models_dir())
+}
+
+/// `set_engine` with the directory an engine switch searches for an installed
+/// model to adopt. Tests pass a tempdir so the outcome does not depend on
+/// which models the machine running them happens to have.
+fn set_engine_with_models(
+    path: PathBuf,
+    name: &str,
+    models_dir: &std::path::Path,
+) -> Result<PathBuf, ConfigSetError> {
     if parse_engine(name).is_none() {
         return Err(ConfigSetError::UnknownEngine(name.to_string()));
     }
@@ -160,7 +188,151 @@ pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> 
     }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
+    if matches!(name, "parakeet" | "cohere") {
+        let retained = editor.get_string(name, "model");
+        let model =
+            crate::model_selection::select_engine_model_in(name, retained.as_deref(), models_dir)
+                .map_err(ConfigSetError::IncompatibleModel)?;
+        crate::model_selection::validate_mode(
+            name,
+            &model,
+            editor.get_bool(name, "streaming").unwrap_or(false),
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+        crate::model_selection::validate_ready(name, &model)
+            .map_err(ConfigSetError::IncompatibleModel)?;
+        editor.set_string(name, "model", &model);
+    }
+    if name == "gguf" {
+        let retained = editor.get_string("gguf", "model");
+        let model =
+            crate::model_selection::select_engine_model_in("gguf", retained.as_deref(), models_dir)
+                .map_err(ConfigSetError::IncompatibleModel)?;
+        let metadata =
+            crate::setup::model::find_pending_gguf_model(&model).filter(|entry| entry.runnable);
+        let architecture = metadata
+            .map(|entry| entry.arch.to_string())
+            .or_else(|| editor.get_string("gguf", "architecture"))
+            .ok_or_else(|| ConfigSetError::IncompatibleModel("A custom GGUF model requires gguf.architecture before switching engines. Config unchanged.".into()))?;
+        let language = retained
+            .as_deref()
+            .filter(|retained| *retained == model)
+            .and_then(|_| editor.get_string("gguf", "language"))
+            .or_else(|| {
+                metadata
+                    .and_then(|entry| entry.languages.first().copied())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "auto".into());
+        editor.set_string("gguf", "model", &model);
+        editor.set_string("gguf", "architecture", &architecture);
+        editor.set_string("gguf", "language", &language);
+        crate::model_selection::validate_gguf_choice(
+            &model,
+            &architecture,
+            &language,
+            editor.get_bool("gguf", "streaming").unwrap_or(false),
+        )
+        .and_then(|()| crate::model_selection::validate_ready("gguf", &model))
+        .map_err(ConfigSetError::IncompatibleModel)?;
+    }
     editor.set_string("", "engine", name);
+    let default = crate::model_catalog::default_model(name);
+    if !default.is_empty() && editor.get_string(name, "model").is_none() {
+        editor.set_string(name, "model", default);
+    }
+    editor.save()?;
+    Ok(editor.path().to_path_buf())
+}
+
+/// Commit an explicit installed model and engine in one validated save.
+/// Browsing and download-only operations must never call this entry point.
+pub fn select_model(
+    path: PathBuf,
+    engine: &str,
+    model: &str,
+    language: Option<&str>,
+) -> Result<PathBuf, ConfigSetError> {
+    select_model_in(
+        path,
+        engine,
+        model,
+        language,
+        &crate::config::Config::models_dir(),
+    )
+}
+
+/// `select_model` against an explicit models directory, so tests do not
+/// depend on which models the machine running them has installed.
+fn select_model_in(
+    path: PathBuf,
+    engine: &str,
+    model: &str,
+    language: Option<&str>,
+    models_dir: &std::path::Path,
+) -> Result<PathBuf, ConfigSetError> {
+    // Every engine `config set engine` offers has a downloadable model.
+    // Soniox is a cloud engine with no installed model to select.
+    let Some(parsed) = parse_engine(engine) else {
+        return Err(ConfigSetError::UnknownEngine(engine.to_string()));
+    };
+    if !ENGINE_NAMES.contains(&engine) {
+        return Err(ConfigSetError::IncompatibleModel(format!(
+            "select-model selects a downloaded model, and {engine} has none. Use `voxtype config set engine {engine}`. Config unchanged."
+        )));
+    }
+    if language.is_some() && engine != "gguf" {
+        return Err(ConfigSetError::IncompatibleModel(
+            "--language is only supported for a GGUF selection. Config unchanged.".into(),
+        ));
+    }
+    if !engine_feature_compiled(engine) {
+        let hint = crate::setup::install_hint::hint(crate::setup::install_hint::Need::Feature(
+            parsed.name(),
+        ));
+        return Err(ConfigSetError::EngineNotCompiled {
+            engine: engine.to_string(),
+            hint: hint.to_string(),
+        });
+    }
+    crate::model_selection::validate_ready_in(engine, model, models_dir)
+        .and_then(|()| {
+            if matches!(engine, "gguf" | "parakeet" | "cohere") {
+                Ok(())
+            } else {
+                crate::model_selection::validate_installed_in(engine, model, models_dir)
+            }
+        })
+        .and_then(|()| crate::model_selection::validate_worker(engine, model))
+        .map_err(ConfigSetError::IncompatibleModel)?;
+
+    let mut editor = ConfigEditor::load_from_path(path)?;
+    editor.set_string(engine, "model", model);
+    if let Some(language) = language {
+        editor.set_string("gguf", "language", language);
+    }
+    if engine == "gguf" {
+        let metadata = std::path::Path::new(model)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(crate::setup::model::find_pending_gguf_model);
+        if let Some(metadata) = metadata {
+            editor.set_string("gguf", "architecture", metadata.arch);
+            // Keep explicit compatible language hints, including when switching
+            // checkpoints. An incompatible explicit hint is rejected below.
+            if editor.get_string("gguf", "language").is_none() {
+                editor.set_string(
+                    "gguf",
+                    "language",
+                    metadata.languages.first().copied().unwrap_or("auto"),
+                );
+            }
+        }
+    }
+    editor.set_string("", "engine", engine);
+    let candidate = editor.candidate_config()?;
+    crate::model_selection::validate_config_backend(&candidate)
+        .map_err(ConfigSetError::IncompatibleModel)?;
     editor.save()?;
     Ok(editor.path().to_path_buf())
 }
@@ -211,8 +383,54 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
     let spec = found.spec();
     let value = schema::validate_value(spec, raw)?;
 
+    if let Some(engine) = key
+        .strip_suffix(".model")
+        .filter(|e| matches!(*e, "parakeet" | "cohere"))
+    {
+        crate::model_selection::validate_ready(engine, raw)
+            .map_err(ConfigSetError::IncompatibleModel)?;
+    }
+
     let mut editor = ConfigEditor::load_from_path(path)?;
     schema::apply(&mut editor, &found, &value);
+    if key == "gguf.model" {
+        if let Some(metadata) =
+            crate::setup::model::find_pending_gguf_model(raw).filter(|entry| entry.runnable)
+        {
+            editor.set_string("gguf", "architecture", metadata.arch);
+            editor.set_string(
+                "gguf",
+                "language",
+                metadata.languages.first().copied().unwrap_or("auto"),
+            );
+        }
+    }
+    if matches!(key, "parakeet.model" | "parakeet.streaming") {
+        let model = editor
+            .get_string("parakeet", "model")
+            .unwrap_or_else(|| crate::model_catalog::default_model("parakeet").into());
+        crate::model_selection::validate_mode(
+            "parakeet",
+            &model,
+            editor.get_bool("parakeet", "streaming").unwrap_or(false),
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+    }
+    if key.starts_with("gguf.") {
+        let candidate = editor.candidate_config()?;
+        let gguf = candidate.gguf.as_ref().ok_or_else(|| {
+            ConfigSetError::IncompatibleModel("[gguf] config section is missing".into())
+        })?;
+        crate::model_selection::validate_gguf_choice(
+            &gguf.model,
+            &gguf.architecture,
+            &gguf.language,
+            gguf.streaming,
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+        crate::model_selection::validate_ready("gguf", &gguf.model)
+            .map_err(ConfigSetError::IncompatibleModel)?;
+    }
     editor.save()?;
 
     Ok(SetOutcome {
@@ -280,6 +498,63 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gguf")]
+    fn generic_gguf_streaming_rejection_preserves_config_bytes() {
+        let original = r#"# keep this exact comment
+engine = "gguf"
+
+[gguf]
+model = "/models/moonshine-streaming-small-Q8_0.gguf"
+architecture = "moonshine_streaming"
+language = "en"
+streaming = false # offline is intentional
+"#;
+        let (_dir, path) = temp_config(original);
+        let error = set_key(path.clone(), "gguf.streaming", "true").unwrap_err();
+        assert!(error.to_string().contains("offline only"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    #[cfg(feature = "gguf")]
+    fn generic_gguf_missing_weights_preserve_config_bytes() {
+        let original = r#"# explicit legacy choice stays untouched
+engine = "whisper"
+[whisper]
+model = "base.en"
+[gguf]
+model = "/nonexistent/voxtype/Qwen3-ASR-0.6B-Q8_0.gguf"
+architecture = "qwen3_asr"
+language = "en"
+"#;
+        let (_dir, path) = temp_config(original);
+        let error = set_engine(path.clone(), "gguf").unwrap_err();
+        assert!(
+            error.to_string().contains("missing or incomplete"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    #[cfg(feature = "gguf")]
+    fn generic_gguf_unsupported_backend_preserves_config_bytes() {
+        let original = r#"engine = "whisper"
+[whisper]
+model = "base.en"
+[gguf]
+model = "/models/Qwen3-ASR-0.6B-Q8_0.gguf"
+architecture = "qwen3_asr"
+language = "en"
+gguf_backend = "cpu"
+"#;
+        let (_dir, path) = temp_config(original);
+        let error = set_key(path.clone(), "gguf.gguf_backend", "opencl").unwrap_err();
+        assert!(error.to_string().contains("not a valid"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
     fn parse_engine_accepts_known_names() {
         for engine in TranscriptionEngine::iter() {
             let name = engine.name();
@@ -318,6 +593,110 @@ mod tests {
     #[test]
     fn engine_feature_unknown_returns_false() {
         assert!(!engine_feature_compiled("not-a-real-engine"));
+    }
+
+    #[test]
+    fn explicit_unsupported_checkpoint_is_rejected_without_writing() {
+        for (engine, legacy, gguf_only) in [
+            (
+                "parakeet",
+                "parakeet-tdt-0.6b-v2",
+                cfg!(feature = "parakeet-gguf") && !cfg!(feature = "parakeet"),
+            ),
+            (
+                "cohere",
+                "cohere-transcribe-int8",
+                cfg!(feature = "cohere-gguf") && !cfg!(feature = "cohere"),
+            ),
+        ] {
+            if !gguf_only {
+                continue;
+            }
+            let source = "# preserve\nengine = \"whisper\"\n";
+            let (_dir, path) = temp_config(source);
+            let result = set_key(path.clone(), &format!("{engine}.model"), legacy);
+            assert!(
+                result.is_err(),
+                "unsupported explicit {engine} ONNX selection must fail"
+            );
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains("ONNX") && message.contains("GGUF"),
+                "{message}"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn first_engine_selection_requires_an_installed_compatible_model() {
+        for engine in ["cohere", "parakeet"] {
+            if !engine_feature_compiled(engine) {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let models = dir.path().join("models");
+            let error = set_engine_with_models(path.clone(), engine, &models).unwrap_err();
+            assert!(
+                matches!(error, ConfigSetError::IncompatibleModel(_)),
+                "{engine}: {error}"
+            );
+            assert!(!path.exists(), "failed selection must not create config");
+        }
+    }
+
+    #[test]
+    fn selecting_existing_legacy_engine_preserves_bytes() {
+        for (engine, model) in [
+            ("cohere", "cohere-transcribe-q4f16"),
+            ("parakeet", "/models/parakeet-migraphx"),
+        ] {
+            if !engine_feature_compiled(engine) {
+                continue;
+            }
+            let source = format!("# Keep my legacy setup\nengine = \"{engine}\"\n\n[{engine}]\nmodel = \"{model}\" # pinned\nthreads = 6\non_demand_loading = true\n");
+            let (_dir, path) = temp_config(&source);
+            let result = set_engine(path.clone(), engine);
+            if let Err(error) = result {
+                assert!(matches!(error, ConfigSetError::IncompatibleModel(_)));
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+            assert_eq!(
+                crate::config::load_config(Some(&path))
+                    .unwrap()
+                    .model_name(),
+                model
+            );
+        }
+    }
+
+    #[test]
+    fn schema_setting_seeds_same_default_as_engine_selection() {
+        for engine in ["cohere", "parakeet"] {
+            if !engine_feature_compiled(engine) {
+                continue;
+            }
+            let (_dir, path) = temp_config("");
+            set_key(path.clone(), &format!("{engine}.threads"), "2").unwrap();
+            let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                doc[engine]["model"].as_str(),
+                Some(crate::model_catalog::default_model(engine))
+            );
+        }
+    }
+
+    #[test]
+    fn engine_struct_defaults_agree_with_first_selection() {
+        assert_eq!(
+            crate::config::CohereConfig::default().model,
+            crate::model_catalog::default_model("cohere")
+        );
+        assert_eq!(
+            crate::config::ParakeetConfig::default().model,
+            crate::model_catalog::default_model("parakeet")
+        );
     }
 
     #[test]
@@ -457,6 +836,66 @@ mod tests {
         assert_eq!(
             cfg.whisper.initial_prompt.as_deref(),
             Some("Voxtype, Omarchy")
+        );
+    }
+
+    /// `echo_cancel` takes its current names, and the names early 1.3.0
+    /// test builds used ("aec", "off") are written as those, not refused;
+    /// a config still holding an old name loads and means the same.
+    #[test]
+    fn echo_cancel_takes_webrtc_and_still_reads_the_old_names() {
+        use crate::audio::echo_cancel::Mode;
+        let (_dir, path) = full_config();
+        let key = "meeting.audio.echo_cancel";
+        for value in ["webrtc", "gtcrn", "disabled", "auto"] {
+            set_key(path.clone(), key, value).unwrap();
+            assert_eq!(reload(&path).meeting.audio.echo_cancel, value);
+        }
+        let out = set_key(path.clone(), key, "aec").unwrap();
+        assert_eq!(out.value, TypedValue::Str("webrtc".to_string()));
+        assert_eq!(reload(&path).meeting.audio.echo_cancel, "webrtc");
+        set_key(path.clone(), key, "off").unwrap();
+        assert_eq!(reload(&path).meeting.audio.echo_cancel, "disabled");
+        assert!(set_key(path.clone(), key, "loud").is_err());
+
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            text.replace("echo_cancel = \"disabled\"", "echo_cancel = \"aec\""),
+        )
+        .unwrap();
+        let cfg = reload(&path);
+        assert_eq!(cfg.meeting.audio.echo_cancel, "aec");
+        assert_eq!(Mode::parse(&cfg.meeting.audio.echo_cancel), Mode::Webrtc);
+    }
+
+    /// The OSD styling keys (#501) must be reachable through `config set`,
+    /// not just by hand-editing the TOML: a style package path, the
+    /// development plugin_path (set and unset), and the nested [osd.frame]
+    /// table.
+    #[test]
+    fn set_key_covers_the_osd_styling_keys() {
+        let (_dir, path) = full_config();
+
+        set_key(path.clone(), "osd.style", "~/.config/voxtype/osd/aegis-hud").unwrap();
+        set_key(path.clone(), "osd.plugin_path", "~/dev/my-style").unwrap();
+        set_key(path.clone(), "osd.frame.border", "accent").unwrap();
+        set_key(path.clone(), "osd.frame.glow", "false").unwrap();
+
+        let cfg = reload(&path);
+        assert_eq!(cfg.osd.style, "~/.config/voxtype/osd/aegis-hud");
+        assert_eq!(
+            cfg.osd.plugin_path.as_deref(),
+            Some(std::path::Path::new("~/dev/my-style"))
+        );
+        assert_eq!(cfg.osd.frame.border, "accent");
+        assert!(!cfg.osd.frame.glow);
+
+        unset_key(path.clone(), "osd.plugin_path").unwrap();
+        let cfg = reload(&path);
+        assert_eq!(
+            cfg.osd.plugin_path, None,
+            "unset must fall back to the serde default"
         );
     }
 
@@ -639,5 +1078,285 @@ mod tests {
         let cfg = reload(&path);
         assert_eq!(cfg.osd.opacity, 0.5);
         assert_eq!(cfg.hotkey.key, "HOME", "existing settings must survive");
+    }
+
+    /// The macOS menu bar (src/menubar.rs) routes its three settings through
+    /// this module. That file is behind `#[cfg(target_os = "macos")]`, so
+    /// nothing on a Linux CI runner compiles it and no test there can call
+    /// those functions. These cases stand in for it: they assert the exact
+    /// key/value pairs the menu sends are accepted, so a schema change that
+    /// would silently turn a menu item into a no-op fails here instead of on
+    /// a user's Mac.
+    ///
+    /// Before #576 the menu bar edited config.toml with regular expressions
+    /// and corrupted it. The fix was to delegate here; this is the part of
+    /// that fix a Linux runner can actually verify.
+    #[test]
+    fn menubar_settings_are_accepted() {
+        let original = r#"engine = "whisper"
+
+[hotkey]
+key = "SCROLLLOCK"
+mode = "push_to_talk"
+
+# How transcribed text reaches the focused window.
+[output]
+mode = "type"
+type_delay_ms = 5
+"#;
+
+        for (key, value) in [
+            ("output.mode", "type"),
+            ("output.mode", "clipboard"),
+            ("output.mode", "paste"),
+            ("output.mode", "file"),
+            ("hotkey.mode", "push_to_talk"),
+            ("hotkey.mode", "toggle"),
+        ] {
+            let (_dir, path) = temp_config(original);
+            set_key(path.clone(), key, value)
+                .unwrap_or_else(|e| panic!("the menu bar sets {key} = {value}, rejected: {e}"));
+
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("[output]") && text.contains("[hotkey]"),
+                "setting {key} destroyed a section header:\n{text}"
+            );
+            assert!(
+                text.contains("# How transcribed text reaches the focused window."),
+                "setting {key} dropped comments:\n{text}"
+            );
+
+            let cfg = crate::config::load_config(Some(&path))
+                .unwrap_or_else(|e| panic!("config unloadable after setting {key}: {e}"));
+            assert_eq!(
+                cfg.output.type_delay_ms, 5,
+                "setting {key} disturbed an unrelated key"
+            );
+        }
+    }
+
+    /// The menu bar's engine picker uses the dedicated `set_engine` entry
+    /// point, and passes `TranscriptionEngine::name()` straight through.
+    #[test]
+    fn menubar_engine_names_are_accepted() {
+        for name in ENGINE_NAMES {
+            let (_dir, path) = temp_config("[hotkey]\nkey = \"HOME\"\n");
+
+            // An engine whose Cargo feature is absent is refused on purpose:
+            // writing it would leave a config the daemon cannot start with.
+            if !engine_feature_compiled(name) {
+                assert!(
+                    set_engine(path.clone(), name).is_err(),
+                    "{name} is not compiled in and must be refused, not written"
+                );
+                continue;
+            }
+
+            let original = fs::read(&path).unwrap();
+            if let Err(error) = set_engine(path.clone(), name) {
+                assert!(
+                    matches!(error, ConfigSetError::IncompatibleModel(_))
+                        && matches!(*name, "parakeet" | "cohere" | "gguf"),
+                    "{error}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), original);
+                continue;
+            }
+
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                !text.contains("[\"\"]"),
+                "engine must be a root key, not a table named \"\":\n{text}"
+            );
+
+            let cfg = crate::config::load_config(Some(&path)).unwrap();
+            assert_eq!(cfg.engine.name(), *name);
+        }
+    }
+
+    /// The format-update transaction generalized `select-model` to parakeet
+    /// and cohere. Every refusal must leave the file byte-identical.
+    #[test]
+    fn select_model_refusals_preserve_config_bytes() {
+        let original = "# mine\nengine = \"parakeet\"\n\n[parakeet]\nmodel = \"parakeet-tdt-0.6b-v3\" # keep\n";
+        let (_dir, path) = temp_config(original);
+        let models = tempfile::tempdir().unwrap();
+        for (engine, model, language) in [
+            ("whisper", "base.en", None),
+            ("whisper", "base.en", Some("en")),
+            ("moonshine", "base", None),
+            ("soniox", "stt-rt-preview", None),
+            ("nonesuch", "base", None),
+            ("parakeet", "parakeet-ultra-Q8_0.gguf", Some("en")),
+            // Not installed under any models directory a test can see.
+            ("parakeet", "/nonexistent/parakeet-ultra-Q8_0.gguf", None),
+            (
+                "cohere",
+                "/nonexistent/cohere-transcribe-03-2026-Q4_K_M.gguf",
+                None,
+            ),
+        ] {
+            let error =
+                select_model_in(path.clone(), engine, model, language, models.path()).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{engine} {model}: {error}");
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                original,
+                "{engine} {model}"
+            );
+        }
+    }
+
+    /// Engines outside the GGUF format-update path, each with its default
+    /// catalog model: what the Settings panel's Use offers for them.
+    const OTHER_ENGINES: &[&str] = &[
+        "whisper",
+        "moonshine",
+        "sensevoice",
+        "paraformer",
+        "dolphin",
+        "omnilingual",
+        "openvino",
+    ];
+
+    /// Lay down the files the cheap installed-model check looks for.
+    fn install_model(models: &std::path::Path, engine: &str, model: &str) {
+        if engine == "whisper" {
+            fs::write(
+                models.join(format!("ggml-{model}.bin")),
+                b"lmgg\x00\x01\x02\x03",
+            )
+            .unwrap();
+            return;
+        }
+        let dir_name = crate::model_catalog::model_dir_name(engine, model);
+        let dir = models.join(&dir_name);
+        fs::create_dir_all(&dir).unwrap();
+        let files: Vec<String> = if engine == "openvino" {
+            [
+                "openvino_encoder_model.xml",
+                "openvino_encoder_model.bin",
+                "openvino_decoder_model.xml",
+                "openvino_decoder_model.bin",
+                "tokenizer.json",
+                "preprocessor_config.json",
+            ]
+            .map(String::from)
+            .to_vec()
+        } else {
+            crate::setup::model::expected_file_names(engine, &dir_name)
+        };
+        assert!(!files.is_empty(), "{engine} {model} has no expected files");
+        for name in files {
+            let file = dir.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"x").unwrap();
+        }
+    }
+
+    const PARAKEET_CONFIG: &str =
+        "# mine\nengine = \"parakeet\" # keep\n\n[parakeet]\nmodel = \"parakeet-tdt-0.6b-v3\"\n";
+
+    /// Use on an installed model of any compiled engine switches to it in one
+    /// write: engine and model together, comments kept.
+    #[test]
+    fn select_model_switches_to_every_compiled_engine() {
+        for &engine in OTHER_ENGINES
+            .iter()
+            .filter(|engine| engine_feature_compiled(engine))
+        {
+            let model = crate::model_catalog::default_model(engine);
+            let (_dir, path) = temp_config(PARAKEET_CONFIG);
+            let models = tempfile::tempdir().unwrap();
+            install_model(models.path(), engine, model);
+
+            select_model_in(path.clone(), engine, model, None, models.path())
+                .unwrap_or_else(|e| panic!("{engine} {model}: {e}"));
+
+            let config = reload(&path);
+            assert_eq!(config.engine.name(), engine);
+            assert_eq!(config.model_name(), model, "{engine}");
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains("# mine"), "{engine}: {text}");
+            assert!(text.contains("parakeet-tdt-0.6b-v3"), "{engine}: {text}");
+        }
+    }
+
+    /// A compiled engine whose model is not on disk is refused before
+    /// anything is written, with the download command to fix it.
+    #[test]
+    fn select_model_refuses_a_missing_model_of_a_compiled_engine() {
+        for &engine in OTHER_ENGINES
+            .iter()
+            .filter(|engine| engine_feature_compiled(engine))
+        {
+            let model = crate::model_catalog::default_model(engine);
+            let (_dir, path) = temp_config(PARAKEET_CONFIG);
+            let models = tempfile::tempdir().unwrap();
+
+            let error = select_model_in(path.clone(), engine, model, None, models.path())
+                .expect_err(engine);
+            assert!(
+                matches!(error, ConfigSetError::IncompatibleModel(_)),
+                "{engine}: {error}"
+            );
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains("missing"), "{engine}: {error}");
+            assert!(
+                error.to_string().contains("voxtype setup --download"),
+                "{engine}: {error}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), PARAKEET_CONFIG);
+        }
+    }
+
+    /// An engine this binary lacks is refused with the install hint, even
+    /// when its model files are on disk.
+    #[test]
+    fn select_model_refuses_an_engine_not_compiled_in() {
+        for &engine in OTHER_ENGINES
+            .iter()
+            .filter(|engine| !engine_feature_compiled(engine))
+        {
+            let model = crate::model_catalog::default_model(engine);
+            let (_dir, path) = temp_config(PARAKEET_CONFIG);
+            let models = tempfile::tempdir().unwrap();
+            install_model(models.path(), engine, model);
+
+            let error = select_model_in(path.clone(), engine, model, None, models.path())
+                .expect_err(engine);
+            assert!(
+                matches!(error, ConfigSetError::EngineNotCompiled { .. }),
+                "{engine}: {error}"
+            );
+            assert_eq!(error.exit_code(), 2);
+            let message = error.to_string();
+            assert!(
+                message.contains("not compiled into this binary. To use it, "),
+                "{engine}: {message}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), PARAKEET_CONFIG);
+        }
+    }
+
+    /// A custom Whisper checkpoint is a path, as the transcriber resolves it.
+    #[test]
+    fn select_model_accepts_a_custom_whisper_file() {
+        let (_dir, path) = temp_config(PARAKEET_CONFIG);
+        let models = tempfile::tempdir().unwrap();
+        let custom = models.path().join("my-finetune.bin");
+        let custom = custom.to_str().unwrap();
+
+        let error = select_model_in(path.clone(), "whisper", custom, None, models.path())
+            .expect_err("missing file");
+        assert!(error.to_string().contains("missing"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), PARAKEET_CONFIG);
+
+        fs::write(custom, b"lmgg\x00\x01\x02\x03").unwrap();
+        select_model_in(path.clone(), "whisper", custom, None, models.path()).unwrap();
+        let config = reload(&path);
+        assert_eq!(config.engine.name(), "whisper");
+        assert_eq!(config.whisper.model, custom);
     }
 }

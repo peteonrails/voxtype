@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+/target-*/
 /dist
 
 # Cached prebuilt downloads (e.g. Microsoft ONNX Runtime for macOS builds)
@@ -28,6 +29,8 @@
 # Exception: test fixtures are intentionally committed
 !tests/fixtures/vad/*.wav
 !tests/fixtures/sensevoice/*.wav
+# The built-in recording announcement ships in the binary
+!assets/sounds/*.wav
 
 # Claude Code
 .claude/settings.local.json
@@ -56,3 +59,6 @@ website/docs
 # Local agent worktrees and ephemeral plans
 .claude/worktrees/
 PLAN-*.md
+
+# Python bytecode from the plugin and script tests
+__pycache__/

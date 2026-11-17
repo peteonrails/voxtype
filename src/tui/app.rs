@@ -139,38 +139,18 @@ fn build_inventory(force_package_mode: bool) -> Inventory {
         if inv.package_lib_dir.is_none() {
             inv.package_lib_dir = Some(Path::new(binary::LIB_DIR).to_path_buf());
         }
-        // If `enumerate_installed()` was skipped because we resolved as Source,
-        // populate the matrix now so cells render with real on-disk state.
+        // Source resolution skips the variant matrix; build it from what is
+        // on disk so the cells render real state.
         if inv.variants.is_empty() {
-            inv.variants = Variant::ALL
-                .iter()
-                .map(|&v| binary::VariantStatus {
-                    variant: v,
-                    binary_name: v.binary_name().to_string(),
-                    installed: Path::new(binary::LIB_DIR).join(v.binary_name()).exists(),
-                    runs_on_this_cpu: variant_runs_on_cpu(v, &inv.cpu),
-                    gpu_available: variant_gpu_available(v, &inv.gpus),
-                    active: inv.active_variant == Some(v),
-                })
-                .collect();
+            inv.variants = binary::variant_statuses(
+                Path::new(binary::LIB_DIR),
+                &inv.cpu,
+                &inv.gpus,
+                inv.active_variant,
+            );
         }
     }
     inv
-}
-
-fn variant_runs_on_cpu(v: Variant, cpu: &binary::Cpu) -> bool {
-    match v.acceleration() {
-        Acceleration::Avx512 | Acceleration::Cuda | Acceleration::Migraphx => cpu.avx512,
-        _ => cpu.avx2,
-    }
-}
-
-fn variant_gpu_available(v: Variant, g: &binary::Gpus) -> bool {
-    match v.acceleration() {
-        Acceleration::Cuda => g.nvidia,
-        Acceleration::Migraphx => g.amd,
-        _ => true,
-    }
 }
 
 impl App {
@@ -295,9 +275,18 @@ impl App {
         match self.current_section {
             Section::Engine => self.engine.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Text => self
+                .text
+                .as_ref()
+                .is_some_and(|s| s.editing.is_some() || s.model_edit.is_some()),
             Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Osd => self.osd.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Meeting => self
+                .meeting
+                .as_ref()
+                .is_some_and(|s| s.form.editing.is_some()),
             _ => false,
         }
     }
@@ -533,6 +522,7 @@ fn detect_missing_model() -> Option<MissingModel> {
         // Cohere — checked but model layout differs by rc/0.7.0; skip the
         // disk probe rather than emit a false-positive missing warning.
         config::TranscriptionEngine::Cohere => return None,
+        config::TranscriptionEngine::Gguf => return None,
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
         // OpenVINO models are stored as multi-file IR directories; skip the

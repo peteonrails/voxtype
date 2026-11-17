@@ -18,7 +18,7 @@ use crate::config::MoonshineConfig;
 use crate::error::TranscribeError;
 use ort::session::Session;
 use ort::value::Tensor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
@@ -541,6 +541,10 @@ impl MoonshineTranscriber {
 }
 
 impl Transcriber for MoonshineTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -626,27 +630,13 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
          - {}\n  \
          - {}\n  \
          - {}\n\n\
-         Run 'voxtype setup model' to download, or manually from:\n  \
-         tiny: https://huggingface.co/onnx-community/moonshine-tiny-ONNX\n  \
-         base: https://huggingface.co/onnx-community/moonshine-base-ONNX",
+         Run: {}",
         model,
         model_path.display(),
         cwd_path.display(),
-        local_models_path.display()
+        local_models_path.display(),
+        crate::model_catalog::download_command("moonshine", model),
     )))
-}
-
-/// Detect whether a model directory contains quantized models
-#[allow(dead_code)]
-fn has_quantized_models(path: &Path) -> bool {
-    path.join("encoder_model_quantized.onnx").exists()
-        && path.join("decoder_model_merged_quantized.onnx").exists()
-}
-
-/// Detect whether a model directory contains full-precision models
-#[allow(dead_code)]
-fn has_full_models(path: &Path) -> bool {
-    path.join("encoder_model.onnx").exists() && path.join("decoder_model_merged.onnx").exists()
 }
 
 #[cfg(test)]
@@ -674,32 +664,6 @@ mod tests {
         let resolved = resolve_model_path(model_path.to_str().unwrap());
         assert!(resolved.is_ok());
         assert_eq!(resolved.unwrap(), model_path);
-    }
-
-    #[test]
-    fn test_has_quantized_models() {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path();
-
-        assert!(!has_quantized_models(path));
-
-        fs::write(path.join("encoder_model_quantized.onnx"), b"dummy").unwrap();
-        fs::write(path.join("decoder_model_merged_quantized.onnx"), b"dummy").unwrap();
-
-        assert!(has_quantized_models(path));
-    }
-
-    #[test]
-    fn test_has_full_models() {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path();
-
-        assert!(!has_full_models(path));
-
-        fs::write(path.join("encoder_model.onnx"), b"dummy").unwrap();
-        fs::write(path.join("decoder_model_merged.onnx"), b"dummy").unwrap();
-
-        assert!(has_full_models(path));
     }
 
     #[test]

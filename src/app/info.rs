@@ -2,8 +2,9 @@
 //! binary variants, audio devices, model catalogs, and compiled engines.
 //!
 //! The `--json` forms exist so a settings UI can populate its pickers without
-//! scraping human-readable output. `info devices` and `info models` back the
-//! `dynamic_enum` key types in `voxtype config schema --json`.
+//! scraping human-readable output. `info devices`, `info models`, and
+//! `info styles` back the `dynamic_enum` key types in
+//! `voxtype config schema --json`.
 
 use voxtype::audio::devices;
 use voxtype::config::Config;
@@ -33,6 +34,7 @@ pub(crate) fn run_info_command(action: InfoAction, config: &Config) -> anyhow::R
         } => run_models(json, engine.as_deref(), verify)?,
         InfoAction::Accel { json } => run_accel(json)?,
         InfoAction::Engines { json } => run_engines(json, config)?,
+        InfoAction::Styles { json } => run_styles(json, config)?,
     }
     Ok(())
 }
@@ -71,7 +73,7 @@ fn run_accel(json: bool) -> anyhow::Result<()> {
 }
 
 fn run_devices(json: bool) -> anyhow::Result<()> {
-    let found = devices::input_devices();
+    let found = devices::input_devices().map_err(|e| anyhow::anyhow!("{e}"))?;
     if json {
         println!("{}", serde_json::to_string_pretty(&found)?);
         return Ok(());
@@ -94,6 +96,9 @@ struct ModelStatus {
     download_arg: Option<String>,
     /// Only populated with `--verify`.
     verification: Option<ModelVerification>,
+    /// An ONNX checkpoint in an engine that also has GGUF models: model lists
+    /// show it only while it is the configured model.
+    legacy: bool,
 }
 
 impl ModelStatus {
@@ -110,6 +115,7 @@ impl ModelStatus {
             health,
             download_arg: model_catalog::download_arg(engine, name),
             verification,
+            legacy: voxtype::model_upgrade::is_legacy_model(engine, name),
         }
     }
 
@@ -158,7 +164,21 @@ impl ModelStatus {
     fn json(&self) -> serde_json::Value {
         let mut o = serde_json::Map::new();
         o.insert("name".into(), serde_json::json!(self.name));
+        if let Some(metadata) = voxtype::setup::model::handy_pending_gguf_models()
+            .iter()
+            .find(|entry| entry.name == self.name)
+        {
+            o.insert("languages".into(), serde_json::json!(metadata.languages));
+            o.insert("architecture".into(), serde_json::json!(metadata.arch));
+        }
+        if let Some((license, url)) = voxtype::setup::model::gguf_license(self.name) {
+            o.insert("license".into(), serde_json::json!(license));
+            o.insert("license_url".into(), serde_json::json!(url));
+        }
         o.insert("installed".into(), serde_json::json!(self.installed()));
+        if self.legacy {
+            o.insert("legacy".into(), serde_json::json!(true));
+        }
         // `name` is the config value; the argument that downloads it is not
         // always the same string, and for five engines there is no such
         // argument at all. Spelling both out keeps a UI from building
@@ -215,7 +235,7 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
     let checked: Vec<(&str, Vec<ModelStatus>)> = engines
         .iter()
         .map(|engine| {
-            let statuses = model_catalog::model_catalog(engine)
+            let statuses = model_catalog::supported_model_catalog(engine)
                 .into_iter()
                 .map(|name| ModelStatus::check(engine, name, verify))
                 .collect();
@@ -238,6 +258,21 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
         let doc = serde_json::json!({
             "engines": serde_json::Value::Object(map),
             "verified": verify,
+            "pending_gguf": voxtype::setup::model::handy_pending_gguf_models()
+                .iter()
+                .map(|model| serde_json::json!({
+                    "name": model.name,
+                    "architecture": model.arch,
+                    "languages": model.languages,
+                    "origin_repo": model.origin_repo,
+                    "origin_revision": model.origin_revision,
+                    "size": model.size,
+                    "sha256": model.sha256,
+                    "r2_dir": model.r2_dir,
+                    "runnable": model.runnable,
+                    "license_gated": model.license_gated,
+                }))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(());
@@ -333,6 +368,52 @@ fn run_engines(json: bool, config: &Config) -> anyhow::Result<()> {
     }
     println!();
     println!("Switch with: voxtype config set engine <NAME>");
+    Ok(())
+}
+
+fn run_styles(json: bool, config: &Config) -> anyhow::Result<()> {
+    let styles = voxtype::osd::style::list_installed_styles();
+    let active = config.osd.style.as_str();
+
+    if json {
+        let list: Vec<serde_json::Value> = styles
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "dir": s.dir,
+                    "description": s.description,
+                    "active": s.name == active,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+
+    println!("OSD styles (Quickshell frontend)");
+    for s in &styles {
+        let mark = if s.name == active { " ● active" } else { "" };
+        println!("  {}{}", s.name, mark);
+        if let Some(dir) = &s.dir {
+            println!("      {}", dir.display());
+        }
+        if let Some(desc) = &s.description {
+            println!("      {}", desc);
+        }
+    }
+    if let Some(path) = &config.osd.plugin_path {
+        println!();
+        println!(
+            "Note: [osd] plugin_path = {} overrides the style selection.",
+            path.display()
+        );
+    }
+    println!();
+    println!("Switch with: voxtype config set osd.style <NAME>");
+    println!(
+        "Recipe presets: `voxtype setup osd --list`, then `voxtype setup osd --recipe <name>`"
+    );
     Ok(())
 }
 

@@ -27,7 +27,7 @@ pub(crate) fn run_config_schema(
     }
 
     println!("Voxtype config schema v{}", schema::SCHEMA_VERSION);
-    println!("  voxtype:     {}", env!("CARGO_PKG_VERSION"));
+    println!("  voxtype:     {}", voxtype::cli::VERSION);
     println!("  config file: {}", path.display());
     println!("  engine:      {}", config.engine.name());
     println!();

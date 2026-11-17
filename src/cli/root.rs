@@ -12,7 +12,7 @@ use super::ENGINE_NAMES_CSV;
 
 #[derive(Parser)]
 #[command(name = "voxtype")]
-#[command(author, version, about = "Push-to-talk voice-to-text for Linux")]
+#[command(author, version = super::VERSION, about = "Push-to-talk voice-to-text for Linux")]
 #[command(long_about = "\
 Voxtype is a push-to-talk voice-to-text tool for Linux.\n\
 Optimized for Wayland, works on X11 too.")]
@@ -23,6 +23,7 @@ QUICK START:
   voxtype setup model         Interactive model selection
   voxtype setup gpu           Manage GPU acceleration
   voxtype status --follow     Watch daemon status (Waybar integration)
+  voxtype doctor              Check the setup and show how to fix problems
 
 See 'voxtype --help' for all options or 'man voxtype' for full docs.")]
 #[command(after_long_help = "\
@@ -35,6 +36,7 @@ QUICK START:
   voxtype record cancel       Cancel current recording
   voxtype status              Show daemon status
   voxtype setup               Check dependencies and download models
+  voxtype doctor              Check the setup and show how to fix problems
   voxtype config              Show current configuration
 
 EXAMPLES:
@@ -55,6 +57,21 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Native Linux tray (enabled by default). Use --tray=false to disable.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub tray: Option<bool>,
+
+    /// On Omarchy, link the packaged Settings panel on daemon start (enabled
+    /// by default). Use --omarchy-link-settings-plugin=false to opt out.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub omarchy_link_settings_plugin: Option<bool>,
+
     /// Quiet mode (errors only)
     #[arg(short, long)]
     pub quiet: bool,
@@ -67,7 +84,11 @@ pub struct Cli {
         help_heading = "Transcription",
         long_help = "Override model for transcription.\n\
         Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).\n\
-        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8"
+        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8.\n\
+        Other engines take the directory-form names from `voxtype info models`\n\
+        (e.g. moonshine-base, cohere-transcribe-q4f16). A model from another\n\
+        engine selects that engine; a Whisper name only sets [whisper] model.\n\
+        With `record start`, applies to that one recording on any engine."
     )]
     pub model: Option<String>,
 
@@ -79,6 +100,46 @@ pub struct Cli {
         long_help = format!("Override transcription engine: {}", ENGINE_NAMES_CSV),
     )]
     pub engine: Option<String>,
+
+    /// GGUF checkpoint path for the shared native engine
+    #[arg(
+        long,
+        value_name = "FILE",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_model: Option<String>,
+
+    /// Expected GGUF general.architecture value
+    #[arg(
+        long,
+        value_name = "ARCH",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_architecture: Option<String>,
+
+    /// Language hint for the selected GGUF checkpoint
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_language: Option<String>,
+
+    /// transcribe.cpp backend: auto, cpu, cpu_accel, vulkan, metal, cuda, or rocm
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        help_heading = "GGUF",
+        hide_short_help = true
+    )]
+    pub gguf_backend: Option<String>,
+
+    /// Request native GGUF streaming (currently rejected explicitly)
+    #[arg(long, help_heading = "GGUF", hide_short_help = true)]
+    pub gguf_streaming: bool,
 
     /// Language for transcription (e.g., en, fr, auto, or comma-separated: en,fr,de)
     #[arg(long, value_name = "LANG", help_heading = "Transcription")]
@@ -236,6 +297,28 @@ pub struct Cli {
     )]
     pub no_audio_feedback: bool,
 
+    /// Keep the audio of a recording whose transcription failed (default)
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        long_help = "Keep the audio of a recording whose transcription failed, so it can be \
+        retried with 'voxtype transcribe <file>'. This is the default. The 20 most recent \
+        are kept in ~/.local/state/voxtype/failed-audio/, readable only by you."
+    )]
+    pub keep_failed_recordings: bool,
+
+    /// Don't keep the audio of a recording whose transcription failed
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "keep_failed_recordings",
+        long_help = "Don't write the audio of a failed transcription to disk (overrides \
+        config and environment). A dictation whose transcription fails is then lost."
+    )]
+    pub no_keep_failed_recordings: bool,
+
     /// Pause MPRIS media players during recording
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub pause_media: bool,
@@ -326,7 +409,9 @@ pub struct Cli {
     )]
     pub no_fallback_to_clipboard: bool,
 
-    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
+    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v), or
+    /// "auto" (the default) for ctrl+v in GUI apps and --paste-keys-terminal in
+    /// terminals
     #[arg(
         long,
         value_name = "KEYS",
@@ -334,6 +419,16 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub paste_keys: Option<String>,
+
+    /// Keystroke for paste mode when the focused window is a terminal
+    /// (default: ctrl+shift+v; detected on Hyprland, Sway and niri)
+    #[arg(
+        long,
+        value_name = "KEYS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub paste_keys_terminal: Option<String>,
 
     /// File path for file output mode
     #[arg(long, value_name = "PATH", help_heading = "Output")]
@@ -475,9 +570,90 @@ pub struct Cli {
     pub modifier_release_timeout_ms: Option<u64>,
 
     // -- Text Processing --
+    /// Enable English-only trained disfluency cleanup (local model required)
+    #[arg(long, help_heading = "Text Processing")]
+    pub lard_disfluency: bool,
+
+    /// Disable trained disfluency cleanup
+    #[arg(
+        long,
+        conflicts_with = "lard_disfluency",
+        help_heading = "Text Processing"
+    )]
+    pub no_lard_disfluency: bool,
+
+    /// Local LARD VXDF model file (never downloaded at startup)
+    #[arg(long, value_name = "FILE", help_heading = "Text Processing")]
+    pub lard_model_path: Option<std::path::PathBuf>,
+
+    /// Restore punctuation and casing for plain CTC transcription engines
+    #[arg(
+        long,
+        help_heading = "Text Processing",
+        long_help = "Restore punctuation, sentence boundaries, and letter casing for engines that emit plain CTC text. Has no effect on engines such as Whisper, Parakeet TDT, and Cohere that already supply punctuation and casing. Requires 'voxtype setup punctuation'."
+    )]
+    pub punctuation_casing: bool,
+
+    /// Disable punctuation and casing restoration (overrides config)
+    #[arg(
+        long,
+        conflicts_with = "punctuation_casing",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_punctuation_casing: bool,
+
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
     #[arg(long, help_heading = "Text Processing")]
     pub spoken_punctuation: bool,
+
+    /// Disable spoken punctuation conversion (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "spoken_punctuation",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_spoken_punctuation: bool,
+
+    /// Collapse repeated starts, stutters, and explicit retractions (off by default)
+    #[arg(long, help_heading = "Text Processing")]
+    pub collapse_restarts: bool,
+
+    /// Disable restart collapsing (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "collapse_restarts",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_collapse_restarts: bool,
+
+    /// Repair premature sentence breaks using deterministic rules (off by default)
+    #[arg(long, help_heading = "Text Processing")]
+    pub repair_sentence_breaks: bool,
+
+    /// Disable sentence-break repair (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "repair_sentence_breaks",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_repair_sentence_breaks: bool,
+
+    /// Format dictated quantities, money, and times (off by default; requires itn)
+    #[arg(long, help_heading = "Text Processing")]
+    pub format_numbers: bool,
+
+    /// Disable number formatting (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "format_numbers",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_format_numbers: bool,
 
     /// Convert newlines to Shift+Enter instead of regular Enter
     #[arg(long, help_heading = "Text Processing")]
@@ -570,6 +746,22 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn keep_failed_recordings_flags_parse_and_conflict() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.keep_failed_recordings && !cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--no-keep-failed-recordings"]);
+        assert!(cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--keep-failed-recordings"]);
+        assert!(cli.keep_failed_recordings);
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-failed-recordings",
+            "--no-keep-failed-recordings"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn test_engine_flag_whisper() {

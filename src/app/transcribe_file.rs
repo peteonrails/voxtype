@@ -62,8 +62,13 @@ pub(crate) fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow
     );
 
     // Run VAD if enabled
-    if let Ok(Some(vad)) = vad::create_vad(config) {
-        match vad.detect(&final_samples) {
+    let vad = vad::create_vad(config).unwrap_or_else(|e| {
+        eprintln!("{}", vad::unavailable_notice(&config.vad, &e).1);
+        None
+    });
+    if let Some(vad) = vad {
+        println!("VAD backend: {:?}", vad.backend);
+        match vad.detector.detect(&final_samples) {
             Ok(result) => {
                 println!(
                     "VAD: {:.2}s speech ({:.1}% of audio)",
@@ -86,6 +91,38 @@ pub(crate) fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow
     let transcriber = transcribe::create_transcriber(config)?;
     let text = transcriber.transcribe(&final_samples)?;
 
-    println!("\n{}", text);
+    println!("\n{}", process_transcript(config, &text));
     Ok(())
+}
+
+/// Apply the configured text pipeline (replacements, spoken punctuation,
+/// filler filtering) to the finished transcript — the same treatment the
+/// daemon gives a batch dictation before output. `voxtype transcribe`
+/// shipped without this, so a config that worked for dictation silently
+/// did nothing here (#581).
+fn process_transcript(config: &config::Config, text: &str) -> String {
+    voxtype::text::TextProcessor::new_for_config(&config.text, config.active_language(), config)
+        .process(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #581: `voxtype transcribe <file>` must honor [text] replacements and
+    /// spoken punctuation like the daemon does.
+    #[test]
+    fn transcript_gets_replacements_and_spoken_punctuation() {
+        let mut config = config::Config::default();
+        config
+            .text
+            .replacements
+            .insert("vox type".to_string(), "voxtype".to_string());
+        config.text.spoken_punctuation = true;
+
+        assert_eq!(
+            process_transcript(&config, "I use vox type period"),
+            "I use voxtype."
+        );
+    }
 }

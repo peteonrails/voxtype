@@ -8,23 +8,22 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use std::io::Read;
-use std::process::Stdio;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::app::{Action, App};
 use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
-use crate::audio::devices::enumerate_input_devices;
+use crate::audio::devices::{list_input_device_names, probe_input_devices};
 use crate::config::AudioConfig;
 
 #[derive(Debug)]
 pub struct AudioState {
     pub device: String,
     pub max_duration_secs: u32,
+    pub keep_failed_recordings: bool,
     pub pause_media: bool,
     pub duck_media: bool,
     pub duck_media_volume_percent: u8,
@@ -75,6 +74,7 @@ pub enum FeedbackLevel {
 pub enum Field {
     Device,
     MaxDuration,
+    KeepFailedRecordings,
     PauseMedia,
     DuckMedia,
     DuckMediaVolume,
@@ -88,6 +88,7 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Device,
         Field::MaxDuration,
+        Field::KeepFailedRecordings,
         Field::PauseMedia,
         Field::DuckMedia,
         Field::DuckMediaVolume,
@@ -121,6 +122,9 @@ impl AudioState {
                 .get_int("audio", "max_duration_secs")
                 .map(|n| n.clamp(0, u32::MAX as i64) as u32)
                 .unwrap_or(120),
+            keep_failed_recordings: ed
+                .get_bool("audio", "keep_failed_recordings")
+                .unwrap_or(true),
             pause_media: ed.get_bool("audio", "pause_media").unwrap_or(false),
             duck_media: ed.get_bool("audio", "duck_media").unwrap_or(false),
             duck_media_volume_percent: ed
@@ -213,6 +217,11 @@ impl AudioState {
         };
         ed.set_string("audio", "device", &self.device);
         ed.set_int("audio", "max_duration_secs", self.max_duration_secs as i64);
+        ed.set_bool(
+            "audio",
+            "keep_failed_recordings",
+            self.keep_failed_recordings,
+        );
         ed.set_bool("audio", "pause_media", self.pause_media);
         ed.set_bool("audio", "duck_media", self.duck_media);
         ed.set_int(
@@ -304,6 +313,9 @@ impl AudioState {
                 self.max_duration_secs =
                     next.clamp(DURATION_MIN as i32, DURATION_MAX as i32) as u32;
             }
+            Field::KeepFailedRecordings => {
+                self.keep_failed_recordings = !self.keep_failed_recordings;
+            }
             Field::PauseMedia => {
                 self.pause_media = !self.pause_media;
             }
@@ -356,80 +368,40 @@ fn initial_device_choices(ed: &ConfigEditor) -> Vec<String> {
 /// Kick off the device probe on a background thread. The probe runs in a
 /// short-lived `voxtype configure --probe-audio-devices` subprocess because
 /// ALSA device probing can misbehave in ways a thread can't contain: dsnoop
-/// opens have been observed to block forever in an ioctl, and libasound can
-/// die on SIGFPE while probing hw params (both seen on PipeWire systems).
-/// In-process, either takes the whole TUI down; in a child, the thread kills
-/// it after a timeout and the TUI just shows "scan failed".
+/// opens have been observed to block forever in an ioctl, a sound server
+/// that never answers blocks in epoll, and libasound can die on SIGFPE while
+/// probing hw params (all seen on PipeWire systems). In-process, either takes
+/// the whole TUI down; in a child, it is killed after a timeout and the TUI
+/// just shows "scan failed".
 fn start_device_scan() -> Option<mpsc::Receiver<Option<Vec<String>>>> {
     let exe = std::env::current_exe().ok()?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(probe_input_devices_via_subprocess(&exe));
+        let _ = tx.send(probe_input_devices(&exe, PROBE_TIMEOUT).ok());
     });
     Some(rx)
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn probe_input_devices_via_subprocess(exe: &std::path::Path) -> Option<Vec<String>> {
-    let mut child = std::process::Command::new(exe)
-        .args(["configure", "--probe-audio-devices"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let deadline = Instant::now() + PROBE_TIMEOUT;
-    let success = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !success {
-        return None;
-    }
-
-    // The child has exited, so this read is bounded; the device list is far
-    // smaller than the pipe buffer, so the child never blocked writing it.
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    Some(
-        out.lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect(),
-    )
-}
-
 /// Entry point for the hidden `--probe-audio-devices` flag: print one input
 /// device name per line. Runs in the subprocess spawned by
-/// [`start_device_scan`].
+/// [`start_device_scan`] and `voxtype info devices`.
 pub fn print_input_devices() {
-    // Watchdog: probing can hang forever in an ALSA ioctl. The parent kills
-    // us after PROBE_TIMEOUT, but not if it already exited (user quit the
-    // TUI early) — self-terminate so a hung probe can't linger as an orphan.
+    use std::io::Write;
+    // Watchdog: probing can hang forever in ALSA. The parent kills us at its
+    // deadline, but not if it already exited (user quit the TUI early), so
+    // end ourselves. _exit: a normal exit would run libasound's cleanup,
+    // which waits on the very lock the hung call holds.
     std::thread::spawn(|| {
         std::thread::sleep(PROBE_TIMEOUT + Duration::from_secs(5));
-        std::process::exit(2);
+        unsafe { libc::_exit(2) };
     });
-    for name in enumerate_input_devices() {
-        println!("{}", name);
+    let mut out = std::io::stdout().lock();
+    for name in list_input_device_names() {
+        let _ = writeln!(out, "{}", name);
     }
+    let _ = out.flush();
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -461,6 +433,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             state.field == Field::MaxDuration,
             "Max recording (seconds)",
             state.max_duration_secs.to_string(),
+        ),
+        FormRowSpec::new(
+            state.field == Field::KeepFailedRecordings,
+            "Keep failed recordings",
+            yesno(state.keep_failed_recordings),
         ),
         FormRowSpec::new(
             state.field == Field::PauseMedia,
@@ -595,6 +572,21 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(
                 "120-300 seconds is normal for dictation. Bump to 600+ for \
                  meeting-mode-style long recordings.",
+            ),
+        ],
+        Field::KeepFailedRecordings => vec![
+            heading("Keep failed recordings"),
+            Line::from(""),
+            Line::from(
+                "When transcription fails, voxtype saves the audio so the \
+                 dictation can be retried with `voxtype transcribe <file>`. \
+                 The 20 most recent are kept in \
+                 ~/.local/state/voxtype/failed-audio/, readable only by you.",
+            ),
+            Line::from(""),
+            Line::from(
+                "Turn this off to write no audio to disk. A dictation whose \
+                 transcription fails is then lost.",
             ),
         ],
         Field::PauseMedia => vec![
@@ -808,6 +800,7 @@ mod tests {
             .map(|f| match f {
                 Field::Device => "audio.device",
                 Field::MaxDuration => "audio.max_duration_secs",
+                Field::KeepFailedRecordings => "audio.keep_failed_recordings",
                 Field::PauseMedia => "audio.pause_media",
                 Field::DuckMedia => "audio.duck_media",
                 Field::DuckMediaVolume => "audio.duck_media_volume_percent",

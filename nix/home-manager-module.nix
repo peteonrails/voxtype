@@ -1,4 +1,4 @@
-# Home Manager module for VoxType
+# Home Manager module for Voxtype
 #
 # Usage in your home.nix or flake-based home-manager config:
 #
@@ -60,7 +60,7 @@ let
   onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
   isOnnxEngine = builtins.elem cfg.engine onnxEngines;
 
-  # Fetch model from HuggingFace if using declarative model management
+  # Fetch model from the Voxtype model mirror if using declarative model management
   fetchedModel = lib.optionalAttrs (cfg.model.name != null) (
     let modelDef = modelDefs.${cfg.model.name}; in
     pkgs.fetchurl {
@@ -82,7 +82,7 @@ let
 
 in {
   options.programs.voxtype = {
-    enable = lib.mkEnableOption "VoxType push-to-talk voice-to-text";
+    enable = lib.mkEnableOption "Voxtype push-to-talk voice-to-text";
 
     engine = lib.mkOption {
       type = lib.types.enum [ "whisper" "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
@@ -108,7 +108,7 @@ in {
     package = lib.mkOption {
       type = lib.types.package;
       description = ''
-        The VoxType package to use. Use the flake's wrapped packages:
+        The Voxtype package to use. Use the flake's wrapped packages:
 
         Whisper packages:
         - packages.default: CPU-only Whisper (works everywhere)
@@ -130,7 +130,7 @@ in {
         type = lib.types.nullOr (lib.types.enum (builtins.attrNames modelDefs));
         default = null;
         description = ''
-          Whisper model to download from HuggingFace. Only used when engine = "whisper".
+          Whisper model to download from the Voxtype model mirror. Only used when engine = "whisper".
           Set to null when using ONNX engines or managing models manually.
 
           Available: tiny, tiny.en, base, base.en, small, small.en,
@@ -190,7 +190,7 @@ in {
     service.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Enable the systemd user service for VoxType.";
+      description = "Enable the systemd user service for Voxtype.";
     };
   };
 
@@ -212,7 +212,7 @@ in {
 
     systemd.user.services.voxtype = lib.mkIf cfg.service.enable {
       Unit = {
-        Description = "VoxType push-to-talk voice-to-text daemon";
+        Description = "Voxtype push-to-talk voice-to-text daemon";
         Documentation = "https://voxtype.io";
         PartOf = [ "graphical-session.target" ];
         After = [ "graphical-session.target" "pipewire.service" "pipewire-pulse.service" ];

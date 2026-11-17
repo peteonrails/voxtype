@@ -52,6 +52,10 @@ pub enum Commands {
         /// Number of threads for inference (passed from parent process)
         #[arg(long)]
         threads: Option<usize>,
+
+        /// Initial prompt merged with profile vocabulary by the parent
+        #[arg(long, hide = true)]
+        initial_prompt: Option<String>,
     },
 
     /// Setup and installation utilities
@@ -65,7 +69,9 @@ pub enum Commands {
 
         /// Specify which model to download (use with --download).
         /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
-        /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
+        /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8.
+        /// Other engines take the names shown by `voxtype info models`:
+        /// directory names for ONNX models, or a .gguf filename for Cohere and Parakeet.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
 
@@ -101,6 +107,44 @@ pub enum Commands {
             env = "VOXTYPE_PROGRESS_FORMAT",
         )]
         progress_format: String,
+    },
+
+    /// Check that everything voxtype needs is installed and working
+    ///
+    /// Runs one health check over the whole setup and prints each result with
+    /// its fix: ✓ is fine, ! works but is degraded, ✗ is broken. Checks follow
+    /// your config, so features you have not enabled are not checked.
+    ///
+    /// Covered: CPU compatibility, config and models directories, the config
+    /// file, the installed binary variant against the configured engine, GPU
+    /// runtime libraries (Vulkan, CUDA, MIGraphX), the configured engine's
+    /// model (and the Whisper secondary model), the VAD model when VAD is on,
+    /// the audio input device, WAYLAND_DISPLAY/DISPLAY in the systemd user
+    /// environment, the text output method, /dev/input access for the
+    /// built-in hotkey, desktop notifications, the OSD frontend (and
+    /// Quickshell's `qs`) when the OSD is on, pactl/parec when meeting mode is
+    /// on, the systemd user service, and the voxtype-setup skill for coding
+    /// agents it finds.
+    ///
+    /// Nothing is downloaded and nothing is changed. The daemon runs the
+    /// quick subset of these checks at startup and sends one notification
+    /// listing any errors.
+    ///
+    /// Exit status: 0 when no check failed (warnings allowed), 1 when at
+    /// least one did. `voxtype setup check` prints the same report and always
+    /// exits 0, as it always has.
+    #[command(after_help = "\
+EXAMPLES:
+  voxtype doctor                     Check everything, with fixes
+  voxtype doctor --json              Machine-readable results
+  voxtype doctor --json | jq '.checks[] | select(.severity != \"ok\")'
+  voxtype -c ~/alt.toml doctor       Check against another config file")]
+    Doctor {
+        /// Print results as JSON: {ok, errors, warnings, checks: [{id,
+        /// severity, message, fix}]}. Severity is "ok", "warn" or "error";
+        /// ids such as "transcription.model" are stable for scripts.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show or modify configuration

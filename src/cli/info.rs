@@ -24,8 +24,9 @@ pub enum InfoAction {
     /// List downloadable models per engine and which are installed
     ///
     /// Every listing runs a cheap integrity check: file sizes against the
-    /// manifest recorded at download time, and the ggml header for whisper
-    /// models. A model that fails is reported as not installed.
+    /// manifest recorded at download time, the ggml header for Whisper, and
+    /// the size and GGUF header for GGUF models. A model that fails is
+    /// reported as not installed.
     Models {
         /// Emit machine-readable JSON instead of human-readable text
         #[arg(long)]
@@ -35,9 +36,9 @@ pub enum InfoAction {
         #[arg(long, value_name = "NAME")]
         engine: Option<String>,
 
-        /// Also hash every file of every installed model against the manifest
-        /// recorded at download time. Thorough and slow: it reads every byte
-        /// of every model, which is minutes for a full models directory.
+        /// Also hash installed models against available publisher checksums
+        /// or recorded manifests. Thorough and slow: it reads every byte of
+        /// every model, which is minutes for a full models directory.
         #[arg(long)]
         verify: bool,
     },
@@ -56,6 +57,18 @@ pub enum InfoAction {
 
     /// List transcription engines and which are compiled into this binary
     Engines {
+        /// Emit machine-readable JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List installed OSD styles (Quickshell frontend)
+    ///
+    /// The values `voxtype config set osd.style` accepts: the built-in
+    /// default plus every style package found in ~/.config/voxtype/osd,
+    /// ~/.local/share/voxtype/osd, and /usr/share/voxtype/osd. A user copy
+    /// shadows a system package with the same name.
+    Styles {
         /// Emit machine-readable JSON instead of human-readable text
         #[arg(long)]
         json: bool,

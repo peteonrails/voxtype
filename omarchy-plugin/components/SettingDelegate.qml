@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // One row of the form: label + description on the left, the control for this
@@ -30,6 +31,12 @@ Item {
   property var choices: []
 
   property string errorText: ""
+  // A help line the panel adds under the schema's description, and a notice
+  // about what the panel just did on this row's behalf.
+  property string helpNote: ""
+  property string noticeText: ""
+  // Shown in an empty text field (not for a custom enum value).
+  property string placeholder: ""
   property int labelColumnWidth: Style.space(280)
 
   // The form's keyboard cursor is on this row: ring the control so it is clear
@@ -47,7 +54,9 @@ Item {
 
   readonly property string specKey: spec ? String(spec.key) : ""
   readonly property string specType: spec ? String(spec.type) : "string"
-  readonly property string specLabel: (spec && spec.label) ? String(spec.label) : specKey
+  readonly property string specLabel: specKey === "text.lard_disfluency"
+    ? "LARD disfluency cleanup"
+    : ((spec && spec.label) ? String(spec.label) : specKey)
   readonly property string specDescription: (spec && spec.description) ? String(spec.description) : ""
   readonly property bool compiled: !spec || spec.compiled !== false
   readonly property bool modified: spec !== null && spec.file_value !== null && spec.file_value !== undefined
@@ -77,6 +86,23 @@ Item {
 
   readonly property string currentText: currentValue === undefined || currentValue === null
     ? "" : String(currentValue)
+
+  // No value at all: the key is unset and the daemon applies its own default,
+  // which the description states. A spin box has no "nothing" to show, and
+  // clamping null to the minimum displayed a number (Threads: 1) that is not
+  // what runs. The field shows "default" instead and writes nothing until the
+  // user enters a number.
+  readonly property bool unsetNumber: specType === "int"
+    && (currentValue === undefined || currentValue === null)
+
+  function syncNumberText() {
+    var unset = root.unsetNumber
+    numberField.field.textFromValue = function(value, locale) {
+      return unset ? "" : Number(value).toLocaleString(locale, 'f', 0)
+    }
+  }
+  onUnsetNumberChanged: syncNumberText()
+  Component.onCompleted: syncNumberText()
 
   readonly property string controlKind: {
     if (specType === "bool") return "bool"
@@ -128,7 +154,7 @@ Item {
   }
 
   readonly property int controlAreaHeight: Math.max(Style.space(34), Style.spacing.controlHeight + Style.spacing.md)
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   function apply(value) {
     root.pendingValue = value
@@ -179,7 +205,7 @@ Item {
 
       Text {
         text: root.specLabel
-        color: Color.foreground
+        color: ShellTheme.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
@@ -205,10 +231,32 @@ Item {
     }
 
     Text {
+      objectName: "settingHelpNote"
+      visible: root.helpNote !== ""
+      width: parent.width
+      text: root.helpNote
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+
+    Text {
+      objectName: "settingNotice"
+      visible: root.noticeText !== ""
+      width: parent.width
+      text: root.noticeText
+      color: ShellTheme.Color.accent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+
+    Text {
       visible: root.errorText !== ""
       width: parent.width
       text: root.errorText
-      color: Color.urgent
+      color: ShellTheme.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap
@@ -216,7 +264,7 @@ Item {
 
     Text {
       text: root.specKey
-      color: Qt.darker(Color.foreground, 2.0)
+      color: Qt.darker(ShellTheme.Color.foreground, 2.0)
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       elide: Text.ElideRight
@@ -238,7 +286,7 @@ Item {
       width: Style.space(6)
       height: width
       radius: width / 2
-      color: Color.accent
+      color: ShellTheme.Color.accent
     }
 
     PanelActionButton {
@@ -299,6 +347,7 @@ Item {
 
     NumberField {
       id: numberField
+      objectName: "settingNumberField"
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       visible: root.controlKind === "int"
@@ -307,6 +356,7 @@ Item {
       from: root.bounded ? Math.round(root.specMin) : 0
       to: root.bounded ? Math.round(root.specMax) : 1000000
       value: {
+        if (root.unsetNumber) return from
         var n = Number(root.currentValue)
         return isFinite(n) ? Math.round(n) : 0
       }
@@ -325,6 +375,19 @@ Item {
         target: numberField.field
         function onActiveFocusChanged() { root.editorFocusChanged(numberField.field.activeFocus) }
       }
+    }
+
+    // A sibling of the field, not a child: NumberField is a Column, which
+    // would stack a child below the spin box.
+    Text {
+      objectName: "numberUnsetPlaceholder"
+      anchors.centerIn: numberField
+      visible: root.controlKind === "int" && root.unsetNumber
+        && numberField.field.displayText === "" && !numberField.field.activeFocus
+      text: "default"
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
     }
 
     Row {
@@ -367,12 +430,13 @@ Item {
 
     TextField {
       id: textField
+      objectName: "settingTextField"
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       visible: root.controlKind === "text"
       text: root.currentText
-      placeholderText: root.openEnum ? "Custom value" : ""
+      placeholderText: root.openEnum ? "Custom value" : root.placeholder
       hasCursor: root.highlighted
       onEditingFinished: {
         if (text === root.currentText) return
@@ -409,9 +473,9 @@ Item {
   // hands over the theme colors directly — the same shim the shell's own dev
   // gallery uses.
   readonly property var sliderBar: QtObject {
-    readonly property color foreground: Color.foreground
-    readonly property color background: Color.popups.background
-    readonly property color urgent: Color.urgent
+    readonly property color foreground: ShellTheme.Color.foreground
+    readonly property color background: ShellTheme.Color.popups.background
+    readonly property color urgent: ShellTheme.Color.urgent
     readonly property string fontFamily: Style.font.family
     readonly property string position: "top"
     readonly property bool vertical: false

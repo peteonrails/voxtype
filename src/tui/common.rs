@@ -334,16 +334,18 @@ pub fn render_section_header(f: &mut Frame, area: Rect, title: &str, dirty: bool
 }
 
 pub fn render_bottom_hint(f: &mut Frame, area: Rect, dirty: bool) {
+    render_bottom_hint_text(f, area, dirty, " ↑↓ field   ←→ change   s save   r revert ");
+}
+
+/// [`render_bottom_hint`] with the section's own key list.
+pub fn render_bottom_hint_text(f: &mut Frame, area: Rect, dirty: bool, hint: &str) {
     let dirty_marker = if dirty {
         Span::styled("  ●", Style::default().fg(Color::Yellow))
     } else {
         Span::raw("")
     };
     let line = Line::from(vec![
-        Span::styled(
-            " ↑↓ field   ←→ change   s save   r revert ",
-            Style::default().fg(Color::Gray),
-        ),
+        Span::styled(hint.to_string(), Style::default().fg(Color::Gray)),
         dirty_marker,
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -388,6 +390,8 @@ pub struct FormRowSpec {
     pub dimmed: bool,
     pub label: String,
     pub value: String,
+    /// A group heading: the label alone, styled as a heading, not a field.
+    pub heading: bool,
 }
 
 impl FormRowSpec {
@@ -397,6 +401,18 @@ impl FormRowSpec {
             dimmed: false,
             label: label.into(),
             value: value.into(),
+            heading: false,
+        }
+    }
+
+    /// A non-focusable heading over the rows that follow it.
+    pub fn heading(label: impl Into<String>) -> Self {
+        Self {
+            focused: false,
+            dimmed: false,
+            label: label.into(),
+            value: String::new(),
+            heading: true,
         }
     }
 
@@ -424,6 +440,30 @@ pub fn render_form_with_guidance(
     rows: &[FormRowSpec],
     guidance: Vec<Line<'_>>,
 ) {
+    render_form_with_guidance_hint(
+        f,
+        area,
+        title,
+        dirty,
+        feedback,
+        rows,
+        guidance,
+        " ↑↓ field   ←→ change   s save   r revert ",
+    );
+}
+
+/// [`render_form_with_guidance`] with the section's own bottom key hint.
+#[allow(clippy::too_many_arguments)]
+pub fn render_form_with_guidance_hint(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    dirty: bool,
+    feedback: Option<(FeedbackLevel, &str)>,
+    rows: &[FormRowSpec],
+    guidance: Vec<Line<'_>>,
+    hint: &str,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -448,7 +488,7 @@ pub fn render_form_with_guidance(
     render_settings_panel(f, body[0], rows);
     render_guidance_panel(f, body[1], guidance);
 
-    render_bottom_hint(f, chunks[3], dirty);
+    render_bottom_hint_text(f, chunks[3], dirty, hint);
 }
 
 fn render_settings_panel(f: &mut Frame, area: Rect, rows: &[FormRowSpec]) {
@@ -458,9 +498,41 @@ fn render_settings_panel(f: &mut Frame, area: Rect, rows: &[FormRowSpec]) {
 
     let lines: Vec<Line> = rows
         .iter()
-        .map(|r| form_row_dimmed(r.focused, r.dimmed, &r.label, &r.value))
+        .map(|r| {
+            if r.heading {
+                Line::from(Span::styled(
+                    r.label.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                form_row_dimmed(r.focused, r.dimmed, &r.label, &r.value)
+            }
+        })
         .collect();
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Use the widget's actual wrapped heights, not logical row indices: long
+    // paths and narrow terminals can consume several terminal lines per row.
+    let mut scroll = 0;
+    if let Some(focused) = rows.iter().position(|r| r.focused) {
+        let before = Paragraph::new(lines[..focused].to_vec())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        let height = Paragraph::new(lines[focused].clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        if before + height > inner.height as usize {
+            scroll = (before + height)
+                .saturating_sub(inner.height as usize)
+                .min(before);
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 }
 
 fn render_guidance_panel(f: &mut Frame, area: Rect, lines: Vec<Line<'_>>) {

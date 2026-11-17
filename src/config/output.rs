@@ -26,6 +26,15 @@ pub struct OutputConfig {
     /// Custom driver order for type mode (overrides default: wtype -> dotool -> ydotool -> clipboard)
     /// Specify which drivers to try and in what order.
     /// Example: ["ydotool", "wtype"] to prefer ydotool over wtype
+    ///
+    /// Paste mode (`mode = "paste"`) also honours this for its keystroke
+    /// step, filtered to the drivers that can simulate a keystroke (wtype,
+    /// eitype, ydotool); dotool/clipboard/xclip entries are ignored there.
+    /// If the order contains none of those three, paste mode falls back to
+    /// wtype -> eitype -> ydotool. See #750: wtype's keymap remapping makes
+    /// keycode-based XWayland clients (xfreerdp and similar) receive Escape
+    /// instead of the paste keystroke, so putting ydotool first here is the
+    /// workaround for that class of client.
     #[serde(default)]
     pub driver_order: Option<Vec<OutputDriver>>,
 
@@ -88,10 +97,18 @@ pub struct OutputConfig {
     #[serde(default)]
     pub post_process: Option<PostProcessConfig>,
 
-    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v")
-    /// Defaults to "ctrl+v" if not specified
+    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v"),
+    /// or "auto" to send ctrl+v to GUI apps and `paste_keys_terminal` to terminals.
+    /// Defaults to "auto" if not specified
     #[serde(default)]
     pub paste_keys: Option<String>,
+
+    /// Keystroke paste mode sends when the focused window is a terminal
+    /// (detected on Hyprland, Sway and niri). Defaults to "ctrl+shift+v".
+    /// Setting it alongside an explicit `paste_keys` makes that keystroke
+    /// terminal-aware too.
+    #[serde(default)]
+    pub paste_keys_terminal: Option<String>,
 
     /// Keyboard layout for dotool (e.g., "de" for German, "fr" for French)
     /// Required for non-US keyboard layouts when using dotool
@@ -197,6 +214,7 @@ impl Default for OutputConfig {
             post_output_command: None,
             post_process: None,
             paste_keys: None,
+            paste_keys_terminal: None,
             dotool_xkb_layout: None,
             dotool_xkb_variant: None,
             eitype_xkb_layout: None,
@@ -269,6 +287,14 @@ pub fn default_language_to_layout() -> std::collections::HashMap<String, String>
 }
 
 impl OutputConfig {
+    /// The post-process table, when it names a command to run. A table with
+    /// an empty command is only holding options, and post-processing is off.
+    pub fn active_post_process(&self) -> Option<&PostProcessConfig> {
+        self.post_process
+            .as_ref()
+            .filter(|p| !p.command.trim().is_empty())
+    }
+
     /// Apply per-language XKB layout/variant hints to eitype and dotool.
     ///
     /// Explicit driver-specific settings win independently per field:
@@ -411,6 +437,20 @@ pub enum FileMode {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn post_process_options_without_a_command_load_and_stay_off() {
+        let cfg: Config = toml::from_str("[output.post_process]\ntrim = false\n").unwrap();
+        let pp = cfg.output.post_process.as_ref().unwrap();
+        assert!(!pp.trim);
+        assert!(pp.fallback_on_empty);
+        assert!(!pp.edit_list);
+        assert!(cfg.output.active_post_process().is_none());
+
+        let cfg: Config =
+            toml::from_str("[output.post_process]\ncommand = \"cat\"\ntrim = false\n").unwrap();
+        assert_eq!(cfg.output.active_post_process().unwrap().command, "cat");
+    }
 
     #[test]
     fn test_parse_auto_submit() {

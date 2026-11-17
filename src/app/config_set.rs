@@ -78,3 +78,142 @@ pub(crate) fn run_config_unset(cli_override: Option<PathBuf>, key: &str) -> anyh
         Err(e) => fail(e),
     }
 }
+
+/// Dispatcher for `voxtype setup osd [--list | --recipe NAME [--dry-run]]`.
+pub(crate) fn run_setup_osd(
+    cli_override: Option<PathBuf>,
+    recipe: Option<String>,
+    list: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use voxtype::osd::recipe;
+
+    let name = recipe.filter(|n| !n.is_empty());
+    let Some(name) = name.filter(|_| !list) else {
+        let recipes = recipe::list_recipes();
+        if recipes.is_empty() {
+            println!("No OSD recipes installed. Searched:");
+            for root in recipe::recipe_roots() {
+                println!("  {}", root.display());
+            }
+            return Ok(());
+        }
+        println!("Available OSD recipes:\n");
+        for r in &recipes {
+            match &r.description {
+                Some(d) => println!("  {:<24} {}", r.name, d),
+                None => println!("  {}", r.name),
+            }
+        }
+        println!("\nApply one with: voxtype setup osd --recipe <NAME> [--dry-run]");
+        return Ok(());
+    };
+
+    let recipe_path = recipe::resolve_recipe(&name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config_path = resolve_config_path_for_write(cli_override)?;
+    let out = recipe::apply_recipe(&recipe_path, config_path, dry_run)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    for key in &out.ignored {
+        eprintln!(
+            "warning: {} sets [{}], which recipes don't apply; only [osd] is written",
+            recipe_path.display(),
+            key
+        );
+    }
+    if out.changes.is_empty() {
+        println!(
+            "{} already matches recipe '{}'; nothing to change.",
+            out.config.display(),
+            name
+        );
+        return Ok(());
+    }
+
+    let verb = if dry_run { "Would change" } else { "Changed" };
+    println!(
+        "{} {} key(s) in {}:",
+        verb,
+        out.changes.len(),
+        out.config.display()
+    );
+    for c in &out.changes {
+        match &c.before {
+            Some(before) => println!("  {} = {}  (was {})", c.key, c.after, before),
+            None => println!("  {} = {}  (was unset)", c.key, c.after),
+        }
+    }
+    if dry_run {
+        println!("\nDry run: nothing written. Drop --dry-run to apply.");
+    } else {
+        println!(
+            "\nTo revert, set the previous values shown above; keys that were \
+             unset can be deleted from [osd]."
+        );
+        restart_hint(true);
+    }
+    Ok(())
+}
+
+/// `voxtype setup osd --status [--json]`: the configured frontend, the one
+/// that resolves on this system, and whether to offer the Quickshell OSD.
+pub(crate) fn run_setup_osd_status(config: &config::Config, json: bool) -> anyhow::Result<()> {
+    use voxtype::osd::frontend::{self, OsdStatus, SystemProbe};
+
+    let configured = frontend::effective_configured(config.osd.frontend);
+    let dismissed = frontend::offer_dismissed(&config::Config::state_dir());
+    let status = OsdStatus::build(configured, &SystemProbe, dismissed);
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
+    println!("Configured: {}", status.configured);
+    println!("Active:     {}", status.active);
+    println!("Reason:     {}", status.reason);
+    println!(
+        "Quickshell: {}",
+        if status.quickshell_available {
+            "available"
+        } else {
+            "not available"
+        }
+    );
+    if !config.osd.enabled {
+        println!("\nThe OSD is disabled ([osd] enabled = false).");
+    }
+    if status.offer {
+        println!(
+            "\nThe Quickshell OSD can run here. Switch with:\n  \
+             voxtype setup osd --use-auto && systemctl --user restart voxtype\n\
+             or keep {} with: voxtype setup osd --dismiss-offer",
+            status.configured
+        );
+    }
+    Ok(())
+}
+
+/// `voxtype setup osd --use-auto`: write osd.frontend = "auto" through the
+/// validated config-set path and clear a dismissed offer.
+pub(crate) fn run_setup_osd_use_auto(cli_override: Option<PathBuf>) -> anyhow::Result<()> {
+    let path = resolve_config_path_for_write(cli_override)?;
+    let out = match config_set::set_key(path, "osd.frontend", "auto") {
+        Ok(out) => out,
+        Err(e) => fail(e),
+    };
+    voxtype::osd::frontend::set_offer_dismissed(&config::Config::state_dir(), false)?;
+    println!("Set osd.frontend = \"auto\" in {}", out.path.display());
+    restart_hint(out.restart_required);
+    Ok(())
+}
+
+/// `voxtype setup osd --dismiss-offer`: keep the current frontend and stop
+/// offering the Quickshell OSD.
+pub(crate) fn run_setup_osd_dismiss_offer() -> anyhow::Result<()> {
+    let state_dir = config::Config::state_dir();
+    voxtype::osd::frontend::set_offer_dismissed(&state_dir, true)?;
+    println!(
+        "Dismissed the Quickshell OSD offer ({}).",
+        voxtype::osd::frontend::offer_state_path(&state_dir).display()
+    );
+    Ok(())
+}

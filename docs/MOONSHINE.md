@@ -67,12 +67,15 @@ This shows an interactive menu with all available engines and models. Select a M
 # Create model directory
 mkdir -p ~/.local/share/voxtype/models/moonshine-base
 
-# Download the three required files
+# Download the three required files from Voxtype's model mirror
 cd ~/.local/share/voxtype/models/moonshine-base
-curl -L https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/encoder_model.onnx -o encoder_model.onnx
-curl -L https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/decoder_model_merged.onnx -o decoder_model_merged.onnx
-curl -L https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/tokenizer.json -o tokenizer.json
+for f in encoder_model.onnx decoder_model_merged.onnx tokenizer.json; do
+  curl -L "https://models.voxtype.io/moonshine/moonshine-base/$f" -o "$f"
+done
 ```
+
+The mirror's `manifest.json` in the same directory lists each file's SHA-256.
+`voxtype setup model` checks them for you; a manual download does not.
 
 ## Configuration
 
@@ -120,12 +123,12 @@ English models are MIT-licensed and can be used freely for any purpose, includin
 |-------|----------|------|------------------|
 | `base-ja` | Japanese | 237 MB | onnx-community/moonshine-base-ja-ONNX |
 | `base-zh` | Mandarin Chinese | 237 MB | onnx-community/moonshine-base-zh-ONNX |
-| `tiny-ja` | Japanese | 100 MB | onnx-community/moonshine-tiny-ja-ONNX |
-| `tiny-zh` | Mandarin Chinese | 100 MB | onnx-community/moonshine-tiny-zh-ONNX |
 | `tiny-ko` | Korean | 100 MB | onnx-community/moonshine-tiny-ko-ONNX |
 | `tiny-ar` | Arabic | 100 MB | onnx-community/moonshine-tiny-ar-ONNX |
 
 Additional languages (Spanish, Vietnamese, Ukrainian) exist as PyTorch models but do not yet have ONNX exports available for direct use with voxtype.
+
+Tiny variants for Japanese and Mandarin exist upstream, but their ONNX repos ship only a plain decoder without the merged (with-past) export voxtype's decoder loop requires, so they are not offered. Use `base-ja` or `base-zh` instead.
 
 ## Licensing
 

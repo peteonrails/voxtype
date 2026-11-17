@@ -102,6 +102,10 @@ impl OmnilingualTranscriber {
 }
 
 impl Transcriber for OmnilingualTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -256,7 +260,7 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     }
 
     // Also check int8 variant naming
-    let sherpa_int8_name = format!("{}-int8", &sherpa_name);
+    let sherpa_int8_name = format!("{}-int8", sherpa_name);
     let sherpa_int8_path = models_dir.join(&sherpa_int8_name);
     if sherpa_int8_path.exists() {
         return Ok(sherpa_int8_path);

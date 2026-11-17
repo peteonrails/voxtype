@@ -75,8 +75,8 @@ impl ParakeetStreamingTranscriber {
                  - Disable streaming in config.toml under [parakeet]:\n\n      \
                  streaming = false\n\n  \
                  - Or switch to the streaming-compatible model:\n\n      \
-                 voxtype setup model {streaming_model}\n\n    \
-                 and set [parakeet] model = \"{streaming_model}\" in config.toml.",
+                 voxtype setup --download --model {streaming_model}\n      \
+                 voxtype setup model --set {streaming_model}",
                 config.model,
                 streaming_model = crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
             )));
@@ -99,7 +99,7 @@ impl ParakeetStreamingTranscriber {
         );
         let start = std::time::Instant::now();
 
-        let exec_config = build_execution_config();
+        let exec_config = build_execution_config(config.threads);
         let handle = ParakeetUnifiedHandle::load(&model_path, exec_config).map_err(|e| {
             TranscribeError::InitFailed(format!(
                 "Parakeet streaming (ParakeetUnified) init failed: {}\n\n\

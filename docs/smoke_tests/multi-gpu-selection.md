@@ -11,18 +11,20 @@ voxtype setup gpu
 VOXTYPE_VULKAN_DEVICE=amd voxtype setup gpu | grep "GPU selection"
 # Expected: "GPU selection: AMD (via VOXTYPE_VULKAN_DEVICE)"
 
-VOXTYPE_VULKAN_DEVICE=nvidia voxtype setup gpu | grep "GPU selection"
-# Expected: "GPU selection: NVIDIA (via VOXTYPE_VULKAN_DEVICE)"
+VOXTYPE_VULKAN_DEVICE=nvidia voxtype setup gpu | grep -A1 "GPU selection"
+VOXTYPE_VULKAN_DEVICE=intel voxtype setup gpu | grep -A1 "GPU selection"
+# Expected, for a vendor that is installed: "GPU selection: <Vendor> (via VOXTYPE_VULKAN_DEVICE)"
+# For one that isn't: "GPU selection: auto (first available)" followed by
+#   "VOXTYPE_VULKAN_DEVICE asks for <Vendor>, but no <Vendor> GPU was detected"
 
-VOXTYPE_VULKAN_DEVICE=intel voxtype setup gpu | grep "GPU selection"
-# Expected: "GPU selection: Intel (via VOXTYPE_VULKAN_DEVICE)"
+# Test with the Vulkan backend (packaged installs)
+sudo voxtype setup gpu --enable
 
-# Test with Vulkan binary
-sudo ln -sf /usr/lib/voxtype/voxtype-vulkan /usr/local/bin/voxtype
+# The daemon reads VOXTYPE_VULKAN_DEVICE from its own environment, so set it
+# on the service, not on the `record` command:
+systemctl --user edit voxtype    # add: [Service]  Environment=VOXTYPE_VULKAN_DEVICE=amd
 systemctl --user restart voxtype
-
-# Record with specific GPU selected
-VOXTYPE_VULKAN_DEVICE=amd voxtype record start
+voxtype record start
 sleep 2
 voxtype record stop
 

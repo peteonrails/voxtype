@@ -9,12 +9,23 @@
 //! ## Module layout
 //!
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
-//! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
+//! - [`visual`] — peak-hold decay, waveform envelope and level mapping, palette types.
+//! - [`placement`] — where the card sits on the output the OSD lands on.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
+//! - [`frontend`] — resolve `[osd] frontend` (including `auto`) to what runs.
 //! - [`theme`] — Omarchy theme parsing + change watcher.
+//! - [`shell_style`] — opt-in Omarchy Shell popup chrome for voice strips.
+//! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
+//! - [`session`] — runtime files describing the session in flight, for OSDs.
 
 pub mod config;
+pub mod frontend;
+pub mod gtk_env;
 pub mod ipc;
+pub mod placement;
+pub mod recipe;
+pub mod session;
+pub mod shell_style;
 pub mod style;
 pub mod supervisor;
 pub mod theme;

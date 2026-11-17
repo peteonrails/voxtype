@@ -14,9 +14,12 @@ mod engine;
 mod general;
 mod hotkey;
 mod meeting_section;
+#[cfg(unix)]
+pub mod meeting_watch;
 mod notifications_section;
 mod osd_section;
 mod output_section;
+mod schema_form;
 mod section;
 mod sidebar;
 mod text_section;
@@ -27,7 +30,7 @@ mod waybar_section;
 // through the same atomic-save-and-validate path the TUI uses, rather than
 // growing a second config writer.
 #[allow(unused_imports)]
-pub use config_editor::{ConfigEditor, EditorError};
+pub use config_editor::{ConfigEditor, EditorError, OverlayChange};
 
 use crossterm::{
     event::{
@@ -51,7 +54,7 @@ use std::time::Duration;
 use app::{Action, App};
 use section::Section;
 
-type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// Entry point for the hidden `voxtype configure --probe-audio-devices`
 /// flag: print detected input devices and exit. See
@@ -82,14 +85,14 @@ pub fn run(
     Ok(())
 }
 
-fn enter_terminal() -> anyhow::Result<Tui> {
+pub(crate) fn enter_terminal() -> anyhow::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
-fn leave_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
+pub(crate) fn leave_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -252,6 +255,10 @@ fn run_setup_model(engine: &str, model: &str) -> Result<(), String> {
 /// model download so the changes take effect immediately. Logs the outcome
 /// to the General switch-outcome banner so the user sees it on next focus.
 fn restart_voxtype_daemon(app: &mut App) {
+    if let Err(error) = validate_saved_selection_for_restart() {
+        eprintln!("Not restarting voxtype: {error}");
+        return;
+    }
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "restart", "voxtype"])
         .status();
@@ -273,11 +280,20 @@ fn restart_if_config_newer(app: &App) -> bool {
         app::config_file_mtime(),
     );
     if restart {
+        if let Err(error) = validate_saved_selection_for_restart() {
+            eprintln!("Not restarting voxtype: {error}");
+            return false;
+        }
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "restart", "voxtype"])
             .status();
     }
     restart
+}
+
+fn validate_saved_selection_for_restart() -> Result<(), String> {
+    let path = config_editor::tui_config_path().ok_or("Cannot determine config path")?;
+    crate::model_selection::validate_saved_for_restart(&path)
 }
 
 /// Routes keypresses while the save-on-exit prompt is showing.
@@ -587,7 +603,7 @@ fn render_title(f: &mut Frame, area: Rect) {
     let daemon = crate::daemon_status::running_version();
     let (version_text, version_style) = match &daemon {
         crate::daemon_status::DaemonVersion::Running(v) if daemon.differs_from_caller() => (
-            format!("daemon {} · this TUI {}", v, env!("CARGO_PKG_VERSION")),
+            format!("daemon {} · this TUI {}", v, crate::cli::VERSION),
             Style::default().fg(Color::Yellow),
         ),
         crate::daemon_status::DaemonVersion::Running(v) => (

@@ -30,12 +30,36 @@ fn apply_bool_override(target: &mut bool, enable: bool, disable: bool) {
     }
 }
 
+/// Point `config` at the engine and model a `transcribe --model` names.
+/// Unknown or undownloaded names are an error with the fix, not a silent
+/// fallback to whatever the config already uses.
+fn apply_transcribe_model(config: &mut config::Config, model: &str) {
+    use voxtype::model_catalog::{override_config, override_route, OverrideRoute};
+    match override_route(config, model) {
+        Ok(OverrideRoute::WhisperManager) => config.whisper.model = model.to_string(),
+        Ok(OverrideRoute::Active) => {}
+        Ok(OverrideRoute::Separate { engine, model }) => {
+            *config = override_config(config, engine, &model);
+        }
+        Err(problem) => {
+            eprintln!("Error: {problem}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Apply every `cli.<flag>` onto `config` in place. Returns `top_level_model`
 /// (a clone of `cli.model`) which is consumed downstream by
 /// `send_record_command` so a subcommand-level `--model` can still defer to
 /// the global flag when the subcommand didn't set its own.
 pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Option<String> {
     let top_level_model = cli.model.clone();
+    if let Some(enabled) = cli.tray {
+        config.tray.enabled = enabled;
+    }
+    if let Some(enabled) = cli.omarchy_link_settings_plugin {
+        config.omarchy.link_settings_plugin = enabled;
+    }
 
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;
@@ -49,9 +73,46 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(delay) = cli.restore_clipboard_delay_ms {
         config.output.restore_clipboard_delay_ms = delay;
     }
-    if let Some(ref model) = cli.model {
+    // Model admission must see the mode selected for this invocation.
+    if let Some(ref mode) = cli.whisper_mode {
+        match mode.to_lowercase().as_str() {
+            "local" => config.whisper.mode = Some(config::WhisperMode::Local),
+            "remote" => config.whisper.mode = Some(config::WhisperMode::Remote),
+            "cli" => config.whisper.mode = Some(config::WhisperMode::Cli),
+            _ => {
+                eprintln!(
+                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli",
+                    mode
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    if let (Some(model), Some(voxtype::Commands::Transcribe { .. })) = (&cli.model, &cli.command) {
+        // `transcribe` runs this one file with the named model, so the name
+        // picks its engine exactly as a per-recording override does in the
+        // daemon, instead of only setting [whisper] model and leaving a
+        // Parakeet config transcribing with Parakeet.
+        apply_transcribe_model(config, model);
+    } else if let Some(ref model) = cli.model {
+        // Another engine's model selects that engine too. A Whisper name
+        // only sets [whisper] model, as it always has, so scripts that pass
+        // one alongside another engine keep working.
+        let other_engine = voxtype::model_catalog::resolve_model(model)
+            .filter(|r| r.engine != "whisper")
+            .and_then(|r| {
+                r.engine
+                    .parse::<config::TranscriptionEngine>()
+                    .ok()
+                    .map(|engine| (engine, r.model))
+            });
         if setup::model::is_valid_model(model) {
             config.whisper.model = model.clone();
+        } else if let Some((engine, resolved)) = other_engine {
+            config.set_model_for(engine, &resolved);
+        } else if matches!(cli.command, Some(voxtype::Commands::Record { .. })) {
+            // `record` forwards the name to the daemon, which rejects an unknown
+            // one with its own error; a "using default" warning would contradict it.
         } else {
             let default_model = &config.whisper.model;
             tracing::warn!(
@@ -77,6 +138,38 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
                 );
                 std::process::exit(1);
             }
+        }
+    }
+    if cli.gguf_model.is_some()
+        || cli.gguf_architecture.is_some()
+        || cli.gguf_language.is_some()
+        || cli.gguf_backend.is_some()
+        || cli.gguf_streaming
+    {
+        let gguf = config.gguf.get_or_insert_with(config::GgufConfig::default);
+        if let Some(model) = &cli.gguf_model {
+            gguf.model = model.clone();
+        }
+        if let Some(architecture) = &cli.gguf_architecture {
+            gguf.architecture = architecture.clone();
+        }
+        if let Some(language) = &cli.gguf_language {
+            gguf.language = language.clone();
+        }
+        if let Some(backend) = &cli.gguf_backend {
+            gguf.gguf_backend = backend.clone();
+        }
+        if cli.gguf_streaming {
+            gguf.streaming = true;
+        }
+        if let Err(message) = voxtype::model_selection::validate_gguf_choice(
+            &gguf.model,
+            &gguf.architecture,
+            &gguf.language,
+            gguf.streaming,
+        ) {
+            eprintln!("Error: {message}");
+            std::process::exit(1);
         }
     }
 
@@ -112,13 +205,21 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.initial_prompt = Some(prompt.clone());
     }
     if let Some(ref lang) = cli.language {
-        config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config.gguf.get_or_insert_with(Default::default).language = lang.clone();
+        } else {
+            config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        }
     }
     if cli.translate {
         config.whisper.translate = true;
     }
     if let Some(threads) = cli.threads {
-        config.whisper.threads = Some(threads);
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config.gguf.get_or_insert_with(Default::default).threads = Some(threads);
+        } else {
+            config.whisper.threads = Some(threads);
+        }
     }
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
@@ -130,20 +231,13 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.flash_attention = true;
     }
     if cli.on_demand_loading {
-        config.whisper.on_demand_loading = true;
-    }
-    if let Some(ref mode) = cli.whisper_mode {
-        match mode.to_lowercase().as_str() {
-            "local" => config.whisper.mode = Some(config::WhisperMode::Local),
-            "remote" => config.whisper.mode = Some(config::WhisperMode::Remote),
-            "cli" => config.whisper.mode = Some(config::WhisperMode::Cli),
-            _ => {
-                eprintln!(
-                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli",
-                    mode
-                );
-                std::process::exit(1);
-            }
+        if config.engine == config::TranscriptionEngine::Gguf {
+            config
+                .gguf
+                .get_or_insert_with(Default::default)
+                .on_demand_loading = true;
+        } else {
+            config.whisper.on_demand_loading = true;
         }
     }
     if let Some(ref model) = cli.secondary_model {
@@ -181,6 +275,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         &mut config.audio.feedback.enabled,
         cli.audio_feedback,
         cli.no_audio_feedback,
+    );
+    apply_bool_override(
+        &mut config.audio.keep_failed_recordings,
+        cli.keep_failed_recordings,
+        cli.no_keep_failed_recordings,
     );
     if cli.pause_media {
         config.audio.pause_media = true;
@@ -236,9 +335,39 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.fallback_to_clipboard,
         cli.no_fallback_to_clipboard,
     );
-    if cli.spoken_punctuation {
-        config.text.spoken_punctuation = true;
+    apply_bool_override(
+        &mut config.text.lard_disfluency,
+        cli.lard_disfluency,
+        cli.no_lard_disfluency,
+    );
+    if let Some(path) = &cli.lard_model_path {
+        config.text.lard_model_path = Some(path.clone());
     }
+    apply_bool_override(
+        &mut config.text.punctuation_casing,
+        cli.punctuation_casing,
+        cli.no_punctuation_casing,
+    );
+    apply_bool_override(
+        &mut config.text.spoken_punctuation,
+        cli.spoken_punctuation,
+        cli.no_spoken_punctuation,
+    );
+    apply_bool_override(
+        &mut config.text.collapse_restarts,
+        cli.collapse_restarts,
+        cli.no_collapse_restarts,
+    );
+    apply_bool_override(
+        &mut config.text.repair_sentence_breaks,
+        cli.repair_sentence_breaks,
+        cli.no_repair_sentence_breaks,
+    );
+    apply_bool_override(
+        &mut config.text.format_numbers,
+        cli.format_numbers,
+        cli.no_format_numbers,
+    );
     apply_bool_override(
         &mut config.text.filter_filler_words,
         cli.filter_fillers,
@@ -246,6 +375,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     );
     if let Some(ref keys) = cli.paste_keys {
         config.output.paste_keys = Some(keys.clone());
+    }
+    if let Some(ref keys) = cli.paste_keys_terminal {
+        config.output.paste_keys_terminal = Some(keys.clone());
     }
     if let Some(ref layout) = cli.dotool_xkb_layout {
         config.output.dotool_xkb_layout = Some(layout.clone());

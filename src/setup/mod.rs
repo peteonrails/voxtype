@@ -9,6 +9,7 @@
 //! - NPU backend management (Intel NPU via OpenVINO)
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
+//! - Omarchy Settings panel linking
 
 pub mod accel;
 #[cfg(target_os = "macos")]
@@ -16,18 +17,26 @@ pub mod app_bundle;
 pub mod binary;
 pub mod compositor;
 pub mod dms;
+pub mod doctor;
 pub mod gpu;
 #[cfg(target_os = "macos")]
 pub mod hammerspoon;
+#[cfg(target_os = "linux")]
+pub mod icons;
+pub mod install_hint;
+pub mod lard;
 pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod manifest;
 pub mod model;
 pub mod npu;
+pub mod omarchy;
 pub mod parakeet;
 pub mod progress;
+pub mod punctuation;
 pub mod quickshell;
+pub mod skill;
 pub mod systemd;
 pub mod vad;
 pub mod variant_check;
@@ -73,6 +82,9 @@ pub struct OutputChainStatus {
     pub display_server: DisplayServer,
     pub wtype: OutputToolStatus,
     pub eitype: OutputToolStatus,
+    /// dotool sits third in the runtime fallback chain but was absent here,
+    /// so `setup check` described a chain the daemon does not use (#507).
+    pub dotool: OutputToolStatus,
     pub ydotool: OutputToolStatus,
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
@@ -148,7 +160,7 @@ pub fn detect_display_server() -> DisplayServer {
     // Check for macOS first
     #[cfg(target_os = "macos")]
     {
-        return DisplayServer::MacOS;
+        DisplayServer::MacOS
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -201,22 +213,106 @@ pub async fn is_ydotool_daemon_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the running compositor implements `zwp_virtual_keyboard_manager_v1`,
+/// which wtype requires.
+///
+/// KWin and Mutter do not, so wtype fails at runtime on KDE and GNOME however
+/// cleanly it installed. wlroots-based compositors (Sway, Hyprland, River,
+/// Niri) do. An unrecognised compositor is assumed to support it, because
+/// wlroots derivatives are numerous and a wrong "unavailable" is worse than a
+/// wrong "available" that still falls through the chain.
+pub fn compositor_supports_virtual_keyboard() -> bool {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let lower = desktop.to_lowercase();
+    !(lower.contains("kde") || lower.contains("plasma") || lower.contains("gnome"))
+}
+
+/// Every tool the output chain report looks up on PATH.
+const OUTPUT_CHAIN_TOOLS: &[&str] = &[
+    "wtype",
+    "eitype",
+    "dotool",
+    "ydotool",
+    "wl-copy",
+    "xclip",
+    "osascript",
+    "pbcopy",
+];
+
 /// Detect the full output chain status
 pub async fn detect_output_chain() -> OutputChainStatus {
-    let display_server = detect_display_server();
+    let mut paths = std::collections::HashMap::new();
+    for tool in OUTPUT_CHAIN_TOOLS {
+        paths.insert(*tool, get_command_path(tool).await);
+    }
+    let ydotool_daemon = if paths.get("ydotool").is_some_and(Option::is_some) {
+        is_ydotool_daemon_running().await
+    } else {
+        false
+    };
+    build_output_chain(
+        detect_display_server(),
+        compositor_supports_virtual_keyboard(),
+        |tool| paths.get(tool).cloned().flatten(),
+        ydotool_daemon,
+    )
+}
 
-    // Check wtype
-    let wtype_path = get_command_path("wtype").await;
+/// Output chain status without spawning anything: PATH lookups in-process,
+/// and ydotoold assumed up when ydotool is installed (probing it means
+/// running ydotool). For the daemon's startup check, which must stay fast
+/// and only cares whether any output method could work at all.
+pub fn detect_output_chain_quick() -> OutputChainStatus {
+    build_output_chain(
+        detect_display_server(),
+        compositor_supports_virtual_keyboard(),
+        |tool| which::which(tool).ok().map(|p| p.display().to_string()),
+        true,
+    )
+}
+
+/// Assemble the output chain status from tool lookups. Pure apart from the
+/// `/dev/uinput` check for dotool, so the classification can be tested
+/// without the tools installed. `compositor_supports_wtype` is
+/// [`compositor_supports_virtual_keyboard`].
+pub fn build_output_chain(
+    display_server: DisplayServer,
+    compositor_supports_wtype: bool,
+    lookup: impl Fn(&str) -> Option<String>,
+    ydotool_daemon_running: bool,
+) -> OutputChainStatus {
+    // Check wtype. Being on Wayland is not sufficient: wtype needs
+    // zwp_virtual_keyboard_manager_v1, which neither KWin nor Mutter
+    // implements, so on KDE and GNOME it installs cleanly and then silently
+    // fails at runtime. Reporting it as available there sent users chasing a
+    // driver that cannot work (#507, #650).
+    let wtype_path = lookup("wtype");
     let wtype_installed = wtype_path.is_some();
-    let wtype_available = wtype_installed && display_server == DisplayServer::Wayland;
+    let wtype_available =
+        wtype_installed && display_server == DisplayServer::Wayland && compositor_supports_wtype;
     let wtype_note = if wtype_installed && display_server != DisplayServer::Wayland {
         Some("Wayland only".to_string())
+    } else if wtype_installed && !compositor_supports_wtype {
+        Some("compositor lacks zwp_virtual_keyboard_v1".to_string())
+    } else {
+        None
+    };
+
+    // Check dotool
+    let dotool_path = lookup("dotool");
+    let dotool_installed = dotool_path.is_some();
+    // dotool drives uinput, so it is independent of the display server and
+    // works where wtype cannot. It does need write access to /dev/uinput.
+    let dotool_uinput = std::path::Path::new("/dev/uinput").exists();
+    let dotool_available = dotool_installed && dotool_uinput;
+    let dotool_note = if dotool_installed && !dotool_uinput {
+        Some("/dev/uinput not present".to_string())
     } else {
         None
     };
 
     // Check eitype
-    let eitype_path = get_command_path("eitype").await;
+    let eitype_path = lookup("eitype");
     let eitype_installed = eitype_path.is_some();
     let eitype_available = eitype_installed && display_server == DisplayServer::Wayland;
     let eitype_note = if eitype_installed && display_server != DisplayServer::Wayland {
@@ -225,14 +321,15 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         None
     };
 
+    // Check dotool. Same test the dotool driver applies at output time: on
+    // PATH is enough, since it writes to uinput on Wayland, X11 and TTY alike.
+    let dotool_path = lookup("dotool");
+    let dotool_installed = dotool_path.is_some();
+
     // Check ydotool
-    let ydotool_path = get_command_path("ydotool").await;
+    let ydotool_path = lookup("ydotool");
     let ydotool_installed = ydotool_path.is_some();
-    let ydotool_daemon = if ydotool_installed {
-        is_ydotool_daemon_running().await
-    } else {
-        false
-    };
+    let ydotool_daemon = ydotool_installed && ydotool_daemon_running;
     let ydotool_available = ydotool_installed && ydotool_daemon;
     let ydotool_note = if ydotool_installed && !ydotool_daemon {
         Some("daemon not running".to_string())
@@ -241,7 +338,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check wl-copy
-    let wl_copy_path = get_command_path("wl-copy").await;
+    let wl_copy_path = lookup("wl-copy");
     let wl_copy_installed = wl_copy_path.is_some();
     let wl_copy_available = wl_copy_installed && display_server == DisplayServer::Wayland;
     let wl_copy_note = if wl_copy_installed && display_server != DisplayServer::Wayland {
@@ -251,7 +348,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check xclip
-    let xclip_path = get_command_path("xclip").await;
+    let xclip_path = lookup("xclip");
     let xclip_installed = xclip_path.is_some();
     let xclip_available = xclip_installed && display_server == DisplayServer::X11;
     let xclip_note = if xclip_installed && display_server != DisplayServer::X11 {
@@ -261,7 +358,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check osascript (macOS)
-    let osascript_path = get_command_path("osascript").await;
+    let osascript_path = lookup("osascript");
     let osascript_installed = osascript_path.is_some();
     let osascript_available = osascript_installed && display_server == DisplayServer::MacOS;
     let osascript_note = if osascript_installed && !osascript_available {
@@ -273,7 +370,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check pbcopy (macOS)
-    let pbcopy_path = get_command_path("pbcopy").await;
+    let pbcopy_path = lookup("pbcopy");
     let pbcopy_installed = pbcopy_path.is_some();
     let pbcopy_available = pbcopy_installed && display_server == DisplayServer::MacOS;
     let pbcopy_note = if pbcopy_installed && !pbcopy_available {
@@ -289,6 +386,8 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         Some("wtype".to_string())
     } else if eitype_available {
         Some("eitype".to_string())
+    } else if dotool_available {
+        Some("dotool".to_string())
     } else if ydotool_available {
         Some("ydotool".to_string())
     } else if pbcopy_available {
@@ -314,6 +413,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
             available: eitype_available,
             path: eitype_path,
             note: eitype_note,
+        },
+        dotool: OutputToolStatus {
+            name: "dotool",
+            installed: dotool_installed,
+            available: dotool_available,
+            path: dotool_path,
+            note: dotool_note,
         },
         ydotool: OutputToolStatus {
             name: "ydotool",
@@ -355,6 +461,57 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     }
 }
 
+/// The output method the daemon will actually use for this config.
+///
+/// `detect_output_chain` only knows what is installed, and its
+/// `primary_method` follows the default driver order. A configured `mode`
+/// other than `type`, or a custom `driver_order`, changes what the daemon
+/// really does, and the status report must say that instead.
+pub fn configured_primary_method(
+    status: &OutputChainStatus,
+    output: &crate::config::OutputConfig,
+) -> Option<String> {
+    use crate::config::{OutputDriver, OutputMode};
+
+    let clipboard = status.wl_copy.available || status.xclip.available || status.pbcopy.available;
+    match output.mode {
+        OutputMode::File => return Some("file".to_string()),
+        OutputMode::Clipboard => return clipboard.then(|| "clipboard".to_string()),
+        OutputMode::Paste => {
+            let keystroke =
+                status.wtype.available || status.eitype.available || status.ydotool.available;
+            return (clipboard && keystroke).then(|| "paste".to_string());
+        }
+        OutputMode::Type => {}
+    }
+
+    let Some(order) = output.driver_order.as_deref() else {
+        return status.primary_method.clone();
+    };
+    if status.display_server == DisplayServer::MacOS {
+        // driver_order is not applied on macOS; the native chain is.
+        return status.primary_method.clone();
+    }
+    for driver in order {
+        let available = match driver {
+            OutputDriver::Wtype => status.wtype.available,
+            OutputDriver::Eitype => status.eitype.available,
+            OutputDriver::Dotool => status.dotool.available,
+            OutputDriver::Ydotool => status.ydotool.available,
+            OutputDriver::Clipboard => status.wl_copy.available,
+            OutputDriver::Xclip => status.xclip.available,
+        };
+        if available {
+            return Some(match driver {
+                OutputDriver::Clipboard | OutputDriver::Xclip => "clipboard".to_string(),
+                other => other.to_string(),
+            });
+        }
+    }
+    // The daemon appends clipboard to a custom order when this is on.
+    (output.fallback_to_clipboard && clipboard).then(|| "clipboard".to_string())
+}
+
 /// Print output chain status
 pub fn print_output_chain_status(status: &OutputChainStatus) {
     println!("\nOutput Chain:");
@@ -392,6 +549,10 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             &status.eitype,
             status.display_server == DisplayServer::Wayland,
         );
+
+        // dotool: third in the runtime chain, and the working answer on
+        // KDE and GNOME where wtype cannot be.
+        print_tool_status(&status.dotool, true);
 
         // ydotool
         if status.ydotool.installed {
@@ -437,17 +598,24 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             "pbcopy" => "pbcopy (clipboard, requires manual paste)",
             "wtype" => "wtype (CJK supported)",
             "eitype" => "eitype (libei, GNOME/KDE native)",
+            "dotool" => "dotool (keyboard layouts via dotool_xkb_layout)",
             "ydotool" => "ydotool (CJK not supported)",
             "clipboard" => "clipboard (requires manual paste)",
             _ => method.as_str(),
         };
-        println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc);
+        match method.as_str() {
+            "file" => println!("  \x1b[32m→\x1b[0m Text will be written to a file (mode = \"file\")"),
+            "paste" => println!(
+                "  \x1b[32m→\x1b[0m Text will be pasted: clipboard, then a paste keystroke (mode = \"paste\")"
+            ),
+            _ => println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc),
+        }
     } else {
         println!("  \x1b[31m→\x1b[0m No text output method available!");
         if status.display_server == DisplayServer::MacOS {
             println!("    osascript should be available on macOS");
         } else {
-            println!("    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support");
+            println!("    Install wtype (Wayland), eitype (GNOME/KDE), dotool, or ydotool for typing support");
         }
     }
 }
@@ -507,6 +675,14 @@ pub(crate) enum ModelKind {
     Whisper,
     Parakeet,
     SenseVoice,
+    Moonshine,
+    Paraformer,
+    Dolphin,
+    Omnilingual,
+    Cohere,
+    CohereGguf,
+    ParakeetGguf,
+    Gguf,
     OpenVino,
 }
 
@@ -517,9 +693,10 @@ pub(crate) enum ModelKind {
 /// SenseVoice existed, so resolving it to SenseVoice made
 /// `setup --download --model small` unable to fetch Whisper small at all: it
 /// failed the `sensevoice` feature gate on Whisper builds, and on ONNX builds
-/// it would have downloaded a different engine's model. SenseVoice's
-/// colliding names stay reachable under their directory form
-/// (`sensevoice-small`, `sensevoice-small-fp32`).
+/// it would have downloaded a different engine's model. The same holds for
+/// Moonshine's `base`/`tiny` and Dolphin's `base`. Every colliding name stays
+/// reachable under its directory form (`sensevoice-small`, `moonshine-base`,
+/// `dolphin-base`), which is what `model_catalog::download_arg` advertises.
 pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
     if model::is_valid_model(name) {
         Ok(ModelKind::Whisper)
@@ -527,17 +704,132 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Parakeet)
     } else if model::is_sensevoice_model(name) {
         Ok(ModelKind::SenseVoice)
+    } else if model::is_moonshine_model(name) {
+        Ok(ModelKind::Moonshine)
+    } else if model::is_paraformer_model(name) {
+        Ok(ModelKind::Paraformer)
+    } else if model::is_dolphin_model(name) {
+        Ok(ModelKind::Dolphin)
+    } else if model::is_omnilingual_model(name) {
+        Ok(ModelKind::Omnilingual)
+    } else if model::is_cohere_model(name) {
+        Ok(ModelKind::Cohere)
+    } else if let Some(gguf) = model::find_gguf_model(name) {
+        Ok(match gguf.engine {
+            "parakeet" => ModelKind::ParakeetGguf,
+            "cohere" => ModelKind::CohereGguf,
+            "gguf" => ModelKind::Gguf,
+            _ => unreachable!(),
+        })
     } else if model::is_openvino_model(name) {
         Ok(ModelKind::OpenVino)
+    } else if let Some(pending) = model::find_pending_gguf_model(name) {
+        anyhow::bail!(
+            "GGUF model '{}' is pinned but pending publication{}; it is not downloadable or selectable yet.",
+            pending.name,
+            if pending.license_gated {
+                " and license clearance"
+            } else {
+                ""
+            }
+        )
     } else {
         anyhow::bail!(
-            "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  OpenVINO: {}",
+            "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  \
+             Moonshine: {}\n  Paraformer: {}\n  Dolphin: {}\n  Omnilingual: {}\n  \
+             Cohere: {}\n  OpenVINO: {}",
             name,
             model::valid_model_names().join(", "),
-            model::valid_parakeet_model_names().join(", "),
+            model::parakeet_setup_model_names().join(", "),
             model::sensevoice_setup_model_names().join(", "),
+            model::moonshine_setup_model_names().join(", "),
+            model::paraformer_setup_model_names().join(", "),
+            model::dolphin_setup_model_names().join(", "),
+            model::omnilingual_setup_model_names().join(", "),
+            model::cohere_setup_model_names().join(", "),
             model::valid_openvino_model_names().join(", "),
         )
+    }
+}
+
+/// How `run_setup` reaches an ONNX engine whose download path was built for
+/// the interactive picker (#687): the same registry lookup, R2 download, and
+/// post-download validator, addressed by function pointer so one branch
+/// serves every such engine.
+struct OnnxSetupRoute {
+    /// Name shown in status lines.
+    display: &'static str,
+    /// Engine name written to the config on --activate.
+    engine: &'static str,
+    /// Cargo feature that compiles the engine's transcriber.
+    feature: &'static str,
+    /// Whether this binary can run the engine. The registry and downloader
+    /// are compiled unconditionally, but fetching a model the binary can't
+    /// load helps nobody, so the gate matches the older per-engine branches.
+    enabled: bool,
+    /// On-disk directory under the models dir.
+    dir_name: fn(&str) -> Option<&'static str>,
+    /// Config value --activate writes. Moonshine keeps its short name (the
+    /// `[moonshine]` default and what the picker writes); the others use the
+    /// directory name, matching their config defaults.
+    config_value: fn(&str) -> Option<&'static str>,
+    validate: fn(&std::path::Path) -> anyhow::Result<()>,
+    download: fn(&str) -> anyhow::Result<()>,
+}
+
+fn onnx_setup_route(kind: ModelKind) -> Option<OnnxSetupRoute> {
+    match kind {
+        ModelKind::Moonshine => Some(OnnxSetupRoute {
+            display: "Moonshine",
+            engine: "moonshine",
+            feature: "moonshine",
+            enabled: cfg!(feature = "moonshine"),
+            dir_name: model::moonshine_dir_name,
+            config_value: model::moonshine_config_name,
+            validate: model::validate_moonshine_model,
+            download: model::download_moonshine_model,
+        }),
+        ModelKind::Paraformer => Some(OnnxSetupRoute {
+            display: "Paraformer",
+            engine: "paraformer",
+            feature: "paraformer",
+            enabled: cfg!(feature = "paraformer"),
+            dir_name: model::paraformer_dir_name,
+            config_value: model::paraformer_dir_name,
+            validate: model::validate_onnx_ctc_model,
+            download: model::download_paraformer_model,
+        }),
+        ModelKind::Dolphin => Some(OnnxSetupRoute {
+            display: "Dolphin",
+            engine: "dolphin",
+            feature: "dolphin",
+            enabled: cfg!(feature = "dolphin"),
+            dir_name: model::dolphin_dir_name,
+            config_value: model::dolphin_dir_name,
+            validate: model::validate_onnx_ctc_model,
+            download: model::download_dolphin_model,
+        }),
+        ModelKind::Omnilingual => Some(OnnxSetupRoute {
+            display: "Omnilingual",
+            engine: "omnilingual",
+            feature: "omnilingual",
+            enabled: cfg!(feature = "omnilingual"),
+            dir_name: model::omnilingual_dir_name,
+            config_value: model::omnilingual_dir_name,
+            validate: model::validate_onnx_ctc_model,
+            download: model::download_omnilingual_model,
+        }),
+        ModelKind::Cohere => Some(OnnxSetupRoute {
+            display: "Cohere Transcribe",
+            engine: "cohere",
+            feature: "cohere",
+            enabled: cfg!(feature = "cohere"),
+            dir_name: model::cohere_dir_name,
+            config_value: model::cohere_dir_name,
+            validate: model::validate_cohere_model,
+            download: model::download_cohere_model,
+        }),
+        _ => None,
     }
 }
 
@@ -567,6 +859,18 @@ pub async fn run_setup(
     no_post_install: bool,
     activate: bool,
 ) -> anyhow::Result<()> {
+    if let Some(name) = model_override {
+        if let Some(resolved) = crate::model_catalog::resolve_model(name) {
+            if matches!(resolved.engine, "parakeet" | "cohere") {
+                crate::model_selection::validate_backend(resolved.engine, name)
+                    .map_err(anyhow::Error::msg)?;
+                if !download {
+                    crate::model_selection::validate_ready(resolved.engine, name)
+                        .map_err(anyhow::Error::msg)?;
+                }
+            }
+        }
+    }
     if !quiet {
         println!("Voxtype Setup\n");
         println!("=============\n");
@@ -583,8 +887,9 @@ pub async fn run_setup(
         print_success(&format!("Models directory: {:?}", Config::models_dir()));
     }
 
-    // Create default config file if it doesn't exist
-    if let Some(config_path) = Config::default_path() {
+    // Provisioning weights is not selection, including on a fresh installation.
+    // --activate writes its selection only after a successful download below.
+    if let Some(config_path) = Config::default_path().filter(|_| !download) {
         if !config_path.exists() {
             if !quiet {
                 println!("\nCreating default config file...");
@@ -612,8 +917,125 @@ pub async fn run_setup(
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
     let is_openvino = kind == Some(ModelKind::OpenVino);
+    let is_gguf = matches!(
+        kind,
+        Some(ModelKind::CohereGguf | ModelKind::ParakeetGguf | ModelKind::Gguf)
+    );
 
-    if is_openvino {
+    if let Some(route) = kind.and_then(onnx_setup_route) {
+        // Engines whose downloads were picker-only until #687: routed
+        // through the same registry + R2 + validator path the picker uses.
+        let model_name = model_override.unwrap(); // Safe: a route implies Some
+
+        if !quiet {
+            println!("\n{} model...", route.display);
+        }
+
+        if !route.enabled {
+            print_failure(&format!(
+                "{} model '{}' requires the '{}' feature",
+                route.display, model_name, route.feature
+            ));
+            println!(
+                "       Rebuild with: cargo build --features {}",
+                route.feature
+            );
+            anyhow::bail!("{} feature not enabled", route.feature);
+        }
+
+        let dir_name = (route.dir_name)(model_name).unwrap(); // Safe: classifier matched
+        let model_path = models_dir.join(dir_name);
+        let model_valid = model_path.exists() && (route.validate)(&model_path).is_ok();
+
+        // Downloading is not selecting (#610): the config is only touched
+        // behind --activate, exactly like the branches below.
+        let apply_activation = || -> anyhow::Result<()> {
+            let value = (route.config_value)(model_name).unwrap();
+            model::set_engine_model_config(route.engine, value)?;
+            if !quiet {
+                print_success(&format!(
+                    "Config updated: engine = \"{}\", model = \"{}\"",
+                    route.engine, value
+                ));
+            }
+            Ok(())
+        };
+
+        if model_valid {
+            if !quiet {
+                let size = std::fs::read_dir(&model_path)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .filter_map(|e| e.metadata().ok())
+                            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                            .sum::<f64>()
+                    })
+                    .unwrap_or(0.0);
+                print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
+            }
+            if activate {
+                apply_activation()?;
+            }
+        } else if download {
+            (route.download)(model_name)?;
+            if activate {
+                apply_activation()?;
+            }
+        } else if !quiet {
+            print_info(&format!("Model '{}' not downloaded yet", model_name));
+            println!(
+                "       Run: voxtype setup --download --model {}",
+                model_name
+            );
+        }
+    } else if is_gguf {
+        let name = model_override.unwrap(); // Safe: classifier matched GGUF
+        let model = model::find_gguf_model(name).unwrap();
+        let path = models_dir.join(model.name);
+        if !model.compiled() {
+            anyhow::bail!(
+                "GGUF model '{}' requires the '{}' feature",
+                name,
+                model.feature()
+            );
+        }
+        let verification = model::verify_gguf_model(&path, model);
+        match &verification {
+            Ok(()) => {
+                if !quiet {
+                    print_success(&format!(
+                        "Model ready: {} ({:.2} GB)",
+                        name,
+                        model.size as f64 / 1e9
+                    ));
+                }
+            }
+            Err(_) if download => model::download_gguf_model(name)?,
+            Err(e) if path.exists() => {
+                left_damaged = true;
+                if !quiet {
+                    print_failure(&format!("Model '{}' failed verification: {}", name, e));
+                    println!("       Run: voxtype setup --download --model {}", name);
+                }
+            }
+            Err(_) => {
+                if !quiet {
+                    print_info(&format!("Model '{}' not downloaded yet", name));
+                    println!("       Run: voxtype setup --download --model {}", name);
+                }
+            }
+        }
+        if activate && (verification.is_ok() || download) {
+            model::set_engine_model_config(model.engine, model.name)?;
+            if !quiet {
+                print_success(&format!(
+                    "Config updated: engine = \"{}\", model = \"{}\"",
+                    model.engine, model.name
+                ));
+            }
+        }
+    } else if is_openvino {
         // Handle OpenVINO model
         #[allow(unused_variables)]
         let model_name = model_override.unwrap(); // Safe: is_openvino implies Some
@@ -914,11 +1336,11 @@ pub async fn run_setup(
         {
             println!("  1. Set up a compositor keybinding to trigger recording:");
             println!(
-                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
+                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record toggle\n"
             );
             println!("  2. Start the daemon: voxtype daemon\n");
             println!("Optional:");
-            println!("  voxtype setup check      - Verify system configuration");
+            println!("  voxtype doctor           - Verify system configuration");
             println!("  voxtype setup model      - Download/switch whisper models");
             println!("  voxtype setup systemd    - Install as systemd service");
             println!("  voxtype setup waybar     - Get Waybar integration config");
@@ -929,275 +1351,143 @@ pub async fn run_setup(
     Ok(())
 }
 
-/// Run system checks (blocking, shows red X for failures)
-pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
-    println!("Voxtype System Check\n");
-    println!("====================\n");
-
-    let mut all_ok = true;
-
-    // Check CPU compatibility
-    println!("CPU:");
-    if let Some(warning) = crate::cpu::check_cpu_compatibility() {
-        print_warning(&warning);
-    } else {
-        print_success("CPU features compatible");
-    }
-    if crate::cpu::is_running_in_vm() {
-        print_info("Running in a virtual machine - ensure CPU features are passed through");
-    }
-
-    // Check directories
-    println!("Directories:");
-    if let Some(config_dir) = Config::config_dir() {
-        if config_dir.exists() {
-            print_success(&format!("Config directory: {:?}", config_dir));
-        } else {
-            print_failure(&format!("Config directory missing: {:?}", config_dir));
-            println!("       Run: voxtype setup");
-            all_ok = false;
-        }
-    }
-
-    let models_dir = Config::models_dir();
-    if models_dir.exists() {
-        print_success(&format!("Models directory: {:?}", models_dir));
-    } else {
-        print_failure(&format!("Models directory missing: {:?}", models_dir));
-        println!("       Run: voxtype setup");
-        all_ok = false;
-    }
-
-    // Check config file
-    if let Some(config_path) = Config::default_path() {
-        if config_path.exists() {
-            print_success(&format!("Config file: {:?}", config_path));
-        } else {
-            print_failure(&format!("Config file missing: {:?}", config_path));
-            println!("       Run: voxtype setup");
-            all_ok = false;
-        }
-    }
-
-    // Check input group
-    println!("\nInput:");
-    if user_in_group("input") {
-        print_success(
-            "User is in 'input' group (evdev hotkeys + modifier-release guard available)",
-        );
-    } else {
-        print_warning("User is not in 'input' group");
-        println!("       evdev hotkeys: unavailable");
-        println!("       Modifier-release guard: unavailable");
-        println!("         (typed text may trigger keybindings if the hotkey is released late)");
-        println!("       Required only for evdev hotkey mode, not compositor keybindings");
-        println!("       To enable: sudo usermod -aG input $USER && logout");
-    }
-
-    // Check output chain
-    let output_status = detect_output_chain().await;
-    print_output_chain_status(&output_status);
-
-    if output_status.primary_method.is_none() {
-        print_failure("No text output method available");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("       Install wtype: sudo pacman -S wtype");
-            println!("       Or eitype:     cargo install eitype");
-        } else {
-            println!("       Install ydotool: sudo pacman -S ydotool");
-        }
-        all_ok = false;
-    } else if output_status.primary_method.as_deref() == Some("clipboard") {
-        print_warning("Only clipboard mode available - typing won't work");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("       Install wtype: sudo pacman -S wtype");
-            println!("       Or eitype:     cargo install eitype");
-        } else {
-            println!("       Install ydotool: sudo pacman -S ydotool");
-        }
-    }
-
-    // Check whisper model (only if using Whisper engine)
-    if config.engine == crate::config::TranscriptionEngine::Whisper {
-        println!("\nWhisper Model:");
-        let model_name = &config.whisper.model;
-        let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
-        let model_path = models_dir.join(&model_filename);
-
-        let size = std::fs::metadata(&model_path)
-            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
-        if crate::model_catalog::model_installed("whisper", model_name) {
-            print_success(&format!(
-                "Model '{}' installed ({:.0} MB)",
-                model_name, size
-            ));
-        } else if model_path.exists() {
-            // Present but short: an interrupted download used to be reported
-            // as installed, then failed to load at runtime.
-            print_failure(&format!(
-                "Model '{}' is incomplete ({:.0} MB on disk)",
-                model_name, size
-            ));
-            println!(
-                "       Run: voxtype setup --download --model {}",
-                model_name
-            );
-            all_ok = false;
-        } else {
-            print_failure(&format!("Model '{}' not found", model_name));
-            println!("       Run: voxtype setup --download");
-            all_ok = false;
-        }
-    } else {
-        println!("\nWhisper Model:");
-        print_info("Using Parakeet engine (Whisper model not required)");
-    }
-
-    // Check Parakeet models
-    println!("\nParakeet Models:");
-
-    // Find available Parakeet models
-    let mut parakeet_models: Vec<(String, u64)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("parakeet") {
-                    // Check if it has the required ONNX files (including quantized variants)
-                    let has_encoder = path.join("encoder-model.onnx").exists()
-                        || path.join("encoder-model.int8.onnx").exists();
-                    let has_decoder = path.join("decoder_joint-model.onnx").exists()
-                        || path.join("decoder_joint-model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
-                    if has_encoder || has_decoder {
-                        // Get total size of model files
-                        let size = std::fs::read_dir(&path)
-                            .map(|entries| {
-                                entries
-                                    .flatten()
-                                    .filter_map(|e| e.metadata().ok())
-                                    .map(|m| m.len())
-                                    .sum()
-                            })
-                            .unwrap_or(0);
-                        parakeet_models.push((name, size));
-                    }
-                }
-            }
-        }
-    }
-
-    if parakeet_models.is_empty() {
-        print_info("No Parakeet models found");
-        println!("       See docs/PARAKEET.md for download instructions");
-    } else {
-        for (name, size) in &parakeet_models {
-            let size_mb = *size as f64 / 1024.0 / 1024.0;
-            print_success(&format!("Model '{}' installed ({:.0} MB)", name, size_mb));
-        }
-    }
-
-    // Check OpenVINO models
-    println!("\nOpenVINO Whisper Models:");
-
-    let mut openvino_models: Vec<(String, u64)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("openvino-whisper")
-                    && model::validate_openvino_model(&path).is_ok()
-                {
-                    let size = std::fs::read_dir(&path)
-                        .map(|entries| {
-                            entries
-                                .flatten()
-                                .filter_map(|e| e.metadata().ok())
-                                .map(|m| m.len())
-                                .sum()
-                        })
-                        .unwrap_or(0);
-                    openvino_models.push((name, size));
-                }
-            }
-        }
-    }
-
-    if openvino_models.is_empty() {
-        print_info("No OpenVINO models found");
-        println!("       Download with: voxtype setup --download --model base.en-int8");
-    } else {
-        for (name, size) in &openvino_models {
-            let size_mb = *size as f64 / 1024.0 / 1024.0;
-            print_success(&format!("Model '{}' installed ({:.0} MB)", name, size_mb));
-        }
-    }
-
-    // Check if OpenVINO is configured but model is missing
-    if config.engine == crate::config::TranscriptionEngine::OpenVino {
-        if let Some(ref openvino_config) = config.openvino {
-            let configured_model = &openvino_config.model;
-            // Resolve the dir name for the configured model
-            let dir_name = model::openvino_dir_name(configured_model);
-            let model_found = match dir_name {
-                Some(dir) => openvino_models.iter().any(|(name, _)| name == dir),
-                None => false,
-            };
-            if !model_found {
-                print_failure(&format!(
-                    "Configured OpenVINO model '{}' not found",
-                    configured_model
-                ));
-                println!(
-                    "       Download with: voxtype setup --download --model {}",
-                    configured_model
-                );
-                all_ok = false;
-            }
-        } else {
-            print_failure("Engine set to 'openvino' but [openvino] config section is missing");
-            all_ok = false;
-        }
-    }
-
-    // Check if Parakeet is configured but model is missing
-    if config.engine == crate::config::TranscriptionEngine::Parakeet {
-        if let Some(ref parakeet_config) = config.parakeet {
-            let configured_model = &parakeet_config.model;
-            let model_found = parakeet_models
-                .iter()
-                .any(|(name, _)| name == configured_model);
-            if !model_found {
-                print_failure(&format!(
-                    "Configured Parakeet model '{}' not found",
-                    configured_model
-                ));
-                println!("       Download the model or change config to use an available model");
-                all_ok = false;
-            }
-        } else {
-            print_failure("Engine set to 'parakeet' but [parakeet] config section is missing");
-            all_ok = false;
-        }
-    }
-
-    // Summary
-    println!("\n---");
-    if all_ok {
-        println!("\x1b[32m✓ All checks passed!\x1b[0m");
-    } else {
-        println!("\x1b[31m✗ Some checks failed.\x1b[0m Please fix the issues above.");
-    }
-
+/// `voxtype setup check`: the `voxtype doctor` report under its old name.
+///
+/// Always succeeds, as it always has, so scripts that run it for its output
+/// keep working; `voxtype doctor` exits non-zero when a check errors.
+pub async fn run_checks(
+    config: &Config,
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    doctor::run_cli(config, config_path, false).await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// #507/#650: wtype needs zwp_virtual_keyboard_manager_v1, which KWin and
+    /// Mutter do not implement, so being on Wayland is not enough.
+    #[test]
+    fn wtype_support_depends_on_the_compositor() {
+        let cases = [
+            ("Hyprland", true),
+            ("sway", true),
+            ("river", true),
+            ("niri", true),
+            ("KDE", false),
+            ("plasma", false),
+            ("GNOME", false),
+            ("ubuntu:GNOME", false),
+        ];
+        for (desktop, expected) in cases {
+            std::env::set_var("XDG_CURRENT_DESKTOP", desktop);
+            assert_eq!(
+                compositor_supports_virtual_keyboard(),
+                expected,
+                "wrong answer for XDG_CURRENT_DESKTOP={desktop}"
+            );
+        }
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+    }
+
+    /// An unrecognised compositor is assumed to work: wlroots derivatives are
+    /// numerous, and a wrong "unavailable" hides a driver that would have
+    /// worked, while a wrong "available" still falls through the chain.
+    #[test]
+    fn unknown_compositor_is_assumed_capable() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "some-new-wlroots-thing");
+        assert!(compositor_supports_virtual_keyboard());
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        assert!(
+            compositor_supports_virtual_keyboard(),
+            "unset must not disable"
+        );
+    }
     use super::*;
+    use crate::config::{OutputConfig, OutputDriver, OutputMode};
+
+    fn tool(name: &'static str, available: bool) -> OutputToolStatus {
+        OutputToolStatus {
+            name,
+            installed: available,
+            available,
+            path: None,
+            note: None,
+        }
+    }
+
+    /// A Wayland box without eitype: what `detect_output_chain` reports here.
+    fn wayland_status(wtype: bool) -> OutputChainStatus {
+        OutputChainStatus {
+            display_server: DisplayServer::Wayland,
+            wtype: tool("wtype", wtype),
+            eitype: tool("eitype", false),
+            dotool: tool("dotool", true),
+            ydotool: tool("ydotool", false),
+            ydotool_daemon: false,
+            wl_copy: tool("wl-copy", true),
+            xclip: tool("xclip", false),
+            osascript: tool("osascript", false),
+            pbcopy: tool("pbcopy", false),
+            primary_method: Some(if wtype { "wtype" } else { "dotool" }.to_string()),
+        }
+    }
+
+    fn output(mode: OutputMode, order: Option<Vec<OutputDriver>>) -> OutputConfig {
+        OutputConfig {
+            mode,
+            driver_order: order,
+            ..OutputConfig::default()
+        }
+    }
+
+    #[test]
+    fn primary_method_follows_a_custom_driver_order() {
+        // driver_order = ["wtype", "clipboard"] never uses dotool, even when
+        // wtype is unavailable and dotool is installed.
+        let cfg = output(
+            OutputMode::Type,
+            Some(vec![OutputDriver::Wtype, OutputDriver::Clipboard]),
+        );
+        assert_eq!(
+            configured_primary_method(&wayland_status(true), &cfg).as_deref(),
+            Some("wtype")
+        );
+        assert_eq!(
+            configured_primary_method(&wayland_status(false), &cfg).as_deref(),
+            Some("clipboard")
+        );
+    }
+
+    #[test]
+    fn primary_method_without_a_custom_order_keeps_detection() {
+        let cfg = output(OutputMode::Type, None);
+        assert_eq!(
+            configured_primary_method(&wayland_status(false), &cfg).as_deref(),
+            Some("dotool")
+        );
+    }
+
+    #[test]
+    fn primary_method_reports_the_configured_mode() {
+        let status = wayland_status(true);
+        let method = |mode| configured_primary_method(&status, &output(mode, None));
+        assert_eq!(method(OutputMode::File).as_deref(), Some("file"));
+        assert_eq!(method(OutputMode::Clipboard).as_deref(), Some("clipboard"));
+        assert_eq!(method(OutputMode::Paste).as_deref(), Some("paste"));
+    }
+
+    #[test]
+    fn exhausted_driver_order_uses_clipboard_only_when_fallback_is_on() {
+        let mut cfg = output(OutputMode::Type, Some(vec![OutputDriver::Ydotool]));
+        assert_eq!(
+            configured_primary_method(&wayland_status(true), &cfg).as_deref(),
+            Some("clipboard")
+        );
+        cfg.fallback_to_clipboard = false;
+        assert_eq!(configured_primary_method(&wayland_status(true), &cfg), None);
+    }
 
     /// `small` is in both the Whisper and SenseVoice tables. Whisper has to
     /// win, or `setup --download --model small` can never fetch Whisper small.
@@ -1212,6 +1502,71 @@ mod tests {
             classify_model_override("small.en").unwrap(),
             ModelKind::Whisper
         );
+        // Moonshine and Dolphin also use `base` as a short name.
+        assert!(model::is_moonshine_model("base"));
+        assert!(model::is_dolphin_model("base"));
+        assert_eq!(classify_model_override("base").unwrap(), ModelKind::Whisper);
+        assert_eq!(classify_model_override("tiny").unwrap(), ModelKind::Whisper);
+    }
+
+    /// The picker-only engines (#687) are reachable by their directory-form
+    /// names, which is what `download_arg` advertises.
+    #[test]
+    fn picker_only_engines_classify_by_directory_name() {
+        for (name, expected) in [
+            ("moonshine-base", ModelKind::Moonshine),
+            ("moonshine-tiny-ko", ModelKind::Moonshine),
+            ("paraformer-zh", ModelKind::Paraformer),
+            ("dolphin-base", ModelKind::Dolphin),
+            ("omnilingual-300m", ModelKind::Omnilingual),
+            ("cohere-transcribe-q4f16", ModelKind::Cohere),
+            ("cohere-transcribe-fp16", ModelKind::Cohere),
+            (
+                "cohere-transcribe-03-2026-Q4_K_M.gguf",
+                ModelKind::CohereGguf,
+            ),
+            ("parakeet-tdt-0.6b-v3-F16.gguf", ModelKind::ParakeetGguf),
+            ("parakeet-tdt-0.6b-v3-Q8_0.gguf", ModelKind::ParakeetGguf),
+        ] {
+            assert_eq!(classify_model_override(name).unwrap(), expected, "{}", name);
+        }
+    }
+
+    /// `run_setup` unwraps a route's `dir_name` and `config_value` for any
+    /// name the classifier accepted, so every advertised argument must
+    /// resolve through its route without panicking.
+    #[test]
+    fn every_routed_engine_resolves_names_for_its_catalog() {
+        for engine in [
+            "moonshine",
+            "paraformer",
+            "dolphin",
+            "omnilingual",
+            "cohere",
+        ] {
+            for model in crate::model_catalog::model_catalog(engine) {
+                if engine == "cohere" && model.ends_with(".gguf") {
+                    continue; // GGUF uses the single-file setup branch below.
+                }
+                let arg = crate::model_catalog::download_arg(engine, model).unwrap();
+                let kind = classify_model_override(&arg).unwrap();
+                let route = onnx_setup_route(kind)
+                    .unwrap_or_else(|| panic!("no setup route for {} '{}'", engine, arg));
+                assert_eq!(route.engine, engine, "{}", arg);
+                assert!(
+                    (route.dir_name)(&arg).is_some(),
+                    "{} '{}' has no directory name",
+                    engine,
+                    arg
+                );
+                assert!(
+                    (route.config_value)(&arg).is_some(),
+                    "{} '{}' has no config value",
+                    engine,
+                    arg
+                );
+            }
+        }
     }
 
     #[test]
@@ -1262,9 +1617,17 @@ mod tests {
                 };
                 let expected = match *engine {
                     "whisper" => ModelKind::Whisper,
+                    "parakeet" if model.ends_with(".gguf") => ModelKind::ParakeetGguf,
                     "parakeet" => ModelKind::Parakeet,
                     "sensevoice" => ModelKind::SenseVoice,
+                    "moonshine" => ModelKind::Moonshine,
+                    "paraformer" => ModelKind::Paraformer,
+                    "dolphin" => ModelKind::Dolphin,
+                    "omnilingual" => ModelKind::Omnilingual,
+                    "cohere" if model.ends_with(".gguf") => ModelKind::CohereGguf,
+                    "cohere" => ModelKind::Cohere,
                     "openvino" => ModelKind::OpenVino,
+                    "gguf" => ModelKind::Gguf,
                     other => panic!(
                         "'{}' advertises a download argument but run_setup has no branch for it",
                         other

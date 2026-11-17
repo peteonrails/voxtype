@@ -12,9 +12,9 @@ cargo test replacements_with_multiple -- --nocapture
 # 1. Add to config.toml:
 #    [text]
 #    spoken_punctuation = true
-#    replacements = [
-#      { from = "slash pr", to = "/pr" },
-#    ]
+#
+#    [text.replacements]
+#    "slash pr" = "/pr"
 # 2. Restart daemon, record "slash pr one two three"
 # Expected: "/pr one two three" (not "/ pr one two three")
 ```

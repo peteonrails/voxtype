@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // Title row: what this panel is, whether the GPU is actually being used, and the
@@ -14,7 +15,7 @@ import qs.Ui
 Item {
   id: root
 
-  property string title: "Voxtype Settings"
+  property string title: "Voxtype"
   property string voxtypeVersion: ""
   // What the running daemon reports, which is not always what the CLI that
   // rendered this panel is. An upgrade installed but never restarted leaves
@@ -37,7 +38,7 @@ Item {
 
   implicitHeight: layout.implicitHeight
 
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   // A Button sizes itself to its content, so one without an icon comes out
   // shorter than its neighbours — which is exactly how "Open TUI" ended up
@@ -85,7 +86,7 @@ Item {
 
       Text {
         text: root.title
-        color: Color.foreground
+        color: ShellTheme.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.heading
         font.bold: true

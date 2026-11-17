@@ -17,6 +17,7 @@
 #
 # Output:
 #   releases/X.Y.Z/voxtype-X.Y.Z-linux-x86_64-vulkan
+#   releases/X.Y.Z/voxtype-X.Y.Z-linux-x86_64-vulkan.gguf-worker
 
 set -e
 
@@ -99,6 +100,7 @@ if [[ -n "$DOCKER_CONTEXT" ]]; then
     # Create container, copy file out, remove container
     CONTAINER_ID=$(docker $CONTEXT_FLAG create voxtype-vulkan-builder)
     docker $CONTEXT_FLAG cp "$CONTAINER_ID:/tmp/voxtype-vulkan" "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
+    docker $CONTEXT_FLAG cp "$CONTAINER_ID:/tmp/voxtype-gguf-worker" "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker"
     docker $CONTEXT_FLAG rm "$CONTAINER_ID" > /dev/null
 else
     docker run --rm -v "$(pwd)/${RELEASE_DIR}:/output" voxtype-vulkan-builder
@@ -108,16 +110,21 @@ echo ""
 echo "=== Verifying extracted binary ==="
 
 BINARY="${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
+WORKER="${BINARY}.gguf-worker"
 
 if [[ ! -f "$BINARY" ]]; then
     echo "ERROR: Binary not found at $BINARY"
     exit 1
 fi
+if [[ ! -f "$WORKER" ]]; then
+    echo "ERROR: GGUF worker not found at $WORKER"
+    exit 1
+fi
 
-vpternlog=$(objdump -d "$BINARY" | grep -c vpternlog) || vpternlog=0
-broadcast=$(objdump -d "$BINARY" | grep -c '{1to') || broadcast=0
-gfni=$(objdump -d "$BINARY" | grep -cE 'vgf2p8|gf2p8') || gfni=0
-zmm=$(objdump -d "$BINARY" | grep -c zmm) || zmm=0
+vpternlog=$(objdump -d "$BINARY" "$WORKER" | grep -c vpternlog) || vpternlog=0
+broadcast=$(objdump -d "$BINARY" "$WORKER" | grep -c '{1to') || broadcast=0
+gfni=$(objdump -d "$BINARY" "$WORKER" | grep -cE 'vgf2p8|gf2p8') || gfni=0
+zmm=$(objdump -d "$BINARY" "$WORKER" | grep -c zmm) || zmm=0
 
 echo "  vpternlog: $vpternlog"
 echo "  broadcast: $broadcast"
@@ -133,4 +140,4 @@ fi
 echo ""
 echo "=== Vulkan build complete ==="
 echo ""
-ls -lh "$BINARY"
+ls -lh "$BINARY" "$WORKER"

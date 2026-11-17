@@ -242,8 +242,23 @@ impl SlidingWindowStreamingTranscriber {
 }
 
 impl Transcriber for SlidingWindowStreamingTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        self.base.set_vocabulary(terms);
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         self.base.transcribe(samples)
+    }
+
+    fn transcribe_timed(
+        &self,
+        samples: &[f32],
+    ) -> Result<Vec<super::TimedSegment>, TranscribeError> {
+        self.base.transcribe_timed(samples)
+    }
+
+    fn short_clips_are_cheap(&self) -> bool {
+        self.base.short_clips_are_cheap()
     }
 
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {

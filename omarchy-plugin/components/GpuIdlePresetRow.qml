@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // One switch standing in for two schema keys.
@@ -89,7 +90,7 @@ Item {
 
         Text {
           text: "Release GPU memory when idle"
-          color: Color.foreground
+          color: ShellTheme.Color.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.body
         }
@@ -97,7 +98,7 @@ Item {
         Text {
           width: parent.width
           text: "Frees VRAM between dictations; the model reloads on the next one, so the first words take a moment longer."
-          color: Qt.darker(Color.foreground, 1.5)
+          color: Qt.darker(ShellTheme.Color.foreground, 1.5)
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -107,7 +108,7 @@ Item {
           visible: root.errorText !== ""
           width: parent.width
           text: root.errorText
-          color: Color.urgent
+          color: ShellTheme.Color.urgent
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -116,7 +117,7 @@ Item {
         Text {
           width: parent.width
           text: root.loadingKey + "  +  " + root.isolationKey
-          color: Qt.darker(Color.foreground, 2.0)
+          color: Qt.darker(ShellTheme.Color.foreground, 2.0)
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight

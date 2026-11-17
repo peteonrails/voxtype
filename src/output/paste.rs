@@ -12,6 +12,7 @@
 
 use super::session::{detect, DisplaySession};
 use super::TextOutput;
+use crate::config::OutputDriver;
 use crate::error::OutputError;
 use crate::output::find_ydotool_socket;
 use crate::output::xclip::copy_to_x11_clipboard;
@@ -19,8 +20,54 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// Keystroke-capable drivers, in the order tried when the configured
+/// `driver_order` doesn't name any of them. dotool/clipboard/xclip have no
+/// keystroke-simulation path, so they never appear here.
+const DEFAULT_KEYSTROKE_DRIVER_ORDER: [OutputDriver; 3] = [
+    OutputDriver::Wtype,
+    OutputDriver::Eitype,
+    OutputDriver::Ydotool,
+];
+
+/// Filter a configured `[output] driver_order` down to keystroke-capable
+/// drivers, preserving relative order. Falls back to
+/// `DEFAULT_KEYSTROKE_DRIVER_ORDER` when the configured order is absent or
+/// names none of wtype/eitype/ydotool (e.g. `["dotool", "clipboard"]`),
+/// since paste mode's keystroke step has nothing to run in that case.
+fn resolve_keystroke_driver_order(configured: Option<&[OutputDriver]>) -> Vec<OutputDriver> {
+    let filtered: Vec<OutputDriver> = configured
+        .map(|order| {
+            order
+                .iter()
+                .copied()
+                .filter(|d| DEFAULT_KEYSTROKE_DRIVER_ORDER.contains(d))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if filtered.is_empty() {
+        DEFAULT_KEYSTROKE_DRIVER_ORDER.to_vec()
+    } else {
+        filtered
+    }
+}
+
+/// `paste_keys` value that picks the keystroke per focused window.
+pub const PASTE_KEYS_AUTO: &str = "auto";
+
+/// Keystroke `auto` sends outside terminals.
+const AUTO_DEFAULT_KEYS: &str = "ctrl+v";
+
+/// Keystroke `auto` sends to terminals unless `paste_keys_terminal` says
+/// otherwise. Ctrl+Shift+V is the clipboard paste binding of stock
+/// Ghostty, Kitty, Alacritty, foot, WezTerm, Konsole and GNOME Terminal, and
+/// Omarchy keeps it. Shift+Insert would be the other candidate, but most of
+/// those terminals bind it to the primary selection unless remapped, which
+/// pastes whatever was last highlighted instead of the transcription.
+const AUTO_TERMINAL_KEYS: &str = "ctrl+shift+v";
+
 /// Parsed paste keystroke (modifiers + key)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedKeystroke {
     /// Modifier keys (e.g., ["ctrl"], ["shift"], ["ctrl", "shift"])
     modifiers: Vec<String>,
@@ -53,6 +100,15 @@ impl ParsedKeystroke {
             .collect();
 
         Ok(Self { modifiers, key })
+    }
+
+    /// Parse `s`, falling back to `fallback` (which must be valid) with a
+    /// warning naming `setting` when `s` is malformed.
+    fn parse_or(s: &str, fallback: &str, setting: &str) -> Self {
+        Self::parse(s).unwrap_or_else(|e| {
+            tracing::warn!("Invalid {} '{}': {}, using {}", setting, s, e, fallback);
+            Self::parse(fallback).expect("fallback keystroke is valid")
+        })
     }
 
     /// Convert to wtype arguments
@@ -130,6 +186,80 @@ impl ParsedKeystroke {
     }
 }
 
+impl std::fmt::Display for ParsedKeystroke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for modifier in &self.modifiers {
+            write!(f, "{}+", modifier)?;
+        }
+        f.write_str(&self.key)
+    }
+}
+
+/// Which keystroke paste mode sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PasteKeystroke {
+    /// One keystroke everywhere: an explicit `paste_keys` with no
+    /// `paste_keys_terminal`.
+    Fixed(ParsedKeystroke),
+    /// `terminal` when the focused window is a terminal, `default` otherwise
+    /// or when that can't be determined.
+    TerminalAware {
+        default: ParsedKeystroke,
+        terminal: ParsedKeystroke,
+    },
+}
+
+impl PasteKeystroke {
+    /// Resolve `[output] paste_keys` and `paste_keys_terminal`.
+    ///
+    /// - unset or `"auto"`: ctrl+v, and `paste_keys_terminal` (default
+    ///   ctrl+shift+v) in terminals
+    /// - explicit keys alone: those keys everywhere, as before `auto` existed
+    /// - explicit keys plus `paste_keys_terminal`: the first outside
+    ///   terminals, the second inside them
+    fn resolve(paste_keys: Option<&str>, paste_keys_terminal: Option<&str>) -> Self {
+        let paste_keys = paste_keys.map(str::trim).filter(|k| !k.is_empty());
+        let terminal_keys = paste_keys_terminal
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case(PASTE_KEYS_AUTO));
+        let terminal = || {
+            ParsedKeystroke::parse_or(
+                terminal_keys.unwrap_or(AUTO_TERMINAL_KEYS),
+                AUTO_TERMINAL_KEYS,
+                "paste_keys_terminal",
+            )
+        };
+
+        match paste_keys {
+            Some(keys) if !keys.eq_ignore_ascii_case(PASTE_KEYS_AUTO) => {
+                let default = ParsedKeystroke::parse_or(keys, AUTO_DEFAULT_KEYS, "paste_keys");
+                if terminal_keys.is_some() {
+                    Self::TerminalAware {
+                        default,
+                        terminal: terminal(),
+                    }
+                } else {
+                    Self::Fixed(default)
+                }
+            }
+            _ => Self::TerminalAware {
+                default: ParsedKeystroke::parse(AUTO_DEFAULT_KEYS).unwrap(),
+                terminal: terminal(),
+            },
+        }
+    }
+
+    /// Pick the keystroke for a window whose terminal-ness is `is_terminal`
+    /// (`None` when unknown).
+    fn select(&self, is_terminal: Option<bool>) -> &ParsedKeystroke {
+        match self {
+            Self::Fixed(keystroke) => keystroke,
+            Self::TerminalAware { terminal, .. } if is_terminal == Some(true) => terminal,
+            Self::TerminalAware { default, .. } => default,
+        }
+    }
+}
+
 /// Convert a key name to its evdev code
 fn key_name_to_evdev(name: &str) -> Result<u16, String> {
     match name.to_lowercase().as_str() {
@@ -200,8 +330,8 @@ pub struct PasteOutput {
     auto_submit: bool,
     /// Text to append after transcription (before auto_submit)
     append_text: Option<String>,
-    /// Parsed paste keystroke
-    keystroke: ParsedKeystroke,
+    /// Paste keystroke, fixed or chosen per focused window
+    keystroke: PasteKeystroke,
     /// Delay between key events in milliseconds
     type_delay_ms: u32,
     /// Delay before pasting (after clipboard copy) in milliseconds
@@ -210,30 +340,33 @@ pub struct PasteOutput {
     restore_clipboard: bool,
     /// Delay after paste before restoring clipboard (milliseconds)
     restore_clipboard_delay_ms: u32,
+    /// Order in which keystroke-capable drivers (wtype/eitype/ydotool) are
+    /// tried for the paste keystroke and the auto-submit Enter. Derived from
+    /// `[output] driver_order`; see [`resolve_keystroke_driver_order`].
+    driver_order: Vec<OutputDriver>,
 }
 
 impl PasteOutput {
     /// Create a new paste output
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         auto_submit: bool,
         append_text: Option<String>,
         paste_keys: Option<String>,
+        paste_keys_terminal: Option<String>,
+        driver_order: Option<Vec<OutputDriver>>,
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
         restore_clipboard: bool,
         restore_clipboard_delay_ms: u32,
     ) -> Self {
-        let keystroke_str = paste_keys.as_deref().unwrap_or("ctrl+v");
-        let keystroke = ParsedKeystroke::parse(keystroke_str).unwrap_or_else(|e| {
-            tracing::warn!(
-                "Invalid paste_keys '{}': {}, using ctrl+v",
-                keystroke_str,
-                e
-            );
-            ParsedKeystroke::parse("ctrl+v").unwrap()
-        });
+        let keystroke =
+            PasteKeystroke::resolve(paste_keys.as_deref(), paste_keys_terminal.as_deref());
 
         tracing::debug!("Paste keystroke configured: {:?}", keystroke);
+
+        let driver_order = resolve_keystroke_driver_order(driver_order.as_deref());
+        tracing::debug!("Paste keystroke driver order: {:?}", driver_order);
 
         Self {
             auto_submit,
@@ -243,6 +376,7 @@ impl PasteOutput {
             pre_type_delay_ms,
             restore_clipboard,
             restore_clipboard_delay_ms,
+            driver_order,
         }
     }
 
@@ -258,6 +392,8 @@ impl PasteOutput {
 
         // Spawn wl-copy with stdin pipe
         let mut child = Command::new("wl-copy")
+            .arg("--type")
+            .arg(super::clipboard::WL_COPY_TEXT_MIME)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -594,8 +730,8 @@ impl PasteOutput {
     }
 
     /// Simulate paste keystroke using wtype
-    async fn simulate_paste_wtype(&self) -> Result<(), OutputError> {
-        let args = self.keystroke.to_wtype_args();
+    async fn simulate_paste_wtype(&self, keystroke: &ParsedKeystroke) -> Result<(), OutputError> {
+        let args = keystroke.to_wtype_args();
         tracing::debug!("Running: wtype {}", args.join(" "));
 
         let output = Command::new("wtype")
@@ -624,8 +760,8 @@ impl PasteOutput {
     }
 
     /// Simulate paste keystroke using eitype
-    async fn simulate_paste_eitype(&self) -> Result<(), OutputError> {
-        let args = self.keystroke.to_eitype_args();
+    async fn simulate_paste_eitype(&self, keystroke: &ParsedKeystroke) -> Result<(), OutputError> {
+        let args = keystroke.to_eitype_args();
         tracing::debug!("Running: eitype {}", args.join(" "));
 
         let output = Command::new("eitype")
@@ -654,8 +790,8 @@ impl PasteOutput {
     }
 
     /// Simulate paste keystroke using ydotool
-    async fn simulate_paste_ydotool(&self) -> Result<(), OutputError> {
-        let args = self.keystroke.to_ydotool_args().map_err(|e| {
+    async fn simulate_paste_ydotool(&self, keystroke: &ParsedKeystroke) -> Result<(), OutputError> {
+        let args = keystroke.to_ydotool_args().map_err(|e| {
             OutputError::CtrlVFailed(format!("Cannot convert keystroke for ydotool: {}", e))
         })?;
 
@@ -705,99 +841,102 @@ impl PasteOutput {
         Ok(())
     }
 
-    /// Simulate paste keystroke, trying wtype first, then eitype, then ydotool
-    async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
-        // Try wtype first (preferred - no daemon needed)
-        if self.is_wtype_available().await {
-            match self.simulate_paste_wtype().await {
+    /// Simulate paste keystroke, trying each driver in `self.driver_order`
+    /// (derived from `[output] driver_order`, defaulting to
+    /// wtype -> eitype -> ydotool) until one succeeds.
+    async fn simulate_paste_keystroke(
+        &self,
+        keystroke: &ParsedKeystroke,
+    ) -> Result<(), OutputError> {
+        let mut tried = Vec::new();
+
+        for driver in &self.driver_order {
+            let (available, name) = match driver {
+                OutputDriver::Wtype => (self.is_wtype_available().await, "wtype"),
+                OutputDriver::Eitype => (self.is_eitype_available().await, "eitype"),
+                OutputDriver::Ydotool => (self.is_ydotool_available().await, "ydotool"),
+                // driver_order is pre-filtered to the three keystroke-capable
+                // drivers above; nothing else can reach this loop.
+                _ => continue,
+            };
+
+            if !available {
+                continue;
+            }
+            tried.push(name);
+
+            let result = match driver {
+                OutputDriver::Wtype => self.simulate_paste_wtype(keystroke).await,
+                OutputDriver::Eitype => self.simulate_paste_eitype(keystroke).await,
+                OutputDriver::Ydotool => self.simulate_paste_ydotool(keystroke).await,
+                _ => unreachable!(),
+            };
+
+            match result {
                 Ok(()) => {
-                    tracing::debug!("Paste keystroke sent via wtype");
+                    tracing::debug!("Paste keystroke sent via {}", name);
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::debug!("wtype paste failed: {}, trying eitype", e);
+                    tracing::debug!("{} paste failed: {}", name, e);
                 }
             }
         }
 
-        // Try eitype (EI protocol - works on GNOME/KDE/Sway with libei)
-        if self.is_eitype_available().await {
-            match self.simulate_paste_eitype().await {
-                Ok(()) => {
-                    tracing::debug!("Paste keystroke sent via eitype");
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::debug!("eitype paste failed: {}, trying ydotool", e);
-                }
+        Err(OutputError::CtrlVFailed(format!(
+            "No keystroke tool available (tried {})",
+            if tried.is_empty() {
+                "none".to_string()
+            } else {
+                tried.join(", ")
             }
-        }
-
-        // Fall back to ydotool
-        if self.is_ydotool_available().await {
-            match self.simulate_paste_ydotool().await {
-                Ok(()) => {
-                    tracing::debug!("Paste keystroke sent via ydotool");
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::debug!("ydotool paste failed: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        Err(OutputError::CtrlVFailed(
-            "No keystroke tool available (tried wtype, eitype, ydotool)".to_string(),
-        ))
+        )))
     }
 
-    /// Send Enter key after paste
+    /// Send Enter key after paste, trying the same driver order as the paste
+    /// keystroke itself.
     async fn send_enter(&self) -> Result<(), OutputError> {
-        // Try wtype first
-        if self.is_wtype_available().await {
-            let output = Command::new("wtype")
-                .args(["-k", "Return"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
+        for driver in &self.driver_order {
+            let available = match driver {
+                OutputDriver::Wtype => self.is_wtype_available().await,
+                OutputDriver::Eitype => self.is_eitype_available().await,
+                OutputDriver::Ydotool => self.is_ydotool_available().await,
+                _ => continue,
+            };
+            if !available {
+                continue;
+            }
 
-            if let Ok(out) = output {
-                if out.status.success() {
-                    return Ok(());
+            let output = match driver {
+                OutputDriver::Wtype => {
+                    Command::new("wtype")
+                        .args(["-k", "Return"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
                 }
-            }
-        }
-
-        // Try eitype
-        if self.is_eitype_available().await {
-            let output = Command::new("eitype")
-                .args(["-k", "return"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
-
-            if let Ok(out) = output {
-                if out.status.success() {
-                    return Ok(());
+                OutputDriver::Eitype => {
+                    Command::new("eitype")
+                        .args(["-k", "return"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
                 }
-            }
-        }
-
-        // Fall back to ydotool
-        if self.is_ydotool_available().await {
-            let mut cmd = Command::new("ydotool");
-            if let Some(socket) = find_ydotool_socket() {
-                cmd.env("YDOTOOL_SOCKET", socket);
-            }
-            let output = cmd
-                .args(["key", "28:1", "28:0"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
+                OutputDriver::Ydotool => {
+                    let mut cmd = Command::new("ydotool");
+                    if let Some(socket) = find_ydotool_socket() {
+                        cmd.env("YDOTOOL_SOCKET", socket);
+                    }
+                    cmd.args(["key", "28:1", "28:0"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
+                }
+                _ => continue,
+            };
 
             if let Ok(out) = output {
                 if out.status.success() {
@@ -856,10 +995,24 @@ impl TextOutput for PasteOutput {
         } else {
             100
         };
-        tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+        let pre_paste_delay = tokio::time::sleep(std::time::Duration::from_millis(delay as u64));
 
-        // Step 2: Simulate paste keystroke
-        self.simulate_paste_keystroke().await?;
+        // Step 2: Pick and simulate the paste keystroke. The focused-window
+        // query runs during the pre-paste delay, so it costs no extra time.
+        let keystroke = match &self.keystroke {
+            PasteKeystroke::Fixed(keystroke) => {
+                pre_paste_delay.await;
+                keystroke
+            }
+            terminal_aware => {
+                let (is_terminal, ()) = tokio::join!(
+                    super::active_window::focused_window_is_terminal(),
+                    pre_paste_delay
+                );
+                terminal_aware.select(is_terminal)
+            }
+        };
+        self.simulate_paste_keystroke(keystroke).await?;
 
         // Send Enter key if configured
         if self.auto_submit {
@@ -886,13 +1039,7 @@ impl TextOutput for PasteOutput {
 
         tracing::info!(
             "Text pasted via clipboard + {} ({} chars)",
-            self.keystroke.modifiers.join("+")
-                + if !self.keystroke.modifiers.is_empty() {
-                    "+"
-                } else {
-                    ""
-                }
-                + &self.keystroke.key,
+            keystroke,
             text.len()
         );
         Ok(())
@@ -973,16 +1120,153 @@ mod tests {
 
     #[test]
     fn test_new_stores_restore_clipboard_fields() {
-        let output = PasteOutput::new(false, None, None, 10, 100, true, 300);
+        let output = PasteOutput::new(false, None, None, None, None, 10, 100, true, 300);
         assert!(output.restore_clipboard);
         assert_eq!(output.restore_clipboard_delay_ms, 300);
     }
 
     #[test]
     fn test_new_defaults_restore_clipboard_disabled() {
-        let output = PasteOutput::new(false, None, None, 10, 100, false, 200);
+        let output = PasteOutput::new(false, None, None, None, None, 10, 100, false, 200);
         assert!(!output.restore_clipboard);
         assert_eq!(output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_driver_order_defaults_to_wtype_eitype_ydotool() {
+        let output = PasteOutput::new(false, None, None, None, None, 10, 100, false, 200);
+        assert_eq!(
+            output.driver_order,
+            vec![
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Ydotool
+            ]
+        );
+    }
+
+    #[test]
+    fn test_driver_order_honours_config_override() {
+        // #750: ydotool sends real evdev keycodes and survives XWayland/RDP
+        // keycode remapping that breaks wtype; a user who puts it first in
+        // driver_order must have paste mode actually try it first.
+        let output = PasteOutput::new(
+            false,
+            None,
+            None,
+            None,
+            Some(vec![OutputDriver::Ydotool, OutputDriver::Wtype]),
+            10,
+            100,
+            false,
+            200,
+        );
+        assert_eq!(
+            output.driver_order,
+            vec![OutputDriver::Ydotool, OutputDriver::Wtype]
+        );
+    }
+
+    #[test]
+    fn test_driver_order_falls_back_when_config_has_no_keystroke_driver() {
+        // A driver_order of e.g. ["dotool", "clipboard"] (valid for type
+        // mode) names nothing paste mode can use for the keystroke step, so
+        // it must fall back to the default rather than trying nothing.
+        let output = PasteOutput::new(
+            false,
+            None,
+            None,
+            None,
+            Some(vec![OutputDriver::Dotool, OutputDriver::Clipboard]),
+            10,
+            100,
+            false,
+            200,
+        );
+        assert_eq!(
+            output.driver_order,
+            vec![
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Ydotool
+            ]
+        );
+    }
+
+    fn keys(s: &str) -> ParsedKeystroke {
+        ParsedKeystroke::parse(s).unwrap()
+    }
+
+    #[test]
+    fn unset_paste_keys_is_terminal_aware() {
+        let keystroke = PasteKeystroke::resolve(None, None);
+        assert_eq!(
+            keystroke,
+            PasteKeystroke::TerminalAware {
+                default: keys("ctrl+v"),
+                terminal: keys("ctrl+shift+v"),
+            }
+        );
+        assert_eq!(keystroke.select(Some(true)), &keys("ctrl+shift+v"));
+        assert_eq!(keystroke.select(Some(false)), &keys("ctrl+v"));
+        // Unknown compositor or failed query: same as before auto existed.
+        assert_eq!(keystroke.select(None), &keys("ctrl+v"));
+    }
+
+    #[test]
+    fn auto_is_case_insensitive_and_honours_paste_keys_terminal() {
+        let keystroke = PasteKeystroke::resolve(Some(" AUTO "), Some("shift+insert"));
+        assert_eq!(keystroke.select(Some(true)), &keys("shift+insert"));
+        assert_eq!(keystroke.select(Some(false)), &keys("ctrl+v"));
+    }
+
+    #[test]
+    fn explicit_paste_keys_stays_fixed_everywhere() {
+        let keystroke = PasteKeystroke::resolve(Some("shift+insert"), None);
+        assert_eq!(keystroke, PasteKeystroke::Fixed(keys("shift+insert")));
+        assert_eq!(keystroke.select(Some(true)), &keys("shift+insert"));
+        assert_eq!(keystroke.select(Some(false)), &keys("shift+insert"));
+        assert_eq!(keystroke.select(None), &keys("shift+insert"));
+    }
+
+    #[test]
+    fn explicit_paste_keys_with_terminal_keys_is_terminal_aware() {
+        let keystroke = PasteKeystroke::resolve(Some("super+v"), Some("ctrl+shift+v"));
+        assert_eq!(keystroke.select(Some(true)), &keys("ctrl+shift+v"));
+        assert_eq!(keystroke.select(Some(false)), &keys("super+v"));
+        assert_eq!(keystroke.select(None), &keys("super+v"));
+    }
+
+    #[test]
+    fn empty_or_auto_terminal_keys_mean_the_default() {
+        for terminal in ["", "auto"] {
+            assert_eq!(
+                PasteKeystroke::resolve(Some("shift+insert"), Some(terminal)),
+                PasteKeystroke::Fixed(keys("shift+insert"))
+            );
+            assert_eq!(
+                PasteKeystroke::resolve(None, Some(terminal)).select(Some(true)),
+                &keys("ctrl+shift+v")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_keys_fall_back() {
+        assert_eq!(
+            PasteKeystroke::resolve(Some("ctrl+"), None),
+            PasteKeystroke::Fixed(keys("ctrl+v"))
+        );
+        assert_eq!(
+            PasteKeystroke::resolve(None, Some("+v")).select(Some(true)),
+            &keys("ctrl+shift+v")
+        );
+    }
+
+    #[test]
+    fn keystroke_displays_as_config_syntax() {
+        assert_eq!(keys("Ctrl+Shift+V").to_string(), "ctrl+shift+v");
+        assert_eq!(keys("insert").to_string(), "insert");
     }
 
     #[test]

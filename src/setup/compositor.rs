@@ -145,9 +145,10 @@ fn river_conf_dir() -> PathBuf {
     get_user_config_dir().join("river/conf.d")
 }
 
-/// Get the voxtype config path
+/// Get the voxtype config path (the `--config` file when one was given)
 fn voxtype_config_path() -> PathBuf {
-    get_user_config_dir().join("voxtype/config.toml")
+    crate::config::Config::default_path()
+        .unwrap_or_else(|| get_user_config_dir().join("voxtype/config.toml"))
 }
 
 /// Add output hooks to voxtype config content

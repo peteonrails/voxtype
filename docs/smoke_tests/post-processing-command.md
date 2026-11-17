@@ -4,8 +4,9 @@ Tests LLM cleanup if configured:
 
 ```bash
 # 1. Configure post-processing in config.toml:
-#    [output]
-#    post_process_command = "your-llm-cleanup-script"
+#    [output.post_process]
+#    command = "your-llm-cleanup-script"
+#    timeout_ms = 30000  # optional
 
 # 2. Restart daemon
 systemctl --user restart voxtype

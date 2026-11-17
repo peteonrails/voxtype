@@ -8,7 +8,7 @@ voxtype daemon
 # Should fail with error about existing instance / PID lock
 
 # Check PID file:
-cat ~/.local/share/voxtype/voxtype.pid
+cat "$XDG_RUNTIME_DIR/voxtype/pid"
 ps aux | grep voxtype
 ```
 

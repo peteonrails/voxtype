@@ -93,7 +93,7 @@ impl OutputState {
                 .unwrap_or(false),
             pre_type_delay_ms: ed.get_int("output", "pre_type_delay_ms").unwrap_or(0),
             append_text: ed.get_string("output", "append_text"),
-            post_process_command: ed.get_string("post_process", "command"),
+            post_process_command: ed.get_string("output.post_process", "command"),
             field: Field::Mode,
             feedback: None,
             dirty_since_load: false,
@@ -168,8 +168,8 @@ impl OutputState {
             None => ed.unset("output", "append_text"),
         }
         match &self.post_process_command {
-            Some(c) if !c.is_empty() => ed.set_string("post_process", "command", c),
-            _ => ed.unset("post_process", "command"),
+            Some(c) if !c.is_empty() => ed.set_string("output.post_process", "command", c),
+            _ => ed.unset("output.post_process", "command"),
         }
         match ed.save() {
             Ok(()) => {

@@ -5,6 +5,6 @@
 voxtype transcribe /path/to/audio.wav
 
 # With model override
-voxtype transcribe --model large-v3-turbo /path/to/audio.wav
+voxtype --model large-v3-turbo transcribe /path/to/audio.wav
 ```
 

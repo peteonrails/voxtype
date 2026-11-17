@@ -54,11 +54,9 @@ fn require_model_files(model_dir: &Path, model_name: &str) -> Result<(), Transcr
     let encoder_xml = model_dir.join("openvino_encoder_model.xml");
     if !encoder_xml.exists() {
         return Err(TranscribeError::ModelNotFound(format!(
-            "OpenVINO Whisper encoder model not found: {}\n  \
-             Run 'voxtype setup model' to download, or manually from:\n  \
-             https://huggingface.co/OpenVINO/whisper-{}",
+            "OpenVINO Whisper encoder model not found: {}\n  Run: {}",
             encoder_xml.display(),
-            model_name
+            crate::model_catalog::download_command("openvino", model_name)
         )));
     }
     OpenVinoTranscriber::require_preprocessor_config(model_dir, model_name)
@@ -333,10 +331,12 @@ impl OpenVinoTranscriber {
         let candidates = device_candidates(&config.device);
 
         let mut pipeline = None;
+        let mut used_device = candidates[0];
         let mut first_error: Option<(String, openvino_genai::SetupError)> = None;
         for (i, device) in candidates.iter().enumerate() {
             match inputs.build(device) {
                 Ok(p) => {
+                    used_device = device;
                     if i > 0 {
                         tracing::warn!(
                             "OpenVINO device '{}' failed to initialize ({}); fell back to '{}'. \
@@ -376,10 +376,12 @@ impl OpenVinoTranscriber {
             ))
         })?;
         tracing::info!(
-            "OpenVINO GenAI Whisper pipeline created in {:.2}s (device={})",
+            "OpenVINO GenAI Whisper pipeline created in {:.2}s (configured device={}, using {})",
             start.elapsed().as_secs_f32(),
             config.device,
+            used_device,
         );
+        report_device_outcome(&config.device, used_device);
 
         Ok(pipeline)
     }
@@ -465,17 +467,12 @@ impl Transcriber for OpenVinoTranscriber {
         let is_multilingual = gen_config.get_is_multilingual().unwrap_or(false);
 
         if is_multilingual {
-            // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
-            // in generation_config.json), while voxtype config uses bare codes like "en"
-            let lang = &self.config.language;
-            let lang_token = if lang.starts_with("<|") {
-                lang.to_string()
-            } else {
-                format!("<|{}|>", lang)
-            };
-            gen_config.set_language(&lang_token).map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
-            })?;
+            // Leaving the language unset is how GenAI auto-detects it.
+            if let Some(lang_token) = language_token(&self.config.language) {
+                gen_config.set_language(&lang_token).map_err(|e| {
+                    TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
+                })?;
+            }
 
             let task = if self.config.translate {
                 "translate"
@@ -523,6 +520,22 @@ impl Transcriber for OpenVinoTranscriber {
         );
 
         Ok(result)
+    }
+}
+
+/// The GenAI language token for a configured language, or `None` to let
+/// GenAI detect it. GenAI expects "<|xx|>" (the lang_to_id keys in
+/// generation_config.json) while voxtype config uses bare codes like "en";
+/// "auto" or an empty value has no token, and "<|auto|>" makes inference
+/// fail with an unknown exception (#875).
+fn language_token(language: &str) -> Option<String> {
+    let language = language.trim();
+    if language.is_empty() || language.eq_ignore_ascii_case("auto") {
+        None
+    } else if language.starts_with("<|") {
+        Some(language.to_string())
+    } else {
+        Some(format!("<|{}|>", language))
     }
 }
 
@@ -691,21 +704,93 @@ fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, Transcrib
     } else {
         format!("{}{}", model, quant_suffix)
     };
-    let hf_repo = format!("whisper-{}-ov", model_with_quant);
 
     Err(TranscribeError::ModelNotFound(format!(
-        "OpenVINO Whisper model '{}' not found. Looked in:\n{}\n\n  \
-         Run 'voxtype setup model' to download, or manually from:\n  \
-         https://huggingface.co/OpenVINO/{}",
+        "OpenVINO Whisper model '{}' not found. Looked in:\n{}\n\n  Run: {}",
         model,
         searched.join("\n"),
-        hf_repo
+        crate::model_catalog::download_command("openvino", &model_with_quant)
     )))
+}
+
+/// The notification for an OpenVINO device fallback: the configured device
+/// failed and another one is doing the work. `None` when the configured
+/// device is the one in use.
+pub(crate) fn device_fallback_message(configured: &str, used: &str) -> Option<String> {
+    if configured.eq_ignore_ascii_case(used) {
+        return None;
+    }
+    let configured_up = configured.trim().to_ascii_uppercase();
+    let check = if configured_up == "NPU" {
+        "reboot, check it with `voxtype setup npu --status`"
+    } else {
+        "check it with `voxtype setup npu --status`"
+    };
+    Some(format!(
+        "OpenVINO could not use the configured device {} and is transcribing on {}. \
+         Install its driver (Arch: sudo pacman -S {}), {}, then restart voxtype. \
+         Details: voxtype info accel",
+        configured_up,
+        used.to_ascii_uppercase(),
+        crate::config::openvino_driver_packages(&configured_up),
+        check,
+    ))
+}
+
+/// Publish the device actually in use for `voxtype info accel`, and tell the
+/// user once per daemon start when it isn't the one they configured.
+fn report_device_outcome(configured: &str, used: &str) {
+    use crate::setup::accel::{self, AccelState};
+    let used_up = used.to_ascii_uppercase();
+    let state = match used_up.as_str() {
+        "CPU" => AccelState::CpuFallback,
+        "NPU" | "GPU" => AccelState::Gpu,
+        // AUTO picks internally and doesn't say which; claim nothing.
+        _ => return,
+    };
+    match device_fallback_message(configured, used) {
+        None => {
+            // Configured CPU is a choice, not a fallback.
+            if state == AccelState::Gpu {
+                accel::publish(
+                    state,
+                    Some("openvino"),
+                    Some(format!("OpenVINO {}", used_up)),
+                );
+            }
+        }
+        Some(message) => {
+            tracing::warn!("{}", message);
+            let detail = format!(
+                "OpenVINO device {} failed, using {}",
+                configured.to_ascii_uppercase(),
+                used_up
+            );
+            if accel::publish(state, Some("openvino"), Some(detail)) {
+                crate::notification::send_sync(
+                    &format!("Voxtype: OpenVINO fell back to {}", used_up),
+                    &message,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_fallback_names_the_fix() {
+        assert!(device_fallback_message("NPU", "npu").is_none());
+        let msg = device_fallback_message("npu", "CPU").unwrap();
+        assert!(msg.contains("configured device NPU"));
+        assert!(msg.contains("transcribing on CPU"));
+        assert!(msg.contains("intel-npu-driver"));
+        assert!(msg.contains("voxtype setup npu --status"));
+        let gpu = device_fallback_message("GPU", "CPU").unwrap();
+        assert!(gpu.contains("intel-compute-runtime"));
+    }
 
     #[test]
     fn device_fallback_order_prefers_gpu_before_cpu() {
@@ -714,6 +799,16 @@ mod tests {
         assert_eq!(device_candidates("GPU"), ["GPU", "CPU"]);
         assert_eq!(device_candidates("gpu"), ["gpu", "CPU"]);
         assert_eq!(device_candidates("CPU"), ["CPU", "GPU"]);
+    }
+
+    #[test]
+    fn language_token_leaves_auto_detection_to_genai() {
+        assert_eq!(language_token("en").as_deref(), Some("<|en|>"));
+        assert_eq!(language_token("<|it|>").as_deref(), Some("<|it|>"));
+        assert_eq!(language_token("auto"), None);
+        assert_eq!(language_token("AUTO"), None);
+        assert_eq!(language_token(""), None);
+        assert_eq!(language_token("  "), None);
     }
 
     #[test]
@@ -778,7 +873,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"));
-        assert!(err.contains("huggingface.co"));
+        assert!(err.contains("voxtype setup --download --model nonexistent-model"));
     }
 
     #[test]

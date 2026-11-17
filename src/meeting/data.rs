@@ -43,6 +43,9 @@ impl std::str::FromStr for MeetingId {
     }
 }
 
+/// The speaker key of the user's own side of a meeting.
+pub const MY_SPEAKER_KEY: &str = "You";
+
 /// Audio source for speaker attribution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,6 +70,15 @@ impl std::fmt::Display for AudioSource {
     }
 }
 
+/// A note or highlight attached to one transcript line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentAnnotation {
+    /// The note; empty for a bare highlight
+    pub text: String,
+    /// Whether the line is highlighted
+    pub highlight: bool,
+}
+
 /// A single transcript segment with timing and speaker info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
@@ -86,6 +98,24 @@ pub struct TranscriptSegment {
     /// Human-assigned speaker label (Phase 3)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker_label: Option<String>,
+    /// The speaker the diarizer assigned, when the line has been moved to
+    /// another speaker by hand (`meeting reassign`). `speaker_id` then holds
+    /// the chosen speaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_speaker: Option<String>,
+    /// A note or highlight the user attached to this line
+    /// (`meeting annotate`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<SegmentAnnotation>,
+    /// The text as transcribed, when the user corrected it with
+    /// `meeting edit`; `text` then holds the correction
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
+    /// Hidden with `meeting delete-line`. Deleted lines stay in
+    /// transcript.json so they can be restored, and are left out of
+    /// everything that reads a meeting through voxtype.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
     /// Confidence score (0.0 - 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -104,6 +134,10 @@ impl TranscriptSegment {
             source: AudioSource::Unknown,
             speaker_id: None,
             speaker_label: None,
+            original_speaker: None,
+            annotation: None,
+            original_text: None,
+            deleted: false,
             confidence: None,
             chunk_id,
         }
@@ -114,15 +148,20 @@ impl TranscriptSegment {
         self.end_ms.saturating_sub(self.start_ms)
     }
 
+    /// The speaker as the diarizer named it: the diarization ID when there
+    /// is one, otherwise the track (`You` or `Remote`). This is what
+    /// `meeting label` keys a human name on.
+    pub fn speaker_key(&self) -> String {
+        self.speaker_id
+            .clone()
+            .unwrap_or_else(|| self.source.to_string())
+    }
+
     /// Get the display name for the speaker
     pub fn speaker_display(&self) -> String {
-        if let Some(ref label) = self.speaker_label {
-            label.clone()
-        } else if let Some(ref id) = self.speaker_id {
-            id.clone()
-        } else {
-            self.source.to_string()
-        }
+        self.speaker_label
+            .clone()
+            .unwrap_or_else(|| self.speaker_key())
     }
 
     /// Format timestamp as HH:MM:SS
@@ -146,7 +185,30 @@ pub struct Transcript {
     pub segments: Vec<TranscriptSegment>,
     /// Total number of chunks processed
     pub total_chunks: u32,
+    /// How far into the meeting's audio the transcript reaches: the end of
+    /// the last chunk transcribed, on the transcript's timeline. What lies
+    /// beyond it in the retained audio was never transcribed (the daemon
+    /// stopped first); `meeting recover --finish` transcribes it. 0 in
+    /// transcripts written before 1.3.1.
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub audio_ms: u64,
 }
+
+fn is_zero_ms(ms: &u64) -> bool {
+    *ms == 0
+}
+
+/// What [`Transcript::resolve_echo_lines`] did, by segment ID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EchoLines {
+    pub dropped: Vec<u32>,
+    pub moved: Vec<u32>,
+}
+
+/// [`Transcript::drop_opening_echoes`]: the longest line it looks at...
+pub const OPENING_ECHO_MAX_WORDS: usize = 8;
+/// ...and how many of its first words must be the remote's, in a row.
+pub const OPENING_ECHO_WORDS: usize = 3;
 
 impl Transcript {
     /// Create a new empty transcript
@@ -154,9 +216,220 @@ impl Transcript {
         Self::default()
     }
 
-    /// Add a segment to the transcript
+    /// Add a segment, keeping the transcript in order of start time.
+    ///
+    /// The microphone and loopback tracks are transcribed one after the
+    /// other for the same stretch of time, so appending would list all of
+    /// one side and then all of the other. A segment goes after any that
+    /// start at the same moment, so arrival order breaks ties.
     pub fn add_segment(&mut self, segment: TranscriptSegment) {
-        self.segments.push(segment);
+        let at = self
+            .segments
+            .partition_point(|s| s.start_ms <= segment.start_ms);
+        self.segments.insert(at, segment);
+    }
+
+    /// Order segments by start time. Transcripts written before segments
+    /// were kept in order list each chunk's tracks one after the other.
+    pub fn sort_chronologically(&mut self) {
+        self.segments.sort_by_key(|s| s.start_ms);
+    }
+
+    /// Settle microphone lines the audio showed to be only the remote side's
+    /// echo ([`crate::meeting::echo::EchoProbe::echo_only`]), whatever their
+    /// length.
+    ///
+    /// When the loopback has the same speech at the same time, even part of
+    /// it, the line is dropped: the loopback's own line already holds those
+    /// words, transcribed from the clean signal, and keeping the echo would
+    /// show them twice. When it does not (the loopback's transcript missed
+    /// them, or the echo was not speech the loopback engine recognised),
+    /// dropping would lose the only copy, so the line moves to the remote
+    /// speaker it overlaps instead (`Remote` if none), keeping its text and
+    /// its microphone source. `meeting reassign <id> You` moves it back.
+    pub fn resolve_echo_lines(&mut self, echo_ids: &std::collections::HashSet<u32>) -> EchoLines {
+        use crate::meeting::echo::{normalize_word, overlapping_loopback_words, same_speech};
+        let mut outcome = EchoLines::default();
+        let snapshot = self.segments.clone();
+        for seg in self.segments.iter_mut() {
+            if seg.source != AudioSource::Microphone
+                || seg.deleted
+                || !echo_ids.contains(&seg.id)
+                || seg.text.trim().is_empty()
+            {
+                continue;
+            }
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if same_speech(&words, &overlapping_loopback_words(seg, &snapshot)) {
+                tracing::debug!("Dropping echo of the remote side: {:?}", seg.text);
+                seg.text.clear();
+                outcome.dropped.push(seg.id);
+                continue;
+            }
+            let remote = snapshot
+                .iter()
+                .filter(|s| s.source == AudioSource::Loopback && !s.deleted)
+                .map(|s| {
+                    let overlap =
+                        seg.end_ms.min(s.end_ms) as i64 - seg.start_ms.max(s.start_ms) as i64;
+                    (overlap, s)
+                })
+                .filter(|(overlap, _)| *overlap > 0)
+                .max_by_key(|(overlap, _)| *overlap)
+                .map(|(_, s)| s);
+            tracing::debug!(
+                "Moving echo of the remote side to {}: {:?}",
+                remote
+                    .and_then(|s| s.speaker_id.as_deref())
+                    .unwrap_or("Remote"),
+                seg.text
+            );
+            seg.speaker_id = Some(
+                remote
+                    .and_then(|s| s.speaker_id.clone())
+                    .unwrap_or_else(|| "Remote".to_string()),
+            );
+            seg.speaker_label = remote.and_then(|s| s.speaker_label.clone());
+            outcome.moved.push(seg.id);
+        }
+        self.segments.retain(|s| !s.text.trim().is_empty());
+        outcome
+    }
+
+    /// Drop microphone lines among `quiet_ids` (lines whose audio showed no
+    /// voice of yours) that are only a speech engine's no-speech phrase
+    /// ("Thank you.", see [`crate::meeting::echo::no_speech_phrase`]) said
+    /// while the remote was talking. Returns the ids dropped.
+    ///
+    /// The engine writes those for the faint residual an echo canceller
+    /// leaves, and no loopback word explains them, so the echo rules keep
+    /// them under You. A "thank you" you really say is loud enough to read
+    /// as your voice and never reaches this.
+    pub fn drop_no_speech_lines(&mut self, quiet_ids: &std::collections::HashSet<u32>) -> Vec<u32> {
+        use crate::meeting::echo::{no_speech_phrase, normalize_word, ECHO_TOLERANCE_MS};
+        let remote: Vec<(u64, u64)> = self
+            .segments
+            .iter()
+            .filter(|s| {
+                s.source == AudioSource::Loopback && !s.deleted && !s.text.trim().is_empty()
+            })
+            .map(|s| (s.start_ms, s.end_ms))
+            .collect();
+        let mut dropped = Vec::new();
+        self.segments.retain(|seg| {
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            let hallucination = seg.source == AudioSource::Microphone
+                && !seg.deleted
+                && quiet_ids.contains(&seg.id)
+                && no_speech_phrase(&words)
+                && remote.iter().any(|&(start, end)| {
+                    seg.start_ms < end + ECHO_TOLERANCE_MS && start < seg.end_ms + ECHO_TOLERANCE_MS
+                });
+            if hallucination {
+                tracing::debug!(
+                    "Dropping a no-speech phrase over the remote: {:?}",
+                    seg.text
+                );
+                dropped.push(seg.id);
+            }
+            !hallucination
+        });
+        dropped
+    }
+
+    /// Drop short microphone lines among `quiet_ids` (lines whose audio
+    /// showed no voice of yours) that open with words a loopback line
+    /// overlapping them holds: at most [`OPENING_ECHO_MAX_WORDS`] words, the
+    /// first [`OPENING_ECHO_WORDS`] of them in a row in that loopback line.
+    /// Returns the ids dropped.
+    ///
+    /// A decoder fed a faint echo can start on the remote's words and then
+    /// run off into a phrase of its own ("I don't know what you're talking
+    /// about." over the remote's "...I don't know if you've followed..."),
+    /// so the four-word phrase match never sees enough of the remote in it.
+    pub fn drop_opening_echoes(&mut self, quiet_ids: &std::collections::HashSet<u32>) -> Vec<u32> {
+        use crate::meeting::echo::{normalize_word, ECHO_TOLERANCE_MS};
+        let words = |text: &str| -> Vec<String> {
+            text.split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect()
+        };
+        let remote: Vec<(u64, u64, Vec<String>)> = self
+            .segments
+            .iter()
+            .filter(|s| s.source == AudioSource::Loopback && !s.deleted)
+            .map(|s| (s.start_ms, s.end_ms, words(&s.text)))
+            .collect();
+        let mut dropped = Vec::new();
+        self.segments.retain(|seg| {
+            let mine = words(&seg.text);
+            let echo = seg.source == AudioSource::Microphone
+                && !seg.deleted
+                && quiet_ids.contains(&seg.id)
+                && (OPENING_ECHO_WORDS..=OPENING_ECHO_MAX_WORDS).contains(&mine.len())
+                && remote.iter().any(|(start, end, said)| {
+                    seg.start_ms < end + ECHO_TOLERANCE_MS
+                        && *start < seg.end_ms + ECHO_TOLERANCE_MS
+                        && said
+                            .windows(OPENING_ECHO_WORDS)
+                            .any(|w| w == &mine[..OPENING_ECHO_WORDS])
+                });
+            if echo {
+                tracing::debug!(
+                    "Dropping a short line that opens with the remote's words: {:?}",
+                    seg.text
+                );
+                dropped.push(seg.id);
+            }
+            !echo
+        });
+        dropped
+    }
+
+    /// Drop loopback lines among `quiet_ids` (lines whose span of the
+    /// loopback held no speech) that are only a no-speech phrase ("Thank
+    /// you.", "you"). The engine writes those for silence, tones or a
+    /// call's join sound on the far side. A "thank you" the remote really
+    /// says is speech on the loopback and never reaches this. Returns the
+    /// ids dropped.
+    pub fn drop_remote_no_speech_lines(
+        &mut self,
+        quiet_ids: &std::collections::HashSet<u32>,
+    ) -> Vec<u32> {
+        use crate::meeting::echo::{no_speech_phrase, normalize_word};
+        let mut dropped = Vec::new();
+        self.segments.retain(|seg| {
+            let words: Vec<String> = seg
+                .text
+                .split_whitespace()
+                .map(normalize_word)
+                .filter(|w| !w.is_empty())
+                .collect();
+            let hallucination = seg.source == AudioSource::Loopback
+                && !seg.deleted
+                && quiet_ids.contains(&seg.id)
+                && no_speech_phrase(&words);
+            if hallucination {
+                tracing::debug!(
+                    "Dropping a no-speech phrase with no remote speech under it: {:?}",
+                    seg.text
+                );
+                dropped.push(seg.id);
+            }
+            !hallucination
+        });
+        dropped
     }
 
     /// Remove echoed phrases from mic segments that match loopback transcripts.
@@ -164,10 +437,104 @@ impl Transcript {
     /// that appear in any loopback segment and strips them out, keeping the user's
     /// actual speech. Returns the number of words removed.
     pub fn dedup_bleed_through(&mut self) -> usize {
+        let exact_only = crate::meeting::echo::EchoRules {
+            guard: false,
+            ..Default::default()
+        };
+        self.dedup_bleed_through_with(&exact_only, &|_| false)
+    }
+
+    /// [`Transcript::dedup_bleed_through`] with the short-line rules set by
+    /// `rules`: misheard short echoes too when `rules.guard`. A microphone
+    /// segment for which `own_voice` is true (the audio shows you speaking,
+    /// see [`crate::meeting::echo::EchoProbe`]) is never taken for a short
+    /// echo, so a "yes" you say while the remote says "yes" stays.
+    pub fn dedup_bleed_through_with(
+        &mut self,
+        rules: &crate::meeting::echo::EchoRules,
+        own_voice: &dyn Fn(&TranscriptSegment) -> bool,
+    ) -> usize {
         // Build a set of loopback n-grams for fast lookup.
         // We use 4-grams as the minimum match length to avoid false positives.
         let min_ngram = 4;
 
+        let total_removed = self.dedup_short_echoes(min_ngram, rules, own_voice)
+            + self.dedup_echoed_phrases(min_ngram);
+
+        // A segment that was all echo is gone, not an empty line.
+        self.segments.retain(|s| !s.text.trim().is_empty());
+
+        total_removed
+    }
+
+    /// A microphone segment too short for the phrase match ("Sounds good.")
+    /// is echo when a loopback segment overlapping it in time holds the same
+    /// words in the same order. The overlap is what keeps a reply you make
+    /// later in the same words.
+    fn dedup_short_echoes(
+        &mut self,
+        min_ngram: usize,
+        rules: &crate::meeting::echo::EchoRules,
+        own_voice: &dyn Fn(&TranscriptSegment) -> bool,
+    ) -> usize {
+        use crate::meeting::echo::{fuzzy_echo, normalize_word, overlapping_loopback_words};
+        const TOLERANCE_MS: u64 = crate::meeting::echo::ECHO_TOLERANCE_MS;
+        let loopback: Vec<(u64, u64, Vec<String>)> = self
+            .segments
+            .iter()
+            .filter(|s| s.source == AudioSource::Loopback)
+            .map(|s| (s.start_ms, s.end_ms, normalize_for_dedup(&s.text)))
+            .collect();
+
+        // Misheard echoes, judged before any line is cleared.
+        let fuzzy: Vec<bool> = self
+            .segments
+            .iter()
+            .map(|seg| {
+                rules.guard
+                    && seg.source == AudioSource::Microphone
+                    && !own_voice(seg)
+                    && fuzzy_echo(
+                        &seg.text
+                            .split_whitespace()
+                            .map(normalize_word)
+                            .filter(|w| !w.is_empty())
+                            .collect::<Vec<_>>(),
+                        &overlapping_loopback_words(seg, &self.segments),
+                        rules.fuzzy_max_words,
+                    )
+            })
+            .collect();
+
+        let mut removed = 0;
+        for (seg, fuzzy) in self.segments.iter_mut().zip(fuzzy) {
+            if seg.source != AudioSource::Microphone || own_voice(seg) {
+                continue;
+            }
+            let words = normalize_for_dedup(&seg.text);
+            if words.is_empty() {
+                continue;
+            }
+            let exact = words.len() < min_ngram
+                && loopback.iter().any(|(start, end, said)| {
+                    seg.start_ms < end + TOLERANCE_MS
+                        && *start < seg.end_ms + TOLERANCE_MS
+                        && said.windows(words.len()).any(|w| w == words.as_slice())
+                });
+            if exact || fuzzy {
+                tracing::debug!(
+                    "Stripping short echo{}: {:?}",
+                    if exact { "" } else { " (misheard)" },
+                    seg.text
+                );
+                removed += words.len();
+                seg.text.clear();
+            }
+        }
+        removed
+    }
+
+    fn dedup_echoed_phrases(&mut self, min_ngram: usize) -> usize {
         let loopback_words: Vec<String> = self
             .segments
             .iter()
@@ -335,6 +702,120 @@ impl Transcript {
             .collect()
     }
 
+    /// Name speakers: `labels` maps a speaker ID ([`TranscriptSegment::speaker_key`])
+    /// to a human name. Speakers given the same name display as one.
+    pub fn apply_speaker_labels(&mut self, labels: &std::collections::HashMap<String, String>) {
+        if labels.is_empty() {
+            return;
+        }
+        for segment in &mut self.segments {
+            if let Some(label) = labels.get(&segment.speaker_key()) {
+                segment.speaker_label = Some(label.clone());
+            }
+        }
+    }
+
+    /// Show `name` for the user's own side: every "You" line that has no
+    /// label of its own gets `name` as its label. The speaker stays keyed
+    /// "You", so attribution and `meeting label` work as before, and a
+    /// label set by hand wins. For display only; never saved.
+    pub fn apply_my_name(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        for segment in &mut self.segments {
+            if segment.speaker_label.is_none() && segment.speaker_key() == MY_SPEAKER_KEY {
+                segment.speaker_label = Some(name.to_string());
+            }
+        }
+    }
+
+    /// Move lines to the speakers chosen by hand: `overrides` maps a segment
+    /// ID to a speaker ID. A line without an override goes back to the
+    /// speaker the diarizer gave it. A line whose speaker changes loses its
+    /// old name, so apply labels after this.
+    pub fn apply_speaker_overrides(&mut self, overrides: &std::collections::HashMap<u32, String>) {
+        for segment in &mut self.segments {
+            let assigned = segment
+                .original_speaker
+                .take()
+                .unwrap_or_else(|| segment.speaker_key());
+            let target = overrides.get(&segment.id).unwrap_or(&assigned);
+            if segment.speaker_key() != *target {
+                segment.speaker_id = Some(target.clone());
+                segment.speaker_label = None;
+            }
+            if *target != assigned {
+                segment.original_speaker = Some(assigned);
+            }
+        }
+    }
+
+    /// Attach the user's notes and highlights: `annotations` maps a segment
+    /// ID to its annotation, and a line missing from it has none.
+    pub fn apply_annotations(
+        &mut self,
+        annotations: &std::collections::HashMap<u32, SegmentAnnotation>,
+    ) {
+        for segment in &mut self.segments {
+            segment.annotation = annotations.get(&segment.id).cloned();
+        }
+    }
+
+    /// Apply the user's corrections: `edits` maps a segment ID to its new
+    /// text. A line without an edit goes back to what was transcribed.
+    pub fn apply_text_edits(&mut self, edits: &std::collections::HashMap<u32, String>) {
+        for segment in &mut self.segments {
+            if let Some(original) = segment.original_text.take() {
+                segment.text = original;
+            }
+            if let Some(edit) = edits.get(&segment.id) {
+                if *edit != segment.text {
+                    segment.original_text =
+                        Some(std::mem::replace(&mut segment.text, edit.clone()));
+                }
+            }
+        }
+    }
+
+    /// Mark the lines the user deleted; every other line is not deleted.
+    pub fn apply_deletions(&mut self, deleted: &std::collections::HashSet<u32>) {
+        for segment in &mut self.segments {
+            segment.deleted = deleted.contains(&segment.id);
+        }
+    }
+
+    /// Drop deleted lines, for anything that shows or reads the meeting.
+    pub fn remove_deleted(&mut self) {
+        self.segments.retain(|s| !s.deleted);
+    }
+
+    /// Rename a speaker ID across the transcript, including lines moved to
+    /// or away from it by hand.
+    pub fn rename_speaker(&mut self, from: &str, to: &str) -> usize {
+        let mut renamed = 0;
+        for segment in &mut self.segments {
+            if segment.speaker_id.as_deref() == Some(from) {
+                segment.speaker_id = Some(to.to_string());
+                renamed += 1;
+            }
+            if segment.original_speaker.as_deref() == Some(from) {
+                segment.original_speaker = Some(to.to_string());
+                renamed += 1;
+            }
+        }
+        renamed
+    }
+
+    /// Unique speaker IDs, before any human labels.
+    pub fn speaker_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.segments.iter().map(|s| s.speaker_key()).collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     /// Get unique speakers
     pub fn speakers(&self) -> Vec<String> {
         let mut speakers: Vec<String> = self.segments.iter().map(|s| s.speaker_display()).collect();
@@ -358,6 +839,10 @@ pub enum MeetingStatus {
     Completed,
     /// Meeting was cancelled/abandoned
     Cancelled,
+    /// The daemon stopped while the meeting was recording (a crash or a
+    /// kill), so it was never finished: `voxtype meeting recover` finishes
+    /// or discards it.
+    Interrupted,
 }
 
 /// Metadata for a meeting
@@ -388,6 +873,9 @@ pub struct MeetingMetadata {
     /// Whisper model used
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The call's link, from `meeting start --url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Summary (Phase 5)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<MeetingSummary>,
@@ -410,6 +898,7 @@ impl MeetingMetadata {
             storage_path: None,
             audio_retained: false,
             model: None,
+            url: None,
             summary: None,
             synced_at: None,
         }
@@ -479,6 +968,9 @@ pub struct MeetingSummary {
     /// Decisions made
     #[serde(default)]
     pub decisions: Vec<String>,
+    /// Topics in order, each starting at a transcript time
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
     /// When the summary was generated
     pub generated_at: DateTime<Utc>,
     /// Model used to generate
@@ -486,20 +978,62 @@ pub struct MeetingSummary {
     pub model: Option<String>,
 }
 
+/// One topic of a meeting summary, starting at a transcript time
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Chapter {
+    /// Where the topic begins, in milliseconds from meeting start
+    pub start_ms: u64,
+    /// Short title of the topic
+    pub title: String,
+}
+
 /// An action item from the meeting
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionItem {
     /// Description of the action
     pub description: String,
     /// Assigned to (speaker name)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
-    /// Due date (if mentioned)
+    /// Due date as it was said ("Friday", "end of the month"), if it was
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
     /// Completed status
     #[serde(default)]
     pub completed: bool,
+    /// `due_date` as a calendar day, resolved against the meeting's date,
+    /// when it names one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<chrono::NaiveDate>,
+    /// Where in the meeting the item was given, in milliseconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ms: Option<u64>,
+}
+
+impl MeetingSummary {
+    /// Follow a speaker rename into the action items: every owner that is
+    /// `from` (ignoring case and surrounding space, nothing looser, so
+    /// "Chris" never touches "Christopher") becomes `to`. Owners `keep`
+    /// accepts stay as they are. Nothing else in the summary changes: the
+    /// descriptions, ticks and due dates, and so what was sent to Todoist,
+    /// which is keyed by the description. Returns how many owners changed.
+    pub fn rename_owner(&mut self, from: &str, to: &str, keep: impl Fn(&str) -> bool) -> usize {
+        let (from, to) = (from.trim(), to.trim());
+        if from.is_empty() || to.is_empty() || from == to {
+            return 0;
+        }
+        let mut changed = 0;
+        for item in &mut self.action_items {
+            let Some(owner) = item.assignee.as_deref() else {
+                continue;
+            };
+            if owner.trim().to_lowercase() == from.to_lowercase() && !keep(owner) {
+                item.assignee = Some(to.to_string());
+                changed += 1;
+            }
+        }
+        changed
+    }
 }
 
 /// Complete meeting data structure
@@ -509,6 +1043,9 @@ pub struct MeetingData {
     pub metadata: MeetingMetadata,
     /// Transcript
     pub transcript: Transcript,
+    /// The user's free-text notes (notes.md), when there are any
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 impl MeetingData {
@@ -517,6 +1054,7 @@ impl MeetingData {
         Self {
             metadata: MeetingMetadata::new(title),
             transcript: Transcript::new(),
+            notes: None,
         }
     }
 
@@ -867,11 +1405,706 @@ mod tests {
         assert_eq!(deserialized.speaker_id, Some("SPEAKER_00".to_string()));
     }
 
+    fn segment(id: u32, start_ms: u64, source: AudioSource, chunk_id: u32) -> TranscriptSegment {
+        let mut seg =
+            TranscriptSegment::new(id, start_ms, start_ms + 1500, format!("s{}", id), chunk_id);
+        seg.source = source;
+        seg
+    }
+
+    /// The daemon transcribes a chunk's microphone track, then its loopback
+    /// track. Turn order has to come from the timestamps, not arrival.
+    #[test]
+    fn transcript_interleaves_tracks_by_start_time() {
+        let mut transcript = Transcript::new();
+        // Chunk 0: mic then loopback.
+        transcript.add_segment(segment(0, 1_000, AudioSource::Microphone, 0));
+        transcript.add_segment(segment(1, 12_000, AudioSource::Microphone, 0));
+        transcript.add_segment(segment(2, 5_000, AudioSource::Loopback, 1));
+        transcript.add_segment(segment(3, 20_000, AudioSource::Loopback, 1));
+        // Chunk 1.
+        transcript.add_segment(segment(4, 31_000, AudioSource::Microphone, 2));
+        transcript.add_segment(segment(5, 30_500, AudioSource::Loopback, 3));
+
+        let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 2, 1, 3, 5, 4]);
+    }
+
+    #[test]
+    fn transcript_keeps_arrival_order_for_equal_starts() {
+        let mut transcript = Transcript::new();
+        transcript.add_segment(segment(0, 1_000, AudioSource::Microphone, 0));
+        transcript.add_segment(segment(1, 1_000, AudioSource::Loopback, 1));
+        let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    #[test]
+    fn sort_chronologically_reorders_a_chunk_grouped_transcript() {
+        let mut transcript = Transcript::new();
+        transcript.segments = vec![
+            segment(0, 1_000, AudioSource::Microphone, 0),
+            segment(1, 12_000, AudioSource::Microphone, 0),
+            segment(2, 5_000, AudioSource::Loopback, 1),
+        ];
+        transcript.sort_chronologically();
+        let order: Vec<u32> = transcript.segments.iter().map(|s| s.id).collect();
+        assert_eq!(order, vec![0, 2, 1]);
+    }
+
+    fn said(
+        id: u32,
+        start_ms: u64,
+        end_ms: u64,
+        source: AudioSource,
+        text: &str,
+    ) -> TranscriptSegment {
+        let mut seg = TranscriptSegment::new(id, start_ms, end_ms, text.to_string(), 0);
+        seg.source = source;
+        seg
+    }
+
+    fn lines(transcript: &Transcript) -> Vec<String> {
+        transcript
+            .segments
+            .iter()
+            .map(|s| format!("{}: {}", s.source, s.text))
+            .collect()
+    }
+
+    #[test]
+    fn dedup_strips_an_echoed_phrase_and_keeps_the_rest() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            1_000,
+            6_000,
+            AudioSource::Loopback,
+            "We should ship the release on Friday.",
+        ));
+        t.add_segment(said(
+            1,
+            1_000,
+            8_000,
+            AudioSource::Microphone,
+            "we should ship the release on Friday agreed",
+        ));
+        assert_eq!(t.dedup_bleed_through(), 7);
+        assert_eq!(
+            lines(&t),
+            vec![
+                "Remote: We should ship the release on Friday.",
+                "You: agreed"
+            ]
+        );
+    }
+
+    /// Bug: a segment that was all echo stayed behind as an empty line.
+    #[test]
+    fn dedup_drops_a_segment_that_was_all_echo() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            1_000,
+            6_000,
+            AudioSource::Loopback,
+            "We should ship the release on Friday.",
+        ));
+        t.add_segment(said(
+            1,
+            1_000,
+            6_000,
+            AudioSource::Microphone,
+            "We should ship the release on Friday.",
+        ));
+        t.dedup_bleed_through();
+        assert_eq!(
+            lines(&t),
+            vec!["Remote: We should ship the release on Friday."]
+        );
+    }
+
+    /// Bug: echoes under four words ("Sounds good.") were never recognised.
+    #[test]
+    fn dedup_strips_a_short_echo_that_overlaps_the_remote_line() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            9_100,
+            10_000,
+            AudioSource::Loopback,
+            "Sounds good.",
+        ));
+        t.add_segment(said(
+            1,
+            9_150,
+            10_050,
+            AudioSource::Microphone,
+            "Sounds good.",
+        ));
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t), vec!["Remote: Sounds good."]);
+    }
+
+    #[test]
+    fn dedup_keeps_a_short_reply_in_the_same_words_said_later() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            9_100,
+            10_000,
+            AudioSource::Loopback,
+            "Sounds good.",
+        ));
+        t.add_segment(said(
+            1,
+            14_000,
+            15_000,
+            AudioSource::Microphone,
+            "Sounds good.",
+        ));
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t), vec!["Remote: Sounds good.", "You: Sounds good."]);
+    }
+
+    /// The demo's remote line and what the microphone made of its echo.
+    fn misheard_echo(mic_start: u64, mic_text: &str) -> Transcript {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            10_320,
+            16_290,
+            AudioSource::Loopback,
+            "Great! I tested the Amarky package this morning, and the settings panel opened without any problems.",
+        ));
+        t.add_segment(said(
+            1,
+            mic_start,
+            mic_start + 900,
+            AudioSource::Microphone,
+            mic_text,
+        ));
+        t
+    }
+
+    const FUZZY: crate::meeting::echo::EchoRules = crate::meeting::echo::EchoRules {
+        guard: true,
+        fuzzy_max_words: 4,
+    };
+
+    /// Lines the audio called echo: dropped when the loopback says the same
+    /// at the time, otherwise moved to the remote speaker they overlap.
+    #[test]
+    fn only_quiet_no_speech_phrases_over_the_remote_are_dropped() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            0,
+            10_000,
+            16_000,
+            AudioSource::Loopback,
+            "Only one. The banner stays.",
+        ));
+        // Quiet, a no-speech phrase, over the remote: dropped.
+        t.add_segment(said(
+            1,
+            11_000,
+            11_400,
+            AudioSource::Microphone,
+            "Thank you.",
+        ));
+        // The same words in your voice: not among the quiet lines, kept.
+        t.add_segment(said(
+            2,
+            12_000,
+            12_400,
+            AudioSource::Microphone,
+            "Thank you.",
+        ));
+        // Quiet, but real words: kept.
+        t.add_segment(said(
+            3,
+            13_000,
+            13_400,
+            AudioSource::Microphone,
+            "Sounds good.",
+        ));
+        // Quiet, a no-speech phrase, but long after the remote: kept.
+        t.add_segment(said(
+            4,
+            30_000,
+            30_400,
+            AudioSource::Microphone,
+            "Thank you.",
+        ));
+        let quiet = [1, 3, 4].into_iter().collect();
+        assert_eq!(t.drop_no_speech_lines(&quiet), vec![1]);
+        let ids: Vec<u32> = t.segments.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![0, 2, 3, 4]);
+    }
+
+    /// The lines from Pete's call with Chad, after the loop collapsed.
+    #[test]
+    fn a_short_quiet_line_opening_with_the_remote_words_is_dropped() {
+        let mut t = Transcript::new();
+        t.add_segment(said(
+            250,
+            899_940,
+            922_080,
+            AudioSource::Loopback,
+            "All right. Next big item on here is the Priola law opt out. I don't know if \
+             you've followed the channel or if you're in the Priola law.",
+        ));
+        let line = |id, text: &str| said(id, 903_520, 919_670, AudioSource::Microphone, text);
+        // Quiet, short, opens with "I don't know": dropped.
+        t.add_segment(line(248, "I don't know what you're talking about."));
+        // The same, but your voice: not quiet, kept.
+        t.add_segment(line(1, "I don't know what you're talking about."));
+        // Quiet but longer than eight words: kept.
+        t.add_segment(line(
+            2,
+            "I don't know what you are talking about here at all, Chad.",
+        ));
+        // Quiet, short, but only two of the remote's words open it: kept.
+        t.add_segment(line(3, "I don't think so."));
+        // Quiet, short, opens with the remote's words, but long after: kept.
+        t.add_segment(said(
+            4,
+            990_000,
+            992_000,
+            AudioSource::Microphone,
+            "I don't know what.",
+        ));
+        let quiet = [248, 2, 3, 4].into_iter().collect();
+        assert_eq!(t.drop_opening_echoes(&quiet), vec![248]);
+        let ids: Vec<u32> = t.segments.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![250, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn echo_lines_are_dropped_when_confirmed_and_moved_when_not() {
+        let mut t = Transcript::new();
+        let mut remote = said(
+            0,
+            10_000,
+            16_000,
+            AudioSource::Loopback,
+            "Great! I tested the Amarky package this morning.",
+        );
+        remote.speaker_id = Some("Remote 1".into());
+        remote.speaker_label = Some("Dana".into());
+        t.add_segment(remote);
+        let mut long_echo = said(
+            1,
+            10_060,
+            13_000,
+            AudioSource::Microphone,
+            "great i tasted the omarky package this mourning",
+        );
+        long_echo.speaker_id = Some("You".into());
+        t.add_segment(long_echo);
+        let mut unheard = said(
+            2,
+            13_100,
+            16_000,
+            AudioSource::Microphone,
+            "mm hmm yeah okay",
+        );
+        unheard.speaker_id = Some("You".into());
+        t.add_segment(unheard);
+        let mut alone = said(3, 40_000, 42_000, AudioSource::Microphone, "la la la");
+        alone.speaker_id = Some("You".into());
+        t.add_segment(alone);
+        let mut yours = said(
+            4,
+            12_000,
+            14_000,
+            AudioSource::Microphone,
+            "We should check that.",
+        );
+        yours.speaker_id = Some("You".into());
+        t.add_segment(yours);
+
+        let ids: std::collections::HashSet<u32> = [1, 2, 3].into_iter().collect();
+        let settled = t.resolve_echo_lines(&ids);
+        assert_eq!(settled.dropped, vec![1]);
+        assert_eq!(settled.moved, vec![2, 3]);
+        let speakers: Vec<(u32, String, Option<String>)> = t
+            .segments
+            .iter()
+            .map(|s| (s.id, s.speaker_id.clone().unwrap(), s.speaker_label.clone()))
+            .collect();
+        assert_eq!(
+            speakers,
+            vec![
+                (0, "Remote 1".into(), Some("Dana".into())),
+                (4, "You".into(), None),
+                (2, "Remote 1".into(), Some("Dana".into())),
+                (3, "Remote".into(), None),
+            ]
+        );
+        // Moved lines keep their words and where they were heard.
+        let moved = t.segments.iter().find(|s| s.id == 2).unwrap();
+        assert_eq!(moved.text, "mm hmm yeah okay");
+        assert_eq!(moved.source, AudioSource::Microphone);
+    }
+
+    #[test]
+    fn fuzzy_rule_drops_a_misheard_short_echo() {
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        assert_eq!(t.dedup_bleed_through_with(&FUZZY, &|_| false), 2);
+        assert_eq!(lines(&t).len(), 1);
+
+        // The exact rule alone keeps it: these are not the remote's words.
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        t.dedup_bleed_through();
+        assert_eq!(lines(&t)[1], "You: Omarky problem.");
+    }
+
+    #[test]
+    fn fuzzy_rule_keeps_your_voice_late_lines_and_long_lines() {
+        // The audio showed you speaking.
+        let mut t = misheard_echo(15_000, "Omarky problem.");
+        t.dedup_bleed_through_with(&FUZZY, &|s| s.id == 1);
+        assert_eq!(lines(&t)[1], "You: Omarky problem.");
+
+        // Well after the remote line.
+        let mut t = misheard_echo(20_000, "Omarky problem.");
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t).len(), 2);
+
+        // Longer than fuzzy_max_words.
+        let mut t = misheard_echo(15_000, "tested the Omarky package this");
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t).len(), 2);
+    }
+
+    /// "Yes" said while the remote also says "yes" is caught by the exact
+    /// rule on text alone; the audio is what keeps it.
+    #[test]
+    fn own_voice_keeps_an_exact_short_reply() {
+        let remote_yes = || {
+            let mut t = Transcript::new();
+            t.add_segment(said(
+                0,
+                4_000,
+                6_000,
+                AudioSource::Loopback,
+                "Yes, ship it.",
+            ));
+            t.add_segment(said(1, 4_100, 4_600, AudioSource::Microphone, "Yes."));
+            t
+        };
+        let mut t = remote_yes();
+        t.dedup_bleed_through_with(&FUZZY, &|_| false);
+        assert_eq!(lines(&t), vec!["Remote: Yes, ship it."]);
+        let mut t = remote_yes();
+        t.dedup_bleed_through_with(&FUZZY, &|s| s.id == 1);
+        assert_eq!(lines(&t), vec!["Remote: Yes, ship it.", "You: Yes."]);
+    }
+
+    fn spoken_by(id: u32, speaker: &str) -> TranscriptSegment {
+        let mut seg =
+            TranscriptSegment::new(id, id as u64 * 1000, id as u64 * 1000 + 900, "x".into(), 0);
+        seg.speaker_id = Some(speaker.to_string());
+        seg
+    }
+
+    fn keys(t: &Transcript) -> Vec<(String, Option<String>)> {
+        t.segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.original_speaker.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn overrides_move_a_line_and_remember_the_diarizers_choice() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "Remote 1"));
+        t.add_segment(spoken_by(1, "Remote 1"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(1, "Remote 2".to_string());
+
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(
+            keys(&t),
+            vec![
+                ("Remote 1".to_string(), None),
+                ("Remote 2".to_string(), Some("Remote 1".to_string())),
+            ]
+        );
+
+        // Applying again is a no-op; removing the override undoes it.
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(t.segments[1].original_speaker.as_deref(), Some("Remote 1"));
+        t.apply_speaker_overrides(&std::collections::HashMap::new());
+        assert_eq!(
+            keys(&t),
+            vec![
+                ("Remote 1".to_string(), None),
+                ("Remote 1".to_string(), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_moved_line_drops_its_old_speakers_name() {
+        let mut t = Transcript::new();
+        let mut seg = spoken_by(0, "Remote 1");
+        seg.speaker_label = Some("Primagen".to_string());
+        t.add_segment(seg);
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(0, "Remote 2".to_string());
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(t.segments[0].speaker_display(), "Remote 2");
+    }
+
+    #[test]
+    fn an_override_to_the_diarizers_own_choice_is_no_move() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(0, "You".to_string());
+        t.apply_speaker_overrides(&overrides);
+        assert_eq!(keys(&t), vec![("You".to_string(), None)]);
+    }
+
+    #[test]
+    fn a_rename_reaches_moved_lines_on_both_sides() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "Remote"));
+        t.add_segment(spoken_by(1, "Remote"));
+        t.add_segment(spoken_by(2, "Remote 2"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(1, "Person 1".to_string()); // moved away from Remote
+        overrides.insert(2, "Remote".to_string()); // moved onto Remote
+        t.apply_speaker_overrides(&overrides);
+
+        t.rename_speaker("Remote", "Remote 1");
+        assert_eq!(
+            keys(&t),
+            vec![
+                ("Remote 1".to_string(), None),
+                ("Person 1".to_string(), Some("Remote 1".to_string())),
+                ("Remote 1".to_string(), Some("Remote 2".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn annotations_attach_by_segment_id_and_come_off_again() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        let mut annotations = std::collections::HashMap::new();
+        let note = SegmentAnnotation {
+            text: "check".to_string(),
+            highlight: false,
+        };
+        annotations.insert(1, note.clone());
+        t.apply_annotations(&annotations);
+        assert_eq!(t.segments[0].annotation, None);
+        assert_eq!(t.segments[1].annotation, Some(note));
+
+        t.apply_annotations(&std::collections::HashMap::new());
+        assert_eq!(t.segments[1].annotation, None);
+        let json = serde_json::to_value(&t.segments[1]).unwrap();
+        assert!(json.get("annotation").is_none());
+    }
+
+    #[test]
+    fn text_edits_replace_a_line_and_remember_the_transcription() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        let mut edits = std::collections::HashMap::new();
+        edits.insert(1, "corrected".to_string());
+
+        t.apply_text_edits(&edits);
+        t.apply_text_edits(&edits);
+        assert_eq!(t.segments[1].text, "corrected");
+        assert_eq!(t.segments[1].original_text.as_deref(), Some("x"));
+        assert_eq!(t.segments[0].original_text, None);
+
+        t.apply_text_edits(&std::collections::HashMap::new());
+        assert_eq!(t.segments[1].text, "x");
+        assert_eq!(t.segments[1].original_text, None);
+
+        // An edit that matches the transcription is no edit.
+        edits.insert(1, "x".to_string());
+        t.apply_text_edits(&edits);
+        assert_eq!(t.segments[1].original_text, None);
+    }
+
+    #[test]
+    fn deletions_mark_lines_and_remove_deleted_drops_them() {
+        let mut t = Transcript::new();
+        t.add_segment(spoken_by(0, "You"));
+        t.add_segment(spoken_by(1, "Remote"));
+        t.apply_deletions(&[1].into_iter().collect());
+        assert!(t.segments[1].deleted);
+        assert_eq!(
+            serde_json::to_value(&t.segments[1]).unwrap()["deleted"],
+            true
+        );
+        assert!(serde_json::to_value(&t.segments[0])
+            .unwrap()
+            .get("deleted")
+            .is_none());
+
+        let mut shown = t.clone();
+        shown.remove_deleted();
+        assert_eq!(shown.segments.len(), 1);
+
+        t.apply_deletions(&std::collections::HashSet::new());
+        assert!(!t.segments[1].deleted);
+    }
+
     #[test]
     fn test_transcript_duration_ms() {
         let mut transcript = Transcript::new();
         transcript.add_segment(TranscriptSegment::new(0, 0, 5000, "A".to_string(), 0));
         transcript.add_segment(TranscriptSegment::new(1, 5000, 12000, "B".to_string(), 1));
         assert_eq!(transcript.duration_ms(), 12000);
+    }
+
+    #[test]
+    fn my_name_labels_only_the_unlabelled_you_side() {
+        let mut t = Transcript::new();
+        let line = |id: u32, source: AudioSource| {
+            let mut s = TranscriptSegment::new(
+                id,
+                id as u64 * 1000,
+                id as u64 * 1000 + 900,
+                "Hi".into(),
+                0,
+            );
+            s.source = source;
+            s
+        };
+        let you = line(0, AudioSource::Microphone);
+        let remote = line(1, AudioSource::Loopback);
+        let mut labelled = line(2, AudioSource::Microphone);
+        labelled.speaker_label = Some("Peter J".into());
+        t.add_segment(you);
+        t.add_segment(remote);
+        t.add_segment(labelled);
+
+        t.apply_my_name("  Pete ");
+        let shown: Vec<_> = t
+            .segments
+            .iter()
+            .map(|s| (s.speaker_key(), s.speaker_display()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("You".to_string(), "Pete".to_string()),
+                ("Remote".to_string(), "Remote".to_string()),
+                ("You".to_string(), "Peter J".to_string()),
+            ]
+        );
+        let mut blank = t.clone();
+        blank.segments[1].speaker_label = None;
+        blank.apply_my_name("   ");
+        assert_eq!(blank.segments[1].speaker_display(), "Remote");
+    }
+
+    fn owned(owners: &[Option<&str>]) -> MeetingSummary {
+        MeetingSummary {
+            summary: "s".into(),
+            key_points: vec![],
+            action_items: owners
+                .iter()
+                .enumerate()
+                .map(|(i, o)| ActionItem {
+                    description: format!("item {i}"),
+                    assignee: o.map(str::to_string),
+                    due_date: Some("Friday".into()),
+                    completed: i == 0,
+                    due_on: None,
+                    source_ms: Some(1000),
+                })
+                .collect(),
+            decisions: vec![],
+            chapters: vec![],
+            generated_at: Utc::now(),
+            model: Some("claude".into()),
+        }
+    }
+
+    fn owners(s: &MeetingSummary) -> Vec<Option<String>> {
+        s.action_items.iter().map(|a| a.assignee.clone()).collect()
+    }
+
+    #[test]
+    fn owners_follow_a_rename_exactly() {
+        let mut s = owned(&[
+            Some("Remote 2"),
+            Some(" remote 2 "),
+            Some("REMOTE 2"),
+            Some("Remote 20"),
+            Some("Remote"),
+            None,
+        ]);
+        assert_eq!(s.rename_owner("Remote 2", "Chris", |_| false), 3);
+        assert_eq!(
+            owners(&s),
+            vec![
+                Some("Chris".into()),
+                Some("Chris".into()),
+                Some("Chris".into()),
+                Some("Remote 20".into()),
+                Some("Remote".into()),
+                None
+            ]
+        );
+        // Everything else stays: ticks, dues, where it was said.
+        assert!(s.action_items[0].completed);
+        assert_eq!(s.action_items[0].due_date.as_deref(), Some("Friday"));
+        assert_eq!(s.action_items[0].source_ms, Some(1000));
+        assert_eq!(s.action_items[0].description, "item 0");
+    }
+
+    #[test]
+    fn a_rename_never_touches_a_longer_name() {
+        let mut s = owned(&[Some("Christopher"), Some("Chris P"), Some("Chris")]);
+        assert_eq!(s.rename_owner("Chris", "Dana", |_| false), 1);
+        assert_eq!(
+            owners(&s),
+            vec![
+                Some("Christopher".into()),
+                Some("Chris P".into()),
+                Some("Dana".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn kept_owners_and_no_op_renames_change_nothing() {
+        let mut s = owned(&[Some("You"), Some("Remote")]);
+        assert_eq!(
+            s.rename_owner("You", "Pete", |o| o.eq_ignore_ascii_case("you")),
+            0
+        );
+        assert_eq!(s.rename_owner("Remote", "Remote", |_| false), 0);
+        assert_eq!(s.rename_owner("", "Dana", |_| false), 0);
+        assert_eq!(s.rename_owner("Remote", "  ", |_| false), 0);
+        assert_eq!(owners(&s), vec![Some("You".into()), Some("Remote".into())]);
+    }
+
+    #[test]
+    fn a_merge_and_its_undo_round_trip() {
+        let mut s = owned(&[Some("Remote 2"), Some("Remote 1")]);
+        // "Remote 2" merged into "Remote 1": both are one speaker now.
+        assert_eq!(s.rename_owner("Remote 2", "Remote 1", |_| false), 1);
+        assert_eq!(
+            owners(&s),
+            vec![Some("Remote 1".into()), Some("Remote 1".into())]
+        );
+        // A rename undone is a rename back.
+        let mut t = owned(&[Some("Remote 2")]);
+        t.rename_owner("Remote 2", "Chris", |_| false);
+        t.rename_owner("Chris", "Remote 2", |_| false);
+        assert_eq!(owners(&t), vec![Some("Remote 2".into())]);
     }
 }

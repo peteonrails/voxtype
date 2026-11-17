@@ -19,6 +19,8 @@ verification.
 | [Single Instance Enforcement](smoke_tests/single-instance-enforcement.md) | A second `voxtype daemon` invocation refuses to start |
 | [Signal Handling](smoke_tests/signal-handling.md) | SIGTERM and SIGINT shut the daemon down cleanly |
 | [Config Validation](smoke_tests/config-validation.md) | Invalid config produces a useful error, not a panic |
+| [Baseline v2 Floor](smoke_tests/baseline-v2-floor.md) | The baseline release asset runs real inference on a QEMU-modeled x86-64-v2 CPU (#740 class) |
+| [Packaged Upgrade](smoke_tests/packaged-upgrade.md) | deb/rpm in-place upgrade preserves the user config and delivers the new file surface |
 
 ## CLI and file I/O
 
@@ -91,7 +93,7 @@ verification.
 
 | Test | What it covers |
 |------|----------------|
-| [Meeting Mode](smoke_tests/meeting-mode.md) | Lifecycle, list, show, export, delete, speaker labels, AI summary, error handling, dual audio, diarization backends |
+| [Meeting Mode](smoke_tests/meeting-mode.md) | A 15-minute pass for 1.3.0: the detection prompt on a Meet call, recording into the live view, minimize and move, renaming, moving, editing and deleting lines, notes, Ask, stopping and the summary, past meetings, export, kept audio and playback, the tray offer on a fresh config, and the standalone Quickshell host |
 
 ## v0.7.6 release verification
 

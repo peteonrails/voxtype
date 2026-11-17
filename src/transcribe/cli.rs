@@ -6,12 +6,14 @@
 //!
 //! The whisper-cli binary must be installed separately or built from whisper.cpp.
 
-use super::Transcriber;
+use super::whisper::{timed_segments, RawSegment};
+use super::{TimedSegment, Transcriber};
 use crate::config::{Config, WhisperConfig};
 use crate::error::TranscribeError;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 /// CLI-based transcriber using whisper-cli subprocess
 pub struct CliTranscriber {
@@ -27,6 +29,8 @@ pub struct CliTranscriber {
     threads: usize,
     /// Initial prompt for context
     initial_prompt: Option<String>,
+    /// Profile vocabulary selected for the current recording.
+    active_vocabulary: Mutex<Vec<String>>,
 }
 
 /// JSON output structure from whisper-cli
@@ -38,6 +42,51 @@ struct WhisperCliOutput {
 #[derive(Debug, Deserialize)]
 struct Segment {
     text: String,
+    /// Start and end in milliseconds. Every whisper-cli that writes JSON
+    /// has them; absent, the segment is placed over the whole clip.
+    #[serde(default)]
+    offsets: Option<Offsets>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Offsets {
+    from: i64,
+    to: i64,
+}
+
+impl WhisperCliOutput {
+    /// Every segment's text, joined: what dictation types.
+    fn text(&self) -> String {
+        self.transcription
+            .iter()
+            .map(|s| s.text.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string()
+    }
+
+    /// The segments with their times, as whisper.cpp in-process gives
+    /// them: trimmed, clamped to the clip, wordless ones dropped.
+    fn timed(&self, duration_secs: f32) -> Vec<TimedSegment> {
+        let whole_clip = (duration_secs * 100.0).round() as i64;
+        let raw: Vec<RawSegment> = self
+            .transcription
+            .iter()
+            .map(|s| {
+                let (from, to) = s
+                    .offsets
+                    .as_ref()
+                    .map_or((0, whole_clip * 10), |o| (o.from, o.to));
+                RawSegment {
+                    start_cs: from / 10,
+                    end_cs: (to.max(0) + 9) / 10,
+                    text: s.text.clone(),
+                }
+            })
+            .collect();
+        timed_segments(&raw, duration_secs)
+    }
 }
 
 impl CliTranscriber {
@@ -76,6 +125,7 @@ impl CliTranscriber {
             translate: config.translate,
             threads,
             initial_prompt: config.initial_prompt.clone(),
+            active_vocabulary: Mutex::new(Vec::new()),
         })
     }
 
@@ -118,7 +168,39 @@ impl CliTranscriber {
 }
 
 impl Transcriber for CliTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        let start = std::time::Instant::now();
+        let text = self.run(samples)?.text();
+        tracing::info!(
+            "Transcription completed in {:.2}s: {:?}",
+            start.elapsed().as_secs_f32(),
+            if text.chars().count() > 50 {
+                format!("{}...", text.chars().take(50).collect::<String>())
+            } else {
+                text.clone()
+            }
+        );
+        Ok(text)
+    }
+
+    /// whisper-cli's JSON already times each segment, so a meeting chunk
+    /// gets a line per segment from the same single run per chunk.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        let duration_secs = samples.len() as f32 / 16000.0;
+        Ok(self.run(samples)?.timed(duration_secs))
+    }
+}
+
+impl CliTranscriber {
+    /// Run whisper-cli once over `samples` and read its JSON.
+    fn run(&self, samples: &[f32]) -> Result<WhisperCliOutput, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -131,8 +213,6 @@ impl Transcriber for CliTranscriber {
             duration_secs,
             samples.len()
         );
-
-        let start = std::time::Instant::now();
 
         // Write audio to temp WAV file
         let temp_wav = self.write_temp_wav(samples)?;
@@ -174,8 +254,15 @@ impl Transcriber for CliTranscriber {
             cmd.arg("--translate");
         }
 
-        // Initial prompt
-        if let Some(prompt) = &self.initial_prompt {
+        // Preserve the configured prompt and append active profile terms.
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        if let Some(prompt) =
+            super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary)
+        {
             cmd.arg("--prompt").arg(prompt);
         }
 
@@ -207,32 +294,9 @@ impl Transcriber for CliTranscriber {
         // Clean up JSON file
         let _ = std::fs::remove_file(&json_path);
 
-        // Parse JSON
-        let result: WhisperCliOutput = serde_json::from_str(&json_content).map_err(|e| {
+        serde_json::from_str(&json_content).map_err(|e| {
             TranscribeError::InferenceFailed(format!("Failed to parse JSON output: {}", e))
-        })?;
-
-        // Combine all segments
-        let text: String = result
-            .transcription
-            .iter()
-            .map(|s| s.text.trim())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_string();
-
-        tracing::info!(
-            "Transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if text.chars().count() > 50 {
-                format!("{}...", text.chars().take(50).collect::<String>())
-            } else {
-                text.clone()
-            }
-        );
-
-        Ok(text)
+        })
     }
 }
 
@@ -351,5 +415,80 @@ mod tests {
     fn test_resolve_model_path_unknown() {
         let result = resolve_model_path("nonexistent-model");
         assert!(result.is_err());
+    }
+
+    /// whisper-cli's `--output-json` for a 10 s clip: two sentences with a
+    /// pause, a wordless segment, and one running past the end.
+    const JSON: &str = r#"{"systeminfo": "AVX = 1", "transcription": [
+        {"timestamps": {"from": "00:00:00,000", "to": "00:00:02,400"},
+         "offsets": {"from": 0, "to": 2400}, "text": " Hello there."},
+        {"timestamps": {"from": "00:00:02,400", "to": "00:00:07,815"},
+         "offsets": {"from": 2400, "to": 7815}, "text": " See you at three."},
+        {"offsets": {"from": 7815, "to": 8000}, "text": " ..."},
+        {"offsets": {"from": 8000, "to": 12000}, "text": " Bye."}
+    ]}"#;
+
+    fn spans(segments: &[TimedSegment]) -> Vec<(&str, f32, f32)> {
+        segments
+            .iter()
+            .map(|s| (s.text.as_str(), s.start_secs, s.end_secs))
+            .collect()
+    }
+
+    #[test]
+    fn json_segments_keep_their_times() {
+        let out: WhisperCliOutput = serde_json::from_str(JSON).unwrap();
+        assert_eq!(out.text(), "Hello there. See you at three. ... Bye.");
+        assert_eq!(
+            spans(&out.timed(10.0)),
+            vec![
+                ("Hello there.", 0.0, 2.4),
+                ("See you at three.", 2.4, 7.82),
+                ("Bye.", 8.0, 10.0),
+            ],
+            "times in seconds, the wordless segment dropped, the last clamped"
+        );
+        // A whisper-cli without offsets: one segment over the whole clip
+        // each, as the default transcribe_timed would give.
+        let bare: WhisperCliOutput =
+            serde_json::from_str(r#"{"transcription": [{"text": " Hi."}]}"#).unwrap();
+        assert_eq!(spans(&bare.timed(3.0)), vec![("Hi.", 0.0, 3.0)]);
+    }
+
+    /// A fake whisper-cli writes the JSON where it is told to; the meeting
+    /// path gets the segments, dictation the joined text, from one run each.
+    #[test]
+    fn transcribe_timed_runs_whisper_cli_once_and_reads_its_segments() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let runs = dir.path().join("runs");
+        let json = dir.path().join("out.json");
+        std::fs::write(&json, JSON).unwrap();
+        let cli = dir.path().join("whisper-cli");
+        crate::test_support::write_script(
+            &cli,
+            &format!(
+                "#!/bin/sh\necho run >> {runs}\nwhile [ $# -gt 0 ]; do \
+                 [ \"$1\" = --output-file ] && cp {json} \"$2.json\"; shift; done\n",
+                runs = runs.display(),
+                json = json.display()
+            ),
+        );
+        let t = CliTranscriber {
+            cli_path: cli,
+            model_path: dir.path().join("model.bin"),
+            language: "en".into(),
+            translate: false,
+            threads: 1,
+            initial_prompt: None,
+            active_vocabulary: Mutex::new(Vec::new()),
+        };
+        let audio = vec![0.0f32; 16000 * 10];
+        assert_eq!(t.transcribe_timed(&audio).unwrap().len(), 3);
+        assert_eq!(
+            t.transcribe(&audio).unwrap(),
+            "Hello there. See you at three. ... Bye."
+        );
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 2);
+        assert!(t.transcribe_timed(&[]).is_err());
     }
 }

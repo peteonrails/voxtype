@@ -14,6 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::{mpsc, oneshot};
 
+/// How long `start()` waits for the capture thread to confirm the stream is
+/// running before returning anyway.
+const STREAM_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Commands sent to the audio capture thread
 enum CaptureCommand {
     Stop(oneshot::Sender<Vec<f32>>),
@@ -154,23 +158,31 @@ impl AudioCapture for CpalCapture {
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-        // Get the device info before spawning the thread
-        let host = cpal::default_host();
-
-        let device = if self.config.device == "default" {
-            host.default_input_device()
-                .ok_or_else(|| AudioError::DeviceNotFound("default".to_string()))?
-        } else {
-            find_audio_device(&host, &self.config.device)?
+        // Find the device and its config before spawning the capture
+        // thread. ALSA blocks forever here when a sound server's socket
+        // exists but nothing answers, and this runs on the daemon's event
+        // loop, so it gets a deadline and a thread of its own.
+        let wanted = self.config.device.clone();
+        let lookup = move || -> Result<(cpal::Device, cpal::SupportedStreamConfig), AudioError> {
+            let host = cpal::default_host();
+            let device = if wanted == "default" {
+                host.default_input_device()
+                    .ok_or_else(|| AudioError::DeviceNotFound("default".to_string()))?
+            } else {
+                find_audio_device(&host, &wanted)?
+            };
+            let config = device
+                .default_input_config()
+                .map_err(|e| AudioError::Connection(e.to_string()))?;
+            Ok((device, config))
         };
+        let timeout = super::devices::SOUND_SERVER_TIMEOUT;
+        let (device, supported_config) = super::devices::bounded_async(timeout, lookup)
+            .await
+            .ok_or(AudioError::NoSoundServer(timeout.as_secs()))??;
 
         let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
         tracing::info!("Using audio device: {}", device_name);
-
-        // Get supported config
-        let supported_config = device
-            .default_input_config()
-            .map_err(|e| AudioError::Connection(e.to_string()))?;
 
         let source_sample_rate = supported_config.sample_rate().0;
         let source_channels = supported_config.channels() as usize;
@@ -187,6 +199,10 @@ impl AudioCapture for CpalCapture {
         // Create channels
         let (chunk_tx, chunk_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        // The stream is built on the capture thread. Its outcome comes back
+        // here so a device that refuses to open fails `start()` instead of
+        // handing back a receiver that never yields a sample.
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
 
         // Shared state
         let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
@@ -254,7 +270,7 @@ impl AudioCapture for CpalCapture {
                     build_stream::<u16>(&device, &stream_config, make_params(), err_fn)
                 }
                 format => {
-                    tracing::error!("Unsupported sample format: {:?}", format);
+                    let _ = ready_tx.send(Err(format!("unsupported sample format {format:?}")));
                     return;
                 }
             };
@@ -262,15 +278,16 @@ impl AudioCapture for CpalCapture {
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("Failed to build audio stream: {}", e);
+                    let _ = ready_tx.send(Err(format!("could not open the input stream: {e}")));
                     return;
                 }
             };
 
             if let Err(e) = stream.play() {
-                tracing::error!("Failed to start audio stream: {}", e);
+                let _ = ready_tx.send(Err(format!("could not start the input stream: {e}")));
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
 
             tracing::debug!("Audio capture thread started");
 
@@ -309,10 +326,12 @@ impl AudioCapture for CpalCapture {
                             }
                         }
 
-                        // Get collected samples
+                        // Hand over the collected samples. Taken, not cloned:
+                        // the capture is ending, and a 30-minute recording is
+                        // over 100 MB.
                         let collected = {
-                            let guard = samples_clone.lock().unwrap();
-                            guard.clone()
+                            let mut guard = samples_clone.lock().unwrap();
+                            std::mem::take(&mut *guard)
                         };
 
                         // Send samples back
@@ -337,6 +356,26 @@ impl AudioCapture for CpalCapture {
 
             tracing::debug!("Audio capture thread stopped");
         });
+
+        match tokio::time::timeout(STREAM_READY_TIMEOUT, ready_rx).await {
+            Ok(Ok(Err(message))) => {
+                let _ = thread_handle.join();
+                return Err(AudioError::StreamError(message));
+            }
+            Ok(Err(_)) => {
+                let _ = thread_handle.join();
+                return Err(AudioError::StreamError(
+                    "the capture thread exited before the stream started".to_string(),
+                ));
+            }
+            // A slow backend keeps the old behaviour: carry on and let the
+            // stream deliver samples when it comes up.
+            Err(_) => tracing::warn!(
+                "Audio stream not confirmed after {:?}; continuing",
+                STREAM_READY_TIMEOUT
+            ),
+            Ok(Ok(Ok(()))) => {}
+        }
 
         self.cmd_tx = Some(cmd_tx);
         self.thread_handle = Some(thread_handle);

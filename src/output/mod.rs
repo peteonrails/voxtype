@@ -19,11 +19,14 @@
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
+pub mod active_window;
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
+pub mod deferred_notice;
 pub mod dotool;
 pub mod eitype;
+pub mod fallback;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -159,7 +162,7 @@ pub fn is_parakeet_binary_active() -> bool {
     // If we can't read the symlink, check if parakeet feature is enabled
     #[cfg(feature = "parakeet")]
     {
-        return true;
+        true
     }
     #[cfg(not(feature = "parakeet"))]
     {
@@ -178,6 +181,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",  // 🐬
         crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
         crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",   // 📝
+        crate::config::TranscriptionEngine::Gguf => "\u{2699}\u{FE0F}", // ⚙️
         crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
         crate::config::TranscriptionEngine::OpenVino => "\u{1F9E0}", // 🧠
     }
@@ -196,22 +200,72 @@ pub fn sanitize_urgency(urgency: &str) -> &str {
 /// Send a transcription notification with optional engine icon
 pub async fn send_transcription_notification(
     text: &str,
+    original: Option<&str>,
     show_engine_icon: bool,
     engine: crate::config::TranscriptionEngine,
     urgency: &str,
 ) {
-    // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-    let preview = if text.chars().count() > 80 {
-        format!("{}...", text.chars().take(80).collect::<String>())
-    } else {
-        text.to_string()
-    };
+    send_transcription_notification_titled(
+        text,
+        original,
+        show_engine_icon,
+        engine,
+        urgency,
+        "Transcribed",
+    )
+    .await;
+}
 
-    let title = if show_engine_icon {
-        format!("{} Transcribed", engine_icon(engine))
+/// Send a transcription notification under `label` ("Transcribed", or a
+/// label saying the text is on the clipboard after a fallback).
+pub async fn send_transcription_notification_titled(
+    text: &str,
+    original: Option<&str>,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+    urgency: &str,
+    label: &str,
+) {
+    use crate::text::diff;
+
+    // When cleanup changed the transcription, show *what* it changed rather
+    // than only the result: deletions struck through, replacements coloured.
+    // Falls back to a plain preview when nothing changed, or when the
+    // notification server does not parse markup.
+    let changed = original
+        .map(|o| o.split_whitespace().ne(text.split_whitespace()))
+        .unwrap_or(false);
+
+    let (body, edits) = if changed {
+        let markup = crate::notification::body_markup().await;
+        let spans = diff::word_diff(original.unwrap_or_default(), text);
+        (
+            diff::render_for_notification(&spans, markup, 160),
+            diff::edit_count(&spans),
+        )
     } else {
-        "Transcribed".to_string()
+        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
+        let preview = if text.chars().count() > 80 {
+            format!("{}...", text.chars().take(80).collect::<String>())
+        } else {
+            text.to_string()
+        };
+        (preview, 0)
     };
+    let preview = body;
+
+    let mut title = if show_engine_icon {
+        format!("{} {}", engine_icon(engine), label)
+    } else {
+        label.to_string()
+    };
+    if edits > 0 {
+        title.push_str(&format!(
+            " \u{270e} {} edit{}",
+            edits,
+            if edits == 1 { "" } else { "s" }
+        ));
+    }
 
     // Through the notification module rather than straight to notify-send:
     // that module owns the --replace-id bookkeeping that keeps every Voxtype
@@ -228,6 +282,10 @@ pub async fn send_transcription_notification(
 
 /// Trait for text output implementations
 #[async_trait::async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds #[must_use] to methods returning must-use futures"
+)]
 pub trait TextOutput: Send + Sync {
     /// Output text (type it or copy to clipboard)
     async fn output(&self, text: &str) -> Result<(), OutputError>;
@@ -282,6 +340,7 @@ fn create_driver_output(
             config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
+            config.shift_enter_newlines,
         )),
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
@@ -391,23 +450,50 @@ pub fn create_output_chain_with_override(
             }
         }
         crate::config::OutputMode::Paste => {
-            // Only paste mode (no fallback as requested)
+            // Paste mode: clipboard + simulated paste keystroke.
             chain.push(Box::new(paste::PasteOutput::new(
                 config.auto_submit,
                 config.append_text.clone(),
                 config.paste_keys.clone(),
+                config.paste_keys_terminal.clone(),
+                config.driver_order.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,
                 config.restore_clipboard,
                 config.restore_clipboard_delay_ms,
             )));
+
+            // The modifier-release guard (wait_for_modifier_release) skips
+            // keystroke-synthesizing methods -- including paste -- when a
+            // modifier is still held after the timeout, falling through to
+            // clipboard-only methods. Without a clipboard fallback here the
+            // transcription would be dropped entirely even though the user is
+            // notified that it was "copied to clipboard". Mirror Type mode's
+            // fallback_to_clipboard behavior so the text still reaches the
+            // user's clipboard.
+            #[cfg(target_os = "macos")]
+            if config.fallback_to_clipboard {
+                chain.push(Box::new(pbcopy::PbcopyOutput::new(false)));
+            }
+            #[cfg(not(target_os = "macos"))]
+            if config.fallback_to_clipboard {
+                chain.push(Box::new(clipboard::ClipboardOutput::new(
+                    config.append_text.clone(),
+                )));
+                chain.push(Box::new(xclip::XclipOutput::new(
+                    config.append_text.clone(),
+                )));
+            }
         }
         crate::config::OutputMode::File => {
-            // File output is handled in the daemon before reaching the output chain.
-            // If we get here, it means mode = "file" but no file_path is configured.
-            tracing::warn!(
-                "Output mode is 'file' but no file_path configured. Falling back to clipboard."
-            );
+            // The daemon writes the file itself before reaching the output
+            // chain, so with a file_path this chain only backs the startup
+            // log. Warn only when there is genuinely nowhere to write.
+            if file_mode_lacks_path(config) {
+                tracing::warn!(
+                    "Output mode is 'file' but no file_path configured. Falling back to clipboard."
+                );
+            }
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.append_text.clone(),
             )));
@@ -417,26 +503,82 @@ pub fn create_output_chain_with_override(
     chain
 }
 
+/// True when mode = "file" has no file_path to write to, so the output
+/// chain's clipboard fallback is what actually delivers the text.
+fn file_mode_lacks_path(config: &OutputConfig) -> bool {
+    config.mode == crate::config::OutputMode::File && config.file_path.is_none()
+}
+
 /// Run a shell command (for pre/post hooks)
 pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
 
-    let output = Command::new("sh")
+    let output = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|e| format!("{} hook failed to execute: {}", hook_name, e))?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            report_hook_failure(hook_name, &format!("could not be started: {e}"));
+            return Err(format!("{} hook failed to execute: {}", hook_name, e));
+        }
+    };
 
     if output.status.success() {
         tracing::info!("{} hook completed successfully", hook_name);
+        deferred_notice::succeeded(&format!("hook:{hook_name}:"));
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        report_hook_failure(
+            hook_name,
+            &hook_failure_reason(output.status.code(), &stderr),
+        );
         Err(format!("{} hook failed: {}", hook_name, stderr))
     }
+}
+
+/// What went wrong with a hook that ran, for its notice.
+fn hook_failure_reason(code: Option<i32>, stderr: &str) -> String {
+    let status = match code {
+        Some(127) => "was not found (exit 127)".to_string(),
+        Some(code) => format!("exited with code {code}"),
+        None => "was killed by a signal".to_string(),
+    };
+    let detail = deferred_notice::detail(stderr);
+    if detail.is_empty() {
+        status
+    } else {
+        format!("{status}: {detail}")
+    }
+}
+
+/// The notice for a failed hook. A failed pre/post output hook usually
+/// leaves a compositor submap or similar state wrong, which the user would
+/// otherwise only find out about by its side effects.
+fn hook_failure_notice(hook_name: &str, reason: &str) -> deferred_notice::Notice {
+    let setting = match hook_name {
+        "external_trigger_stop" => "`external_trigger_stop_command` in [audio]".to_string(),
+        name => format!("`{name}_command` in [output]"),
+    };
+    deferred_notice::Notice {
+        title: format!("Voxtype: {hook_name} hook failed"),
+        body: format!(
+            "The {hook_name} command {reason}. The dictation itself was not affected. \
+             Run the command by hand to see why, or fix {setting}."
+        ),
+    }
+}
+
+fn report_hook_failure(hook_name: &str, reason: &str) {
+    deferred_notice::report(
+        &format!("hook:{hook_name}:failed"),
+        hook_failure_notice(hook_name, reason),
+    );
 }
 
 /// Output configuration for the fallback chain
@@ -458,6 +600,16 @@ fn is_keystroke_method(name: &str) -> bool {
     matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
 }
 
+/// True when any method in the chain synthesizes keystrokes, so the
+/// modifier-release guard has something to protect. Clipboard-only chains
+/// (clipboard mode, or a `driver_order` of clipboard drivers) never press a
+/// key, and building the guard costs hundreds of milliseconds on hosts with
+/// many input devices (#543), so they skip it.
+#[cfg(target_os = "linux")]
+fn chain_synthesizes_keystrokes<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
+    names.into_iter().any(is_keystroke_method)
+}
+
 /// Try each output method in the chain until one succeeds
 /// Pre/post output commands are run before and after typing (for compositor integration).
 pub async fn output_with_fallback(
@@ -465,6 +617,17 @@ pub async fn output_with_fallback(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<(), OutputError> {
+    output_with_fallback_report(chain, text, options).await.1
+}
+
+/// `output_with_fallback`, also reporting which method delivered the text and
+/// which were skipped on the way, so the caller can tell the user when the
+/// text landed on the clipboard instead of being typed.
+pub async fn output_with_fallback_report(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+) -> (fallback::OutputReport, Result<(), OutputError>) {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
 
@@ -473,12 +636,15 @@ pub async fn output_with_fallback(
     // from combining with Super/Ctrl/Alt/Shift and firing compositor or
     // application keybindings. Disabled and timed-out cases both leave the
     // chain runnable; only the latter skips keystroke-synthesizing methods.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut skip_keystroke_methods = false;
     // The evdev-based modifier_guard is Linux-only. macOS uses its own
     // wait_for_modifiers_release in osascript.rs and gets called separately
     // from the osascript output path.
     #[cfg(target_os = "linux")]
-    if options.wait_for_modifier_release {
+    if options.wait_for_modifier_release
+        && chain_synthesizes_keystrokes(chain.iter().map(|o| o.name()))
+    {
         let mut guard = modifier_guard::ModifierGuard::new();
         if guard
             .wait_for_release(options.modifier_release_timeout)
@@ -511,33 +677,8 @@ pub async fn output_with_fallback(
         }
     }
 
-    // Try each output method
-    let mut result = Err(OutputError::AllMethodsFailed);
-    for output in chain {
-        if skip_keystroke_methods && is_keystroke_method(output.name()) {
-            tracing::debug!(
-                "{} skipped (modifier still held), trying next",
-                output.name()
-            );
-            continue;
-        }
-
-        if !output.is_available().await {
-            tracing::debug!("{} not available, trying next", output.name());
-            continue;
-        }
-
-        match output.output(&normalized_text).await {
-            Ok(()) => {
-                tracing::debug!("Text output via {}", output.name());
-                result = Ok(());
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("{} failed: {}, trying next", output.name(), e);
-            }
-        }
-    }
+    let (report, result) =
+        fallback::run_chain(chain, &normalized_text, skip_keystroke_methods).await;
 
     // Run post-output hook if configured (e.g., reset submap)
     // Always run this, even on failure, to ensure cleanup
@@ -547,12 +688,28 @@ pub async fn output_with_fallback(
         }
     }
 
-    result
+    (report, result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_mode_warns_only_without_a_path() {
+        let mut config = OutputConfig {
+            mode: crate::config::OutputMode::File,
+            ..Default::default()
+        };
+        assert!(file_mode_lacks_path(&config));
+
+        config.file_path = Some(PathBuf::from("/tmp/notes.txt"));
+        assert!(!file_mode_lacks_path(&config));
+
+        config.file_path = None;
+        config.mode = crate::config::OutputMode::Clipboard;
+        assert!(!file_mode_lacks_path(&config));
+    }
 
     #[test]
     fn test_normalize_quotes_no_change() {
@@ -618,6 +775,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn test_chain_synthesizes_keystrokes() {
+        assert!(!chain_synthesizes_keystrokes(["clipboard (wl-copy)"]));
+        assert!(!chain_synthesizes_keystrokes([
+            "clipboard (wl-copy)",
+            "clipboard (xclip/xsel)"
+        ]));
+        assert!(!chain_synthesizes_keystrokes(std::iter::empty::<&str>()));
+        assert!(chain_synthesizes_keystrokes([
+            "paste (clipboard + keystroke)"
+        ]));
+        assert!(chain_synthesizes_keystrokes([
+            "wtype",
+            "dotool",
+            "clipboard (wl-copy)"
+        ]));
+    }
+
+    #[test]
     fn test_find_ydotool_socket_returns_none_when_no_socket() {
         // In a test environment there should be no ydotoold running, so this
         // should return None (no socket file exists at any candidate path).
@@ -643,6 +819,59 @@ mod tests {
         std::env::remove_var("YDOTOOL_SOCKET");
 
         assert_eq!(result, Some(sock_path));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_paste_chain_includes_clipboard_fallback_when_enabled() {
+        let config = OutputConfig {
+            mode: crate::config::OutputMode::Paste,
+            fallback_to_clipboard: true,
+            ..Default::default()
+        };
+        let names: Vec<&str> = create_output_chain(&config)
+            .iter()
+            .map(|o| o.name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "paste (clipboard + keystroke)",
+                "clipboard (wl-copy)",
+                "clipboard (xclip/xsel)",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_paste_chain_no_clipboard_fallback_when_disabled() {
+        let config = OutputConfig {
+            mode: crate::config::OutputMode::Paste,
+            fallback_to_clipboard: false,
+            ..Default::default()
+        };
+        let names: Vec<&str> = create_output_chain(&config)
+            .iter()
+            .map(|o| o.name())
+            .collect();
+        assert_eq!(names, vec!["paste (clipboard + keystroke)"]);
+    }
+
+    #[test]
+    fn hook_notice_names_the_hook_and_its_setting() {
+        let n = hook_failure_notice(
+            "post_output",
+            &hook_failure_reason(Some(1), "hyprctl: no such submap\nmore"),
+        );
+        assert_eq!(n.title, "Voxtype: post_output hook failed");
+        assert!(n
+            .body
+            .starts_with("The post_output command exited with code 1: hyprctl: no such submap."));
+        assert!(n.body.contains("`post_output_command` in [output]"));
+        let n = hook_failure_notice("external_trigger_stop", &hook_failure_reason(None, ""));
+        assert!(n.body.contains("was killed by a signal."));
+        assert!(n.body.contains("[audio]"));
     }
 
     #[test]

@@ -115,6 +115,46 @@ Fixes #123
 
 Types: `fix`, `feat`, `docs`, `style`, `refactor`, `test`, `chore`
 
+## Signed commits
+
+Every commit in a pull request must be signed, and GitHub must show it as **Verified**. Pull requests with unsigned or unverified commits are not merged.
+
+If this is your first pull request to voxtype and any of its commits are unsigned or unverified, the pull request is closed automatically with a comment that links here. Sign the commits and open a new pull request. Nothing else about your change needs to be different.
+
+### Set up signing
+
+With SSH, using the key you already push with:
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+```
+
+Then add the same public key on GitHub under **Settings > SSH and GPG keys > New SSH key**, with the key type set to **Signing Key**.
+
+With GPG:
+
+```bash
+gpg --full-generate-key
+gpg --list-secret-keys --keyid-format=long   # copy the key ID
+git config --global user.signingkey <KEY_ID>
+git config --global commit.gpgsign true
+gpg --armor --export <KEY_ID>
+```
+
+Then paste the exported key on GitHub under **Settings > SSH and GPG keys > New GPG key**.
+
+Either way, the email on your commits must be a verified email on your GitHub account, or GitHub shows the signature as Unverified.
+
+### Re-sign commits you already made
+
+```bash
+git rebase --exec 'git commit --amend --no-edit -S' origin/dev
+git log --show-signature origin/dev..HEAD   # every commit should show a good signature
+git push --force-with-lease
+```
+
 ## Refactoring while contributing
 
 If you're already inside a file to fix a bug or add a feature, it's fine to

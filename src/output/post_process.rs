@@ -12,9 +12,13 @@
 //! ```
 //!
 //! The command receives the transcribed text on stdin and should output
-//! the processed text on stdout. On any failure, the original text is used.
+//! the processed text on stdout. On any failure, the original text is used,
+//! and the user gets a desktop notice saying cleanup did not run (see
+//! [`crate::output::deferred_notice`]).
 
 use crate::config::PostProcessConfig;
+use crate::output::deferred_notice::{self, Notice};
+use serde::Deserialize;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -27,7 +31,52 @@ pub struct PostProcessor {
     timeout: Duration,
     trim: bool,
     fallback_on_empty: bool,
+    edit_list: bool,
+    origin: Origin,
+    /// Whether a failure queues a desktop notice. Failures are always logged.
+    notices: bool,
 }
+
+/// Where the command came from, so a notice names the setting to change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Origin {
+    /// `[output.post_process]`
+    Output,
+    /// `[profiles.<name>]`, whose keys are `post_process_command` and
+    /// `post_process_timeout_ms`.
+    Profile(String),
+}
+
+impl Origin {
+    fn command_setting(&self) -> String {
+        match self {
+            Origin::Output => "`command` in [output.post_process]".to_string(),
+            Origin::Profile(name) => format!("`post_process_command` in [profiles.{name}]"),
+        }
+    }
+
+    /// Key prefix for the notice rate limiter. Per origin, so a working
+    /// default command doesn't re-arm the notice of a broken profile one.
+    fn notice_source(&self) -> String {
+        match self {
+            Origin::Output => "post_process:output:".to_string(),
+            Origin::Profile(name) => format!("post_process:profile:{name}:"),
+        }
+    }
+
+    fn timeout_fix(&self) -> String {
+        match self {
+            Origin::Output => "Raise `timeout_ms` in [output.post_process] \
+                 (`voxtype config set output.post_process.timeout_ms 60000`)"
+                .to_string(),
+            Origin::Profile(name) => {
+                format!("Raise `post_process_timeout_ms` in [profiles.{name}]")
+            }
+        }
+    }
+}
+
+const USED_AS_IS: &str = "The text was used as transcribed, without cleanup.";
 
 impl PostProcessor {
     /// Create a new post-processor from configuration
@@ -37,6 +86,141 @@ impl PostProcessor {
             timeout: Duration::from_millis(config.timeout_ms),
             trim: config.trim,
             fallback_on_empty: config.fallback_on_empty,
+            edit_list: config.edit_list,
+            origin: Origin::Output,
+            notices: true,
+        }
+    }
+
+    /// Mark this processor as running a profile's `post_process_command`, so
+    /// failure notices point at the profile's settings.
+    pub fn for_profile(mut self, name: &str) -> Self {
+        self.origin = Origin::Profile(name.to_string());
+        self
+    }
+
+    /// Log failures without queuing a desktop notice for them. Meeting mode
+    /// uses this: it runs the command on every segment of every chunk, so a
+    /// failing command would notify over and over during a call, and a
+    /// notice left in the shared queue would surface on a later dictation.
+    /// Such a processor leaves the dictation rate limiter alone too.
+    pub fn without_notices(mut self) -> Self {
+        self.notices = false;
+        self
+    }
+
+    fn report(&self, kind: &str, notice: Notice) {
+        if self.notices {
+            deferred_notice::report(&format!("{}{kind}", self.origin.notice_source()), notice);
+        }
+    }
+
+    fn succeeded(&self) {
+        if self.notices {
+            deferred_notice::succeeded(&self.origin.notice_source());
+        }
+    }
+
+    /// The notice for a failed run, with the failure kind it is rate-limited by.
+    fn failure_notice(&self, err: &PostProcessError) -> (&'static str, Notice) {
+        let fix_command = format!(
+            "Run the command by hand to see why, or fix {}.",
+            self.origin.command_setting()
+        );
+        match err {
+            // `sh -c` reports a missing program as exit 127, and one it
+            // cannot execute as 126.
+            PostProcessError::NonZeroExit {
+                code: Some(code @ (126 | 127)),
+                stderr,
+            } => {
+                let what = if stderr.is_empty() {
+                    format!(
+                        "`{}` was not found (exit {code})",
+                        deferred_notice::detail(&self.command)
+                    )
+                } else {
+                    deferred_notice::detail(stderr)
+                };
+                (
+                    "not_found",
+                    Notice {
+                        title: "Voxtype: post-processing command not found".to_string(),
+                        body: format!(
+                            "{what}. {USED_AS_IS} Install the program or fix {}.",
+                            self.origin.command_setting()
+                        ),
+                    },
+                )
+            }
+            PostProcessError::NonZeroExit { code, stderr } => {
+                let status = match code {
+                    Some(code) => format!("exited with code {code}"),
+                    None => "was killed by a signal".to_string(),
+                };
+                let reason = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", deferred_notice::detail(stderr))
+                };
+                (
+                    "exit",
+                    Notice {
+                        title: "Voxtype: post-processing failed".to_string(),
+                        body: format!("The command {status}{reason}. {USED_AS_IS} {fix_command}"),
+                    },
+                )
+            }
+            PostProcessError::Timeout(ms) => (
+                "timeout",
+                Notice {
+                    title: "Voxtype: post-processing timed out".to_string(),
+                    body: format!(
+                        "The command did not finish within {ms} ms. {USED_AS_IS} {} \
+                         or use a faster command or model.",
+                        self.origin.timeout_fix()
+                    ),
+                },
+            ),
+            PostProcessError::InvalidEditList(reason) => (
+                "edit_list",
+                Notice {
+                    title: "Voxtype: post-processing edit list rejected".to_string(),
+                    body: format!(
+                        "The command's edit list was not applied ({}). {USED_AS_IS} \
+                         Check that the command prints only a JSON edit list, or set \
+                         `edit_list = false` in [output.post_process].",
+                        deferred_notice::detail(reason)
+                    ),
+                },
+            ),
+            other => (
+                "other",
+                Notice {
+                    title: "Voxtype: post-processing failed".to_string(),
+                    body: format!(
+                        "{}. {USED_AS_IS} {fix_command}",
+                        deferred_notice::detail(&other.to_string())
+                    ),
+                },
+            ),
+        }
+    }
+
+    fn empty_output_notice(&self) -> Notice {
+        let intended = match self.origin {
+            Origin::Output => {
+                " If empty output is intended, set `fallback_on_empty = false` \
+                 in [output.post_process]."
+            }
+            Origin::Profile(_) => "",
+        };
+        Notice {
+            title: "Voxtype: post-processing returned nothing".to_string(),
+            body: format!(
+                "The command printed nothing on stdout. {USED_AS_IS} \
+                 Check that it writes the cleaned text to stdout.{intended}"
+            ),
         }
     }
 
@@ -48,16 +232,35 @@ impl PostProcessor {
     /// Returns the processed text on success, or the original text on any failure.
     pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
         match self.execute_command_with_env(text, context).await {
-            Ok(processed) => {
+            Ok(command_output) => {
+                let processed = if self.edit_list {
+                    match apply_edit_list(text, &command_output) {
+                        Ok(processed) => processed,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Post-process command returned an invalid edit list: {}, using original text",
+                                e
+                            );
+                            let (kind, notice) = self.failure_notice(&e);
+                            self.report(kind, notice);
+                            return text.to_string();
+                        }
+                    }
+                } else {
+                    command_output
+                };
                 if processed.is_empty() && self.fallback_on_empty {
                     tracing::warn!(
                         "Post-process command returned empty output, using original text"
                     );
+                    self.report("empty", self.empty_output_notice());
                     text.to_string()
                 } else if processed.is_empty() {
                     tracing::debug!("Post-process command returned empty output");
+                    self.succeeded();
                     String::new()
                 } else {
+                    self.succeeded();
                     tracing::debug!(
                         "Post-processed ({} -> {} chars)",
                         text.len(),
@@ -68,6 +271,8 @@ impl PostProcessor {
             }
             Err(e) => {
                 tracing::warn!("Post-process command failed: {}, using original text", e);
+                let (kind, notice) = self.failure_notice(&e);
+                self.report(kind, notice);
                 text.to_string()
             }
         }
@@ -115,7 +320,7 @@ impl PostProcessor {
         // Wait for completion with timeout
         let output = timeout(self.timeout, child.wait_with_output())
             .await
-            .map_err(|_| PostProcessError::Timeout(self.timeout.as_secs()))?
+            .map_err(|_| PostProcessError::Timeout(self.timeout.as_millis() as u64))?
             .map_err(|e| PostProcessError::WaitFailed(e.to_string()))?;
 
         // Check exit status
@@ -140,6 +345,90 @@ impl PostProcessor {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextEdit {
+    find: String,
+    replace: String,
+    reason: String,
+}
+
+/// Apply a command's JSON edit list without accepting any undeclared output.
+///
+/// Every target must occur exactly once in the original text. Resolving all
+/// spans before applying any edit prevents one replacement from creating the
+/// target for a later edit, and rejecting overlaps keeps the result
+/// deterministic regardless of list order.
+fn apply_edit_list(text: &str, output: &str) -> Result<String, PostProcessError> {
+    let edits: Vec<TextEdit> = serde_json::from_str(output)
+        .map_err(|e| PostProcessError::InvalidEditList(e.to_string()))?;
+    let mut resolved = Vec::with_capacity(edits.len());
+
+    for edit in edits {
+        if edit.find.is_empty() {
+            return Err(PostProcessError::InvalidEditList(
+                "find must not be empty".to_string(),
+            ));
+        }
+        if edit.reason.trim().is_empty() {
+            return Err(PostProcessError::InvalidEditList(
+                "reason must not be empty".to_string(),
+            ));
+        }
+
+        // Count scalar values, not UTF-8 bytes: non-ASCII edits get the same
+        // budget as English ones. Cap spans before the quadratic distance check.
+        let old_len = edit.find.chars().count();
+        let new_len = edit.replace.chars().count();
+        if old_len > 4096
+            || new_len > old_len.saturating_mul(2).saturating_add(8)
+            || strsim::levenshtein(&edit.find, &edit.replace) > (old_len / 2).max(4)
+        {
+            return Err(PostProcessError::InvalidEditList(
+                "replacement exceeds the cleanup edit budget".to_string(),
+            ));
+        }
+
+        let Some(start) = text.find(&edit.find) else {
+            return Err(PostProcessError::InvalidEditList(format!(
+                "find target {:?} is not in the transcription",
+                edit.find
+            )));
+        };
+        // Search from the next character, not the end of the first match:
+        // `aa` is ambiguous in `aaa` even though its occurrences overlap.
+        let next = start + text[start..].chars().next().unwrap().len_utf8();
+        if text[next..].contains(&edit.find) {
+            return Err(PostProcessError::InvalidEditList(format!(
+                "find target {:?} is ambiguous",
+                edit.find
+            )));
+        }
+        resolved.push((start, start + edit.find.len(), edit.replace));
+    }
+
+    resolved.sort_by_key(|(start, _, _)| *start);
+    for pair in resolved.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return Err(PostProcessError::InvalidEditList(
+                "edits overlap".to_string(),
+            ));
+        }
+    }
+
+    let mut result = text.to_string();
+    for (start, end, replacement) in resolved.into_iter().rev() {
+        result.replace_range(start..end, &replacement);
+    }
+    let original_len = text.chars().count();
+    if result.chars().count() > original_len.saturating_add((original_len / 5).max(8)) {
+        return Err(PostProcessError::InvalidEditList(
+            "edit list adds too much content".to_string(),
+        ));
+    }
+    Ok(result)
+}
+
 /// Errors that can occur during post-processing
 #[derive(Debug)]
 pub enum PostProcessError {
@@ -147,7 +436,7 @@ pub enum PostProcessError {
     SpawnFailed(String),
     /// Failed to write text to stdin
     WriteFailed(String),
-    /// Command timed out
+    /// Command timed out (the timeout, in milliseconds)
     Timeout(u64),
     /// Failed to wait for command completion
     WaitFailed(String),
@@ -155,6 +444,8 @@ pub enum PostProcessError {
     NonZeroExit { code: Option<i32>, stderr: String },
     /// Command output was not valid UTF-8
     InvalidUtf8(String),
+    /// Command output did not satisfy the edit-list contract
+    InvalidEditList(String),
 }
 
 impl std::fmt::Display for PostProcessError {
@@ -162,7 +453,7 @@ impl std::fmt::Display for PostProcessError {
         match self {
             Self::SpawnFailed(e) => write!(f, "failed to spawn command: {}", e),
             Self::WriteFailed(e) => write!(f, "failed to write to stdin: {}", e),
-            Self::Timeout(secs) => write!(f, "command timed out after {}s", secs),
+            Self::Timeout(ms) => write!(f, "command timed out after {}ms", ms),
             Self::WaitFailed(e) => write!(f, "failed to wait for command: {}", e),
             Self::NonZeroExit { code, stderr } => {
                 if stderr.is_empty() {
@@ -172,6 +463,7 @@ impl std::fmt::Display for PostProcessError {
                 }
             }
             Self::InvalidUtf8(e) => write!(f, "output is not valid UTF-8: {}", e),
+            Self::InvalidEditList(e) => write!(f, "invalid edit list: {}", e),
         }
     }
 }
@@ -182,13 +474,174 @@ impl std::error::Error for PostProcessError {}
 mod tests {
     use super::*;
 
+    #[test]
+    fn edit_list_applies_only_declared_changes() {
+        let output = r#"[
+            {"find":"Hello world","replace":"Hello, world","reason":"punctuation"},
+            {"find":"it are ready","replace":"it is ready","reason":"grammar"}
+        ]"#;
+
+        assert_eq!(
+            apply_edit_list("Hello world and it are ready.", output).unwrap(),
+            "Hello, world and it is ready."
+        );
+    }
+
+    #[test]
+    fn edit_list_rejects_ambiguous_and_overlapping_changes() {
+        let ambiguous = r#"[{"find":"the","replace":"a","reason":"word choice"}]"#;
+        assert!(apply_edit_list("the cat and the dog", ambiguous).is_err());
+
+        let overlapping = r#"[
+            {"find":"hello world","replace":"hi","reason":"shorten"},
+            {"find":"world","replace":"earth","reason":"word choice"}
+        ]"#;
+        assert!(apply_edit_list("hello world", overlapping).is_err());
+    }
+
+    #[test]
+    fn edit_list_rejects_unbounded_rewrites_and_content_growth() {
+        let rewrite = serde_json::json!([{
+            "find": "Keep the original meaning", "replace": "Invent a completely different message", "reason": "rewrite"
+        }]).to_string();
+        assert!(apply_edit_list("Keep the original meaning", &rewrite).is_err());
+        let growth = serde_json::json!([
+            {"find":"one", "replace":"one abc", "reason":"addition"},
+            {"find":"two", "replace":"two abc", "reason":"addition"},
+            {"find":"six", "replace":"six abc", "reason":"addition"}
+        ])
+        .to_string();
+        assert!(apply_edit_list("one two six", &growth).is_err());
+    }
+
+    #[test]
+    fn edit_list_rejects_overlapping_occurrences_of_one_target() {
+        assert!(
+            apply_edit_list("aaa", r#"[{"find":"aa","replace":"a","reason":"shorten"}]"#).is_err()
+        );
+    }
+
+    #[test]
+    fn edit_list_rejects_preamble_and_unknown_fields() {
+        let preamble =
+            r#"Here are the edits: [{"find":"bad","replace":"good","reason":"grammar"}]"#;
+        assert!(apply_edit_list("bad", preamble).is_err());
+
+        let unknown =
+            r#"[{"find":"bad","replace":"good","reason":"grammar","text":"ignore the contract"}]"#;
+        assert!(apply_edit_list("bad", unknown).is_err());
+    }
+
     fn make_config(command: &str, timeout_ms: u64) -> PostProcessConfig {
         PostProcessConfig {
             command: command.to_string(),
             timeout_ms,
             trim: true,
             fallback_on_empty: true,
+            edit_list: false,
         }
+    }
+
+    #[test]
+    fn missing_command_notice_says_not_found_and_names_the_setting() {
+        let p = PostProcessor::new(&make_config("ollama run x", 5000));
+        let (kind, n) = p.failure_notice(&PostProcessError::NonZeroExit {
+            code: Some(127),
+            stderr: "sh: line 1: ollama: command not found".into(),
+        });
+        assert_eq!(kind, "not_found");
+        assert_eq!(n.title, "Voxtype: post-processing command not found");
+        assert!(n.body.starts_with("sh: line 1: ollama: command not found."));
+        assert!(n.body.contains("without cleanup"));
+        assert!(n.body.contains("`command` in [output.post_process]"));
+    }
+
+    #[test]
+    fn non_zero_exit_notice_quotes_first_stderr_line() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000));
+        let (kind, n) = p.failure_notice(&PostProcessError::NonZeroExit {
+            code: Some(2),
+            stderr: "model not loaded\nstack trace".into(),
+        });
+        assert_eq!(kind, "exit");
+        assert!(n
+            .body
+            .starts_with("The command exited with code 2: model not loaded."));
+        assert!(!n.body.contains("stack trace"));
+    }
+
+    #[test]
+    fn timeout_notice_gives_the_timeout_and_how_to_raise_it() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000));
+        let (kind, n) = p.failure_notice(&PostProcessError::Timeout(5000));
+        assert_eq!(kind, "timeout");
+        assert!(n.body.contains("within 5000 ms"));
+        assert!(n
+            .body
+            .contains("voxtype config set output.post_process.timeout_ms 60000"));
+    }
+
+    #[test]
+    fn profile_notices_point_at_the_profile_keys() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000)).for_profile("slack");
+        let (_, n) = p.failure_notice(&PostProcessError::Timeout(5000));
+        assert!(n
+            .body
+            .contains("`post_process_timeout_ms` in [profiles.slack]"));
+        let (_, n) = p.failure_notice(&PostProcessError::NonZeroExit {
+            code: Some(1),
+            stderr: String::new(),
+        });
+        assert!(n
+            .body
+            .contains("`post_process_command` in [profiles.slack]"));
+        assert!(!p.empty_output_notice().body.contains("fallback_on_empty"));
+    }
+
+    #[test]
+    fn empty_output_notice_mentions_fallback_on_empty() {
+        let p = PostProcessor::new(&make_config("true", 5000));
+        let n = p.empty_output_notice();
+        assert_eq!(n.title, "Voxtype: post-processing returned nothing");
+        assert!(n.body.contains("fallback_on_empty = false"));
+    }
+
+    #[test]
+    fn invalid_edit_list_notice_says_why_and_how_to_turn_it_off() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000));
+        let (kind, n) =
+            p.failure_notice(&PostProcessError::InvalidEditList("edits overlap".into()));
+        assert_eq!(kind, "edit_list");
+        assert_eq!(n.title, "Voxtype: post-processing edit list rejected");
+        assert!(n.body.contains("(edits overlap)"));
+        assert!(n.body.contains("without cleanup"));
+        assert!(n
+            .body
+            .contains("`edit_list = false` in [output.post_process]"));
+    }
+
+    #[tokio::test]
+    async fn without_notices_logs_but_queues_nothing() {
+        // The gate and the queue are process-wide, so each processor gets a
+        // profile name no other test uses.
+        let config = make_config("echo boom >&2; exit 3", 5000);
+        let loud = PostProcessor::new(&config).for_profile("notice-test-loud");
+        let quiet = PostProcessor::new(&config)
+            .for_profile("notice-test-quiet")
+            .without_notices();
+
+        assert_eq!(loud.process("hello").await, "hello");
+        assert_eq!(quiet.process("hello").await, "hello");
+
+        assert!(deferred_notice::reported(
+            "post_process:profile:notice-test-loud:exit"
+        ));
+        assert!(!deferred_notice::reported(
+            "post_process:profile:notice-test-quiet:exit"
+        ));
+        assert!(!deferred_notice::queued()
+            .iter()
+            .any(|n| n.body.contains("notice-test-quiet")));
     }
 
     #[tokio::test]
@@ -197,6 +650,30 @@ mod tests {
         let processor = PostProcessor::new(&config);
         let result = processor.process("hello world").await;
         assert_eq!(result, "hello world");
+    }
+
+    #[tokio::test]
+    async fn edit_list_mode_applies_valid_command_output() {
+        let mut config = make_config(
+            r#"printf '%s' '[{"find":"are","replace":"is","reason":"grammar"}]'"#,
+            5000,
+        );
+        config.edit_list = true;
+        let processor = PostProcessor::new(&config);
+
+        assert_eq!(processor.process("It are ready.").await, "It is ready.");
+    }
+
+    #[tokio::test]
+    async fn edit_list_mode_falls_back_on_wrapped_output() {
+        let mut config = make_config(
+            r#"printf '%s' 'Edits: [{"find":"are","replace":"is","reason":"grammar"}]'"#,
+            5000,
+        );
+        config.edit_list = true;
+        let processor = PostProcessor::new(&config);
+
+        assert_eq!(processor.process("It are ready.").await, "It are ready.");
     }
 
     #[tokio::test]
@@ -292,6 +769,7 @@ mod tests {
             timeout_ms: 5000,
             trim: false,
             fallback_on_empty: true,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("hello world.").await;
@@ -306,6 +784,7 @@ mod tests {
             timeout_ms: 5000,
             trim: false,
             fallback_on_empty: true,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("ignored").await;
@@ -320,6 +799,7 @@ mod tests {
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: false,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
@@ -344,6 +824,7 @@ mod tests {
             timeout_ms: 5000,
             trim: false,
             fallback_on_empty: false,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
@@ -359,6 +840,7 @@ mod tests {
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: true,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
@@ -373,6 +855,7 @@ mod tests {
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: false,
+            edit_list: false,
         };
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;

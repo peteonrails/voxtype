@@ -39,7 +39,7 @@ pub const SECTIONS: &[&str] = &[
     "Hotkey",
     "Audio",
     "Output",
-    "Text",
+    "Text Cleanup",
     "VAD",
     "Meeting",
     "Notifications",
@@ -63,9 +63,8 @@ pub enum KeyType {
     /// Closed set of values. `open` means the listed choices are the useful
     /// presets but any non-empty string is accepted — used where the config
     /// field is a free-form string that also has canonical values (an evdev
-    /// key name, a sound theme that may be a directory path, an OSD style
-    /// that may be a package path). A UI should render these as an editable
-    /// combo box rather than a fixed picker.
+    /// key name, a sound theme that may be a directory path). A UI should
+    /// render these as an editable combo box rather than a fixed picker.
     Enum {
         choices: &'static [&'static str],
         open: bool,
@@ -114,6 +113,10 @@ pub struct KeySpec {
     /// Cargo feature that must be compiled in for the key to do anything.
     pub requires_feature: Option<&'static str>,
     pub restart_required: bool,
+    /// Set when the key only applies to an ONNX model of its engine and has no
+    /// effect while that engine's configured model is a `.gguf` file. UIs hide
+    /// such keys for a GGUF model.
+    pub onnx_model_only: bool,
 }
 
 const fn spec(
@@ -136,6 +139,7 @@ const fn spec(
         engine: None,
         requires_feature: None,
         restart_required: true,
+        onnx_model_only: false,
     }
 }
 
@@ -150,6 +154,11 @@ impl KeySpec {
     const fn for_onnx_engine(mut self, engine: &'static str) -> Self {
         self.engine = Some(engine);
         self.requires_feature = Some(engine);
+        self
+    }
+
+    const fn onnx_model_only(mut self) -> Self {
+        self.onnx_model_only = true;
         self
     }
 
@@ -177,15 +186,20 @@ impl KeySpec {
 /// Only features that gate config keys are listed. Pinned against
 /// [`crate::config_set::engine_feature_compiled`] by a test so the two
 /// `cfg!` blocks can't drift.
+// In a build with every listed feature (the ONNX release binaries, which also
+// carry the GGUF client) each arm is `true`, and clippy would rewrite this as
+// `matches!`, hiding the per-feature mapping the other builds depend on.
+#[allow(clippy::match_like_matches_macro)]
 pub fn feature_compiled(feature: &str) -> bool {
     match feature {
-        "parakeet" => cfg!(feature = "parakeet"),
+        "parakeet" => cfg!(any(feature = "parakeet", feature = "parakeet-gguf")),
         "moonshine" => cfg!(feature = "moonshine"),
         "sensevoice" => cfg!(feature = "sensevoice"),
         "paraformer" => cfg!(feature = "paraformer"),
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
-        "cohere" => cfg!(feature = "cohere"),
+        "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
+        "gguf" => cfg!(feature = "gguf"),
         "openvino" => cfg!(feature = "openvino-whisper"),
         _ => false,
     }
@@ -237,14 +251,18 @@ const FEEDBACK_THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const OUTPUT_MODE_CHOICES: &[&str] = &["type", "clipboard", "paste", "file"];
 const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
-const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
+const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "webrtc", "gtcrn", "disabled"];
 
-const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
-const OSD_STYLE_CHOICES: &[&str] = &["default"];
+const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
 /// means absent. Use `voxtype config unset osd.palette`.
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
-const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
+/// Canonical hints only — any palette role name or literal color is accepted.
+const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
+const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "aura", "none"];
+const OSD_LAYOUT_CHOICES: &[&str] = &[
+    "compact", "wide", "minimal", "pill", "shell", "tile", "orb", "custom",
+];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -267,6 +285,19 @@ const ICON_THEME_CHOICES: &[&str] = &[
     "text",
 ];
 
+/// Old names a closed key still accepts, written as their current name.
+/// They are not offered as choices; a config that still holds one loads as
+/// before, since the field itself is a plain string.
+fn choice_alias(key: &str, raw: &str) -> Option<&'static str> {
+    match (key, raw) {
+        // Renamed in 1.3.0 before release: "aec" and "off" shipped in test
+        // builds.
+        ("meeting.audio.echo_cancel", "aec") => Some("webrtc"),
+        ("meeting.audio.echo_cancel", "off") => Some("disabled"),
+        _ => None,
+    }
+}
+
 const fn closed(choices: &'static [&'static str]) -> KeyType {
     KeyType::Enum {
         choices,
@@ -287,6 +318,15 @@ pub const REPLACEMENTS_TABLE: &str = "text.replacements";
 // ---------------------------------------------------------------------------
 // The allowlist.
 // ---------------------------------------------------------------------------
+
+const FILE_MODE_CHOICES: &[&str] = &["overwrite", "append"];
+const URGENCY_CHOICES: &[&str] = &["low", "normal", "critical"];
+const PASTE_KEY_CHOICES: &[&str] = &["auto", "shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
+const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
+const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
+const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
+const SUMMARY_BACKEND_CHOICES: &[&str] = &["agent", "local", "remote", "disabled"];
+const ASSISTANT_AGENT_CHOICES: &[&str] = crate::meeting::assistant::SUPPORTED_AGENTS;
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
     // -- Engine -------------------------------------------------------------
@@ -413,7 +453,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Parakeet model directory name under the voxtype models dir.",
+        "Parakeet ONNX model directory, or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -424,6 +464,28 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Engine",
         "Decoder type",
         "Force the decoder family instead of auto-detecting it from the model directory.",
+    )
+    .for_onnx_engine("parakeet")
+    // A GGUF file carries its own architecture; the setting is ignored there.
+    .onnx_model_only(),
+    spec(
+        "parakeet.threads",
+        "parakeet",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "ONNX Runtime intra-op threads. Unset uses 4; long CPU dictations are fastest at the physical core count. GGUF models: transcribe.cpp CPU threads.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
+        "parakeet.gguf_backend",
+        "parakeet",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -629,7 +691,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Cohere Transcribe model variant (quantization level).",
+        "Cohere ONNX model variant or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("cohere"),
     spec(
@@ -649,7 +711,37 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 1, max: 256 },
         "Engine",
         "Threads",
-        "ONNX Runtime intra-op threads. Unset lets voxtype pick.",
+        "Inference threads. Unset lets the runtime pick.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.gguf_backend",
+        "cohere",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.max_chunk_secs",
+        "cohere",
+        "max_chunk_secs",
+        KeyType::Int { min: 5, max: 35 },
+        "Engine",
+        "Max chunk duration",
+        "Maximum seconds per Cohere inference; longer recordings split near quiet boundaries.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.boundary_search_secs",
+        "cohere",
+        "boundary_search_secs",
+        KeyType::Float { min: 0.0, max: 5.0 },
+        "Engine",
+        "Boundary search",
+        "Seconds around each balanced split to search for a quiet boundary.",
     )
     .for_onnx_engine("cohere"),
     spec(
@@ -662,6 +754,84 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // shared transcribe.cpp GGUF
+    spec(
+        "gguf.model",
+        "gguf",
+        "model",
+        KeyType::DynamicEnum { source: "models" },
+        "Engine",
+        "Model path",
+        "Path to a curated or custom transcribe.cpp GGUF checkpoint.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.architecture",
+        "gguf",
+        "architecture",
+        KeyType::String,
+        "Engine",
+        "Architecture",
+        "Expected general.architecture value; curated checkpoints validate it automatically.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.language",
+        "gguf",
+        "language",
+        KeyType::String,
+        "Engine",
+        "Language",
+        "Language hint validated against the selected checkpoint metadata.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.gguf_backend",
+        "gguf",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for the isolated transcribe.cpp worker.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.threads",
+        "gguf",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "Inference threads. Unset lets transcribe.cpp choose.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.on_demand_loading",
+        "gguf",
+        "on_demand_loading",
+        KeyType::Bool,
+        "Engine",
+        "Load on demand",
+        "Load the worker model when recording starts and unload at idle.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
+    spec(
+        "gguf.streaming",
+        "gguf",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Native streaming",
+        "Reserved for native streaming; true is rejected until implemented.",
+    )
+    .for_engine("gguf")
+    .gated("gguf"),
     // openvino
     spec(
         "openvino.model",
@@ -753,6 +923,97 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Enable live transcription through the shared sliding-window engine.",
     )
     .for_onnx_engine("openvino"),
+    // soniox
+    spec(
+        "soniox.api_key",
+        "soniox",
+        "api_key",
+        KeyType::String,
+        "Engine",
+        "API key",
+        "Soniox API key. Unset falls back to the SONIOX_API_KEY environment variable.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.model",
+        "soniox",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "Soniox model name.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.language_hints_strict",
+        "soniox",
+        "language_hints_strict",
+        KeyType::Bool,
+        "Engine",
+        "Strict language hints",
+        "Keep recognition to the hinted languages. Ignored when there are no hints.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.streaming",
+        "soniox",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Stream over a WebSocket with live partials. Off sends one request when you release the key.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.type_partials",
+        "soniox",
+        "type_partials",
+        KeyType::Bool,
+        "Engine",
+        "Type partials",
+        "Type partial results as they arrive. Off types only finalized segments.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.context",
+        "soniox",
+        "context",
+        KeyType::String,
+        "Engine",
+        "Context",
+        "Short domain description sent to Soniox, e.g. \"medical consultation\".",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.terms_file",
+        "soniox",
+        "terms_file",
+        KeyType::String,
+        "Engine",
+        "Terms file",
+        "Path to a JSON list of vocabulary boost terms, loaded at daemon startup.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.async_api",
+        "soniox",
+        "async_api",
+        KeyType::Bool,
+        "Engine",
+        "Async API",
+        "Use Soniox's async file API instead of the real-time one.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.async_max_wait_secs",
+        "soniox",
+        "async_max_wait_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "Engine",
+        "Async max wait",
+        "Seconds to wait for an async transcription before giving up.",
+    )
+    .for_engine("soniox"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -817,6 +1078,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Audio",
         "Max recording length",
         "Safety cap in seconds; recording stops on its own at this point.",
+    ),
+    spec(
+        "audio.keep_failed_recordings",
+        "audio",
+        "keep_failed_recordings",
+        KeyType::Bool,
+        "Audio",
+        "Keep failed recordings",
+        "Save the audio when transcription fails so it can be retried. The 20 most recent are kept, readable only by you.",
     ),
     spec(
         "audio.pause_media",
@@ -945,13 +1215,76 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Post-process command",
         "Shell command that receives the transcription on stdin and returns the cleaned text on stdout.",
     ),
+    spec(
+        "output.post_process.timeout_ms",
+        "output.post_process",
+        "timeout_ms",
+        KeyType::Int { min: 100, max: 600_000 },
+        "Output",
+        "Post-process timeout",
+        "Milliseconds to wait for the post-process command before typing the original text.",
+    ),
+    spec(
+        "output.post_process.trim",
+        "output.post_process",
+        "trim",
+        KeyType::Bool,
+        "Output",
+        "Trim post-process output",
+        "Strip leading and trailing whitespace from the command's output. Turn off to keep a deliberate trailing space.",
+    ),
+    spec(
+        "output.post_process.fallback_on_empty",
+        "output.post_process",
+        "fallback_on_empty",
+        KeyType::Bool,
+        "Output",
+        "Keep text when output is empty",
+        "Output the original transcription when the command prints nothing. Turn off to let the command drop a transcription.",
+    ),
+    spec(
+        "output.post_process.edit_list",
+        "output.post_process",
+        "edit_list",
+        KeyType::Bool,
+        "Output",
+        "Require an edit list",
+        "Accept only a JSON list of exact, unambiguous edits from the post-process command.",
+    ),
     // -- Text ---------------------------------------------------------------
+    spec(
+        "text.lard_disfluency",
+        "text",
+        "lard_disfluency",
+        KeyType::Bool,
+        "Text Cleanup",
+        "LARD disfluency cleanup",
+        "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+    ),
+    spec(
+        "text.lard_model_path",
+        "text",
+        "lard_model_path",
+        KeyType::String,
+        "Text Cleanup",
+        "LARD model file",
+        "Path to the local VXDF model. By default use the model installed by voxtype setup lard in the XDG data directory.",
+    ),
+    spec(
+        "text.punctuation_casing",
+        "text",
+        "punctuation_casing",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Restore punctuation and casing",
+        "Add punctuation, sentence boundaries, and letter casing to plain CTC output. Engines that already provide them are unchanged.",
+    ),
     spec(
         "text.spoken_punctuation",
         "text",
         "spoken_punctuation",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Spoken punctuation",
         "Convert spoken names like \"period\" and \"new line\" into the characters they describe.",
     ),
@@ -960,7 +1293,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "smart_auto_submit",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Say \"submit\" to press Enter",
         "Strip a trailing \"submit\" from the transcription and press Return instead.",
     ),
@@ -969,16 +1302,43 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "filter_filler_words",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Drop filler words",
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
+    ),
+    spec(
+        "text.collapse_restarts",
+        "text",
+        "collapse_restarts",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Collapse restarts and stutters",
+        "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
+    ),
+    spec(
+        "text.repair_sentence_breaks",
+        "text",
+        "repair_sentence_breaks",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Repair sentence breaks",
+        "Join fragments split off by a premature sentence boundary and add question marks to interrogatives.",
+    ),
+    spec(
+        "text.format_numbers",
+        "text",
+        "format_numbers",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Format dictated numbers",
+        "Convert spoken quantities to written form (\"twenty five dollars\" -> \"$25\"). Prose-heavy words like \"one\" and \"first\" are left alone.",
     ),
     spec(
         "text.replacements.<from>",
         REPLACEMENTS_TABLE,
         "<from>",
         KeyType::MapString,
-        "Text",
+        "Text Cleanup",
         "Word replacements",
         "Case-insensitive substitutions applied to the transcription, keyed by the spoken form.",
     ),
@@ -1021,6 +1381,45 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Allow `voxtype meeting` to record and transcribe long sessions.",
     ),
     spec(
+        "meeting.offer_enable",
+        "meeting",
+        "offer_enable",
+        KeyType::Bool,
+        "Meeting",
+        "Offer meeting mode",
+        "While meeting mode is off, the tray offers to turn it on. Set false to stop the offer.",
+    ),
+    spec(
+        "meeting.status_notifications",
+        "meeting",
+        "status_notifications",
+        closed(crate::meeting::status_notice::STATUS_MODES),
+        "Meeting",
+        "Meeting status notifications",
+        "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
+    ),
+    // `meeting start` reads these itself and hands them to the daemon, so
+    // the next meeting follows a change without a restart.
+    spec(
+        "meeting.announce_recording",
+        "meeting",
+        "announce_recording",
+        KeyType::Bool,
+        "Meeting",
+        "Announce recording",
+        "When a meeting starts, play \"This meeting is being recorded and transcribed with Voxtype\" into the call app's microphone so the others hear it, and on your speakers. A courtesy, not consent: recording laws still apply.",
+    )
+    .live(),
+    spec(
+        "meeting.my_name",
+        "meeting",
+        "my_name",
+        KeyType::String,
+        "Meeting",
+        "Your name",
+        "Shown instead of \"You\" for your side of a meeting, in the view, exports, summaries and search.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -1036,7 +1435,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(ECHO_CANCEL_CHOICES),
         "Meeting",
         "Echo cancellation",
-        "auto runs GTCRN enhancement plus transcript dedup on the mic track. Set disabled if PipeWire already cancels echo.",
+        "auto cancels speaker echo with PipeWire's WebRTC canceller unless the output is headphones, GTCRN otherwise. webrtc forces it, gtcrn is the old behaviour, disabled is neither.",
     ),
     spec(
         "meeting.diarization.enabled",
@@ -1076,6 +1475,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Post the transcribed text as a notification when it completes.",
     ),
     spec(
+        "output.notification.on_no_speech",
+        "output.notification",
+        "on_no_speech",
+        KeyType::Bool,
+        "Notifications",
+        "Notify when no speech is heard",
+        "Post a notification when voice activity detection finds no speech and the recording is discarded.",
+    ),
+    spec(
+        "output.notification.show_edits",
+        "output.notification",
+        "show_edits",
+        KeyType::Bool,
+        "Notifications",
+        "Show cleanup edits",
+        "When cleanup or post-processing changed the text, show the edits as a word diff in the transcription notification instead of a plain preview.",
+    ),
+    spec(
         "output.notification.show_engine_icon",
         "output.notification",
         "show_engine_icon",
@@ -1083,6 +1500,20 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Notifications",
         "Engine icon in title",
         "Prefix the notification title with the active engine's icon.",
+    ),
+    spec(
+        "tray.enabled", "tray", "enabled", KeyType::Bool, "Status",
+        "Native system tray",
+        "Show the Linux system tray icon and recording controls. Enabled by default; restart the daemon after changing. Requires a StatusNotifierItem host, such as Omarchy, KDE, Waybar or GNOME AppIndicator.",
+    ),
+    spec(
+        "omarchy.link_settings_plugin",
+        "omarchy",
+        "link_settings_plugin",
+        KeyType::Bool,
+        "Status",
+        "Link Omarchy Settings panel",
+        "On Omarchy, let the daemon link the packaged Voxtype panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
     ),
     // -- OSD ----------------------------------------------------------------
     spec(
@@ -1101,16 +1532,25 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(OSD_FRONTEND_CHOICES),
         "OSD",
         "Frontend",
-        "Which OSD renderer the daemon launches.",
+        "Which OSD renderer the daemon launches. auto picks quickshell, then gtk4, then native.",
     ),
     spec(
         "osd.style",
         "osd",
         "style",
-        open(OSD_STYLE_CHOICES),
+        KeyType::DynamicEnum { source: "styles" },
         "OSD",
         "Style",
-        "Quickshell style name, package name, or package path.",
+        "Quickshell style name, package name, or package path. `voxtype info styles` lists what is installed.",
+    ),
+    spec(
+        "osd.plugin_path",
+        "osd",
+        "plugin_path",
+        KeyType::String,
+        "OSD",
+        "Plugin path",
+        "Directory of a Quickshell style package under development. QML in this path is trusted. Unset once the package is installed to a search path.",
     ),
     spec(
         "osd.palette",
@@ -1164,7 +1604,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 0, max: 512 },
         "OSD",
         "Edge margin",
-        "Gap from the screen edge in physical pixels. Corner anchors use this for both axes.",
+        "Gap from the screen edge in logical pixels. Corner anchors use it for both axes; centered anchors never sit closer to the top or bottom edge than this.",
     ),
     spec(
         "osd.top_margin",
@@ -1173,7 +1613,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Vertical position",
-        "Top edge as a fraction of monitor height, matching swayosd. Only used by the centered anchors.",
+        "Top edge as a fraction of the focused output's height, matching swayosd. Only used by the centered anchors; top-center mirrors values above 0.5.",
     ),
     spec(
         "osd.opacity",
@@ -1182,7 +1622,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Opacity",
-        "Background opacity of the panel.",
+        "Opacity of the GTK4 and native OSD card. It stays the same while the card is shown.",
     ),
     spec(
         "osd.waveform_window_secs",
@@ -1212,7 +1652,43 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.1, max: 50.0 },
         "OSD",
         "Waveform gain",
-        "Visual gain applied before drawing. Lower for hot mics, raise for quiet ones.",
+        "Waveform sensitivity on its fixed dB scale. 10 is neutral, each doubling shows input 6 dB louder. Lower for hot mics, raise for quiet ones.",
+    ),
+    spec(
+        "osd.frame.background",
+        "osd.frame",
+        "background",
+        open(OSD_FRAME_BACKGROUND_CHOICES),
+        "OSD",
+        "Frame background",
+        "Card background of the Quickshell frame: a palette role name, a literal color like #1e1e2e, or none.",
+    ),
+    spec(
+        "osd.frame.border",
+        "osd.frame",
+        "border",
+        open(OSD_FRAME_BORDER_CHOICES),
+        "OSD",
+        "Frame border",
+        "Border of the Quickshell frame: state follows the daemon state color, or use a palette role, a literal color, or none.",
+    ),
+    spec(
+        "osd.frame.glow",
+        "osd.frame",
+        "glow",
+        KeyType::Bool,
+        "OSD",
+        "Frame glow",
+        "Voice-reactive soft glow around the Quickshell frame.",
+    ),
+    spec(
+        "osd.frame.halo",
+        "osd.frame",
+        "halo",
+        KeyType::Bool,
+        "OSD",
+        "Frame halo",
+        "Extra outline halo the orb layout renders around the frame.",
     ),
     // -- Status -------------------------------------------------------------
     spec(
@@ -1253,6 +1729,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Status",
         "Transcribing icon",
         "Override the theme's transcribing glyph.",
+    )
+    .live(),
+    spec(
+        "status.icons.streaming",
+        "status.icons",
+        "streaming",
+        KeyType::String,
+        "Status",
+        "Streaming icon",
+        "Override the theme's streaming glyph.",
     )
     .live(),
     spec(
@@ -1317,6 +1803,43 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("whisper"),
     spec(
+        "whisper.gpu_wait_secs",
+        "whisper",
+        "gpu_wait_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Advanced",
+        "GPU wait at startup",
+        "Seconds to wait for the graphics driver before loading the model. Only \
+         spent when no GPU is present yet; raise it if the daemon starts during \
+         login and lands on CPU.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "parakeet.max_window_secs",
+        "parakeet",
+        "max_window_secs",
+        KeyType::Float { min: 0.0, max: 3600.0 },
+        "Advanced",
+        "Max audio per pass",
+        "Longest stretch of audio sent to the model at once. Longer recordings are \
+         split into overlapping windows, because the TDT exports abort rather than \
+         degrade past their fixed attention size. 0 disables windowing.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "parakeet.window_overlap_secs",
+        "parakeet",
+        "window_overlap_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Window overlap",
+        "Audio shared between consecutive windows, used to find where two passes \
+         agree so the join is not duplicated or cut short.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
         "parakeet.streaming",
         "parakeet",
         "streaming",
@@ -1327,6 +1850,868 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("parakeet")
     .gated("parakeet"),
+    spec(
+        "output.file_path",
+        "output",
+        "file_path",
+        KeyType::String,
+        "Output",
+        "Output file",
+        "File that file output mode writes transcriptions to. Also the default for --output-file.",
+    ),
+    spec(
+        "output.file_mode",
+        "output",
+        "file_mode",
+        closed(FILE_MODE_CHOICES),
+        "Output",
+        "File write mode",
+        "overwrite replaces the file on each transcription; append adds to it.",
+    ),
+    spec(
+        "output.type_delay_ms",
+        "output",
+        "type_delay_ms",
+        KeyType::Int { min: 0, max: 1000 },
+        "Output",
+        "Typing delay",
+        "Milliseconds between typed characters. 0 types as fast as the driver allows.",
+    ),
+    spec(
+        "output.paste_keys",
+        "output",
+        "paste_keys",
+        open(PASTE_KEY_CHOICES),
+        "Output",
+        "Paste keystroke",
+        "Keystroke paste mode sends after copying. auto (the default) sends ctrl+v to GUI apps and the terminal keystroke to terminals.",
+    ),
+    spec(
+        "output.paste_keys_terminal",
+        "output",
+        "paste_keys_terminal",
+        open(PASTE_KEY_CHOICES),
+        "Output",
+        "Terminal paste keystroke",
+        "Keystroke paste mode sends when the focused window is a terminal (Hyprland, Sway, niri). Default ctrl+shift+v.",
+    ),
+    spec(
+        "output.restore_clipboard",
+        "output",
+        "restore_clipboard",
+        KeyType::Bool,
+        "Output",
+        "Restore clipboard",
+        "Put the previous clipboard contents back after paste mode pastes.",
+    ),
+    spec(
+        "output.restore_clipboard_delay_ms",
+        "output",
+        "restore_clipboard_delay_ms",
+        KeyType::Int { min: 0, max: 10000 },
+        "Output",
+        "Clipboard restore delay",
+        "Milliseconds to wait after the paste keystroke before restoring the clipboard.",
+    ),
+    spec(
+        "output.wait_for_modifier_release",
+        "output",
+        "wait_for_modifier_release",
+        KeyType::Bool,
+        "Output",
+        "Wait for modifier release",
+        "Hold typed output until Ctrl, Alt, Shift and Super are released, so text can't trigger keybindings.",
+    ),
+    spec(
+        "output.modifier_release_timeout_ms",
+        "output",
+        "modifier_release_timeout_ms",
+        KeyType::Int { min: 0, max: 60000 },
+        "Output",
+        "Modifier release timeout",
+        "Milliseconds to wait for held modifiers before falling back to the clipboard.",
+    ),
+    spec(
+        "output.wtype_shift_prefix",
+        "output",
+        "wtype_shift_prefix",
+        KeyType::Bool,
+        "Output",
+        "wtype Shift prefix",
+        "Send a Shift tap before wtype output, for apps that drop the first CJK character.",
+    ),
+    spec(
+        "output.dotool_xkb_layout",
+        "output",
+        "dotool_xkb_layout",
+        KeyType::String,
+        "Output",
+        "dotool layout",
+        "XKB layout for dotool, e.g. de or fr. Needed for non-US layouts.",
+    ),
+    spec(
+        "output.dotool_xkb_variant",
+        "output",
+        "dotool_xkb_variant",
+        KeyType::String,
+        "Output",
+        "dotool layout variant",
+        "XKB layout variant for dotool, e.g. nodeadkeys.",
+    ),
+    spec(
+        "output.eitype_xkb_layout",
+        "output",
+        "eitype_xkb_layout",
+        KeyType::String,
+        "Output",
+        "eitype layout",
+        "XKB layout eitype types with, overriding the system layout while it runs.",
+    ),
+    spec(
+        "output.eitype_xkb_variant",
+        "output",
+        "eitype_xkb_variant",
+        KeyType::String,
+        "Output",
+        "eitype layout variant",
+        "XKB layout variant for eitype, e.g. dvorak or colemak.",
+    ),
+    spec(
+        "output.pre_recording_command",
+        "output",
+        "pre_recording_command",
+        KeyType::String,
+        "Output",
+        "Pre-recording command",
+        "Shell command run when recording starts, e.g. entering a compositor submap.",
+    ),
+    spec(
+        "output.pre_output_command",
+        "output",
+        "pre_output_command",
+        KeyType::String,
+        "Output",
+        "Pre-output command",
+        "Shell command run before text is output.",
+    ),
+    spec(
+        "output.post_output_command",
+        "output",
+        "post_output_command",
+        KeyType::String,
+        "Output",
+        "Post-output command",
+        "Shell command run after output, even if output failed, e.g. resetting a submap.",
+    ),
+    spec(
+        "output.notification.urgency",
+        "output.notification",
+        "urgency",
+        closed(URGENCY_CHOICES),
+        "Notifications",
+        "Notification urgency",
+        "Urgency for voxtype notifications. On GNOME, low skips the popup banner.",
+    ),
+    spec(
+        "state_file",
+        "",
+        "state_file",
+        open(STATE_FILE_CHOICES),
+        "Advanced",
+        "State file",
+        "Where the daemon writes its state for Waybar and record commands: auto, a path, or disabled.",
+    ),
+    spec(
+        "audio.sample_rate",
+        "audio",
+        "sample_rate",
+        KeyType::Int { min: 8000, max: 48000 },
+        "Advanced",
+        "Sample rate",
+        "Capture sample rate in Hz. The engines expect 16000.",
+    ),
+    spec(
+        "audio.external_trigger_silence_timeout_secs",
+        "audio",
+        "external_trigger_silence_timeout_secs",
+        KeyType::Float { min: 0.0, max: 600.0 },
+        "Advanced",
+        "External-trigger silence timeout",
+        "Auto-stop a record start recording after this many seconds of silence. Unset never auto-stops.",
+    ),
+    spec(
+        "audio.external_trigger_speech_threshold_dbfs",
+        "audio",
+        "external_trigger_speech_threshold_dbfs",
+        KeyType::Float { min: -100.0, max: 0.0 },
+        "Advanced",
+        "External-trigger speech level",
+        "Peak level in dBFS that counts as speech for the silence timeout.",
+    ),
+    spec(
+        "audio.external_trigger_stop_command",
+        "audio",
+        "external_trigger_stop_command",
+        KeyType::String,
+        "Output",
+        "External-trigger stop command",
+        "Shell command run whenever a record start recording ends, for any reason.",
+    ),
+    spec(
+        "vad.min_speech_duration_ms",
+        "vad",
+        "min_speech_duration_ms",
+        KeyType::Int { min: 0, max: 10000 },
+        "VAD",
+        "Minimum speech",
+        "Recordings with less detected speech than this many milliseconds are discarded.",
+    ),
+    spec(
+        "vad.model",
+        "vad",
+        "model",
+        KeyType::String,
+        "VAD",
+        "VAD model path",
+        "Model file for the Whisper VAD backend. Unset uses the default models directory.",
+    ),
+    spec(
+        "whisper.eager_chunk_secs",
+        "whisper",
+        "eager_chunk_secs",
+        KeyType::Float { min: 1.0, max: 60.0 },
+        "Advanced",
+        "Eager chunk length",
+        "Nominal seconds per chunk when eager_processing is on; cuts land on the nearest pause.",
+    ),
+    spec(
+        "whisper.streaming",
+        "whisper",
+        "streaming",
+        KeyType::Bool,
+        "Advanced",
+        "Whisper streaming",
+        "Type text incrementally while you speak using sliding-window re-transcription.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "whisper.remote_timeout_secs",
+        "whisper",
+        "remote_timeout_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "Advanced",
+        "Remote timeout",
+        "Seconds to wait for a remote transcription request.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "whisper.remote_send_auto_language",
+        "whisper",
+        "remote_send_auto_language",
+        KeyType::Bool,
+        "Advanced",
+        "Send language auto",
+        "Send an explicit language=auto to remote endpoints that require the field.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "whisper.whisper_cli_path",
+        "whisper",
+        "whisper_cli_path",
+        KeyType::String,
+        "Advanced",
+        "whisper-cli path",
+        "whisper-cli binary for the cli backend. Unset searches PATH.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "whisper.max_loaded_models",
+        "whisper",
+        "max_loaded_models",
+        KeyType::Int { min: 1, max: 16 },
+        "Advanced",
+        "Loaded model limit",
+        "Models kept in memory at once when gpu_isolation is off.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "whisper.cold_model_timeout_secs",
+        "whisper",
+        "cold_model_timeout_secs",
+        KeyType::Int { min: 0, max: 86400 },
+        "Advanced",
+        "Idle model unload",
+        "Seconds before an idle secondary model is unloaded. 0 never unloads.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "whisper.context_window_optimization",
+        "whisper",
+        "context_window_optimization",
+        KeyType::Bool,
+        "Advanced",
+        "Short-clip context window",
+        "Use a smaller context window for short recordings, which is faster.",
+    )
+    .for_engine("whisper"),
+    spec(
+        "parakeet.streaming_chunk_secs",
+        "parakeet",
+        "streaming_chunk_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Streaming chunk",
+        "Seconds per streaming chunk. Smaller is lower latency with more inference overhead.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "parakeet.streaming_left_context_secs",
+        "parakeet",
+        "streaming_left_context_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Streaming left context",
+        "Seconds of past audio each streaming chunk sees.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "parakeet.streaming_right_context_secs",
+        "parakeet",
+        "streaming_right_context_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Streaming right context",
+        "Seconds of lookahead each streaming chunk waits for.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "streaming.interval_secs",
+        "streaming",
+        "interval_secs",
+        KeyType::Float { min: 0.1, max: 30.0 },
+        "Advanced",
+        "Streaming interval",
+        "Seconds between re-transcriptions of the rolling buffer.",
+    ),
+    spec(
+        "streaming.max_buffer_secs",
+        "streaming",
+        "max_buffer_secs",
+        KeyType::Float { min: 1.0, max: 120.0 },
+        "Advanced",
+        "Streaming buffer",
+        "Buffered seconds before the window slides forward.",
+    ),
+    spec(
+        "streaming.min_speech_rms",
+        "streaming",
+        "min_speech_rms",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "Advanced",
+        "Streaming speech floor",
+        "Skip re-transcription while the buffer RMS is below this.",
+    ),
+    spec(
+        "streaming.min_audio_secs",
+        "streaming",
+        "min_audio_secs",
+        KeyType::Float { min: 0.0, max: 30.0 },
+        "Advanced",
+        "Streaming first partial",
+        "Buffered seconds before the first partial is attempted.",
+    ),
+    spec(
+        "streaming.partial_min_words",
+        "streaming",
+        "partial_min_words",
+        KeyType::Int { min: 1, max: 100 },
+        "Advanced",
+        "Streaming words per commit",
+        "New stable words needed before a delta is committed.",
+    ),
+    spec(
+        "streaming.type_partials",
+        "streaming",
+        "type_partials",
+        KeyType::Bool,
+        "Advanced",
+        "Type partials",
+        "Type committed deltas live, or only whole segments at the end.",
+    ),
+    spec(
+        "streaming.revision_mode",
+        "streaming",
+        "revision_mode",
+        KeyType::Bool,
+        "Advanced",
+        "Revision mode",
+        "Experimental: type the best guess at once and correct it later with backspace.",
+    ),
+    spec(
+        "meeting.chunk_duration_secs",
+        "meeting",
+        "chunk_duration_secs",
+        KeyType::Int { min: 5, max: 600 },
+        "Meeting",
+        "Chunk length",
+        "Seconds of meeting audio per transcription chunk.",
+    ),
+    spec(
+        "meeting.max_duration_mins",
+        "meeting",
+        "max_duration_mins",
+        KeyType::Int { min: 0, max: 1440 },
+        "Meeting",
+        "Maximum length",
+        "Minutes before a meeting stops on its own. 0 is unlimited.",
+    ),
+    spec(
+        "meeting.show_view_on_start",
+        "meeting",
+        "show_view_on_start",
+        KeyType::Bool,
+        "Meeting",
+        "Show meeting view on start",
+        "Open the live meeting view when a meeting starts: the Quickshell view, or the GTK4 window when the meeting view resolves to it.",
+    ),
+    spec(
+        "meeting.view",
+        "meeting",
+        "view",
+        closed(crate::meeting::view::frontend::VIEW_CHOICES),
+        "Meeting",
+        "Meeting view",
+        "Which meeting view opens: auto uses Quickshell, then the GTK4 window; terminal runs `meeting watch` and is never automatic.",
+    )
+    .live(),
+    spec(
+        "meeting.calendar.command",
+        "meeting.calendar",
+        "command",
+        KeyType::String,
+        "Meeting",
+        "Calendar command",
+        "Command printing the next meeting as JSON (the Omarchy Next Meeting plugin's format). Empty uses that plugin's command when it is on the bar.",
+    ),
+    spec(
+        "meeting.calendar.window_mins",
+        "meeting.calendar",
+        "window_mins",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Calendar window",
+        "Minutes either side of a meeting's start within which a calendar event names it.",
+    ),
+    spec(
+        "meeting.calendar.timeout_secs",
+        "meeting.calendar",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 60 },
+        "Meeting",
+        "Calendar timeout",
+        "Seconds to wait for the calendar command.",
+    ),
+    spec(
+        "meeting.view_opacity",
+        "meeting",
+        "view_opacity",
+        KeyType::Float { min: 0.3, max: 1.0 },
+        "Meeting",
+        "Meeting view opacity",
+        "Background opacity of the meeting view while the pointer is elsewhere. Text stays opaque.",
+    ),
+    spec(
+        "meeting.auto_label_from_title",
+        "meeting",
+        "auto_label_from_title",
+        KeyType::Bool,
+        "Meeting",
+        "Name speakers from the title",
+        "In a two-person meeting titled like \"Pete <> Andrew standup\", name your microphone and every remote voice from the title. Names given by hand are kept.",
+    ),
+    spec(
+        "meeting.retain_audio",
+        "meeting",
+        "retain_audio",
+        KeyType::Bool,
+        "Meeting",
+        "Keep audio",
+        "Keep the meeting's mic, loopback and mixed audio as Opus in its folder.",
+    ),
+    spec(
+        "meeting.announcement_voice",
+        "meeting",
+        "announcement_voice",
+        closed(crate::meeting::announce::VOICES),
+        "Meeting",
+        "Announcement voice",
+        "kokoro is built in and MIT. jessica is an ElevenLabs voice downloaded once on first use, under its own terms: not MIT, redistributable unmodified, no AI training. An announcement audio file overrides both.",
+    )
+    .live(),
+    spec(
+        "meeting.announcement_file",
+        "meeting",
+        "announcement_file",
+        KeyType::String,
+        "Meeting",
+        "Announcement audio",
+        "Audio file (WAV, FLAC or Ogg) played instead of the built-in announcement, for your own wording or language. Empty uses the built-in clip.",
+    )
+    .live(),
+    spec(
+        "meeting.post_meeting_command",
+        "meeting",
+        "post_meeting_command",
+        KeyType::String,
+        "Meeting",
+        "Post-meeting command",
+        "Shell command run once a meeting's folder is final. Gets VOXTYPE_MEETING_DIR.",
+    ),
+    spec(
+        "meeting.post_meeting_timeout_secs",
+        "meeting",
+        "post_meeting_timeout_secs",
+        KeyType::Int { min: 1, max: 86400 },
+        "Meeting",
+        "Post-meeting timeout",
+        "Seconds before the post-meeting command is killed.",
+    ),
+    spec(
+        "meeting.storage_path",
+        "meeting",
+        "storage_path",
+        open(MEETING_STORAGE_CHOICES),
+        "Meeting",
+        "Storage path",
+        "Where meetings are stored. auto uses ~/.local/share/voxtype/meetings.",
+    ),
+    spec(
+        "meeting.audio.echo_guard",
+        "meeting.audio",
+        "echo_guard",
+        KeyType::Bool,
+        "Meeting",
+        "Echo guard",
+        "Keep the call heard through your speakers out of your lines: drop mic lines that are only its echo, unless the mic level shows you speaking.",
+    ),
+    spec(
+        "meeting.audio.echo_fuzzy_max_words",
+        "meeting.audio",
+        "echo_fuzzy_max_words",
+        KeyType::Int { min: 1, max: 12 },
+        "Meeting",
+        "Misheard echo length",
+        "Longest mic line, in words, checked for misheard echo.",
+    ),
+    spec(
+        "meeting.audio.mic_device",
+        "meeting.audio",
+        "mic_device",
+        KeyType::String,
+        "Meeting",
+        "Meeting microphone",
+        "Microphone for meetings. default uses the [audio] device.",
+    ),
+    spec(
+        "meeting.audio.vad_threshold",
+        "meeting.audio",
+        "vad_threshold",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "Meeting",
+        "Chunk speech threshold",
+        "RMS below which a meeting chunk is skipped. 0 disables the gate.",
+    ),
+    spec(
+        "meeting.diarization.backend",
+        "meeting.diarization",
+        "backend",
+        closed(DIARIZATION_BACKEND_CHOICES),
+        "Meeting",
+        "Diarization backend",
+        "simple (You/Remote), ml (clusters every voice) or hybrid (You, then Remote 1, Remote 2 by clustering the loopback).",
+    ),
+    spec(
+        "meeting.diarization.max_speakers",
+        "meeting.diarization",
+        "max_speakers",
+        KeyType::Int { min: 1, max: 32 },
+        "Meeting",
+        "Maximum speakers",
+        "Most distinct speakers diarization will label.",
+    ),
+    spec(
+        "meeting.diarization.similarity_threshold",
+        "meeting.diarization",
+        "similarity_threshold",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "Meeting",
+        "Speaker similarity",
+        "Cosine similarity for the ml backend to call two segments the same speaker.",
+    ),
+    spec(
+        "meeting.diarization.min_segment_ms",
+        "meeting.diarization",
+        "min_segment_ms",
+        KeyType::Int { min: 0, max: 60000 },
+        "Meeting",
+        "Minimum segment",
+        "Shortest segment in milliseconds the ml backend embeds.",
+    ),
+    spec(
+        "meeting.diarization.vad_window_secs",
+        "meeting.diarization",
+        "vad_window_secs",
+        KeyType::Float { min: 0.1, max: 30.0 },
+        "Meeting",
+        "Diarization window",
+        "Sub-window length in seconds fed to the ml embedder.",
+    ),
+    spec(
+        "meeting.diarization.vad_hop_secs",
+        "meeting.diarization",
+        "vad_hop_secs",
+        KeyType::Float { min: 0.05, max: 30.0 },
+        "Meeting",
+        "Diarization hop",
+        "Hop between diarization sub-windows in seconds.",
+    ),
+    spec(
+        "meeting.diarization.vad_rms_floor",
+        "meeting.diarization",
+        "vad_rms_floor",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "Meeting",
+        "Diarization silence floor",
+        "RMS below which a diarization sub-window counts as silence.",
+    ),
+    spec(
+        "meeting.diarization.model_path",
+        "meeting.diarization",
+        "model_path",
+        KeyType::String,
+        "Meeting",
+        "Diarization model",
+        "Path to the ONNX speaker model for the ml backend. Unset uses the downloaded default.",
+    ),
+    spec(
+        "meeting.summary.backend",
+        "meeting.summary",
+        "backend",
+        closed(SUMMARY_BACKEND_CHOICES),
+        "Meeting",
+        "Summary backend",
+        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama) or remote (an API). disabled, the default, also uses the assistant.",
+    ),
+    spec(
+        "meeting.summary.ollama_url",
+        "meeting.summary",
+        "ollama_url",
+        KeyType::String,
+        "Meeting",
+        "Ollama URL",
+        "Ollama endpoint for the local summary backend.",
+    ),
+    spec(
+        "meeting.summary.ollama_model",
+        "meeting.summary",
+        "ollama_model",
+        KeyType::String,
+        "Meeting",
+        "Ollama model",
+        "Model the local summary backend asks Ollama for.",
+    ),
+    spec(
+        "meeting.summary.remote_endpoint",
+        "meeting.summary",
+        "remote_endpoint",
+        KeyType::String,
+        "Meeting",
+        "Remote summary endpoint",
+        "API endpoint for the remote summary backend.",
+    ),
+    spec(
+        "meeting.summary.remote_api_key",
+        "meeting.summary",
+        "remote_api_key",
+        KeyType::String,
+        "Meeting",
+        "Remote summary API key",
+        "API key for the remote summary backend.",
+    ),
+    spec(
+        "meeting.actions.remind_in_mins",
+        "meeting.actions",
+        "remind_in_mins",
+        KeyType::Int { min: 1, max: 10080 },
+        "Meeting",
+        "Reminder delay",
+        "Minutes until an Omarchy reminder for an action item goes off, unless a time later today was said.",
+    ),
+    spec(
+        "meeting.actions.todoist_project_id",
+        "meeting.actions",
+        "todoist_project_id",
+        KeyType::String,
+        "Meeting",
+        "Todoist project",
+        "Todoist project ID action items are added to. Empty is the Inbox.",
+    ),
+    spec(
+        "meeting.actions.todoist_token_file",
+        "meeting.actions",
+        "todoist_token_file",
+        KeyType::String,
+        "Meeting",
+        "Todoist token file",
+        "A file holding a Todoist personal API token, instead of connecting in a browser. The token never goes in config.toml.",
+    ),
+    spec(
+        "meeting.share.command",
+        "meeting.share",
+        "command",
+        KeyType::String,
+        "Meeting",
+        "Share command",
+        "Shell command `meeting share --to command` pipes a meeting's notes to, such as a chat webhook or pandoc.",
+    ),
+    spec(
+        "meeting.share.timeout_secs",
+        "meeting.share",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "Meeting",
+        "Share command timeout",
+        "Seconds before the share command is killed.",
+    ),
+    spec(
+        "meeting.share.folder",
+        "meeting.share",
+        "folder",
+        KeyType::String,
+        "Meeting",
+        "Share folder",
+        "Folder `meeting share --to file` saves into. \"auto\" is Documents/Voxtype.",
+    ),
+    spec(
+        "meeting.summary.timeout_secs",
+        "meeting.summary",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "Meeting",
+        "Summary timeout",
+        "Seconds to wait for a summary request.",
+    ),
+    spec(
+        "meeting.detect.enabled",
+        "meeting.detect",
+        "enabled",
+        KeyType::Bool,
+        "Meeting",
+        "Offer to record calls",
+        "Notice a Zoom, Teams or Google Meet call starting and offer to record it. Unset is on for Omarchy, off elsewhere. Needs meeting mode on.",
+    ),
+    spec(
+        "meeting.detect.auto_record_apps",
+        "meeting.detect",
+        "auto_record_apps",
+        KeyType::String,
+        "Meeting",
+        "Record without asking",
+        "Comma-separated call apps (Zoom, Google Meet, Microsoft Teams) whose calls are recorded without a prompt.",
+    ),
+    spec(
+        "meeting.detect.debounce_secs",
+        "meeting.detect",
+        "debounce_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Call detection delay",
+        "Seconds a call app must hold the mic before the prompt, so a quick mic test does not count.",
+    ),
+    spec(
+        "meeting.detect.on_call_end",
+        "meeting.detect",
+        "on_call_end",
+        closed(super::CALL_END_CHOICES),
+        "Meeting",
+        "When the call ends",
+        "stop ends the recording after the grace period (with Keep recording), ask offers to stop it, keep leaves it running. Only meetings with a detected call.",
+    ),
+    spec(
+        "meeting.detect.stop_grace_secs",
+        "meeting.detect",
+        "stop_grace_secs",
+        KeyType::Int { min: 0, max: 600 },
+        "Meeting",
+        "Stop grace period",
+        "Seconds between \"Call ended\" and the automatic stop, to choose Keep recording.",
+    ),
+    spec(
+        "meeting.summary.auto",
+        "meeting.summary",
+        "auto",
+        KeyType::Bool,
+        "Meeting",
+        "Summarize at stop",
+        "Summarize each meeting when it stops. Unset is on once an agent is allowed.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.local_only",
+        "meeting.assistant",
+        "local_only",
+        KeyType::Bool,
+        "Meeting",
+        "Local model only",
+        "Never send transcripts to an agent; answer and summarize with the local Ollama model.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.agent",
+        "meeting.assistant",
+        "agent",
+        open(ASSISTANT_AGENT_CHOICES),
+        "Meeting",
+        "Assistant agent",
+        "Agent that answers questions and writes summaries. Unset uses the Omarchy default, then PATH.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.timeout_secs",
+        "meeting.assistant",
+        "timeout_secs",
+        KeyType::Int { min: 5, max: 3600 },
+        "Meeting",
+        "Assistant timeout",
+        "Seconds to wait for an answer or a summary.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.max_transcript_chars",
+        "meeting.assistant",
+        "max_transcript_chars",
+        KeyType::Int {
+            min: 2_000,
+            max: 2_000_000,
+        },
+        "Meeting",
+        "Assistant transcript budget",
+        "Transcript characters sent verbatim; longer meetings send a summary of the earlier part.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.open_command",
+        "meeting.assistant",
+        "open_command",
+        KeyType::String,
+        "Meeting",
+        "Answer Open command",
+        "Command the Open action of an ask notification runs. Unset opens the meeting view's Ask tab; empty turns Open off.",
+    )
+    .live(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1401,6 +2786,33 @@ pub fn find_key(dotted: &str) -> Option<Found> {
         }
     }
     None
+}
+
+/// Where a top-level `[name]` table belongs when voxtype only reads a section
+/// of that name nested under another, e.g. `[post_process]` is read as
+/// `[output.post_process]`. `None` when `name` is a real top-level section or
+/// matches nothing voxtype knows, so unknown sections stay silently ignored.
+pub fn misplaced_section_home(name: &str) -> Option<String> {
+    let mut homes = std::collections::BTreeSet::new();
+    for spec in CONFIG_KEYS {
+        let parts: Vec<&str> = spec.key.split('.').collect();
+        if parts[0] == name {
+            return None;
+        }
+        // Proper prefixes of two or more segments are the nested tables.
+        for depth in 2..parts.len() {
+            if parts[depth - 1] == name {
+                homes.insert(parts[..depth].join("."));
+            }
+        }
+    }
+    (!homes.is_empty()).then(|| {
+        homes
+            .into_iter()
+            .map(|h| format!("[{h}]"))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    })
 }
 
 /// Scalar keys only — the ones that appear in the schema's `keys` array.
@@ -1515,6 +2927,9 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
             if choices.contains(&raw) {
                 return Ok(TypedValue::Str(raw.to_string()));
             }
+            if let Some(canonical) = choice_alias(spec.key, raw) {
+                return Ok(TypedValue::Str(canonical.to_string()));
+            }
             if open {
                 if raw.is_empty() {
                     return Err(ValueError::Empty { key: spec.key });
@@ -1549,15 +2964,13 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
 fn ensure_required_siblings(editor: &mut ConfigEditor, spec: &KeySpec) {
     let Some(engine) = spec.engine else { return };
     // Whisper's table is not optional and its `model` has a serde default.
-    if engine == "whisper" || spec.field == "model" {
+    // An engine with no catalog default (Soniox) defaults `model` in serde.
+    let default = crate::model_catalog::default_model(engine);
+    if engine == "whisper" || spec.field == "model" || default.is_empty() {
         return;
     }
     if editor.get_string(spec.table, "model").is_none() {
-        editor.set_string(
-            spec.table,
-            "model",
-            crate::model_catalog::default_model(engine),
-        );
+        editor.set_string(spec.table, "model", default);
     }
 }
 
@@ -1621,7 +3034,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
+    let so = || cfg.soniox.clone().unwrap_or_default();
+    // Without a table, post-processing is off; report the values a new
+    // table would start with.
+    let pp = || cfg.output.post_process.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -1650,12 +3068,20 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+        "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
 
         "parakeet.model" => json!(pk().model),
+        "parakeet.max_window_secs" => json!(pk().max_window_secs),
+        "parakeet.window_overlap_secs" => json!(pk().window_overlap_secs),
         "parakeet.model_type" => match pk().model_type {
             Some(t) => serde_json::to_value(t).ok()?,
             None => Json::Null,
         },
+        "parakeet.threads" => match pk().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "parakeet.gguf_backend" => json!(pk().gguf_backend),
         "parakeet.on_demand_loading" => json!(pk().on_demand_loading),
         "parakeet.streaming" => json!(pk().streaming),
 
@@ -1703,7 +3129,21 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+        "cohere.gguf_backend" => json!(co().gguf_backend),
+        "cohere.max_chunk_secs" => json!(co().max_chunk_secs),
+        "cohere.boundary_search_secs" => json!(co().boundary_search_secs),
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+
+        "gguf.model" => json!(gg().model),
+        "gguf.architecture" => json!(gg().architecture),
+        "gguf.language" => json!(gg().language),
+        "gguf.gguf_backend" => json!(gg().gguf_backend),
+        "gguf.threads" => match gg().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "gguf.on_demand_loading" => json!(gg().on_demand_loading),
+        "gguf.streaming" => json!(gg().streaming),
 
         "openvino.model" => json!(ov().model),
         "openvino.device" => json!(ov().device),
@@ -1718,6 +3158,19 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "openvino.openvino_dir" => opt_str(ov().openvino_dir.as_ref()),
         "openvino.streaming" => json!(ov().streaming),
 
+        "soniox.api_key" => opt_str(so().api_key.as_ref()),
+        "soniox.model" => json!(so().model),
+        "soniox.language_hints_strict" => json!(so().language_hints_strict),
+        "soniox.streaming" => json!(so().streaming),
+        "soniox.type_partials" => json!(so().type_partials),
+        "soniox.context" => opt_str(so().context.as_ref()),
+        "soniox.terms_file" => match so().terms_file {
+            Some(p) => json!(p.to_string_lossy()),
+            None => Json::Null,
+        },
+        "soniox.async_api" => json!(so().async_api),
+        "soniox.async_max_wait_secs" => json!(so().async_max_wait_secs),
+
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
         "hotkey.mode" => json!(match cfg.hotkey.mode {
@@ -1729,6 +3182,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
+        "audio.keep_failed_recordings" => json!(cfg.audio.keep_failed_recordings),
         "audio.pause_media" => json!(cfg.audio.pause_media),
         "audio.duck_media" => json!(cfg.audio.duck_media),
         "audio.duck_media_volume_percent" => json!(cfg.audio.duck_media_volume_percent),
@@ -1747,10 +3201,20 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(p) => json!(p.command),
             None => Json::Null,
         },
+        "output.post_process.timeout_ms" => json!(pp().timeout_ms),
+        "output.post_process.trim" => json!(pp().trim),
+        "output.post_process.fallback_on_empty" => json!(pp().fallback_on_empty),
+        "output.post_process.edit_list" => json!(pp().edit_list),
 
+        "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
+        "text.lard_model_path" => json!(cfg.text.lard_model_path),
+        "text.punctuation_casing" => json!(cfg.text.punctuation_casing),
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
+        "text.collapse_restarts" => json!(cfg.text.collapse_restarts),
+        "text.repair_sentence_breaks" => json!(cfg.text.repair_sentence_breaks),
+        "text.format_numbers" => json!(cfg.text.format_numbers),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg
                 .text
@@ -1766,6 +3230,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "vad.threshold" => f32_json(cfg.vad.threshold),
 
         "meeting.enabled" => json!(cfg.meeting.enabled),
+        "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
+        "meeting.status_notifications" => json!(cfg.meeting.status_notifications),
+        "meeting.my_name" => opt_str(cfg.meeting.my_name.as_ref()),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),
@@ -1777,11 +3244,19 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             json!(cfg.output.notification.on_recording_stop)
         }
         "output.notification.on_transcription" => json!(cfg.output.notification.on_transcription),
+        "output.notification.on_no_speech" => json!(cfg.output.notification.on_no_speech),
+        "output.notification.show_edits" => json!(cfg.output.notification.show_edits),
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
+        "tray.enabled" => json!(cfg.tray.enabled),
+        "omarchy.link_settings_plugin" => json!(cfg.omarchy.link_settings_plugin),
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
+        "osd.plugin_path" => match &cfg.osd.plugin_path {
+            Some(p) => json!(p.display().to_string()),
+            None => Json::Null,
+        },
         "osd.palette" => match cfg.osd.palette {
             Some(p) => serde_json::to_value(p).ok()?,
             None => Json::Null,
@@ -1796,12 +3271,138 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.waveform_window_secs" => f32_json(cfg.osd.waveform_window_secs),
         "osd.peak_decay_db_per_sec" => f32_json(cfg.osd.peak_decay_db_per_sec),
         "osd.waveform_gain" => f32_json(cfg.osd.waveform_gain),
+        "osd.frame.background" => json!(cfg.osd.frame.background),
+        "osd.frame.border" => json!(cfg.osd.frame.border),
+        "osd.frame.glow" => json!(cfg.osd.frame.glow),
+        "osd.frame.halo" => json!(cfg.osd.frame.halo),
 
         "status.icon_theme" => json!(cfg.status.icon_theme),
         "status.icons.idle" => opt_str(cfg.status.icons.idle.as_ref()),
         "status.icons.recording" => opt_str(cfg.status.icons.recording.as_ref()),
         "status.icons.transcribing" => opt_str(cfg.status.icons.transcribing.as_ref()),
+        "status.icons.streaming" => opt_str(cfg.status.icons.streaming.as_ref()),
         "status.icons.stopped" => opt_str(cfg.status.icons.stopped.as_ref()),
+
+        "output.file_path" => cfg
+            .output
+            .file_path
+            .as_ref()
+            .map(|p| json!(p.display().to_string()))
+            .unwrap_or(Json::Null),
+        "output.file_mode" => json!(cfg.output.file_mode),
+        "output.type_delay_ms" => json!(cfg.output.type_delay_ms),
+        "output.paste_keys" => opt_str(cfg.output.paste_keys.as_ref()),
+        "output.paste_keys_terminal" => opt_str(cfg.output.paste_keys_terminal.as_ref()),
+        "output.restore_clipboard" => json!(cfg.output.restore_clipboard),
+        "output.restore_clipboard_delay_ms" => json!(cfg.output.restore_clipboard_delay_ms),
+        "output.wait_for_modifier_release" => json!(cfg.output.wait_for_modifier_release),
+        "output.modifier_release_timeout_ms" => json!(cfg.output.modifier_release_timeout_ms),
+        "output.wtype_shift_prefix" => json!(cfg.output.wtype_shift_prefix),
+        "output.dotool_xkb_layout" => opt_str(cfg.output.dotool_xkb_layout.as_ref()),
+        "output.dotool_xkb_variant" => opt_str(cfg.output.dotool_xkb_variant.as_ref()),
+        "output.eitype_xkb_layout" => opt_str(cfg.output.eitype_xkb_layout.as_ref()),
+        "output.eitype_xkb_variant" => opt_str(cfg.output.eitype_xkb_variant.as_ref()),
+        "output.pre_recording_command" => opt_str(cfg.output.pre_recording_command.as_ref()),
+        "output.pre_output_command" => opt_str(cfg.output.pre_output_command.as_ref()),
+        "output.post_output_command" => opt_str(cfg.output.post_output_command.as_ref()),
+        "output.notification.urgency" => json!(cfg.output.notification.urgency),
+        "state_file" => opt_str(cfg.state_file.as_ref()),
+        "audio.sample_rate" => json!(cfg.audio.sample_rate),
+        "audio.external_trigger_silence_timeout_secs" => {
+            json!(cfg.audio.external_trigger_silence_timeout_secs)
+        }
+        "audio.external_trigger_speech_threshold_dbfs" => {
+            json!(cfg.audio.external_trigger_speech_threshold_dbfs)
+        }
+        "audio.external_trigger_stop_command" => {
+            opt_str(cfg.audio.external_trigger_stop_command.as_ref())
+        }
+        "vad.min_speech_duration_ms" => json!(cfg.vad.min_speech_duration_ms),
+        "vad.model" => opt_str(cfg.vad.model.as_ref()),
+        "whisper.eager_chunk_secs" => json!(cfg.whisper.eager_chunk_secs),
+        "whisper.streaming" => json!(cfg.whisper.streaming),
+        "whisper.remote_timeout_secs" => json!(cfg.whisper.remote_timeout_secs),
+        "whisper.remote_send_auto_language" => json!(cfg.whisper.remote_send_auto_language),
+        "whisper.whisper_cli_path" => opt_str(cfg.whisper.whisper_cli_path.as_ref()),
+        "whisper.max_loaded_models" => json!(cfg.whisper.max_loaded_models),
+        "whisper.cold_model_timeout_secs" => json!(cfg.whisper.cold_model_timeout_secs),
+        "whisper.context_window_optimization" => json!(cfg.whisper.context_window_optimization),
+        "parakeet.streaming_chunk_secs" => json!(pk().streaming_chunk_secs),
+        "parakeet.streaming_left_context_secs" => json!(pk().streaming_left_context_secs),
+        "parakeet.streaming_right_context_secs" => json!(pk().streaming_right_context_secs),
+        "streaming.interval_secs" => json!(cfg.streaming.unwrap_or_default().interval_secs),
+        "streaming.max_buffer_secs" => json!(cfg.streaming.unwrap_or_default().max_buffer_secs),
+        "streaming.min_speech_rms" => json!(cfg.streaming.unwrap_or_default().min_speech_rms),
+        "streaming.min_audio_secs" => json!(cfg.streaming.unwrap_or_default().min_audio_secs),
+        "streaming.partial_min_words" => {
+            json!(cfg.streaming.unwrap_or_default().partial_min_words)
+        }
+        "streaming.type_partials" => json!(cfg.streaming.unwrap_or_default().type_partials),
+        "streaming.revision_mode" => json!(cfg.streaming.unwrap_or_default().revision_mode),
+        "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
+        "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
+        "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
+        "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
+        "meeting.share.command" => opt_str(cfg.meeting.share.command.as_ref()),
+        "meeting.actions.remind_in_mins" => json!(cfg.meeting.actions.remind_in_mins),
+        "meeting.actions.todoist_project_id" => {
+            opt_str(cfg.meeting.actions.todoist_project_id.as_ref())
+        }
+        "meeting.actions.todoist_token_file" => {
+            opt_str(cfg.meeting.actions.todoist_token_file.as_ref())
+        }
+        "meeting.share.timeout_secs" => json!(cfg.meeting.share.timeout_secs),
+        "meeting.share.folder" => json!(cfg.meeting.share.folder),
+        "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
+        "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
+        "meeting.view" => json!(cfg.meeting.view),
+        // Two places are all an opacity needs, and an f32 such as 0.8 would
+        // otherwise read back as 0.800000011920929.
+        "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
+        "meeting.calendar.command" => json!(cfg.meeting.calendar.command),
+        "meeting.calendar.window_mins" => json!(cfg.meeting.calendar.window_mins),
+        "meeting.calendar.timeout_secs" => json!(cfg.meeting.calendar.timeout_secs),
+        "meeting.auto_label_from_title" => json!(cfg.meeting.auto_label_from_title),
+        "meeting.announce_recording" => json!(cfg.meeting.announce_recording),
+        "meeting.announcement_file" => opt_str(cfg.meeting.announcement_file.as_ref()),
+        "meeting.announcement_voice" => json!(cfg.meeting.announcement_voice),
+        "meeting.storage_path" => json!(cfg.meeting.storage_path),
+        "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
+        "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),
+        "meeting.audio.echo_fuzzy_max_words" => json!(cfg.meeting.audio.echo_fuzzy_max_words),
+        "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
+        "meeting.diarization.backend" => json!(cfg.meeting.diarization.backend),
+        "meeting.diarization.max_speakers" => json!(cfg.meeting.diarization.max_speakers),
+        "meeting.diarization.similarity_threshold" => {
+            json!(cfg.meeting.diarization.similarity_threshold)
+        }
+        "meeting.diarization.min_segment_ms" => json!(cfg.meeting.diarization.min_segment_ms),
+        "meeting.diarization.vad_window_secs" => json!(cfg.meeting.diarization.vad_window_secs),
+        "meeting.diarization.vad_hop_secs" => json!(cfg.meeting.diarization.vad_hop_secs),
+        "meeting.diarization.vad_rms_floor" => json!(cfg.meeting.diarization.vad_rms_floor),
+        "meeting.diarization.model_path" => opt_str(cfg.meeting.diarization.model_path.as_ref()),
+        "meeting.summary.backend" => json!(cfg.meeting.summary.backend),
+        "meeting.summary.ollama_url" => json!(cfg.meeting.summary.ollama_url),
+        "meeting.summary.ollama_model" => json!(cfg.meeting.summary.ollama_model),
+        "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
+        "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
+        "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
+        "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
+        "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {
+            [] => Json::Null,
+            apps => json!(apps.join(",")),
+        },
+        "meeting.detect.debounce_secs" => json!(cfg.meeting.detect.debounce_secs),
+        "meeting.detect.on_call_end" => json!(cfg.meeting.detect.on_call_end),
+        "meeting.detect.stop_grace_secs" => json!(cfg.meeting.detect.stop_grace_secs),
+        "meeting.summary.auto" => json!(cfg.meeting.summary.auto),
+        "meeting.assistant.local_only" => json!(cfg.meeting.assistant.local_only),
+        "meeting.assistant.agent" => opt_str(cfg.meeting.assistant.agent.as_ref()),
+        "meeting.assistant.timeout_secs" => json!(cfg.meeting.assistant.timeout_secs),
+        "meeting.assistant.max_transcript_chars" => {
+            json!(cfg.meeting.assistant.max_transcript_chars)
+        }
+        "meeting.assistant.open_command" => opt_str(cfg.meeting.assistant.open_command.as_ref()),
 
         _ => return None,
     };
@@ -1864,6 +3465,11 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
         }
         KeyType::DynamicEnum { source } => {
             o.insert("source".into(), json!(source));
+            // Styles accept values outside the discovered list (package
+            // paths, packages installed later); models and devices do not.
+            if source == "styles" {
+                o.insert("open".into(), json!(true));
+            }
         }
         _ => {}
     }
@@ -1875,6 +3481,10 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
     o.insert("engine".into(), json!(spec.engine));
     o.insert("compiled".into(), json!(spec.compiled()));
     o.insert("restart_required".into(), json!(spec.restart_required));
+    // Additive and only present when set, like `open`: older consumers ignore it.
+    if spec.onnx_model_only {
+        o.insert("onnx_model_only".into(), json!(true));
+    }
     Json::Object(o)
 }
 
@@ -1887,6 +3497,7 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
+    let profiles = serde_json::to_value(&cfg.profiles).unwrap_or_else(|_| json!({}));
     // `voxtype_version` is this CLI's build. `daemon_version` is what is
     // actually serving dictation, which is routinely a different thing: an
     // upgrade installed but not restarted, an ExecStart override pointing at
@@ -1903,7 +3514,14 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         "config_path": path.display().to_string(),
         "engine": cfg.engine.name(),
         "keys": keys,
+        // Values set through a command and never stored in config.toml.
+        "secrets": [crate::meeting::calendar::source::schema_entry(
+            &crate::meeting::calendar::source::Store::new(
+                crate::meeting::calendar::source::Store::default_dir(),
+            ),
+        )],
         "replacements": Json::Object(replacements),
+        "profiles": profiles,
     })
 }
 
@@ -1924,6 +3542,10 @@ pub fn get_all_json(cfg: &Config) -> Json {
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
     o.insert(REPLACEMENTS_TABLE.to_string(), Json::Object(replacements));
+    o.insert(
+        "profiles".to_string(),
+        serde_json::to_value(&cfg.profiles).unwrap_or_else(|_| json!({})),
+    );
     Json::Object(o)
 }
 
@@ -2093,6 +3715,14 @@ mod tests {
                 continue;
             }
             for choice in choices {
+                if s.key == "engine" {
+                    // Enum deserialization is independent of installed weights.
+                    // Activation/persistence has separate transaction tests.
+                    let cfg: crate::config::Config =
+                        toml::from_str(&format!("engine = {choice:?}")).unwrap();
+                    assert_eq!(cfg.engine.name(), *choice);
+                    continue;
+                }
                 let (_dir, path) = temp_config();
                 let typed = validate_value(s, choice).unwrap();
                 let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
@@ -2286,11 +3916,13 @@ mod tests {
     fn onnx_engine_keys_are_feature_gated() {
         for s in CONFIG_KEYS {
             let Some(engine) = s.engine else { continue };
-            if engine == "whisper" {
+            // Whisper and the Soniox cloud client are always compiled in.
+            if engine == "whisper" || engine == "soniox" {
                 assert!(
                     s.requires_feature.is_none(),
-                    "{} should not be feature-gated; whisper is always compiled in",
-                    s.key
+                    "{} should not be feature-gated; {} is always compiled in",
+                    s.key,
+                    engine
                 );
             } else {
                 assert_eq!(
@@ -2349,6 +3981,10 @@ mod tests {
         assert_eq!(doc["config_path"], json!(path.display().to_string()));
         assert_eq!(doc["engine"], json!("whisper"));
         assert!(doc["replacements"].is_object());
+        assert!(doc["profiles"].is_object());
+        let secrets = doc["secrets"].as_array().unwrap();
+        assert_eq!(secrets[0]["key"], "meeting.calendar.ics_link");
+        assert_eq!(secrets[0]["label"], "Calendar (iCal link)");
 
         let keys = doc["keys"].as_array().unwrap();
         assert_eq!(keys.len(), scalar_keys().count());
@@ -2421,6 +4057,32 @@ mod tests {
     }
 
     #[test]
+    fn decoder_type_is_flagged_onnx_model_only_and_nothing_else_is() {
+        let (_dir, path) = temp_config();
+        let cfg = load_config(Some(&path)).unwrap();
+        let ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let doc = schema_json(&cfg, &path, &ed);
+        let flagged: Vec<&str> = doc["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|k| k.get("onnx_model_only").is_some())
+            .map(|k| {
+                // Only ever emitted as `true`; absence means "applies to any model".
+                assert_eq!(k["onnx_model_only"], json!(true), "{}", k);
+                k["key"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(flagged, ["parakeet.model_type"]);
+
+        let spec = scalar_keys()
+            .find(|s| s.key == "parakeet.model_type")
+            .unwrap();
+        assert!(spec.onnx_model_only);
+        assert_eq!(spec.engine, Some("parakeet"));
+    }
+
+    #[test]
     fn get_all_json_covers_every_scalar_key() {
         let cfg = Config::default();
         let all = get_all_json(&cfg);
@@ -2445,5 +4107,89 @@ mod tests {
             };
             assert_eq!(s.compiled(), feature_compiled(feature), "{}", s.key);
         }
+    }
+
+    /// Fields `config set` deliberately doesn't reach. Everything else a
+    /// config struct can hold as a scalar needs a [`KeySpec`], or the
+    /// "reaches every setting" promise quietly stops being true.
+    const NOT_SETTABLE: &[&str] = &[
+        // Deprecated aliases, still read for old configs.
+        "whisper.backend",
+        "whisper.eager_overlap_secs",
+        "output.wtype_delay_ms",
+        // Deprecated per-engine copies of the shared [streaming] table.
+        "whisper.streaming_interval_secs",
+        "whisper.streaming_max_buffer_secs",
+        "whisper.streaming_min_audio_secs",
+        "whisper.streaming_min_speech_rms",
+        "whisper.streaming_partial_min_words",
+        "whisper.streaming_revision_mode",
+        "whisper.streaming_type_partials",
+        "openvino.streaming_interval_secs",
+        "openvino.streaming_max_buffer_secs",
+        "openvino.streaming_min_audio_secs",
+        "openvino.streaming_min_speech_rms",
+        "openvino.streaming_partial_min_words",
+        "openvino.streaming_revision_mode",
+        "openvino.streaming_type_partials",
+        // Lists, which need a hand edit.
+        "output.driver_order",
+        "soniox.terms",
+    ];
+
+    /// Tables of arbitrary keys, also a hand edit.
+    const NOT_SETTABLE_TABLES: &[&str] = &["output.language_to_layout."];
+
+    fn scalar_leaves(prefix: &str, v: &Json, out: &mut Vec<String>) {
+        match v {
+            Json::Object(m) => {
+                for (k, v) in m {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    scalar_leaves(&path, v, out);
+                }
+            }
+            Json::Array(_) => {}
+            _ => out.push(prefix.to_string()),
+        }
+    }
+
+    #[test]
+    fn every_scalar_config_field_has_a_key() {
+        // Materialize every optional table so its fields are visible.
+        let mut src: String = [
+            "parakeet",
+            "moonshine",
+            "sensevoice",
+            "paraformer",
+            "dolphin",
+            "omnilingual",
+            "cohere",
+            "gguf",
+            "openvino",
+            "soniox",
+        ]
+        .iter()
+        .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
+        .collect();
+        src.push_str("[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
+        let cfg: Config = toml::from_str(&src).expect("materialized config parses");
+
+        let mut leaves = Vec::new();
+        scalar_leaves("", &serde_json::to_value(&cfg).unwrap(), &mut leaves);
+        let keys: std::collections::HashSet<&str> = scalar_keys().map(|s| s.key).collect();
+        let missing: Vec<_> = leaves
+            .iter()
+            .filter(|l| !keys.contains(l.as_str()))
+            .filter(|l| !NOT_SETTABLE.contains(&l.as_str()))
+            .filter(|l| !NOT_SETTABLE_TABLES.iter().any(|t| l.starts_with(t)))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config fields with no schema key: {missing:?}"
+        );
     }
 }

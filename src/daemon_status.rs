@@ -81,7 +81,11 @@ pub fn publish_version() {
     }
     // Best effort: a daemon that cannot write this still runs fine, callers
     // just fall back to reporting the version as unknown.
-    let _ = std::fs::write(&path, env!("CARGO_PKG_VERSION"));
+    //
+    // The full build version, not CARGO_PKG_VERSION: two builds of the same
+    // crate version can differ by a day of fixes, and the `+g<sha>` suffix is
+    // what lets `differs_from_caller` catch that.
+    let _ = std::fs::write(&path, crate::cli::VERSION);
 }
 
 /// What the *running daemon* reports as its version.
@@ -133,7 +137,7 @@ impl DaemonVersion {
     /// build. This is the condition worth surfacing: the user is looking at a
     /// UI from one version while a different one is doing the work.
     pub fn differs_from_caller(&self) -> bool {
-        matches!(self, Self::Running(v) if v != env!("CARGO_PKG_VERSION"))
+        matches!(self, Self::Running(v) if v != crate::cli::VERSION)
     }
 
     /// One line for a status surface, phrased so the three states stay
@@ -141,7 +145,7 @@ impl DaemonVersion {
     pub fn describe(&self) -> String {
         match self {
             Self::Running(v) if self.differs_from_caller() => {
-                format!("{} (this CLI is {})", v, env!("CARGO_PKG_VERSION"))
+                format!("{} (this CLI is {})", v, crate::cli::VERSION)
             }
             Self::Running(v) => v.clone(),
             Self::NotRunning => "not running".to_string(),
@@ -239,15 +243,15 @@ mod tests {
     /// confirmed, different, running version.
     #[test]
     fn only_a_confirmed_different_running_version_counts_as_differing() {
-        let same = DaemonVersion::Running(env!("CARGO_PKG_VERSION").to_string());
+        let same = DaemonVersion::Running(crate::cli::VERSION.to_string());
         assert!(!same.differs_from_caller());
-        assert_eq!(same.version(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(same.version(), Some(crate::cli::VERSION));
 
         let other = DaemonVersion::Running("0.0.1-other".to_string());
         assert!(other.differs_from_caller());
         assert!(other.describe().contains("0.0.1-other"));
         assert!(
-            other.describe().contains(env!("CARGO_PKG_VERSION")),
+            other.describe().contains(crate::cli::VERSION),
             "a mismatch must name both versions, or the user cannot tell \
              which one they are looking at"
         );
