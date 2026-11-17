@@ -113,6 +113,11 @@ struct ParakeetModelInfo {
     /// handler auto-switches the configured model to one of these when the
     /// user enables streaming on top of an incompatible model. See #423.
     streaming_compatible: bool,
+    /// The checkpoint was trained on English only and cannot write another
+    /// language: NVIDIA's `parakeet-tdt-0.6b-v2` and the English unified
+    /// streaming export. The v3 family covers 25 European languages and
+    /// picks one per utterance.
+    english_only: bool,
 }
 
 const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
@@ -129,6 +134,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
         streaming_compatible: false,
+        english_only: true,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v2-int8",
@@ -142,6 +148,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
         streaming_compatible: false,
+        english_only: true,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3",
@@ -156,6 +163,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
         streaming_compatible: false,
+        english_only: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3-int8",
@@ -169,6 +177,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
         streaming_compatible: false,
+        english_only: false,
     },
     // Streaming-capable Parakeet model. Ships `tokenizer.model` alongside the
     // encoder/decoder, which `parakeet-rs::ParakeetUnified::load` requires for
@@ -189,6 +198,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "bobNight/parakeet-unified-en-0.6b-onnx",
         streaming_compatible: true,
+        english_only: true,
     },
 ];
 
@@ -1989,6 +1999,99 @@ pub fn whisper_model_english_only(name: &str) -> Option<bool> {
         .iter()
         .find(|model| model.name == name)
         .map(|model| model.english_only)
+}
+
+/// The one language `model` of `engine` can write, when the registry says it
+/// has only one: `Some("en")` for an English-only checkpoint, `Some("ja")`
+/// for a Japanese one. `None` for a multilingual model and for anything the
+/// registry does not know by name, so a custom path is never classified.
+///
+/// Text cleanup asks this to decide whether English-only stages may run for
+/// an engine that has no language setting (#696). Each arm reads the
+/// registry's own language field:
+///
+/// - Whisper: `english_only` (the `.en` checkpoints).
+/// - Parakeet: `english_only` (v2 and the English unified export).
+/// - Moonshine: `language`, one per checkpoint.
+/// - SenseVoice, Paraformer, Dolphin, Omnilingual: `languages`, when it
+///   names a single language (only `paraformer-en` does).
+/// - Generic GGUF: `languages`, when every entry but `auto` is one language.
+/// - OpenVINO: its Whisper checkpoint's `english_only`. The registry names
+///   an OpenVINO export `<whisper checkpoint>-<quantization>`, which is the
+///   one place a name is taken apart; distil exports are not Whisper
+///   registry checkpoints and stay unclassified.
+///
+/// Cohere and Soniox have no single-language model.
+pub fn model_only_language(engine: TranscriptionEngine, model: &str) -> Option<&'static str> {
+    let named = |name: &str, dir_name: &str| name == model || dir_name == model;
+    match engine {
+        TranscriptionEngine::Whisper => whisper_model_english_only(model)?.then_some("en"),
+        TranscriptionEngine::Parakeet => PARAKEET_MODELS
+            .iter()
+            .find(|entry| entry.name == model)?
+            .english_only
+            .then_some("en"),
+        TranscriptionEngine::Moonshine => MOONSHINE_MODELS
+            .iter()
+            .find(|entry| named(entry.name, entry.dir_name))
+            .map(|entry| entry.language),
+        TranscriptionEngine::SenseVoice => SENSEVOICE_MODELS
+            .iter()
+            .find(|entry| named(entry.name, entry.dir_name))
+            .and_then(|entry| single_language(entry.languages)),
+        TranscriptionEngine::Paraformer => PARAFORMER_MODELS
+            .iter()
+            .find(|entry| named(entry.name, entry.dir_name))
+            .and_then(|entry| single_language(entry.languages)),
+        TranscriptionEngine::Dolphin => DOLPHIN_MODELS
+            .iter()
+            .find(|entry| named(entry.name, entry.dir_name))
+            .and_then(|entry| single_language(entry.languages)),
+        TranscriptionEngine::Omnilingual => OMNILINGUAL_MODELS
+            .iter()
+            .find(|entry| named(entry.name, entry.dir_name))
+            .and_then(|entry| single_language(entry.languages)),
+        TranscriptionEngine::Gguf => HANDY_PENDING_GGUF_MODELS
+            .iter()
+            .find(|entry| entry.name == model)
+            .and_then(|entry| only_base_language(entry.languages)),
+        TranscriptionEngine::OpenVino => {
+            let checkpoint = OPENVINO_MODELS
+                .iter()
+                .find(|entry| named(entry.name, entry.dir_name))
+                .and_then(|entry| {
+                    entry
+                        .name
+                        .strip_suffix(entry.quantization)?
+                        .strip_suffix('-')
+                })
+                // "base.en" without a quantization is a Whisper name as is.
+                .unwrap_or(model);
+            whisper_model_english_only(checkpoint)?.then_some("en")
+        }
+        TranscriptionEngine::Cohere | TranscriptionEngine::Soniox => None,
+    }
+}
+
+/// A registry `languages` display string that names exactly one language
+/// code ("en"), as opposed to a list ("zh/en") or a description
+/// ("1600+ langs").
+fn single_language(languages: &'static str) -> Option<&'static str> {
+    let is_code = (2..=3).contains(&languages.len())
+        && languages.bytes().all(|byte| byte.is_ascii_lowercase());
+    is_code.then_some(languages)
+}
+
+/// The base language shared by every entry of a GGUF `languages` list, not
+/// counting `auto`: `["auto", "en"]` is English, `["en-US", "en-GB"]` is
+/// English, and a list naming two languages is none.
+fn only_base_language(languages: &[&'static str]) -> Option<&'static str> {
+    let mut bases = languages
+        .iter()
+        .filter(|code| **code != "auto")
+        .map(|code| code.split(['-', '_']).next().unwrap_or(code));
+    let first = bases.next()?;
+    bases.all(|base| base == first).then_some(first)
 }
 
 /// Which engines this binary lists in the interactive picker.
@@ -5004,6 +5107,38 @@ pub fn set_openvino_config(model_name: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_helpers_only_accept_a_single_language() {
+        assert_eq!(single_language("en"), Some("en"));
+        assert_eq!(single_language("yue"), Some("yue"));
+        for several in ["zh/en", "zh/en/ja/ko/yue", "1600+ langs", "", "e", "EN"] {
+            assert_eq!(single_language(several), None, "{several:?}");
+        }
+        assert_eq!(only_base_language(&["auto", "en"]), Some("en"));
+        assert_eq!(only_base_language(&["en-US", "en-GB"]), Some("en"));
+        assert_eq!(only_base_language(&["auto", "ja"]), Some("ja"));
+        assert_eq!(only_base_language(&["auto", "en", "fr"]), None);
+        assert_eq!(only_base_language(&["auto", "en-US", "es-US"]), None);
+        assert_eq!(only_base_language(&["auto"]), None);
+        assert_eq!(only_base_language(&[]), None);
+    }
+
+    /// The Parakeet flag is the registry's own statement, checked here
+    /// against the one place the same fact is written for people.
+    #[test]
+    fn parakeet_english_only_flag_matches_the_model_descriptions() {
+        for model in PARAKEET_MODELS {
+            assert_eq!(
+                model.english_only,
+                model.description.contains("English-only"),
+                "{}",
+                model.name
+            );
+        }
+        assert!(PARAKEET_MODELS.iter().any(|model| model.english_only));
+        assert!(PARAKEET_MODELS.iter().any(|model| !model.english_only));
+    }
 
     #[test]
     fn only_npu_downloads_require_eager_openvino_compilation() {
