@@ -169,6 +169,8 @@ pub struct MeetingDaemon {
     current_meeting: Option<MeetingData>,
     transcriber: Option<Arc<dyn Transcriber>>,
     diarizer: Option<Box<dyn diarization::Diarizer>>,
+    /// Why the configured diarization backend was replaced, for the user
+    diarization_notice: Option<String>,
     engine_name: String,
     event_tx: mpsc::Sender<MeetingEvent>,
     post_processor: Option<PostProcessor>,
@@ -232,8 +234,13 @@ impl MeetingDaemon {
         event_tx: mpsc::Sender<MeetingEvent>,
         resident: Option<Arc<dyn Transcriber>>,
     ) -> Result<Self> {
-        let storage = MeetingStorage::open(config.storage.clone())
-            .map_err(|e| MeetingError::Storage(e.to_string()))?;
+        let storage = MeetingStorage::open(config.storage.clone()).map_err(|e| {
+            MeetingError::Storage(format!(
+                "{} at {}. Check [meeting] storage_path",
+                e,
+                config.storage.storage_path.display()
+            ))
+        })?;
 
         let transcriber: Arc<dyn Transcriber> = match resident {
             Some(transcriber) => {
@@ -264,10 +271,12 @@ impl MeetingDaemon {
         });
 
         // Create diarizer if configured
+        let mut diarization_notice = None;
         let diarizer = config.diarization.as_ref().and_then(|diar_config| {
             if diar_config.enabled {
-                let d = diarization::create_diarizer(diar_config);
+                let (d, notice) = diarization::create_diarizer(diar_config);
                 tracing::info!("Meeting diarization enabled: {}", d.name());
+                diarization_notice = notice;
                 Some(d)
             } else {
                 None
@@ -283,6 +292,7 @@ impl MeetingDaemon {
             current_meeting: None,
             transcriber: Some(transcriber),
             diarizer,
+            diarization_notice,
             engine_name,
             event_tx,
             post_processor,
@@ -317,6 +327,7 @@ impl MeetingDaemon {
             current_meeting: None,
             transcriber: Some(transcriber),
             diarizer,
+            diarization_notice: None,
             engine_name: "test".to_string(),
             event_tx,
             post_processor: None,
@@ -333,6 +344,12 @@ impl MeetingDaemon {
             title_labels: None,
             announcement: None,
         }
+    }
+
+    /// Why the configured diarization backend could not be used, if it
+    /// could not. Speaker labels then come from the simple backend.
+    pub fn diarization_notice(&self) -> Option<&str> {
+        self.diarization_notice.as_deref()
     }
 
     /// Start a new meeting
@@ -619,8 +636,9 @@ impl MeetingDaemon {
     /// that the loopback track also holds are stripped as echo. Only then
     /// are the chunks published, so a live consumer never sees the echo as
     /// something you said. A track that fails to transcribe is logged and
-    /// the other still processed.
-    pub async fn process_pair(&mut self, mic: Vec<f32>, loopback: Vec<f32>) {
+    /// the other still processed; the first such error is returned, so the
+    /// caller can tell the user that part of the transcript is missing.
+    pub async fn process_pair(&mut self, mic: Vec<f32>, loopback: Vec<f32>) -> Option<String> {
         // Kept as recorded, before VAD skips anything, so the files hold
         // the whole meeting on the transcript's timeline. Paused audio is
         // dropped like it is from the transcript.
@@ -645,6 +663,7 @@ impl MeetingDaemon {
             .under_canceller(self.echo_cancelled)
         });
         let mut done = Vec::new();
+        let mut first_error: Option<String> = None;
         for (samples, source) in [
             (mic, AudioSource::Microphone),
             (loopback, AudioSource::Loopback),
@@ -655,7 +674,10 @@ impl MeetingDaemon {
             match self.transcribe_track(samples, source).await {
                 Ok(Some(chunk)) => done.push(chunk),
                 Ok(None) => {}
-                Err(e) => tracing::error!("Error processing {} chunk: {}", source, e),
+                Err(e) => {
+                    tracing::error!("Error processing {} chunk: {}", source, e);
+                    first_error.get_or_insert_with(|| e.to_string());
+                }
             }
         }
 
@@ -778,6 +800,7 @@ impl MeetingDaemon {
         for (chunk_id, segments) in done {
             self.emit_chunk(chunk_id, segments).await;
         }
+        first_error
     }
 
     /// Rename a speaker in the segments already transcribed, carry over any

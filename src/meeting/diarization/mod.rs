@@ -197,49 +197,61 @@ impl Default for DiarizationConfig {
     }
 }
 
-/// Create a diarizer based on configuration
-pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
+/// Create a diarizer based on configuration.
+///
+/// When the configured backend cannot be used and the simple backend stands
+/// in for it, the second value says why and how to fix it, so the daemon can
+/// tell the user instead of quietly producing coarser speaker labels.
+pub fn create_diarizer(config: &DiarizationConfig) -> (Box<dyn Diarizer>, Option<String>) {
+    let fallback = |notice: String| -> (Box<dyn Diarizer>, Option<String>) {
+        tracing::warn!("{}", notice);
+        (Box::new(simple::SimpleDiarizer::new()), Some(notice))
+    };
+
     match config.backend.as_str() {
-        "simple" => Box::new(simple::SimpleDiarizer::new()),
+        "simple" => (Box::new(simple::SimpleDiarizer::new()), None),
         "ml" => match load_ml_diarizer(config) {
-            Some(diarizer) => {
+            Ok(diarizer) => {
                 tracing::info!("Using ML diarization with ONNX");
-                diarizer
+                (diarizer, None)
             }
-            None => Box::new(simple::SimpleDiarizer::new()),
+            Err(reason) => fallback(format!(
+                "Speaker labels fall back to mic/remote only: {}",
+                reason
+            )),
         },
         "hybrid" => match load_ml_diarizer(config) {
-            Some(remote) => {
+            Ok(remote) => {
                 tracing::info!(
                     "Using hybrid diarization: mic is You, ONNX clustering splits the loopback"
                 );
-                Box::new(hybrid::HybridDiarizer::new(remote))
+                (Box::new(hybrid::HybridDiarizer::new(remote)), None)
             }
-            None => {
-                tracing::warn!(
-                    "Hybrid diarization needs ML speaker clustering, which is unavailable; \
-                     labelling speakers You and Remote (simple backend)"
-                );
-                Box::new(simple::SimpleDiarizer::new())
-            }
+            Err(reason) => fallback(format!(
+                "Speaker labels fall back to You and Remote, without telling remote \
+                 speakers apart: hybrid diarization needs ML speaker clustering, and {}",
+                reason
+            )),
         },
         "subprocess" => {
             // Subprocess diarizer for memory-isolated ML diarization
-            Box::new(subprocess::SubprocessDiarizer::new(config.clone()))
+            (
+                Box::new(subprocess::SubprocessDiarizer::new(config.clone())),
+                None,
+            )
         }
-        _ => {
-            tracing::warn!(
-                "Unknown diarizer backend '{}', using simple",
-                config.backend
-            );
-            Box::new(simple::SimpleDiarizer::new())
-        }
+        other => fallback(format!(
+            "Speaker labels fall back to mic/remote only: unknown diarization backend \
+             '{}'. Set [meeting.diarization] backend to \"simple\", \"ml\" or \"hybrid\".",
+            other
+        )),
     }
 }
 
-/// The ECAPA-TDNN clusterer, or `None` (with the reason logged) when this
-/// binary lacks the `ml-diarization` feature or the model cannot be loaded.
-fn load_ml_diarizer(config: &DiarizationConfig) -> Option<Box<dyn Diarizer>> {
+/// The ECAPA-TDNN clusterer, or why it is unavailable (this binary lacks the
+/// `ml-diarization` feature, or the model is missing or cannot be loaded),
+/// worded to follow "Speaker labels fall back to ...: " and name the fix.
+fn load_ml_diarizer(config: &DiarizationConfig) -> Result<Box<dyn Diarizer>, String> {
     #[cfg(feature = "ml-diarization")]
     {
         // Auto-download model if missing
@@ -250,23 +262,36 @@ fn load_ml_diarizer(config: &DiarizationConfig) -> Option<Box<dyn Diarizer>> {
 
         let mut diarizer = ml::MlDiarizer::new(config);
         if !diarizer.model_exists() {
-            tracing::warn!("ML diarization model not found, falling back to simple");
-            return None;
+            let fix = match config.model_path.as_deref() {
+                Some(path) => format!(
+                    "[meeting.diarization] model_path points to {}, which does not exist.",
+                    path
+                ),
+                None => format!(
+                    "Download it with: {}",
+                    crate::setup::model::ecapa_download_command()
+                ),
+            };
+            return Err(format!("the ML diarization model is missing. {}", fix));
         }
         if let Err(e) = diarizer.load_model() {
-            tracing::warn!("Failed to load ML diarization model: {}", e);
-            tracing::info!("Falling back to simple diarization");
-            return None;
+            return Err(format!(
+                "the ML diarization model failed to load ({}). Delete it and download it \
+                 again with: {}",
+                e,
+                crate::setup::model::ecapa_download_command()
+            ));
         }
-        Some(Box::new(diarizer))
+        Ok(Box::new(diarizer))
     }
     #[cfg(not(feature = "ml-diarization"))]
     {
         let _ = config;
-        tracing::warn!(
-            "ML diarization requires the 'ml-diarization' feature, falling back to simple"
-        );
-        None
+        Err(
+            "this voxtype binary was built without ML diarization. Install an ONNX build \
+             (voxtype-onnx-*) or set [meeting.diarization] backend = \"simple\"."
+                .to_string(),
+        )
     }
 }
 
@@ -284,7 +309,7 @@ mod tests {
                 backend: backend.to_string(),
                 ..Default::default()
             };
-            assert_eq!(create_diarizer(&config).name(), "simple", "{backend}");
+            assert_eq!(create_diarizer(&config).0.name(), "simple", "{backend}");
         }
     }
 
@@ -331,6 +356,47 @@ mod tests {
             SpeakerId::Named("Alice".to_string()).display_name(),
             "Alice"
         );
+    }
+
+    fn config_with_backend(backend: &str) -> DiarizationConfig {
+        DiarizationConfig {
+            backend: backend.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn simple_backend_has_no_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("simple"));
+        assert_eq!(diarizer.name(), "simple");
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn unknown_backend_falls_back_with_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("bogus"));
+        assert_eq!(diarizer.name(), "simple");
+        let notice = notice.expect("fallback must be explained");
+        assert!(notice.contains("'bogus'"));
+        assert!(notice.contains("backend"));
+    }
+
+    #[cfg(not(feature = "ml-diarization"))]
+    #[test]
+    fn ml_backend_without_feature_falls_back_with_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("ml"));
+        assert_eq!(diarizer.name(), "simple");
+        assert!(notice.unwrap().contains("voxtype-onnx"));
+    }
+
+    #[cfg(not(feature = "ml-diarization"))]
+    #[test]
+    fn hybrid_backend_without_feature_falls_back_with_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("hybrid"));
+        assert_eq!(diarizer.name(), "simple");
+        let notice = notice.expect("fallback must be explained");
+        assert!(notice.contains("You and Remote"));
+        assert!(notice.contains("voxtype-onnx"));
     }
 
     #[test]

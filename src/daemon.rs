@@ -1236,6 +1236,10 @@ pub struct Daemon {
     meeting_announce_task: Option<tokio::task::JoinHandle<meeting::announce::Status>>,
     // When the meeting's capture started: zero on its transcript timeline
     meeting_capture_started: Option<std::time::Instant>,
+    // Missing-model notices already shown this run, so each pops up once
+    meeting_notices_shown: std::collections::HashSet<String>,
+    // Whether this meeting's first transcription error was already notified
+    meeting_error_notified: bool,
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
@@ -1431,6 +1435,8 @@ impl Daemon {
             meeting_announce_rx: None,
             meeting_announce_task: None,
             meeting_capture_started: None,
+            meeting_notices_shown: std::collections::HashSet::new(),
+            meeting_error_notified: false,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
             meeting_gtcrn: false,
@@ -3302,6 +3308,19 @@ impl Daemon {
         let resident = self.resident_transcriber_for(&meeting_app_config);
         match MeetingDaemon::new(meeting_config, &meeting_app_config, tx, resident) {
             Ok(mut daemon) => {
+                // What this meeting will be missing, told to the user in one
+                // notification once it is recording.
+                let mut notices: Vec<String> = Vec::new();
+                if let Some(notice) = daemon.diarization_notice() {
+                    if self.meeting_notices_shown.insert(notice.to_string()) {
+                        notices.push(notice.to_string());
+                    }
+                }
+                // Every meeting, not once: each one loses the remote side of
+                // the conversation.
+                if let Some(issue) = capture.loopback_issue() {
+                    notices.push(issue.message());
+                }
                 match daemon.start(title, options.url).await {
                     Ok(meeting_id) => {
                         let id_str = meeting_id.to_string();
@@ -3335,7 +3354,10 @@ impl Daemon {
                         }
                         self.meeting_audio_capture = Some(capture);
 
-                        let used = self.meeting_echo_path_in_use(echo_path);
+                        let (used, echo_notice) = self.meeting_echo_path_in_use(echo_path);
+                        if let Some(notice) = echo_notice {
+                            notices.push(notice);
+                        }
                         self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
                         self.meeting_aec_liveness = liveness;
                         self.meeting_echo_canceller = echo_canceller.take();
@@ -3349,6 +3371,7 @@ impl Daemon {
                         self.meeting_daemon = Some(daemon);
                         self.meeting_mic_buffer.clear();
                         self.meeting_loopback_buffer.clear();
+                        self.meeting_error_notified = false;
 
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
@@ -3360,15 +3383,31 @@ impl Daemon {
                             self.start_announcement(clip);
                         }
 
-                        let title = meeting::status_notice::display_title(
-                            self.meeting_hud.title.as_deref(),
-                            self.meeting_hud.started_at,
-                        );
-                        self.meeting_status_notice(
-                            meeting::status_notice::MeetingNotice::Started { title },
-                            self.config.output.notification.on_recording_start,
-                        )
-                        .await;
+                        // Degradations replace the usual "started" notice
+                        // and are shown whatever on_recording_start or a
+                        // visible meeting view says: the user has to act on
+                        // them.
+                        if !notices.is_empty() {
+                            send_notification_with_lifetime(
+                                "Meeting started with limitations",
+                                &notices.join("\n\n"),
+                                false,
+                                self.config.engine,
+                                "normal",
+                                Lifetime::Millis(15000),
+                            )
+                            .await;
+                        } else {
+                            let title = meeting::status_notice::display_title(
+                                self.meeting_hud.title.as_deref(),
+                                self.meeting_hud.started_at,
+                            );
+                            self.meeting_status_notice(
+                                meeting::status_notice::MeetingNotice::Started { title },
+                                self.config.output.notification.on_recording_start,
+                            )
+                            .await;
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Failed to start meeting: {}", e);
@@ -4028,6 +4067,28 @@ impl Daemon {
         changed
     }
 
+    /// Tell the user a meeting is losing transcript, once per meeting: a
+    /// broken engine fails every chunk, and one notification per chunk would
+    /// bury the desktop. The log keeps every occurrence.
+    async fn notify_meeting_error(&mut self, error: &str) {
+        if std::mem::replace(&mut self.meeting_error_notified, true) {
+            return;
+        }
+        send_notification_with_lifetime(
+            "Meeting transcription failed",
+            &format!(
+                "{}\n\nThe meeting is still recording, but this part is missing from the \
+                 transcript. Later errors are only logged: journalctl --user -u voxtype",
+                error
+            ),
+            false,
+            self.config.engine,
+            "critical",
+            Lifetime::Millis(15000),
+        )
+        .await;
+    }
+
     /// Check if a meeting is in progress
     fn meeting_active(&self) -> bool {
         self.meeting_daemon
@@ -4037,10 +4098,16 @@ impl Daemon {
 
     /// The echo handling a meeting gets for `path`, loading GTCRN when it
     /// is the one: none if its model is missing or this build lacks it.
+    /// The second value says why GTCRN is off, the first time it is.
     fn meeting_echo_path_in_use(
         &mut self,
         path: audio::echo_cancel::EchoPath,
-    ) -> audio::echo_cancel::EchoPath {
+    ) -> (audio::echo_cancel::EchoPath, Option<String>) {
+        // Why GTCRN was wanted but is off, once per daemon run: the model
+        // stays missing until the user fetches it.
+        #[cfg_attr(not(feature = "onnx-common"), allow(unused_mut))]
+        let mut notice: Option<String> = None;
+
         // Load GTCRN speech enhancer for echo cancellation
         #[cfg(feature = "onnx-common")]
         if self.speech_enhancer.is_none() && path == audio::echo_cancel::EchoPath::Gtcrn {
@@ -4055,15 +4122,27 @@ impl Daemon {
                     }
                     Err(e) => {
                         tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                        notice = Some(format!(
+                            "Echo cancellation is off: the GTCRN model failed to load ({}). \
+                             Delete it and download it again with: {}",
+                            e,
+                            crate::setup::model::gtcrn_download_command()
+                        ));
                     }
                 }
             } else {
-                tracing::debug!(
+                tracing::warn!(
                     "GTCRN model not found at {:?}, skipping speech enhancement",
                     model_path
                 );
+                notice = Some(format!(
+                    "Echo cancellation is off: the GTCRN model is missing. Download it \
+                     with: {} (or set [meeting.audio] echo_cancel = \"disabled\")",
+                    crate::setup::model::gtcrn_download_command()
+                ));
             }
         }
+        let notice = notice.filter(|n| self.meeting_notices_shown.insert(n.clone()));
 
         // What the meeting really uses: GTCRN only if its
         // model loaded (and this build has it).
@@ -4071,7 +4150,7 @@ impl Daemon {
         let gtcrn_loaded = self.speech_enhancer.is_some();
         #[cfg(not(feature = "onnx-common"))]
         let gtcrn_loaded = false;
-        path.effective(gtcrn_loaded)
+        (path.effective(gtcrn_loaded), notice)
     }
 
     /// The echo canceller has delivered only digital silence since the
@@ -4099,7 +4178,19 @@ impl Daemon {
         };
         self.meeting_mic_buffer.extend(rest.mic);
         self.meeting_loopback_buffer.extend(rest.loopback);
-        let used = self.meeting_echo_path_in_use(audio::echo_cancel::EchoPath::Gtcrn);
+        let (used, echo_notice) =
+            self.meeting_echo_path_in_use(audio::echo_cancel::EchoPath::Gtcrn);
+        if let Some(notice) = echo_notice {
+            send_notification_with_lifetime(
+                "Meeting continues with limitations",
+                &notice,
+                false,
+                self.config.engine,
+                "normal",
+                Lifetime::Millis(15000),
+            )
+            .await;
+        }
         self.meeting_gtcrn = used == audio::echo_cancel::EchoPath::Gtcrn;
         tracing::info!("Meeting echo handling: {}", used.as_str());
         if let Some(ref mut daemon) = self.meeting_daemon {
@@ -4143,8 +4234,12 @@ impl Daemon {
             }
         }
 
-        if let Some(ref mut daemon) = self.meeting_daemon {
-            daemon.process_pair(mic_chunk, loopback_chunk).await;
+        let chunk_error = match self.meeting_daemon {
+            Some(ref mut daemon) => daemon.process_pair(mic_chunk, loopback_chunk).await,
+            None => None,
+        };
+        if let Some(error) = chunk_error {
+            self.notify_meeting_error(&error).await;
         }
     }
 
@@ -6497,6 +6592,7 @@ impl Daemon {
                             if let Some(ref hub) = self.meeting_event_hub {
                                 hub.publish_error(&msg);
                             }
+                            self.notify_meeting_error(&msg).await;
                         }
                         None => {
                             // Channel closed
