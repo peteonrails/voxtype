@@ -209,6 +209,10 @@ pub struct MeetingDaemon {
     /// When the recording announcement played, to keep it out of the
     /// transcript
     announcement: Option<announce::Window>,
+    /// Watches each track for sound that puts no lines in the transcript
+    silent_tracks: silent_track::Monitor,
+    /// What the watch found since the caller last asked
+    track_changes: Vec<silent_track::Change>,
 }
 
 /// Who the title names as the user, when titles name speakers at all:
@@ -310,6 +314,8 @@ impl MeetingDaemon {
             me,
             title_labels: None,
             announcement: None,
+            silent_tracks: silent_track::Monitor::default(),
+            track_changes: Vec::new(),
         })
     }
 
@@ -345,6 +351,8 @@ impl MeetingDaemon {
             me: None,
             title_labels: None,
             announcement: None,
+            silent_tracks: silent_track::Monitor::default(),
+            track_changes: Vec::new(),
         }
     }
 
@@ -426,6 +434,8 @@ impl MeetingDaemon {
         self.state = MeetingState::start();
         self.next_segment_id = 0;
         self.own_voice_ids.clear();
+        self.silent_tracks = silent_track::Monitor::new(self.config.vad_threshold);
+        self.track_changes.clear();
 
         let _ = self
             .event_tx
@@ -664,6 +674,25 @@ impl MeetingDaemon {
             )
             .under_canceller(self.echo_cancelled)
         });
+        // What the speech check is about to see of each track, so a side
+        // that has sound but never passes it does not go missing unnoticed.
+        let readings = self.state.is_active().then(|| {
+            let read = |samples: &[f32], call: Option<&[f32]>| {
+                silent_track::read_chunk(
+                    samples,
+                    call,
+                    ChunkConfig::default().sample_rate,
+                    self.config.vad_threshold,
+                )
+            };
+            [
+                (
+                    AudioSource::Microphone,
+                    read(&mic, Some(loopback.as_slice()).filter(|l| !l.is_empty())),
+                ),
+                (AudioSource::Loopback, read(&loopback, None)),
+            ]
+        });
         let mut done = Vec::new();
         let mut first_error: Option<String> = None;
         for (samples, source) in [
@@ -798,11 +827,68 @@ impl MeetingDaemon {
             }
         }
 
+        for (source, reading) in readings.into_iter().flatten() {
+            let Some(reading) = reading else {
+                continue;
+            };
+            let lines = done
+                .iter()
+                .flat_map(|(_, segments)| segments)
+                .any(|s| s.source == source);
+            self.watch_track(source, reading, lines);
+        }
+
         self.persist_transcript();
         for (chunk_id, segments) in done {
             self.emit_chunk(chunk_id, segments).await;
         }
         first_error
+    }
+
+    /// Note what one chunk of a track showed, and log it when the track
+    /// turns out to have sound but no lines, or gets its lines back.
+    fn watch_track(
+        &mut self,
+        source: AudioSource,
+        reading: silent_track::ChunkReading,
+        lines: bool,
+    ) {
+        let Some(change) = self.silent_tracks.observe(source, reading, lines) else {
+            return;
+        };
+        match &change {
+            silent_track::Change::Raised { track, .. } => tracing::warn!(
+                track = ?track.track,
+                level = track.level,
+                noise = reading.noise,
+                vad_threshold = track.threshold,
+                suggested_threshold = %track.suggested_threshold(),
+                "Meeting track is not being transcribed: {}",
+                track.summary()
+            ),
+            silent_track::Change::Cleared(track) => {
+                tracing::info!(?track, "Meeting track is being transcribed again")
+            }
+        }
+        self.track_changes.push(change);
+    }
+
+    /// What the watch for tracks with sound and no lines found since the
+    /// last call, for the caller to tell the user. Not sent from here: a
+    /// chunk is being transcribed.
+    pub fn take_track_changes(&mut self) -> Vec<silent_track::Change> {
+        std::mem::take(&mut self.track_changes)
+    }
+
+    /// The tracks that have sound and no lines right now.
+    pub fn silent_tracks(&self) -> Vec<silent_track::SilentTrack> {
+        self.silent_tracks.active()
+    }
+
+    /// Whether the running meeting's audio is being kept, so `meeting
+    /// retranscribe` can make up for lines it missed.
+    pub fn keeps_audio(&self) -> bool {
+        self.audio.is_some()
     }
 
     /// Rename a speaker in the segments already transcribed, carry over any
@@ -3587,6 +3673,176 @@ mod tests {
         h.daemon.assistant = Some(settings);
         let id = h.daemon.stop().await.unwrap();
         assert!(h.daemon.auto_summary(id).is_none());
+    }
+
+    /// The incident's microphone: a room at 0.002 and two sentences whose
+    /// loudest 30 ms is 0.06 RMS, said while the call is quiet.
+    fn incident_mic(seed: u32) -> Vec<f32> {
+        silent_track::testing::track(30.0, 0.002, &[(3.0, 6.0, 0.06), (15.0, 18.0, 0.06)], seed)
+    }
+
+    /// The call at a normal level, speaking between the user's sentences.
+    fn loud_call(seed: u32) -> Vec<f32> {
+        silent_track::testing::track(30.0, 0.0, &[(8.0, 12.0, 0.3), (20.0, 25.0, 0.3)], seed)
+    }
+
+    fn speakers(h: &Harness) -> Vec<String> {
+        h.saved()
+            .transcript
+            .segments
+            .iter()
+            .map(|s| s.speaker_display())
+            .collect()
+    }
+
+    /// `vad_threshold = 0.11` against speech at 0.06: every microphone
+    /// chunk fails the speech check and the user's side is missing. The
+    /// meeting says so on the third such chunk, once.
+    #[tokio::test]
+    async fn a_microphone_under_the_threshold_is_raised_once_with_its_numbers() {
+        let mut h = harness_with(|c| c.vad_threshold = 0.11).await;
+        let mut raised = Vec::new();
+        for chunk in 0..8 {
+            h.daemon
+                .process_pair(incident_mic(chunk), loud_call(100 + chunk))
+                .await;
+            for change in h.daemon.take_track_changes() {
+                raised.push((chunk, change));
+            }
+            while h.events.try_recv().is_ok() {}
+        }
+
+        let lines = speakers(&h);
+        assert_eq!(lines.len(), 16, "two lines from the call per chunk");
+        assert!(
+            lines.iter().all(|speaker| speaker == "Remote"),
+            "nothing from the microphone: {lines:?}"
+        );
+
+        let [(
+            2,
+            silent_track::Change::Raised {
+                track,
+                announce: true,
+            },
+        )] = raised.as_slice()
+        else {
+            panic!("one notice, on the third chunk: {raised:?}");
+        };
+        assert_eq!(track.track, AudioSource::Microphone);
+        assert_eq!(track.threshold, 0.11);
+        assert!(
+            (0.05..=0.062).contains(&track.level),
+            "the level of the speech: {}",
+            track.level
+        );
+        assert_eq!(h.daemon.silent_tracks(), std::slice::from_ref(track));
+        assert!(!h.daemon.keeps_audio());
+        let (_, body) = track.notification(h.daemon.keeps_audio(), None);
+        assert!(
+            body.contains("voxtype config set meeting.audio.vad_threshold 0.01"),
+            "{body}"
+        );
+    }
+
+    /// The fix the notice gives works: the same audio at the default
+    /// threshold puts the user's lines in the transcript and raises nothing.
+    #[tokio::test]
+    async fn the_same_microphone_at_the_default_threshold_is_transcribed() {
+        let mut h = harness().await;
+        for chunk in 0..4 {
+            h.daemon
+                .process_pair(incident_mic(chunk), loud_call(100 + chunk))
+                .await;
+            assert_eq!(h.daemon.take_track_changes(), []);
+            while h.events.try_recv().is_ok() {}
+        }
+        let lines = speakers(&h);
+        assert_eq!(lines.iter().filter(|s| *s == "You").count(), 8, "{lines:?}");
+        assert_eq!(h.daemon.silent_tracks(), []);
+    }
+
+    /// Someone who only listens, on speakers: the microphone holds the room
+    /// and the call's echo, under the threshold. That is not their voice.
+    #[tokio::test]
+    async fn a_listener_whose_microphone_hears_the_call_is_not_raised() {
+        let mut h = harness_with(|c| c.vad_threshold = 0.11).await;
+        for chunk in 0..10 {
+            let call = loud_call(100 + chunk);
+            let mut mic = silent_track::testing::track(30.0, 0.002, &[], chunk);
+            let delay = 16000 * 60 / 1000;
+            for i in delay..mic.len() {
+                mic[i] += call[i - delay] / 5.0;
+            }
+            h.daemon.process_pair(mic, call).await;
+            assert_eq!(h.daemon.take_track_changes(), [], "chunk {chunk}");
+            while h.events.try_recv().is_ok() {}
+        }
+        assert_eq!(h.daemon.silent_tracks(), []);
+    }
+
+    /// Both sides under the threshold: one notice each, however long the
+    /// meeting runs, and a new meeting starts over.
+    #[tokio::test]
+    async fn each_track_is_raised_once_per_meeting() {
+        let mut h = harness_with(|c| c.vad_threshold = 0.11).await;
+        let quiet_call =
+            |seed| silent_track::testing::track(30.0, 0.0005, &[(8.0, 12.0, 0.05)], seed);
+        for meeting in 0..2 {
+            let mut announced = Vec::new();
+            for chunk in 0..12 {
+                h.daemon
+                    .process_pair(incident_mic(chunk), quiet_call(100 + chunk))
+                    .await;
+                for change in h.daemon.take_track_changes() {
+                    match change {
+                        silent_track::Change::Raised {
+                            track,
+                            announce: true,
+                        } => announced.push((chunk, track.track)),
+                        other => panic!("meeting {meeting}: {other:?}"),
+                    }
+                }
+                while h.events.try_recv().is_ok() {}
+            }
+            assert_eq!(
+                announced,
+                [(2, AudioSource::Microphone), (2, AudioSource::Loopback)],
+                "meeting {meeting}"
+            );
+            assert_eq!(h.daemon.silent_tracks().len(), 2);
+            assert!(h.saved().transcript.segments.is_empty());
+
+            h.daemon.stop().await.unwrap();
+            h.daemon
+                .start(Some("Next".to_string()), None)
+                .await
+                .unwrap();
+            assert_eq!(h.daemon.silent_tracks(), [], "a new meeting starts clean");
+        }
+    }
+
+    /// The user leans in and is heard: the condition clears with their
+    /// first line.
+    #[tokio::test]
+    async fn a_raised_microphone_clears_when_its_lines_arrive() {
+        let mut h = harness_with(|c| c.vad_threshold = 0.11).await;
+        for chunk in 0..3 {
+            h.daemon
+                .process_pair(incident_mic(chunk), loud_call(100 + chunk))
+                .await;
+        }
+        assert_eq!(h.daemon.take_track_changes().len(), 1);
+        assert_eq!(h.daemon.silent_tracks().len(), 1);
+
+        let loud_mic = silent_track::testing::track(30.0, 0.002, &[(3.0, 6.0, 0.3)], 9);
+        h.daemon.process_pair(loud_mic, loud_call(109)).await;
+        assert_eq!(
+            h.daemon.take_track_changes(),
+            [silent_track::Change::Cleared(AudioSource::Microphone)]
+        );
+        assert_eq!(h.daemon.silent_tracks(), []);
+        assert!(speakers(&h).contains(&"You".to_string()));
     }
 
     #[test]
