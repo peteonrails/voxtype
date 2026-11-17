@@ -1403,9 +1403,9 @@ sudo cp build/bin/whisper-cli /usr/local/bin/
 
 ## [streaming]
 
-Tuning for the sliding-window streaming engine (`transcribe::sliding_window`): a rolling audio buffer is re-transcribed on an interval and stable-prefix deltas are emitted as you speak. Shared by every engine that wraps itself in this engine — currently `[whisper] streaming` and `[openvino] streaming` — so it's configured once here instead of once per engine. It has nothing to do with Parakeet's own cache-aware streaming pipeline (`[parakeet] streaming`) or Soniox's cloud WebSocket streaming (`[soniox] streaming`), which are different mechanisms that happen to share the word "streaming".
+Tuning for the sliding-window streaming engine (`transcribe::sliding_window`): a rolling audio buffer is re-transcribed on an interval and stable-prefix deltas are emitted as you speak. These values apply only to `[whisper] streaming` and `[openvino] streaming`.
 
-This section is entirely optional. Omitting it (or omitting individual fields inside it) falls back to each engine's own deprecated `streaming_*` fields — see the compatibility note at the end of this section.
+This section is entirely optional. Omitting it falls back to each engine's own deprecated `streaming_*` tuning fields.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -1440,6 +1440,24 @@ Before this section existed, `[whisper]` and `[openvino]` each carried their own
 - The first time an old per-engine field is actually carrying a non-default value and gets used as a fallback, the daemon logs a one-time warning suggesting the migration. An old config that never touched these fields sees no warning and no behavior change.
 
 There's no need to migrate an existing config that already works the way you want — the old fields aren't going away.
+
+## [streaming_recovery]
+
+Controls recovery for every streaming backend, including Parakeet and Soniox. When a backend errors, ends without text, or exceeds the stop deadline, Voxtype uses the audio retained by the capture and the configured batch backend to deliver the dictation through the normal output path.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | Boolean | `true` | Recover retained audio with the configured batch backend when streaming ends without delivering text |
+| `stop_timeout_secs` | Integer | `10` | Wait this many seconds after microphone stop for the streaming backend to finish, then tear it down and recover the dictation. Range: `1`–`120` |
+
+`VOXTYPE_STREAMING_RECOVERY` and `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` set these values for one process. The matching CLI flags are `--streaming-recovery=false` and `--streaming-stop-timeout-secs 10`.
+
+```toml
+[streaming_recovery]
+enabled = true
+stop_timeout_secs = 10
+```
+
 
 ---
 
@@ -4141,6 +4159,14 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
+
+**Streaming recovery:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_STREAMING_RECOVERY` | bool | `streaming_recovery.enabled` |
+| `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` | integer (1-120) | `streaming_recovery.stop_timeout_secs` |
+
 
 **Audio:**
 

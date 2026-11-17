@@ -1,4 +1,4 @@
-//! Shared sliding-window streaming tuning config.
+//! Shared `[streaming]` tuning and `[streaming_recovery]` safety config.
 //!
 //! `transcribe::sliding_window::SlidingWindowStreamingTranscriber` wraps any
 //! batch `Transcriber` (whisper.cpp, OpenVINO GenAI, …) to add live
@@ -17,6 +17,9 @@
 //! `streaming_*`). Those per-engine fields are kept — unchanged, still
 //! read straight out of `config.toml` — purely as a fallback for old
 //! configs; see [`StreamingConfig::resolve`].
+//!
+//! Streaming recovery is configured separately so a user can opt out or tune
+//! its deadline without changing the legacy tuning precedence.
 
 use serde::{Deserialize, Serialize};
 
@@ -69,18 +72,33 @@ impl Default for StreamingConfig {
     }
 }
 
+/// Recovery settings shared by every streaming backend.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StreamingRecoveryConfig {
+    /// Recover a dictation with the configured batch transcriber when a
+    /// streaming backend ends before delivering text.
+    pub enabled: bool,
+
+    /// Maximum number of seconds to wait for a streaming backend after the
+    /// microphone stops before tearing it down and recovering the dictation.
+    pub stop_timeout_secs: u64,
+}
+
+impl Default for StreamingRecoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stop_timeout_secs: 10,
+        }
+    }
+}
+
 impl StreamingConfig {
     /// Resolve the effective sliding-window tuning knobs for one engine.
     ///
-    /// The shared `[streaming]` section (`shared`) wins outright when
-    /// present in config.toml. Otherwise, fall back to `legacy` — that
-    /// engine's own deprecated per-field copies (`[whisper]
-    /// streaming_interval_secs`, etc.), which used to be the only place
-    /// these settings lived. A one-time warning is logged the first time
-    /// the fallback is actually carrying a customization (i.e. `legacy`
-    /// isn't just the defaults again), so a user who genuinely relies on
-    /// the old fields is told to migrate; a user who never touched them
-    /// gets identical behavior either way and no noise.
+    /// The shared `[streaming]` section wins when present; otherwise use the
+    /// engine's legacy tuning fields.
     pub fn resolve(
         shared: Option<&StreamingConfig>,
         legacy: StreamingConfig,
@@ -132,6 +150,23 @@ mod tests {
         };
         let resolved = StreamingConfig::resolve(None, legacy, "whisper");
         assert_eq!(resolved, legacy);
+    }
+
+    #[test]
+    fn recovery_defaults_enable_fallback_and_bound_stop() {
+        let serialized = toml::to_string(&StreamingRecoveryConfig::default()).unwrap();
+        assert!(serialized.contains("enabled = true"));
+        assert!(serialized.contains("stop_timeout_secs = 10"));
+    }
+
+    #[test]
+    fn recovery_config_does_not_change_streaming_tuning_precedence() {
+        let config: crate::config::Config =
+            toml::from_str("[streaming_recovery]\nenabled = false\nstop_timeout_secs = 15\n")
+                .unwrap();
+        assert!(config.streaming.is_none());
+        assert_eq!(config.streaming_recovery.unwrap().stop_timeout_secs, 15);
+        assert!(!config.streaming_recovery.unwrap().enabled);
     }
 
     #[test]

@@ -46,7 +46,7 @@ pub use output::{
 pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
 pub use root::{Config, OmarchyConfig, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
-pub use streaming::StreamingConfig;
+pub use streaming::{StreamingConfig, StreamingRecoveryConfig};
 pub use text::TextConfig;
 pub use vad::{VadBackend, VadConfig};
 pub use whisper::{WhisperConfig, WhisperMode};

@@ -197,6 +197,14 @@ translate = false
 # own -l setting (default "en"); enable this so "auto" is sent explicitly.
 # remote_send_auto_language = true
 
+# --- Streaming recovery ---
+#
+# Applies to every streaming backend. If a backend errors or never finishes
+# after stop, Voxtype transcribes the capture with the configured batch backend.
+# [streaming_recovery]
+# enabled = true
+# stop_timeout_secs = 10
+
 [output]
 # Primary output mode: "type" or "clipboard"
 # - type: Simulates keyboard input at cursor position (requires ydotool)

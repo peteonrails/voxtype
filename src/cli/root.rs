@@ -99,6 +99,29 @@ pub struct Cli {
     )]
     pub engine: Option<String>,
 
+    /// Recover lost streaming dictation with the configured batch backend
+    /// (enabled by default). Use --streaming-recovery=false to disable.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        help_heading = "Streaming",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub streaming_recovery: Option<bool>,
+
+    /// Maximum seconds (1-120, built-in default 10) to wait for a streaming
+    /// backend to finish after stop before recovering the dictation.
+    #[arg(
+        long,
+        value_name = "SECS",
+        help_heading = "Streaming",
+        hide_short_help = true,
+        value_parser = clap::value_parser!(u64).range(1..=120)
+    )]
+    pub streaming_stop_timeout_secs: Option<u64>,
+
     /// GGUF checkpoint path for the shared native engine
     #[arg(
         long,
@@ -807,6 +830,39 @@ mod tests {
                 assert_eq!(engine, Some("whisper".to_string()));
             }
             _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn streaming_recovery_flags_parse() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--streaming-recovery=false",
+            "--streaming-stop-timeout-secs",
+            "10",
+        ]);
+        assert_eq!(cli.streaming_recovery, Some(false));
+        assert_eq!(cli.streaming_stop_timeout_secs, Some(10));
+
+        let cli = Cli::parse_from(["voxtype", "--streaming-recovery"]);
+        assert_eq!(cli.streaming_recovery, Some(true));
+        assert_eq!(cli.streaming_stop_timeout_secs, None);
+
+        let cli = Cli::parse_from(["voxtype"]);
+        assert_eq!(cli.streaming_recovery, None);
+    }
+
+    #[test]
+    fn streaming_stop_timeout_matches_config_range() {
+        for value in ["1", "120"] {
+            let cli = Cli::parse_from(["voxtype", "--streaming-stop-timeout-secs", value]);
+            assert_eq!(cli.streaming_stop_timeout_secs, value.parse().ok());
+        }
+        for value in ["0", "121"] {
+            assert!(
+                Cli::try_parse_from(["voxtype", "--streaming-stop-timeout-secs", value]).is_err(),
+                "--streaming-stop-timeout-secs {value} was accepted"
+            );
         }
     }
 }

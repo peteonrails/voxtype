@@ -424,12 +424,9 @@ pub fn create_whisper_transcriber(
     create_transcriber_with_config_path(config, None)
 }
 
-/// Build the sliding-window engine config for the active backend.
-///
-/// The shared `[streaming]` section (`config.streaming`) wins when present;
-/// otherwise `legacy` — that engine's own deprecated `streaming_*` fields —
-/// is used, preserving the exact behavior of an old config.toml that never
-/// had a `[streaming]` section. See `StreamingConfig::resolve`.
+/// Build the sliding-window engine config from the shared `[streaming]`
+/// tuning, falling back to the active engine's deprecated `streaming_*`
+/// fields. See `StreamingConfig::resolve`.
 fn sliding_window_config(
     config: &Config,
     legacy: StreamingConfig,

@@ -2,7 +2,8 @@ use super::{
     AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
     MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
     ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
-    StreamingConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine, VadConfig,
+    WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -80,6 +81,11 @@ pub struct Config {
     /// `streaming_*` fields — see `StreamingConfig::resolve`.
     #[serde(default)]
     pub streaming: Option<StreamingConfig>,
+
+    /// Recovery settings for every streaming backend. Separate from
+    /// `[streaming]` so changing recovery cannot override legacy tuning.
+    #[serde(default)]
+    pub streaming_recovery: Option<StreamingRecoveryConfig>,
 
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
@@ -185,6 +191,7 @@ impl Default for Config {
             openvino: None,
             soniox: None,
             streaming: None,
+            streaming_recovery: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),

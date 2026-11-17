@@ -60,6 +60,18 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(enabled) = cli.omarchy_link_settings_plugin {
         config.omarchy.link_settings_plugin = enabled;
     }
+    if let Some(enabled) = cli.streaming_recovery {
+        config
+            .streaming_recovery
+            .get_or_insert_with(Default::default)
+            .enabled = enabled;
+    }
+    if let Some(timeout_secs) = cli.streaming_stop_timeout_secs {
+        config
+            .streaming_recovery
+            .get_or_insert_with(Default::default)
+            .stop_timeout_secs = timeout_secs;
+    }
 
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;

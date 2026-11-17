@@ -2180,6 +2180,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Experimental: type the best guess at once and correct it later with backspace.",
     ),
     spec(
+        "streaming_recovery.enabled",
+        "streaming_recovery",
+        "enabled",
+        KeyType::Bool,
+        "Advanced",
+        "Recover interrupted dictation",
+        "Use the configured batch backend to recover audio when any streaming backend ends without text.",
+    ),
+    spec(
+        "streaming_recovery.stop_timeout_secs",
+        "streaming_recovery",
+        "stop_timeout_secs",
+        KeyType::Int { min: 1, max: 120 },
+        "Advanced",
+        "Streaming stop timeout",
+        "Seconds to wait after stopping the microphone before recovering a streaming dictation.",
+    ),
+    spec(
         "meeting.chunk_duration_secs",
         "meeting",
         "chunk_duration_secs",
@@ -2978,6 +2996,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }
         "streaming.type_partials" => json!(cfg.streaming.unwrap_or_default().type_partials),
         "streaming.revision_mode" => json!(cfg.streaming.unwrap_or_default().revision_mode),
+        "streaming_recovery.enabled" => {
+            json!(cfg.streaming_recovery.unwrap_or_default().enabled)
+        }
+        "streaming_recovery.stop_timeout_secs" => {
+            json!(cfg.streaming_recovery.unwrap_or_default().stop_timeout_secs)
+        }
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
@@ -3763,7 +3787,9 @@ mod tests {
         .iter()
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
         .collect();
-        src.push_str("[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
+        src.push_str(
+            "[streaming]\n[streaming_recovery]\n[output.post_process]\ncommand = \"cat\"\n",
+        );
         let cfg: Config = toml::from_str(&src).expect("materialized config parses");
 
         let mut leaves = Vec::new();
