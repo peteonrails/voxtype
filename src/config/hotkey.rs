@@ -57,6 +57,12 @@ pub struct HotkeyConfig {
     /// Example: { "LEFTSHIFT" = "translate" } activates [profiles.translate] when Shift is held
     #[serde(default)]
     pub profile_modifiers: HashMap<String, String>,
+
+    /// Double-tap the hotkey to keep recording without holding it
+    /// (push_to_talk only). The recording then runs until the next press.
+    /// A single short tap is discarded instead of transcribed.
+    #[serde(default)]
+    pub double_tap_latch: bool,
 }
 
 impl Default for HotkeyConfig {
@@ -69,6 +75,7 @@ impl Default for HotkeyConfig {
             cancel_key: None,
             model_modifier: None,
             profile_modifiers: HashMap::new(),
+            double_tap_latch: false,
         }
     }
 }
