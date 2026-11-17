@@ -567,14 +567,19 @@ impl MeetingEventHub {
         });
     }
 
-    /// Broadcast an `error` event for a track of the running meeting that
-    /// has sound and no lines, with `code`
+    /// Broadcast an `error` event for the tracks of the running meeting
+    /// found to have sound and no lines, with `code`
     /// [`EVENT_CODE`](crate::meeting::silent_track::EVENT_CODE). It names
     /// no meeting, so the views show it in their banner like any other
-    /// error of the meeting being recorded.
-    pub fn publish_track_notice(&self, track: &crate::meeting::silent_track::SilentTrack) {
+    /// error of the meeting being recorded. One event for both sides: the
+    /// banner holds one message.
+    pub fn publish_track_notice(&self, tracks: &[crate::meeting::silent_track::SilentTrack]) {
+        if tracks.is_empty() {
+            return;
+        }
+        let message: Vec<String> = tracks.iter().map(|track| track.summary()).collect();
         self.publish(WireEvent::Error {
-            message: track.summary(),
+            message: message.join(" "),
             meeting_id: None,
             code: Some(crate::meeting::silent_track::EVENT_CODE.to_string()),
             backend: None,
@@ -1115,7 +1120,7 @@ mod tests {
             level: 0.052,
             threshold: 0.11,
         };
-        hub.publish_track_notice(&track);
+        hub.publish_track_notice(std::slice::from_ref(&track));
 
         let value = read_line(&mut client).await;
         assert_eq!(value["event"], "error");

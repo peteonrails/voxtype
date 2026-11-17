@@ -41,6 +41,9 @@ use super::status_notice::StatusMode;
 /// The notification's title, and the heading of its troubleshooting entry.
 pub const TITLE: &str = "One side of the meeting is not being transcribed";
 
+/// The title when both sides are raised by the same pair of chunks.
+pub const TITLE_BOTH: &str = "Neither side of the meeting is being transcribed";
+
 /// The running meeting's untranscribed tracks, in the runtime directory,
 /// for `voxtype meeting status`.
 pub const STATUS_FILE: &str = "meeting_untranscribed_tracks.json";
@@ -249,11 +252,12 @@ impl SilentTrack {
         }
     }
 
-    fn louder(&self) -> &'static str {
+    /// What to turn up when the threshold cannot be the cause.
+    fn volume(&self) -> &'static str {
         match self.track {
-            AudioSource::Microphone => "Raise the microphone's input volume",
-            AudioSource::Loopback => "Raise the call's volume in the app that plays it",
-            AudioSource::Unknown => "Raise its volume",
+            AudioSource::Microphone => "the microphone's input volume",
+            AudioSource::Loopback => "the call's volume in the app that plays it",
+            AudioSource::Unknown => "its volume",
         }
     }
 
@@ -277,13 +281,13 @@ impl SilentTrack {
         );
         if self.at_or_below_default() {
             format!(
-                "{what}, already {} the default. {}, or run: {}",
+                "{what}, already {} the default. Raise {}, or run: {}",
                 if self.threshold < DEFAULT_VAD_THRESHOLD {
                     "below"
                 } else {
                     "at"
                 },
-                self.louder(),
+                self.volume(),
                 self.command()
             )
         } else {
@@ -291,11 +295,10 @@ impl SilentTrack {
         }
     }
 
-    /// The desktop notification: what is wrong, the numbers, the fix, and
-    /// whether this meeting's lines can be had back. `meeting` is the
-    /// meeting's ID, for the `retranscribe` command.
-    pub fn notification(&self, audio_kept: bool, meeting: Option<&str>) -> (&'static str, String) {
-        let mut body = format!(
+    /// The notification's opening: what is wrong with this side, and the
+    /// numbers.
+    fn opening(&self) -> String {
+        let mut text = format!(
             "{} has sound, but the speech check skips it, so {} reaches the transcript. \
              It reaches about {} and [meeting.audio] vad_threshold is {}",
             self.name(),
@@ -304,48 +307,45 @@ impl SilentTrack {
             self.threshold,
         );
         if self.at_or_below_default() {
-            body.push_str(&format!(
-                ", already {} the default ({DEFAULT_VAD_THRESHOLD}).\n\n\
-                 {}, or lower the threshold further:\n",
+            text.push_str(&format!(
+                ", already {} the default ({DEFAULT_VAD_THRESHOLD})",
                 if self.threshold < DEFAULT_VAD_THRESHOLD {
                     "below"
                 } else {
                     "at"
                 },
-                self.louder(),
             ));
+        }
+        text.push('.');
+        text
+    }
+
+    /// The fix, for this side and any others in `volumes` raised with it.
+    fn fix(&self, volumes: &[&str]) -> String {
+        let lead = if self.at_or_below_default() {
+            format!(
+                "Raise {}, or lower the threshold further:",
+                volumes.join(" and ")
+            )
         } else if self.too_quiet_for_default() {
-            body.push_str(&format!(
-                ".\n\nLower the threshold. This side is quiet, so go below the default \
-                 ({DEFAULT_VAD_THRESHOLD}):\n"
-            ));
+            format!(
+                "Lower the threshold. The sound is quiet, so go below the default \
+                 ({DEFAULT_VAD_THRESHOLD}):"
+            )
         } else {
-            body.push_str(&format!(
-                ".\n\nLower the threshold to the default, {DEFAULT_VAD_THRESHOLD}:\n"
-            ));
-        }
-        body.push_str(&self.command());
-        body.push_str(
-            "\nIt applies once voxtype restarts, so restart it after this meeting: \
+            format!("Lower the threshold to the default, {DEFAULT_VAD_THRESHOLD}:")
+        };
+        format!(
+            "{lead}\n{}\nIt applies once voxtype restarts, so restart it after this meeting: \
              systemctl --user restart voxtype",
-        );
-        if audio_kept {
-            // The first block of the UUID: `retranscribe` takes a unique start.
-            let id = meeting
-                .and_then(|id| id.split('-').next())
-                .filter(|id| !id.is_empty())
-                .unwrap_or("latest");
-            body.push_str(&format!(
-                "\n\nThis meeting keeps its audio. With the threshold lowered, get the \
-                 missing lines back after it ends:\nvoxtype meeting retranscribe {id}"
-            ));
-        } else {
-            body.push_str(
-                "\n\nThis meeting does not keep its audio ([meeting] retain_audio), so the \
-                 lines missed so far cannot be recovered.",
-            );
-        }
-        (TITLE, body)
+            self.command()
+        )
+    }
+
+    /// The desktop notification for this side alone: see [`notification`].
+    pub fn notification(&self, audio_kept: bool, meeting: Option<&str>) -> (&'static str, String) {
+        notification(std::slice::from_ref(self), audio_kept, meeting)
+            .expect("one track is a notification")
     }
 
     /// For `meeting status --json`: the fields, the threshold to set, and
@@ -356,6 +356,56 @@ impl SilentTrack {
         value["text"] = self.summary().into();
         value
     }
+}
+
+/// Whether the lines this meeting missed can be had back.
+fn recovery(audio_kept: bool, meeting: Option<&str>) -> String {
+    if !audio_kept {
+        return "This meeting does not keep its audio ([meeting] retain_audio), so the lines \
+                missed so far cannot be recovered."
+            .to_string();
+    }
+    // The first block of the UUID: `retranscribe` takes a unique start.
+    let id = meeting
+        .and_then(|id| id.split('-').next())
+        .filter(|id| !id.is_empty())
+        .unwrap_or("latest");
+    format!(
+        "This meeting keeps its audio. With the threshold lowered, get the missing lines \
+         back after it ends:\nvoxtype meeting retranscribe {id}"
+    )
+}
+
+/// The desktop notification for the sides raised by one pair of chunks:
+/// what is wrong with each and its numbers, one fix (the threshold the
+/// quietest of them needs), and whether this meeting's lines can be had
+/// back. `meeting` is the meeting's ID, for the `retranscribe` command.
+///
+/// One notification for both: voxtype's notifications share a slot, so a
+/// second one sent at once would replace the first unread. `None` for no
+/// tracks.
+pub fn notification(
+    tracks: &[SilentTrack],
+    audio_kept: bool,
+    meeting: Option<&str>,
+) -> Option<(&'static str, String)> {
+    let quietest = tracks.iter().min_by(|a, b| {
+        a.level
+            .partial_cmp(&b.level)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let title = if tracks.len() > 1 { TITLE_BOTH } else { TITLE };
+    let openings: Vec<String> = tracks.iter().map(SilentTrack::opening).collect();
+    let volumes: Vec<&str> = tracks.iter().map(SilentTrack::volume).collect();
+    Some((
+        title,
+        format!(
+            "{}\n\n{}\n\n{}",
+            openings.join("\n"),
+            quietest.fix(&volumes),
+            recovery(audio_kept, meeting)
+        ),
+    ))
 }
 
 /// What a chunk changed.
@@ -912,6 +962,61 @@ mod tests {
     }
 
     #[test]
+    fn both_sides_raised_together_share_one_notification() {
+        let both = [
+            SilentTrack {
+                track: MIC,
+                level: 0.052,
+                threshold: 0.5,
+            },
+            SilentTrack {
+                track: CALL,
+                level: 0.012,
+                threshold: 0.5,
+            },
+        ];
+        let (title, body) = notification(&both, true, Some("b6b2a0c4-1d2e")).unwrap();
+        assert_eq!(title, "Neither side of the meeting is being transcribed");
+        assert_eq!(
+            body,
+            "Your microphone has sound, but the speech check skips it, so nothing you say \
+             reaches the transcript. It reaches about 0.052 and [meeting.audio] vad_threshold \
+             is 0.5.\n\
+             The call has sound, but the speech check skips it, so nothing the other side says \
+             reaches the transcript. It reaches about 0.012 and [meeting.audio] vad_threshold \
+             is 0.5.\n\
+             \n\
+             Lower the threshold. The sound is quiet, so go below the default (0.01):\n\
+             voxtype config set meeting.audio.vad_threshold 0.006\n\
+             It applies once voxtype restarts, so restart it after this meeting: \
+             systemctl --user restart voxtype\n\
+             \n\
+             This meeting keeps its audio. With the threshold lowered, get the missing lines \
+             back after it ends:\n\
+             voxtype meeting retranscribe b6b2a0c4",
+            "one command, for the quieter side"
+        );
+
+        // At the default threshold: both volumes, one command.
+        let both = both.map(|track| SilentTrack {
+            level: track.level / 2.0,
+            threshold: DEFAULT_VAD_THRESHOLD,
+            ..track
+        });
+        let (_, body) = notification(&both, false, None).unwrap();
+        assert!(
+            body.contains(
+                "Raise the microphone's input volume and the call's volume in the app that \
+                 plays it, or lower the threshold further:\nvoxtype config set \
+                 meeting.audio.vad_threshold 0.003\n"
+            ),
+            "{body}"
+        );
+
+        assert_eq!(notification(&[], true, None), None);
+    }
+
+    #[test]
     fn at_the_default_threshold_it_does_not_say_to_lower_it_to_the_default() {
         let quiet_mic = SilentTrack {
             track: MIC,
@@ -966,7 +1071,7 @@ mod tests {
         let (_, body) = track.notification(false, None);
         assert!(
             body.contains(
-                "Lower the threshold. This side is quiet, so go below the default (0.01):\n\
+                "Lower the threshold. The sound is quiet, so go below the default (0.01):\n\
                  voxtype config set meeting.audio.vad_threshold 0.006\n"
             ),
             "{body}"

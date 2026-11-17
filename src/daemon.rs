@@ -4355,32 +4355,39 @@ impl Daemon {
         let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
         let mode =
             meeting::status_notice::StatusMode::parse(&self.config.meeting.status_notifications);
-        for change in changes {
-            let Change::Raised {
-                track,
-                announce: true,
-            } = change
-            else {
-                continue;
-            };
-            if let Some(ref hub) = self.meeting_event_hub {
-                hub.publish_track_notice(&track);
-            }
-            if !silent_track::notify_desktop(mode) {
-                tracing::debug!(?track, "Untranscribed track notification skipped");
-                continue;
-            }
-            let (title, body) = track.notification(audio_kept, meeting_id.as_deref());
-            send_notification_with_lifetime(
-                title,
-                &body,
-                false,
-                self.config.engine,
-                "normal",
-                Lifetime::Millis(15000),
-            )
-            .await;
+        // Both sides raised by the same pair go out together: voxtype's
+        // notifications share a slot, and the views' banner holds one error.
+        let announced: Vec<silent_track::SilentTrack> = changes
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Raised {
+                    track,
+                    announce: true,
+                } => Some(track),
+                _ => None,
+            })
+            .collect();
+        let Some((title, body)) =
+            silent_track::notification(&announced, audio_kept, meeting_id.as_deref())
+        else {
+            return;
+        };
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_track_notice(&announced);
         }
+        if !silent_track::notify_desktop(mode) {
+            tracing::debug!(?announced, "Untranscribed track notification skipped");
+            return;
+        }
+        send_notification_with_lifetime(
+            title,
+            &body,
+            false,
+            self.config.engine,
+            "normal",
+            Lifetime::Millis(15000),
+        )
+        .await;
     }
 
     /// The echo canceller has delivered only digital silence since the

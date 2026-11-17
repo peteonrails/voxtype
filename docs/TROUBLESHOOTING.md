@@ -613,7 +613,7 @@ With it off nothing is written, so a dictation whose transcription fails can't b
 
 ### One side of the meeting is not being transcribed
 
-**Symptom:** A notification with this title during a meeting, a `Not transcribed:` line in `voxtype meeting status`, or a transcript that has one side of the conversation and nothing from the other, although that side was talking.
+**Symptom:** A notification with this title during a meeting (or "Neither side of the meeting is being transcribed" when it is both), a `Not transcribed:` line in `voxtype meeting status`, or a transcript that has one side of the conversation and nothing from the other, although that side was talking.
 
 **Cause:** Each chunk of a track has to pass a speech check before it is transcribed: 300 ms of it louder than `[meeting.audio] vad_threshold` (default `0.01`). When the threshold is above the level a track reaches, every chunk of it is skipped as silence. The usual way to get there is raising `vad_threshold` to keep noise out and going past the level of your own voice. The check to see it for yourself:
 
