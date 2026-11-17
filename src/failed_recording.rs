@@ -6,6 +6,10 @@
 //! `~/.local/state/voxtype/failed-audio/`) and tells the user how to
 //! retry it with `voxtype transcribe <file>`. Only the most recent
 //! [`KEEP`] recordings are kept so the directory cannot grow without bound.
+//!
+//! A recording is the user's voice, so on Unix the directory is only
+//! accessible to the user (0700) and each file only readable by them (0600),
+//! like the undelivered transcripts in `output::fallback`.
 
 use std::path::{Path, PathBuf};
 
@@ -44,7 +48,7 @@ fn save_in(
     samples: &[f32],
     now: chrono::DateTime<chrono::Local>,
 ) -> anyhow::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
     let stem = format!("recording-{}", now.format("%Y%m%d-%H%M%S"));
     let mut path = dir.join(format!("{stem}.wav"));
     let mut n = 1;
@@ -59,7 +63,8 @@ fn save_in(
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::create(&path, spec)?;
+    let file = std::io::BufWriter::new(create_private_file(&path)?);
+    let mut writer = hound::WavWriter::new(file, spec)?;
     for &s in samples {
         writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
     }
@@ -67,6 +72,34 @@ fn save_in(
 
     prune(dir, KEEP);
     Ok(path)
+}
+
+/// Create `dir` for the user only. An existing directory is tightened too:
+/// it may have been made with the default umask by an earlier build.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// Create the new file `path`, readable and writable by the user only.
+fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Remove all but the newest `keep` recordings. Names sort by time, so the
@@ -115,6 +148,36 @@ mod tests {
         assert_eq!(reader.spec().sample_rate, 16000);
         assert_eq!(reader.spec().channels, 1);
         assert_eq!(reader.len() as usize, samples.len());
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recordings_are_private_to_the_user() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("state/voxtype/failed-audio");
+        let path = save_in(&dir, &[0.0; 160], at(0)).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_loose_directory_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("failed-audio");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path = save_in(&dir, &[0.0; 160], at(0)).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]
