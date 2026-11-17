@@ -33,6 +33,12 @@ pub struct StreamingConfig {
     /// samples to respect the model's context limit).
     pub max_buffer_secs: f32,
 
+    /// Close the sentence after a pause this long (seconds): its text gets
+    /// one last pass and is never revised again, and the next sentence
+    /// starts from an empty buffer. Keeps long dictations out of sliding
+    /// mode. `0` (default) disables it; around `0.6` suits dictation.
+    pub commit_on_pause_secs: f32,
+
     /// Skip transcription while whole-buffer RMS is below this.
     pub min_speech_rms: f32,
 
@@ -60,6 +66,7 @@ impl Default for StreamingConfig {
         Self {
             interval_secs: 0.8,
             max_buffer_secs: 29.0,
+            commit_on_pause_secs: 0.0,
             min_speech_rms: 0.005,
             min_audio_secs: 1.0,
             partial_min_words: 1,
