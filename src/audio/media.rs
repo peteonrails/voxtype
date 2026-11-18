@@ -280,8 +280,20 @@ mod imp {
     }
 
     async fn list_active_sink_inputs() -> Result<Vec<DuckedMediaStream>, String> {
+        // The client list only helps recognise voxtype's own streams, so it
+        // is fetched alongside the streams, not after them, and recording
+        // start waits no longer than it did for one `pactl` call.
+        let (streams, clients) = tokio::join!(pactl_list("sink-inputs"), pactl_list("clients"));
+        let clients = clients.unwrap_or_else(|e| {
+            debug!("Failed to list audio clients, matching own streams by name only: {e}");
+            Value::Null
+        });
+        Ok(parse_sink_inputs(&streams?, &clients, std::process::id()))
+    }
+
+    async fn pactl_list(what: &str) -> Result<Value, String> {
         let output = Command::new("pactl")
-            .args(["-f", "json", "list", "sink-inputs"])
+            .args(["-f", "json", "list", what])
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -290,11 +302,13 @@ mod imp {
             return Err(format!("pactl exited with {}", output.status));
         }
 
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
-        Ok(parse_sink_inputs(&value))
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
     }
 
-    fn parse_sink_inputs(value: &Value) -> Vec<DuckedMediaStream> {
+    /// Active sink inputs that ducking may lower: everything playing except
+    /// voxtype's own streams. `clients` is `pactl -f json list clients`, or
+    /// `Value::Null` when that could not be read.
+    fn parse_sink_inputs(value: &Value, clients: &Value, own_pid: u32) -> Vec<DuckedMediaStream> {
         let Some(streams) = value.as_array() else {
             return Vec::new();
         };
@@ -308,6 +322,16 @@ mod imp {
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
             })
+            .filter(|stream| {
+                let own = is_voxtype_stream(stream, clients, own_pid);
+                if own {
+                    debug!(
+                        stream = ?stream.get("index"),
+                        "Leaving voxtype's own audio stream out of media ducking"
+                    );
+                }
+                !own
+            })
             .filter_map(|stream| {
                 let index = value_as_u32(stream.get("index")?)?;
                 let volumes = stream_volumes(stream);
@@ -318,6 +342,66 @@ mod imp {
                 }
             })
             .collect()
+    }
+
+    /// Whether a sink input is played by voxtype itself.
+    ///
+    /// The daemon's cue sounds go out through a stream it keeps open, so that
+    /// stream is active when recording starts and used to be ducked with the
+    /// media, which left the stop and completion cues playing quietly. Any
+    /// voxtype process counts, not only this one: none of them is the media
+    /// the user asked to have turned down.
+    ///
+    /// The stream alone often cannot say which process owns it. cpal plays
+    /// through PipeWire's ALSA plugin, whose streams carry no
+    /// `application.process.id`, only the binary's name inside
+    /// `application.name` and `node.name`. The process id and binary are on
+    /// the client the stream's `client` field points at, so both are checked.
+    fn is_voxtype_stream(stream: &Value, clients: &Value, own_pid: u32) -> bool {
+        let client = stream
+            .get("client")
+            .and_then(value_as_u32)
+            .and_then(|index| {
+                clients
+                    .as_array()?
+                    .iter()
+                    .find(|client| client.get("index").and_then(value_as_u32) == Some(index))
+            });
+
+        [Some(stream), client]
+            .into_iter()
+            .flatten()
+            .filter_map(|object| object.get("properties"))
+            .any(|properties| owned_by_voxtype(properties, own_pid))
+    }
+
+    /// Whether a stream's or client's properties name this process or a
+    /// voxtype binary.
+    fn owned_by_voxtype(properties: &Value, own_pid: u32) -> bool {
+        let text = |key: &str| properties.get(key).and_then(Value::as_str);
+
+        let is_this_process = ["application.process.id", "pipewire.sec.pid"]
+            .into_iter()
+            .any(|key| properties.get(key).and_then(value_as_u32) == Some(own_pid));
+
+        // PipeWire's ALSA plugin names its streams after the program:
+        // "PipeWire ALSA [voxtype]" and "alsa_playback.voxtype".
+        let alsa_program = text("application.name")
+            .and_then(|name| name.strip_prefix("PipeWire ALSA [")?.strip_suffix(']'))
+            .or_else(|| text("node.name")?.strip_prefix("alsa_playback."));
+
+        is_this_process
+            || [text("application.process.binary"), alsa_program]
+                .into_iter()
+                .flatten()
+                .any(is_voxtype_binary)
+    }
+
+    /// Whether a program name is one of voxtype's binaries: `voxtype`, a
+    /// variant such as `voxtype-onnx-cuda-13`, or a Nix wrapper's
+    /// `.voxtype-wrapped`.
+    fn is_voxtype_binary(name: &str) -> bool {
+        name.trim_start_matches('.').starts_with("voxtype")
     }
 
     fn value_as_u32(value: &Value) -> Option<u32> {
@@ -509,10 +593,128 @@ mod imp {
                 }
             ]);
 
-            let streams = parse_sink_inputs(&value);
+            let streams = parse_sink_inputs(&value, &Value::Null, 1);
             assert_eq!(streams.len(), 1);
             assert_eq!(streams[0].index, 42);
             assert_eq!(streams[0].volumes, vec!["75%", "80%"]);
+        }
+
+        /// A playing sink input with the given `client` and properties.
+        fn sink_input(index: u32, client: &str, properties: Value) -> Value {
+            serde_json::json!({
+                "index": index,
+                "client": client,
+                "mute": false,
+                "corked": false,
+                "volume": { "mono": { "value_percent": "100%" } },
+                "properties": properties
+            })
+        }
+
+        fn ducked_indexes(streams: &Value, clients: &Value, own_pid: u32) -> Vec<u32> {
+            parse_sink_inputs(streams, clients, own_pid)
+                .iter()
+                .map(|stream| stream.index)
+                .collect()
+        }
+
+        /// The stream the daemon plays its cues through, as `pactl` reported
+        /// it on a PipeWire desktop: no process id anywhere on the stream,
+        /// only the binary's name. It was ducked along with the media, so the
+        /// stop and completion cues played quietly.
+        #[test]
+        fn own_cue_stream_is_not_ducked_when_only_its_name_identifies_it() {
+            let streams = serde_json::json!([
+                sink_input(
+                    281,
+                    "280",
+                    serde_json::json!({
+                        "application.name": "PipeWire ALSA [voxtype-onnx-migraphx]",
+                        "node.name": "alsa_playback.voxtype-onnx-migraphx",
+                        "media.name": "ALSA Playback"
+                    })
+                ),
+                sink_input(
+                    90,
+                    "89",
+                    serde_json::json!({
+                        "application.name": "Firefox",
+                        "application.process.binary": "firefox",
+                        "application.process.id": "4000"
+                    })
+                ),
+            ]);
+
+            assert_eq!(ducked_indexes(&streams, &Value::Null, 1), vec![90]);
+        }
+
+        #[test]
+        fn own_stream_is_recognised_by_the_process_id_of_its_client() {
+            // Nothing on the stream names voxtype; only its client does.
+            let streams = serde_json::json!([
+                sink_input(7, "6", serde_json::json!({ "media.name": "Playback" })),
+                sink_input(9, "8", serde_json::json!({ "media.name": "Playback" })),
+            ]);
+            let clients = serde_json::json!([
+                { "index": 6, "properties": { "application.process.id": "4242" } },
+                { "index": 8, "properties": { "application.process.id": "4243" } },
+            ]);
+
+            assert_eq!(ducked_indexes(&streams, &clients, 4242), vec![9]);
+            assert_eq!(ducked_indexes(&streams, &clients, 4243), vec![7]);
+            assert_eq!(ducked_indexes(&streams, &clients, 1), vec![7, 9]);
+        }
+
+        #[test]
+        fn another_voxtype_process_is_recognised_by_its_client_binary() {
+            let streams = serde_json::json!([sink_input(
+                7,
+                "6",
+                serde_json::json!({ "media.name": "Playback" })
+            )]);
+            let clients = serde_json::json!([{
+                "index": 6,
+                "properties": {
+                    "application.process.id": "777",
+                    "application.process.binary": ".voxtype-wrapped"
+                }
+            }]);
+
+            assert!(ducked_indexes(&streams, &clients, 1).is_empty());
+        }
+
+        #[test]
+        fn other_programs_playing_through_alsa_are_still_ducked() {
+            let streams = serde_json::json!([sink_input(
+                12,
+                "11",
+                serde_json::json!({
+                    "application.name": "PipeWire ALSA [mpv]",
+                    "node.name": "alsa_playback.mpv"
+                })
+            )]);
+            let clients = serde_json::json!([{
+                "index": 11,
+                "properties": {
+                    "application.process.id": "500",
+                    "application.process.binary": "mpv"
+                }
+            }]);
+
+            assert_eq!(ducked_indexes(&streams, &clients, 1), vec![12]);
+        }
+
+        #[test]
+        fn a_stream_with_no_client_or_properties_is_ducked() {
+            let streams = serde_json::json!([{
+                "index": 3,
+                "client": "n/a",
+                "mute": false,
+                "corked": false,
+                "volume": { "mono": { "value_percent": "100%" } }
+            }]);
+
+            assert_eq!(ducked_indexes(&streams, &Value::Null, 1), vec![3]);
         }
 
         #[test]
