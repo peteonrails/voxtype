@@ -485,8 +485,6 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         });
     }
 
-    // GTK pauses tick callbacks while the widget is hidden. While visible,
-    // redraw even between audio deliveries so fractional scrolling continues.
     // Redraw on every frame while shown, so fractional scrolling continues
     // between audio deliveries. The callback is removed while hidden: with no
     // compositor frame callbacks to pace it, GDK's frame clock falls back to
