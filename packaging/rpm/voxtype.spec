@@ -344,7 +344,7 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
-* Tue Nov 17 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
+* Wed Nov 18 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
 - Meetings: live transcript view, echo cancellation and echo guard, hybrid
   diarization, notes, annotations, line edits, search, sharing, action
   items, recovery of interrupted meetings, import and retranscription
