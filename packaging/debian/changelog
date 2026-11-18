@@ -1,3 +1,16 @@
+voxtype (1.3.1-1) unstable; urgency=medium
+
+  * Dictation history: a private, local record of what you dictated, with the
+    history command, pause and resume, app exclusions and a history window
+  * Meeting playback: the transcript follows the waveform, and speakers have
+    their own colours
+  * A notice when one side of a meeting records nothing
+  * Zoom's web client window counts as a call for meeting detection
+  * text.language tells LARD cleanup the language for engines that do not
+    report one
+
+ -- Peter Jackson <pete@peteonrails.com>  Wed, 18 Nov 2026 18:00:00 +0000
+
 voxtype (1.3.0-1) unstable; urgency=medium
 
   * Meetings: live transcript view, echo cancellation and echo guard, hybrid

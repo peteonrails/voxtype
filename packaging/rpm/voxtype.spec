@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        1.3.0
+Version:        1.3.1
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -344,6 +344,16 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
+* Wed Nov 18 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
+- Dictation history: a private, local record of what you dictated, with the
+  history command, pause and resume, app exclusions and a history window
+- Meeting playback: the transcript follows the waveform, and speakers have
+  their own colours
+- A notice when one side of a meeting records nothing
+- Zoom's web client window counts as a call for meeting detection
+- text.language tells LARD cleanup the language for engines that do not
+  report one
+
 * Wed Nov 18 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
 - Meetings: live transcript view, echo cancellation and echo guard, hybrid
   diarization, notes, annotations, line edits, search, sharing, action
