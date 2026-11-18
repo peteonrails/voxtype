@@ -87,6 +87,9 @@ impl WhisperTranscriber {
             tracing::info!("Using GPU device index {}", device);
             ctx_params.gpu_device(device);
         }
+        if config.gpu_required {
+            require_gpu(device_index.unwrap_or(0))?;
+        }
         ctx_params.flash_attn(config.flash_attention);
         if config.flash_attention {
             tracing::info!("Flash attention enabled");
@@ -631,6 +634,106 @@ fn collapse_repetition_loops(text: &str) -> String {
     words.join(" ")
 }
 
+/// Whether whisper-rs was built with a GPU backend, which is also when it
+/// asks whisper.cpp to use the GPU at all.
+const GPU_BUILD: bool = cfg!(any(
+    feature = "gpu-vulkan",
+    feature = "gpu-cuda",
+    feature = "gpu-hipblas",
+    feature = "gpu-metal"
+));
+
+/// A ggml compute device, reduced to what whisper.cpp looks at when it picks
+/// the backend for the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    Cpu,
+    /// A discrete or integrated GPU.
+    Gpu,
+    /// An accelerator such as BLAS, which whisper.cpp only adds next to the
+    /// CPU and never loads the model onto.
+    Accel,
+}
+
+/// Fail before the model loads if whisper.cpp would put it on the CPU.
+fn require_gpu(gpu_device: i32) -> Result<(), TranscribeError> {
+    let devices = ggml_devices();
+    tracing::info!(
+        "ggml devices: {}",
+        devices
+            .iter()
+            .map(|(kind, name)| format!("{name} ({kind:?})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let kinds: Vec<DeviceKind> = devices.iter().map(|(kind, _)| *kind).collect();
+    match cpu_fallback_reason(GPU_BUILD, &kinds, gpu_device) {
+        Some(reason) => Err(TranscribeError::GpuUnavailable(reason)),
+        None => Ok(()),
+    }
+}
+
+/// Why whisper.cpp would load the model on the CPU with these devices, or
+/// `None` if it finds the GPU it is asked for.
+///
+/// This follows `whisper_backend_init_gpu`, which takes the `gpu_device`-th
+/// GPU or integrated GPU and falls back to the CPU without an error when
+/// there is no such device. A build without a GPU backend never asks for
+/// one, so it always runs on the CPU.
+fn cpu_fallback_reason(gpu_build: bool, devices: &[DeviceKind], gpu_device: i32) -> Option<String> {
+    if !gpu_build {
+        return Some(
+            "This build has no GPU backend (gpu-vulkan, gpu-cuda, gpu-hipblas or gpu-metal)"
+                .to_string(),
+        );
+    }
+    let gpus = devices.iter().filter(|d| **d == DeviceKind::Gpu).count();
+    if gpus == 0 {
+        return Some("No GPU found: the GPU backend enumerated no devices".to_string());
+    }
+    match usize::try_from(gpu_device) {
+        Ok(index) if index < gpus => None,
+        _ => Some(format!(
+            "GPU device {gpu_device} not found: the GPU backend enumerated {gpus} GPU(s)"
+        )),
+    }
+}
+
+/// The compute devices ggml registered in this process, with their names.
+///
+/// ggml builds this list once, the first time anything asks for it, so it
+/// is the same list whisper.cpp will choose from when the model loads.
+fn ggml_devices() -> Vec<(DeviceKind, String)> {
+    use whisper_rs::whisper_rs_sys as sys;
+    // SAFETY: takes no arguments; builds the registry on first call.
+    let count = unsafe { sys::ggml_backend_dev_count() };
+    (0..count)
+        .map(|i| {
+            // SAFETY: i is below the device count, and ggml's device registry
+            // is a process-wide static that is never freed, so the handle and
+            // its name stay valid.
+            unsafe {
+                let dev = sys::ggml_backend_dev_get(i);
+                let kind = match sys::ggml_backend_dev_type(dev) {
+                    sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_CPU => DeviceKind::Cpu,
+                    sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU
+                    | sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU => DeviceKind::Gpu,
+                    _ => DeviceKind::Accel,
+                };
+                let name_ptr = sys::ggml_backend_dev_name(dev);
+                let name = if name_ptr.is_null() {
+                    format!("device {i}")
+                } else {
+                    std::ffi::CStr::from_ptr(name_ptr)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                (kind, name)
+            }
+        })
+        .collect()
+}
+
 fn is_degenerate_transcript(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -918,6 +1021,44 @@ fn report_gpu_outcome(backend: &str, requested: i32, devices: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use DeviceKind::{Accel, Cpu, Gpu};
+
+    #[test]
+    fn a_build_without_a_gpu_backend_always_falls_back() {
+        let reason = cpu_fallback_reason(false, &[Gpu, Cpu], 0).expect("CPU-only build");
+        assert!(reason.contains("no GPU backend"), "{reason}");
+    }
+
+    #[test]
+    fn cpu_only_device_list_is_a_cpu_fallback() {
+        let reason = cpu_fallback_reason(true, &[Cpu], 0).expect("no GPU");
+        assert!(reason.contains("No GPU found"), "{reason}");
+    }
+
+    #[test]
+    fn an_accelerator_is_not_a_gpu() {
+        assert!(cpu_fallback_reason(true, &[Accel, Cpu], 0).is_some());
+    }
+
+    #[test]
+    fn first_gpu_is_found_whatever_order_ggml_lists_it_in() {
+        assert_eq!(cpu_fallback_reason(true, &[Gpu, Cpu], 0), None);
+        assert_eq!(cpu_fallback_reason(true, &[Cpu, Accel, Gpu], 0), None);
+    }
+
+    #[test]
+    fn gpu_device_counts_gpus_only() {
+        assert_eq!(cpu_fallback_reason(true, &[Gpu, Cpu, Gpu], 1), None);
+        let reason = cpu_fallback_reason(true, &[Gpu, Cpu], 1).expect("only one GPU");
+        assert!(reason.contains("GPU device 1 not found"), "{reason}");
+        assert!(reason.contains("1 GPU(s)"), "{reason}");
+    }
+
+    #[test]
+    fn negative_gpu_device_matches_no_gpu() {
+        assert!(cpu_fallback_reason(true, &[Gpu, Cpu], -1).is_some());
+    }
 
     fn raw(start_cs: i64, end_cs: i64, text: &str) -> RawSegment {
         RawSegment {

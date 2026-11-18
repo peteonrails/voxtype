@@ -159,6 +159,11 @@ translate = false
 # Use gpu_device for same-vendor GPUs or precise index control.
 # gpu_device = 1
 
+# Fail instead of falling back to the CPU when a GPU build finds no GPU
+# (default: false). Without it, whisper.cpp loads the model on the CPU and a
+# dictation can take minutes. A CPU-only build always fails this check.
+# gpu_required = false
+
 # Enable flash attention for GPU inference (default: false)
 # Reduces memory usage (~75%) and improves speed (~10%) on CUDA/Vulkan.
 # flash_attention = false

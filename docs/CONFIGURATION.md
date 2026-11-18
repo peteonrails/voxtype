@@ -1071,6 +1071,33 @@ Raise it if your GPU appears late in boot. Set it to `0` to skip the check entir
 gpu_wait_secs = 15  # slow dGPU bind on this machine
 ```
 
+### gpu_required
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Refuse to load the Whisper model on the CPU when a GPU build finds no GPU.
+
+When the GPU backend enumerates no device, whisper.cpp loads the model on the CPU and says nothing. That happens when the driver fails to initialize, an external GPU drops off the bus, or the Vulkan loader picks an ICD with no working device. A model that takes half a second per dictation on the GPU can then take minutes. With `gpu_required = true`, Voxtype checks the device list before it loads the model and fails instead.
+
+Voxtype reads the device list from ggml, the same list whisper.cpp picks from. A discrete or integrated GPU counts. If `gpu_device` is set, that GPU has to exist.
+
+What happens when there is no GPU:
+
+- With the model preloaded (`on_demand_loading = false`), the daemon exits with an error. Under the systemd unit (`Restart=on-failure`) it starts again 5 seconds later, and once the GPU is back it loads the model on it
+- With `on_demand_loading = true` or `gpu_isolation = true`, the model loads when recording starts. The load fails, and when the recording stops Voxtype plays the error sound and discards the recording
+
+It only applies to local Whisper (`mode = "local"`) in a build with a GPU feature (`gpu-vulkan`, `gpu-cuda`, `gpu-hipblas`, `gpu-metal`). A CPU-only build can never meet it, so it always fails the check. Other engines don't check it.
+
+Environment variable: `VOXTYPE_GPU_REQUIRED`. CLI flag: `--gpu-required`.
+
+**Example:**
+```toml
+[whisper]
+gpu_required = true  # never transcribe on the CPU
+```
+
 ### context_window_optimization
 
 **Type:** Boolean
@@ -5380,6 +5407,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_THREADS` | integer | `whisper.threads` |
 | `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |
 | `VOXTYPE_GPU_DEVICE` | integer | `whisper.gpu_device` |
+| `VOXTYPE_GPU_REQUIRED` | bool | `whisper.gpu_required` |
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
