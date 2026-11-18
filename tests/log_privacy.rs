@@ -47,11 +47,18 @@ const TEXT_BINDINGS: &[&str] = &[
 
 /// Calls that use one of those names for something that is not the user's
 /// words: the file, a fragment of the call, and why it is fine.
-const NOT_THE_USERS_WORDS: &[(&str, &str, &str)] = &[(
-    "src/meeting/calendar/mod.rs",
-    "Calendar link not fetched",
-    "`text` is the fetch error, which names the calendar host",
-)];
+const NOT_THE_USERS_WORDS: &[(&str, &str, &str)] = &[
+    (
+        "src/meeting/calendar/mod.rs",
+        "Calendar link not fetched",
+        "`text` is the fetch error, which names the calendar host",
+    ),
+    (
+        "src/config/load.rs",
+        "is not a language code and is ignored",
+        "`config.text.language` is the [text] section's language key, as written in the config file",
+    ),
+];
 
 struct LogCall {
     file: String,
