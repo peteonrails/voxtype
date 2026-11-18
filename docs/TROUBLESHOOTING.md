@@ -667,6 +667,37 @@ With it off nothing is written, so a dictation whose transcription fails can't b
 
 **Solution:** Install `libpulse` (Arch) or `pulseaudio-utils` (Debian, Ubuntu, Fedora); on PipeWire, make sure `pipewire-pulse` is running; or set `[meeting.audio] loopback_device` to a source from `pactl list short sources`. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for the other meeting notifications.
 
+### One side of the meeting is not being transcribed
+
+**Symptom:** A notification with this title during a meeting (or "Neither side of the meeting is being transcribed" when it is both), a `Not transcribed:` line in `voxtype meeting status`, or a transcript that has one side of the conversation and nothing from the other, although that side was talking.
+
+**Cause:** Each chunk of a track has to pass a speech check before it is transcribed: 300 ms of it louder than `[meeting.audio] vad_threshold` (default `0.01`). When the threshold is above the level a track reaches, every chunk of it is skipped as silence. The usual way to get there is raising `vad_threshold` to keep noise out and going past the level of your own voice. The check to see it for yourself:
+
+```bash
+voxtype config get meeting.audio.vad_threshold
+voxtype meeting status     # Not transcribed: Your microphone has sound, but nothing you say is transcribed: it reaches about 0.052 and [meeting.audio] vad_threshold is 0.11. ...
+journalctl --user -u voxtype | grep "not being transcribed"
+```
+
+**Solution:** Lower the threshold with the command the notification gives, then restart voxtype once the meeting is over (the running meeting keeps the threshold it started with, and a restart interrupts it):
+
+```bash
+voxtype config set meeting.audio.vad_threshold 0.01
+systemctl --user restart voxtype
+```
+
+If the meeting keeps its audio (`[meeting] retain_audio = true`), get the missing lines back after it ends:
+
+```bash
+voxtype meeting retranscribe latest
+```
+
+If the notification says the threshold is already at or below the default, the track is too quiet: raise the microphone's input volume, or the call's volume in the app that plays it, or lower the threshold to the value the notification gives. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for when it is raised and where else it shows.
+
+The notification is shown whatever `[meeting] status_notifications` is set to, like the other meeting error notifications; it comes at most once per side per meeting.
+
+The notification does not cover a track with no sound at all: a muted or wrong microphone, a loopback that records nothing, or an echo canceller that delivers silence. Check those with `voxtype meeting soundcheck`.
+
 ---
 
 ## Transcription Issues

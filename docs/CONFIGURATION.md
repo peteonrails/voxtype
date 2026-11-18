@@ -4001,7 +4001,7 @@ The Meeting Started, Paused, Resumed and Ended notifications, and "A meeting did
 - `"always"` - Always show them.
 - `"never"` - Never show them.
 
-`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. Changing it needs a daemon restart.
+`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. That includes ["One side of the meeting is not being transcribed"](MEETING_MODE.md#troubleshooting), which reports transcript being lost: `"never"` does not turn it off, and `"auto"` does not skip it for a meeting view on screen. Changing it needs a daemon restart.
 
 ### my_name
 
@@ -4280,6 +4280,8 @@ voxtype config set meeting.audio.echo_fuzzy_max_words 3
 RMS threshold for meeting chunk voice activity detection. Lower values are more permissive and can help quiet microphones; higher values skip more low-level noise before transcription. Set to `0.0` to disable this pre-transcription gate.
 
 For quiet USB/XLR mics, try `0.001`.
+
+A threshold above the level a track reaches skips all of that track, so one side of the meeting goes missing from the transcript. The daemon notices sound that keeps being skipped and says ["One side of the meeting is not being transcribed"](MEETING_MODE.md#troubleshooting), with the level it measured and the value to set. A running meeting keeps the threshold it started with; a change applies after a daemon restart.
 
 **Example:**
 ```toml

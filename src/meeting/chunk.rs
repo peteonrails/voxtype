@@ -160,7 +160,7 @@ impl VoiceActivityDetector {
     }
 
     /// Calculate RMS energy of samples
-    fn calculate_rms(samples: &[f32]) -> f32 {
+    pub(crate) fn calculate_rms(samples: &[f32]) -> f32 {
         if samples.is_empty() {
             return 0.0;
         }
@@ -214,7 +214,7 @@ impl VoiceActivityDetector {
 }
 
 /// Speech a chunk needs before it is transcribed at all.
-const MIN_SPEECH_MS: u32 = 300;
+pub(crate) const MIN_SPEECH_MS: u32 = 300;
 
 /// How far before a whole-chunk engine's segment start, and after its end,
 /// to look for the speech it timed. Whisper starts late less often than it
@@ -232,7 +232,7 @@ const UTTERANCE_GAP_SECS: f32 = 0.7;
 const UTTERANCE_PAD_SECS: f32 = 0.2;
 /// Shorter pieces (a click, a cough, a lone "mm") are folded into a
 /// neighbour instead of being transcribed alone, where engines hallucinate.
-const MIN_UTTERANCE_SECS: f32 = 0.6;
+pub(crate) const MIN_UTTERANCE_SECS: f32 = 0.6;
 
 /// Split a chunk into utterances: sample ranges separated by pauses of at
 /// least [`UTTERANCE_GAP_SECS`].

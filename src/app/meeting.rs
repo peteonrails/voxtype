@@ -412,6 +412,12 @@ pub(crate) async fn run_meeting_command(
             let announcement = active
                 .then(|| meeting::announce::read_status(&config::Config::runtime_dir()))
                 .flatten();
+            // Tracks with sound that puts no lines in the transcript.
+            let untranscribed = if active {
+                meeting::silent_track::read_status(&config::Config::runtime_dir())
+            } else {
+                Vec::new()
+            };
             if json {
                 let payload = serde_json::json!({
                     "active": active,
@@ -419,6 +425,10 @@ pub(crate) async fn run_meeting_command(
                     "meeting_id": meeting_id,
                     "echo_cancel": echo_cancel,
                     "announcement": announcement.as_ref().map(meeting::announce::Status::to_json),
+                    "untranscribed_tracks": untranscribed
+                        .iter()
+                        .map(meeting::silent_track::SilentTrack::to_json)
+                        .collect::<Vec<_>>(),
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if !active {
@@ -435,6 +445,9 @@ pub(crate) async fn run_meeting_command(
                 }
                 if let Some(status) = announcement {
                     println!("Announcement: {}", status.describe());
+                }
+                for track in &untranscribed {
+                    println!("Not transcribed: {}", track.summary());
                 }
             }
         }

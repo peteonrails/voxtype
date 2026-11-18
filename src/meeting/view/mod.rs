@@ -1150,6 +1150,22 @@ mod tests {
     }
 
     #[test]
+    fn a_track_with_sound_and_no_lines_shows_as_the_recording_meetings_error() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello("recording", "m1", vec![]));
+        v.apply_line(&ev(serde_json::json!({
+            "event": "error",
+            "code": crate::meeting::silent_track::EVENT_CODE,
+            "message": "Your microphone has sound, but nothing you say is transcribed",
+        })));
+        assert_eq!(v.state, ViewState::Recording, "the meeting goes on");
+        assert_eq!(
+            v.last_error.as_deref(),
+            Some("Your microphone has sound, but nothing you say is transcribed")
+        );
+    }
+
+    #[test]
     fn a_failed_summary_ends_with_the_error() {
         let mut v = MeetingView::live();
         v.apply_line(&hello("recording", "m1", vec![]));

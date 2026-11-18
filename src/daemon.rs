@@ -3583,6 +3583,7 @@ impl Daemon {
         // from the meeting that just finished.
         if state_name == "idle" {
             self.meeting_hud = meeting::MeetingHudState::idle();
+            meeting::silent_track::write_status(&Config::runtime_dir(), &[]);
         } else {
             self.meeting_hud.status = state_name.to_string();
             if let Some(id) = meeting_id {
@@ -3963,6 +3964,8 @@ impl Daemon {
                         self.meeting_mic_buffer.clear();
                         self.meeting_loopback_buffer.clear();
                         self.meeting_error_notified = false;
+                        // One a crashed daemon left behind is not this meeting's.
+                        meeting::silent_track::write_status(&Config::runtime_dir(), &[]);
 
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
@@ -4761,6 +4764,53 @@ impl Daemon {
         (path.effective(gtcrn_loaded), notice)
     }
 
+    /// A track of the meeting has sound but no lines, or got its lines
+    /// back. `meeting status` always follows it. The first time a track
+    /// goes missing in a meeting, the meeting views get it as an error and
+    /// the user a notification, once per track however long it lasts.
+    async fn on_track_changes(&mut self, changes: Vec<meeting::silent_track::Change>) {
+        use meeting::silent_track::{self, Change};
+        let Some(daemon) = self.meeting_daemon.as_ref() else {
+            return;
+        };
+        silent_track::write_status(&Config::runtime_dir(), &daemon.silent_tracks());
+        let audio_kept = daemon.keeps_audio();
+        let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+        // Both sides raised by the same pair go out together: voxtype's
+        // notifications share a slot, and the views' banner holds one error.
+        let announced: Vec<silent_track::SilentTrack> = changes
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Raised {
+                    track,
+                    announce: true,
+                } => Some(track),
+                _ => None,
+            })
+            .collect();
+        let Some((title, body)) =
+            silent_track::notification(&announced, audio_kept, meeting_id.as_deref())
+        else {
+            return;
+        };
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.publish_track_notice(&announced);
+        }
+        // Whatever `[meeting] status_notifications` says and whether or not
+        // a meeting view is on screen, like the other meeting errors: this
+        // is transcript being lost, and a view minimized to its pill shows
+        // no banner.
+        send_notification_with_lifetime(
+            title,
+            &body,
+            false,
+            self.config.engine,
+            "normal",
+            Lifetime::Millis(15000),
+        )
+        .await;
+    }
+
     /// The echo canceller has delivered only digital silence since the
     /// meeting started: it is not hearing the mic, and every line of yours
     /// would be lost. Record the mic directly instead, with GTCRN, as a
@@ -4842,12 +4892,18 @@ impl Daemon {
             }
         }
 
-        let chunk_error = match self.meeting_daemon {
-            Some(ref mut daemon) => daemon.process_pair(mic_chunk, loopback_chunk).await,
-            None => None,
+        let (chunk_error, track_changes) = match self.meeting_daemon {
+            Some(ref mut daemon) => (
+                daemon.process_pair(mic_chunk, loopback_chunk).await,
+                daemon.take_track_changes(),
+            ),
+            None => (None, Vec::new()),
         };
         if let Some(error) = chunk_error {
             self.notify_meeting_error(&error).await;
+        }
+        if !track_changes.is_empty() {
+            self.on_track_changes(track_changes).await;
         }
     }
 

@@ -159,6 +159,22 @@ played). `note`, when present, says why the voice that played isn't the
 one asked for (the Jessica voice could not be downloaded, so the built-in
 voice played). `text` is the line `meeting status` prints, note included.
 
+`untranscribed_tracks` lists the sides of the running meeting that have
+sound but put no lines in the transcript, because the sound stays under
+`[meeting.audio] vad_threshold` (see
+[Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting)). It is
+empty when there are none or no meeting is running, and an entry goes away
+when a line from that side arrives:
+
+```json
+"untranscribed_tracks": [{"track": "microphone", "level": 0.052, "threshold": 0.11, "suggested_threshold": "0.01", "text": "Your microphone has sound, but nothing you say is transcribed: it reaches about 0.052 and [meeting.audio] vad_threshold is 0.11. Lower it: voxtype config set meeting.audio.vad_threshold 0.01"}]
+```
+
+`track` is `microphone` or `loopback`. `level` is the level the skipped
+sound reaches and `threshold` the meeting's `vad_threshold`, on the same
+scale. `suggested_threshold` is the value to set, and `text` the line
+`meeting status` prints.
+
 `status` is one of `idle`, `starting`, `recording`, `pausing`, `paused`,
 `resuming`, `stopping` or `finalizing`. `starting`, `pausing`, `resuming` and
 `stopping` mean the command was issued and the daemon has not acted on it
@@ -655,6 +671,10 @@ Act on an entry with `voxtype meeting recover` (below).
 ```
 
 `message` is for people, and names the backend that failed and its reason.
+An error with `code` `track_not_transcribed` and no `meeting_id` is about
+the meeting being recorded: one side has sound but no lines (the
+`untranscribed_tracks` of `meeting status --json`), and `message` says which
+and what to set. It is sent once per side per meeting.
 An error about the summary at stop also has `meeting_id`, a `code` from the
 [assistant error codes](#assistant-error-codes), and `backend`, the name of
 the backend that failed, as `summary_backend_name` gives it.

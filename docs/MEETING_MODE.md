@@ -1484,3 +1484,24 @@ The daemon tells you with a desktop notification when a meeting cannot start or 
 Missing remote audio is reported at every meeting start, since every meeting loses that side of the conversation. Missing models are reported once per daemon run. If the echo canceller goes silent mid-meeting and the meeting switches to GTCRN without its model, a "Meeting continues with limitations" notification says so.
 
 **"Meeting transcription failed".** A chunk could not be transcribed, so that part of the meeting is missing from the transcript. The meeting keeps recording. Only the first failure in a meeting raises a notification; later ones are logged.
+
+**"One side of the meeting is not being transcribed".** Your microphone, or the call, has sound, but none of it reaches the transcript. Before a chunk of a track is transcribed it has to pass a speech check: 300 ms of it louder than `[meeting.audio] vad_threshold`. With the threshold above the level a track reaches, every chunk of that track is skipped as silence, and that side of the conversation is missing while the other side transcribes as usual. The notification names the side, the level its sound reaches and the threshold, both on the threshold's scale:
+
+```
+Your microphone has sound, but the speech check skips it, so nothing you say reaches the transcript. It reaches about 0.052 and [meeting.audio] vad_threshold is 0.11.
+
+Lower the threshold to the default, 0.01:
+voxtype config set meeting.audio.vad_threshold 0.01
+It applies once voxtype restarts, so restart it after this meeting: systemctl --user restart voxtype
+
+This meeting keeps its audio. With the threshold lowered, get the missing lines back after it ends:
+voxtype meeting retranscribe b6b2a0c4
+```
+
+- Run the `voxtype config set` command it gives. The value is half the level the track reaches and never above the default, so a quiet track is sent below `0.01`. The running meeting keeps the threshold it started with; the new one applies to meetings started after `systemctl --user restart voxtype`. Restarting during a meeting interrupts it, so wait until it has ended.
+- With `[meeting] retain_audio = true` the lines are not lost: once the meeting has ended and the threshold is lowered, `voxtype meeting retranscribe <meeting>` transcribes the kept audio again. Without kept audio, what was skipped cannot be recovered.
+- If the threshold is already at or below the default, the track itself is too quiet, and the notification says that instead: raise the microphone's input volume (or the call's volume in the app that plays it), or lower the threshold further with the command it gives.
+
+It is raised on evidence, not on silence, so a microphone that is quiet because you are only listening does not trigger it. A skipped chunk counts when it holds at least 0.6 s of sound that stands well above the track's own noise floor, comes in stretches of 150 ms or more (not clicks or key presses), and, on the microphone, does not coincide with sound on the call, which the microphone may only be hearing through your speakers. Three such chunks among a track's last ten, with no line from that track in between, raise it.
+
+Each side is announced at most once per meeting. When both sides go missing at the same moment they share one notification, titled "Neither side of the meeting is being transcribed", with one command that covers the quieter of the two. `voxtype meeting status` shows it for as long as it lasts, as a `Not transcribed:` line (`untranscribed_tracks` in `--json`), and drops it when a line from that side arrives. The meeting view shows it in its banner, and the log has it as a warning with the numbers. The notification is shown whatever `[meeting] status_notifications` is set to, `"never"` included, and whether or not a meeting view is on screen, like the other meeting error notifications: it reports transcript being lost.

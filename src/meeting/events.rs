@@ -30,6 +30,7 @@
 //! {"event":"status","status":"paused","recording_notice":false}
 //! {"event":"title_changed","meeting_id":"...","title":"Pete <> Chad"}
 //! {"event":"error","message":"..."}
+//! {"event":"error","message":"Your microphone has sound, but nothing you say is transcribed: ...","code":"track_not_transcribed"}
 //! ```
 //!
 //! After a meeting stops, auto-summary reports on the meeting it just
@@ -566,6 +567,25 @@ impl MeetingEventHub {
         });
     }
 
+    /// Broadcast an `error` event for the tracks of the running meeting
+    /// found to have sound and no lines, with `code`
+    /// [`EVENT_CODE`](crate::meeting::silent_track::EVENT_CODE). It names
+    /// no meeting, so the views show it in their banner like any other
+    /// error of the meeting being recorded. One event for both sides: the
+    /// banner holds one message.
+    pub fn publish_track_notice(&self, tracks: &[crate::meeting::silent_track::SilentTrack]) {
+        if tracks.is_empty() {
+            return;
+        }
+        let message: Vec<String> = tracks.iter().map(|track| track.summary()).collect();
+        self.publish(WireEvent::Error {
+            message: message.join(" "),
+            meeting_id: None,
+            code: Some(crate::meeting::silent_track::EVENT_CODE.to_string()),
+            backend: None,
+        });
+    }
+
     /// Broadcast what the auto-summary of a finished meeting is doing.
     pub fn publish_summary_event(&self, event: crate::meeting::assistant::summarize::SummaryEvent) {
         use crate::meeting::assistant::summarize::SummaryEvent;
@@ -1081,6 +1101,34 @@ mod tests {
         let value = read_line(&mut client).await;
         assert_eq!(value["event"], "status");
         assert_eq!(value["status"], "paused");
+
+        hub.cleanup();
+    }
+
+    #[tokio::test]
+    async fn a_track_with_sound_and_no_lines_is_an_error_event_naming_no_meeting() {
+        let (_tmp, path) = temp_socket_dir();
+        let hub = MeetingEventHub::start(path.clone())
+            .await
+            .expect("start hub");
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        let _hello = read_line(&mut client).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let track = crate::meeting::silent_track::SilentTrack {
+            track: crate::meeting::AudioSource::Microphone,
+            level: 0.052,
+            threshold: 0.11,
+        };
+        hub.publish_track_notice(std::slice::from_ref(&track));
+
+        let value = read_line(&mut client).await;
+        assert_eq!(value["event"], "error");
+        assert_eq!(value["code"], "track_not_transcribed");
+        assert_eq!(value["message"], track.summary());
+        // The views put an error naming no meeting in their banner; one
+        // naming a meeting goes to that meeting's summary instead.
+        assert!(value.get("meeting_id").is_none(), "{value}");
 
         hub.cleanup();
     }
