@@ -33,7 +33,7 @@ async fn selected_metadata_case(name: &str, eager: bool, fail: bool, cancel: boo
     } else {
         let adapter = crate::transcribe::SlidingWindowStreamingTranscriber::new(selected.clone(), crate::transcribe::SlidingWindowConfig { interval_s: 0.02, min_audio_s: 0.0, min_speech_rms: 0.0, ..Default::default() });
         daemon.transcriber_preloaded = Some(Arc::new(adapter));
-        daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: if cancel { Vec::new() } else { vec![0.2;16000] }, stop: None }));
+        daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: if cancel { Vec::new() } else { vec![0.2;16000] }, stop: None, delivered: None }));
         let mut state = State::Idle;
         let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
         assert!(daemon.try_start_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, None, false).await);
@@ -151,10 +151,19 @@ async fn eof_failure_persistence(name: &str, partial: bool) {
     let root=tempfile::tempdir().unwrap(); let mut daemon=fidelity_daemon(root.path());
     let engine=Arc::new(EofFailureEngine { fail_after:if partial {2} else {0}, calls:std::sync::atomic::AtomicUsize::new(0) });
     daemon.transcriber_preloaded=Some(Arc::new(crate::transcribe::SlidingWindowStreamingTranscriber::new(engine.clone(),crate::transcribe::SlidingWindowConfig { interval_s:if partial {0.2} else {60.0}, partial_min_words:1, min_audio_s:0.0,min_speech_rms:0.0,..Default::default() })));
-    daemon.history_test_capture=Some(Box::new(StreamingFidelityAudio { samples:vec![0.2;16000],stop:None }));
+    let (delivered,audio_delivered)=tokio::sync::oneshot::channel();
+    daemon.history_test_capture=Some(Box::new(StreamingFidelityAudio { samples:vec![0.2;16000],stop:None,delivered:(!partial).then_some(delivered) }));
     let mut state=State::Idle; let (mut capture,mut handle,mut session,mut chain)=(None,None,None,None);
     assert!(daemon.try_start_streaming(&mut state,&mut capture,&mut handle,&mut session,&mut chain,None,false).await);
-    if !partial { daemon.stop_active_recording(&mut state,&mut capture,&mut session,&mut chain,&mut None).await; }
+    if !partial {
+        // Stop only once the audio is on its way to the session. A stop that
+        // beats it there ends the session with nothing to flush: no engine
+        // call, no error, and correctly so, but not the case under test.
+        // The wait is on the fixture's own signal; the limit only keeps a
+        // broken fixture from hanging the run.
+        tokio::time::timeout(Duration::from_secs(60),audio_delivered).await.expect("the fixture audio never reached the streaming session").unwrap();
+        daemon.stop_active_recording(&mut state,&mut capture,&mut session,&mut chain,&mut None).await;
+    }
     let mut saw_partial=false; let mut errors=0;
     loop {
         let event=tokio::time::timeout(Duration::from_secs(10),handle.as_mut().unwrap().events.recv()).await.unwrap().unwrap();
@@ -169,6 +178,8 @@ async fn eof_failure_persistence(name: &str, partial: bool) {
     let entries=wait_for_entries(root.path(),1).await;
     println!("EOF_FAILURE_PERSISTED calls={} errors={errors} {}",engine.calls.load(std::sync::atomic::Ordering::SeqCst),serde_json::to_string(&entries).unwrap());
     assert_eq!(entries.len(),1); assert_eq!(saw_partial,partial); assert_eq!(errors,1);
+    // With no partials the only engine call is the flush at the end.
+    if !partial { assert_eq!(engine.calls.load(std::sync::atomic::Ordering::SeqCst),1); }
     assert_eq!(entries[0].outcome,crate::history::Outcome::TranscriptionFailed);
     assert!(!entries[0].delivered);
     assert!(entries[0].error.as_deref().unwrap().contains("CONTROLLED_EOF_FAILURE"));

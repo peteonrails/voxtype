@@ -118,7 +118,15 @@ async fn real_batch_or_eager_fidelity(name: &str, fixture: &str, eager: bool) {
     assert_fidelity(root.path(), &daemon, &raw, name.rsplit("::").next().unwrap(), false).await;
 }
 
-struct StreamingFidelityAudio { samples: Vec<f32>, stop: Option<tokio::sync::oneshot::Sender<()>> }
+struct StreamingFidelityAudio {
+    samples: Vec<f32>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Told once the samples are on their way to the streaming session, for
+    /// a test that stops the recording without waiting for an event first.
+    /// Stopping aborts the daemon's tap (`cut_streaming_audio`), and audio
+    /// the tap has not passed on by then never reaches the session.
+    delivered: Option<tokio::sync::oneshot::Sender<()>>,
+}
 #[async_trait::async_trait]
 impl AudioCapture for StreamingFidelityAudio {
     async fn start(&mut self) -> std::result::Result<tokio::sync::mpsc::Receiver<Vec<f32>>, crate::error::AudioError> {
@@ -126,7 +134,23 @@ impl AudioCapture for StreamingFidelityAudio {
         let (stop, wait) = tokio::sync::oneshot::channel();
         self.stop = Some(stop);
         let samples = self.samples.clone();
-        tokio::spawn(async move { tx.send(samples).await.unwrap(); let _ = wait.await; drop(tx); });
+        let delivered = self.delivered.take();
+        tokio::spawn(async move {
+            tx.send(samples).await.unwrap();
+            if let Some(delivered) = delivered {
+                // The channel holds one chunk, and the tap takes a chunk,
+                // passes it to the session's queue, then comes back for the
+                // next. So the first empty chunk is accepted when the tap has
+                // taken the samples, and the second when it has taken the
+                // first, which it does only after passing the samples on.
+                // Empty chunks add no audio. The session reads its queue in
+                // order, so it has the samples before it sees the end.
+                for _ in 0..2 { tx.send(Vec::new()).await.unwrap(); }
+                let _ = delivered.send(());
+            }
+            let _ = wait.await;
+            drop(tx);
+        });
         Ok(rx)
     }
     async fn stop(&mut self) -> std::result::Result<Vec<f32>, crate::error::AudioError> { self.stop.take(); Ok(std::mem::take(&mut self.samples)) }
@@ -142,7 +166,7 @@ async fn real_stream_fidelity(name: &str, partials: bool) {
     let base: Arc<dyn Transcriber> = crate::transcribe::create_transcriber(&daemon.config).unwrap().into();
     assert!(base.as_streaming().is_some(), "Actual factory must provide the supported adapter");
     daemon.transcriber_preloaded = Some(base.clone());
-    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: fidelity_samples("speech_long.wav"), stop: None }));
+    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: fidelity_samples("speech_long.wav"), stop: None, delivered: None }));
     let mut state = State::Idle;
     let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
     assert!(daemon.try_start_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, None, false).await);
@@ -213,7 +237,7 @@ async fn history_real_stream_cancel_loaded_model_stays_unknown_before_decode() {
     assert!(!base.transcribe(&fidelity_samples("speech_hello.wav")).unwrap().is_empty());
     assert_eq!(base.runtime_metadata().backend.as_deref(), Some("cpu"));
     daemon.transcriber_preloaded = Some(base.clone());
-    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: Vec::new(), stop: None }));
+    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: Vec::new(), stop: None, delivered: None }));
     let mut state = State::Idle;
     let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
     assert!(daemon.try_start_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, None, false).await);
@@ -249,7 +273,7 @@ async fn history_controlled_stream_error_keeps_unmeasured_metadata_unknown() {
     let adapter = crate::transcribe::SlidingWindowStreamingTranscriber::new(Arc::new(UnmeasuredFailure), crate::transcribe::SlidingWindowConfig { interval_s: 0.02, min_audio_s: 0.0, min_speech_rms: 0.0, ..Default::default() });
     assert_eq!(adapter.runtime_metadata(), crate::transcribe::RuntimeMetadata::default());
     daemon.transcriber_preloaded = Some(Arc::new(adapter));
-    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: vec![0.2;16000], stop: None }));
+    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: vec![0.2;16000], stop: None, delivered: None }));
     let mut state = State::Idle;
     let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
     assert!(daemon.try_start_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, None, false).await);
