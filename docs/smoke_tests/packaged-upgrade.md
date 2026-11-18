@@ -9,18 +9,27 @@ Run inside Docker so nothing touches the host. Both containers follow the
 same script; only the package manager differs.
 
 ```bash
+# Run from the repository root.
 PREV=1.0.1        # previous stable
 NEXT=1.1.0-rc5    # candidate under test
+SCRIPT=$(realpath docs/smoke_tests/packaged-upgrade.sh)
 WORK=$(mktemp -d)
-cd "$WORK"
-gh release download "v${PREV}" --repo peteonrails/voxtype -p "voxtype_${PREV}-1_amd64.deb" -p "voxtype-${PREV}-1.x86_64.rpm"
-gh release download "v${NEXT}" --repo peteonrails/voxtype -p "voxtype_${NEXT}-1_amd64.deb" -p "voxtype-${NEXT}-1.x86_64.rpm"
+gh release download "v${PREV}" --repo peteonrails/voxtype --dir "$WORK" -p "voxtype_${PREV}-1_amd64.deb" -p "voxtype-${PREV}-1.x86_64.rpm"
+gh release download "v${NEXT}" --repo peteonrails/voxtype --dir "$WORK" -p "voxtype_${NEXT}-1_amd64.deb" -p "voxtype-${NEXT}-1.x86_64.rpm"
 
 # deb path
-sudo docker run --rm -v "$WORK":/pkgs:ro ubuntu:24.04 bash -s "$PREV" "$NEXT" deb < docs/smoke_tests/packaged-upgrade.sh
+sudo docker run --rm -v "$WORK":/pkgs:ro -v "$SCRIPT":/t.sh:ro ubuntu:24.04 bash /t.sh "$PREV" "$NEXT" deb
 # rpm path
-sudo docker run --rm -v "$WORK":/pkgs:ro fedora:40 bash -s "$PREV" "$NEXT" rpm < docs/smoke_tests/packaged-upgrade.sh
+sudo docker run --rm -v "$WORK":/pkgs:ro -v "$SCRIPT":/t.sh:ro fedora:40 bash /t.sh "$PREV" "$NEXT" rpm
 ```
+
+Each run must end with a `RESULT: N passed, 0 failed` line. A run that
+prints no `RESULT` line tested nothing, whatever it exited with.
+
+Mount the script as above; do not pipe it in with `bash -s ... < packaged-upgrade.sh`.
+Without `-i` the container gets no stdin, so bash runs nothing and exits 0.
+With `-i`, `apt-get` reads the rest of the script as its own input and the
+deb run stops after phase 1. Both looked like a pass.
 
 What the script asserts, in order:
 
