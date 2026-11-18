@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype v1.2.2: OSD Selection, Settings, and Output Fixes">
-    <meta property="og:description" content="Automatic OSD frontend selection, validated Settings changes, output and audio failure handling, text cleanup fixes, and updated source packaging.">
+    <meta property="og:title" content="Voxtype v1.3.0: Meetings, Failure Notifications and voxtype doctor">
+    <meta property="og:description" content="A live meeting transcript with echo cancellation, speaker names, search, summaries and action items. Notifications that name the fix when dictation fails, and voxtype doctor.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype v1.2.2: OSD Selection, Settings, and Output Fixes">
-    <meta name="twitter:description" content="Automatic OSD frontend selection, validated Settings changes, output and audio failure handling, text cleanup fixes, and updated source packaging.">
+    <meta name="twitter:title" content="Voxtype v1.3.0: Meetings, Failure Notifications and voxtype doctor">
+    <meta name="twitter:description" content="A live meeting transcript with echo cancellation, speaker names, search, summaries and action items. Notifications that name the fix when dictation fails, and voxtype doctor.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -74,6 +74,490 @@
     <!-- News Articles -->
     <main class="news-content">
         <div class="container">
+
+            <article class="news-article" id="v130">
+                <div class="article-meta">
+                    <time datetime="2026-11-17">November 17, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.3.0: Meetings, Failure Notifications and voxtype doctor</h2>
+                <div class="article-body">
+                    <p>voxtype 1.3.0 is the meetings release. A meeting streams its transcript as it records, to a live view on your desktop and to a socket other programs can read. Your lines and the other side's interleave in the order they were spoken, and speaker echo stays out of your lines. After the call you can fix any line, search every meeting, get a summary from your own coding agent or a local model, send the action items to Todoist, and share the notes.</p>
+                    <p>It's also the release where voxtype tells you when something fails. <a href="https://github.com/crmne">Carmine Paolino</a> wrote fifteen pull requests that turn failures which only reached the log into notifications that name the fix, and added <code>voxtype doctor</code>.</p>
+                    <p>Meeting mode stays off on existing installs until you turn it on. The new notifications are on for everyone, so read <strong>Upgrading</strong> before you install. Everything in 1.2.2 is included.</p>
+
+                    <h3>The live meeting view (<a href="https://github.com/peteonrails/voxtype/issues/809">#809</a>)</h3>
+                    <p><code>voxtype meeting view</code> opens a card at the right edge of the screen that follows the meeting as it records. It opens by itself when a meeting starts, and it never takes keyboard focus from your call.</p>
+                    <ul>
+                        <li><strong>Transcript:</strong> one line per utterance with its time and speaker. Click a speaker to name them, or the speaker on one line to move only that line. Hover a line to play the audio from it, edit its text, add a note or highlight, or delete it. Edits, moves and deletes offer Undo for a few seconds.</li>
+                        <li><strong>Notes:</strong> your own notes for the meeting, saved as you type.</li>
+                        <li><strong>Ask:</strong> questions about what has been said so far. Times in answers jump to the line.</li>
+                        <li><strong>Summary:</strong> overview, decisions, action items and chapters once the meeting stops, with Regenerate after you fix speakers or lines.</li>
+                    </ul>
+                    <p>The header has Pause, Resume and Stop, live level meters for your mic and the call, and a menu that exports Markdown, text, JSON, SRT or WebVTT into <code>~/Documents/Voxtype/</code>. With no meeting running, the view lists past meetings and searches them. An ended meeting with kept audio gets a waveform you can click to play from. The card can be moved, resized, made see-through and minimized to a pill that shows the state, the time and the last line.</p>
+                    <p>It runs in the Omarchy shell as part of the Voxtype panel, and in voxtype's own Quickshell shell elsewhere:</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup quickshell
+voxtype meeting view latest --tab summary</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting]
+show_view_on_start = true
+view_opacity = 0.8
+status_notifications = "auto"   # skip Started/Ended notices while the view is showing</code></pre>
+                    </div>
+                    <p>Lines arrive once per chunk (<code>chunk_duration_secs</code>, 30 seconds by default), not word by word. Requested by <a href="https://github.com/sintel-be">@sintel-be</a>.</p>
+                    <p><strong>Why use it:</strong> you see who said what during the call and fix it right after, without a terminal.</p>
+
+                    <h3>No Quickshell? A window, or your terminal</h3>
+                    <p>On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, a meeting opens in an ordinary GTK 4 window, <code>voxtype-meetings-gtk4</code>. It has the transcript with level meters, Pause and Stop, speaker renaming, Move line and Note on line, your notes, Ask and the summary. Past meetings opened from its list are read-only there.</p>
+                    <p><code>voxtype meeting watch</code> shows the same meeting in a terminal, on any desktop and over SSH, with keys to pause, stop, move a line, add a note and ask.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting]
+view = "auto"   # auto | quickshell | gtk4 | terminal | none</code></pre>
+                    </div>
+                    <p><code>auto</code> picks the Quickshell view when Quickshell can run, then the GTK 4 window when it is installed and GTK 4 loads. <code>terminal</code> is never picked by <code>auto</code>.</p>
+                    <p>The window ships in the release <code>.deb</code> and <code>.rpm</code>. The source RPM and Debian packages build it as a <code>voxtype-meetings-gtk4</code> subpackage that the main package recommends, so a from-source install (COPR, a Debian rebuild) gets the same window. On NixOS it's the flake's <code>meetings-gtk4</code> output.</p>
+                    <p><strong>Why use it:</strong> meetings are no longer tied to one desktop shell.</p>
+
+                    <h3>Meetings start at once, and can use their own engine (<a href="https://github.com/peteonrails/voxtype/issues/808">#808</a>, <a href="https://github.com/peteonrails/voxtype/issues/717">#717</a>)</h3>
+                    <p>A meeting used to load a second copy of the transcription model, even when dictation already had it loaded. It now uses dictation's loaded model when the engine, model and language match. Dictation keeps working during the meeting, and the two take turns on the model. Measured from the start command to the meeting being ready to transcribe:</p>
+                    <div class="code-block">
+                        <table>
+                            <thead><tr><th scope="col">Engine</th><th scope="col">1.2.2</th><th scope="col">1.3.0</th></tr></thead>
+                            <tbody>
+                                <tr><td>Parakeet Ultra Q8 (GGUF worker)</td><td>0.30 s</td><td>0.005 s</td></tr>
+                                <tr><td>Cohere q4 (ONNX)</td><td>0.84 s</td><td>0.004 s</td></tr>
+                                <tr><td>Whisper large-v3-turbo</td><td>0.42 s</td><td>0.003 s</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>Recording starts before any model loads, so the first sentence of a meeting is no longer lost. A meeting can also use its own engine, model or language, and keep a link to the call:</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting start --model large-v3-turbo --language de
+voxtype meeting start --engine parakeet --model parakeet-ultra-Q8_0.gguf
+voxtype meeting start --title "Planning" --url https://meet.example.com/abc-defg-hij</code></pre>
+                    </div>
+                    <p><code>VOXTYPE_MEETING_ENGINE</code>, <code>VOXTYPE_MEETING_MODEL</code> and <code>VOXTYPE_MEETING_LANGUAGE</code> do the same. A choice the meeting can't use is refused before it starts, with the command that fixes it. Reported by <a href="https://github.com/yaubara">@yaubara</a> and <a href="https://github.com/thrawny">@thrawny</a>.</p>
+
+                    <h3>Speaker echo stays out of your lines</h3>
+                    <p>On speakers, your mic hears the other side of the call, and that used to be transcribed as You.</p>
+                    <p><strong>Echo cancellation.</strong> While a meeting records on speakers, voxtype runs PipeWire's WebRTC echo canceller on the meeting's mic, using what your speakers play as the reference. It starts and stops with the meeting and changes nothing in your PipeWire configuration. With headphones, a headset or Bluetooth there's no echo to cancel, and GTCRN runs as before.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.audio]
+echo_cancel = "auto"   # auto | webrtc | gtcrn | disabled</code></pre>
+                    </div>
+                    <p><strong>Echo guard.</strong> For every mic line, voxtype compares the two tracks' levels. A line the loopback explains is dropped when the remote track has those words, and moved to the remote speaker when it doesn't. Short misheard echoes, the "Thank you." a speech engine writes for noise, and a decoder repeating one phrase six times are dropped or collapsed. A line with any of your own voice in it stays yours.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.audio]
+echo_guard = true
+echo_fuzzy_max_words = 4</code></pre>
+                    </div>
+                    <p><code>voxtype meeting status --json</code>, each meeting's <code>meeting.json</code> and the meeting socket say which path a meeting used: <code>webrtc</code>, <code>gtcrn</code> or <code>none</code>.</p>
+                    <p><strong>Why use it:</strong> you can take calls on speakers and still get a transcript where You means you.</p>
+
+                    <h3>Lines in speaking order, for every engine</h3>
+                    <p>Each line is timed per utterance, so the two sides interleave as they were spoken instead of a chunk at a time. Parakeet uses its own word times, in-process and through the GGUF worker. Whisper gets a line per utterance from one call per chunk, <code>whisper-cli</code> a line per segment, and remote Whisper uses the server's segment times. Chunks end in a pause both tracks share, so fewer sentences are split across two chunks.</p>
+
+                    <h3>Hybrid diarization: You on the mic, remote voices told apart</h3>
+                    <p>The <code>hybrid</code> backend keeps everything on your mic as You and clusters only the system audio. One remote voice stays Remote. When a second voice speaks they become Remote 1 and Remote 2, and earlier lines are renamed. Short utterances no longer split one caller into several speakers.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype config set meeting.diarization.backend hybrid</code></pre>
+                    </div>
+                    <p>Hybrid needs the ONNX builds and the ECAPA model that <code>ml</code> uses. Without them it falls back to <code>simple</code> and a notification says why.</p>
+
+                    <h3>Fix the transcript, during the call or after</h3>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting label latest "Remote 1" Dana
+voxtype meeting reassign latest 28 Stephanie     # --reset undoes it
+voxtype meeting edit latest 28 "fixed text"      # --reset restores the original
+voxtype meeting delete-line latest 31            # --restore brings it back
+voxtype meeting annotate latest 28 "check this number" --highlight
+voxtype meeting notes latest --append "follow up with Steve"
+voxtype meeting title latest "Pete &lt;&gt; Chad Bi-Weekly"</code></pre>
+                    </div>
+                    <ul>
+                        <li><code>label</code> names a speaker and survives the daemon's saves during a meeting. If the meeting has a summary, action items owned by the old name take the new one. Only exact matches change, so naming Chris never touches Christopher.</li>
+                        <li><code>reassign</code> moves one line, <code>edit</code> corrects its text, <code>delete-line</code> hides it. The originals are kept, and every change can be undone.</li>
+                        <li><code>annotate</code> attaches a note or a highlight to a line, and <code>notes</code> keeps free-text notes in the meeting's <code>notes.md</code>.</li>
+                        <li><code>title</code> renames a meeting at any time, live or finished.</li>
+                        <li>Each meeting folder gets a <code>transcript.md</code> with notes at the top and annotations under their lines.</li>
+                    </ul>
+
+                    <h3>Your name, and names from the title</h3>
+                    <p>Set your name once and it replaces "You" everywhere voxtype shows your side: the views, exports, summaries, the assistant and search.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting]
+my_name = "Pete"</code></pre>
+                    </div>
+                    <p>A two-person title names both sides on its own. In "Pete &lt;&gt; Andrew standup", your side is Pete and every remote voice is Andrew, so a 1:1 never shows three Remotes. A name you gave by hand always wins.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting]
+auto_label_from_title = true</code></pre>
+                    </div>
+
+                    <h3>Titles from your calendar</h3>
+                    <p>A meeting that starts without a title you chose takes its name, and its call link, from the calendar event in progress. Voxtype asks your calendar's private iCal link first, then a calendar command, then the Omarchy Next Meeting widget when it's on your bar.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting calendar set-ics -        # reads the private iCal link from stdin, kept outside config.toml</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.calendar]
+window_mins = 10</code></pre>
+                    </div>
+
+                    <h3>Search every meeting</h3>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting search budget
+voxtype meeting search budget review --speaker Dana
+voxtype meeting search '"next quarter"' --since 2026-11-01 --json</code></pre>
+                    </div>
+                    <p>Search covers transcripts as you see them (names, moves and corrections applied, deleted lines left out), plus titles, notes and summaries. Meetings recorded before this release are indexed the first time you search.</p>
+
+                    <h3>Ask about a meeting, and get a summary when it ends</h3>
+                    <p><code>voxtype meeting ask</code> answers questions about a meeting, and a summary is written when it stops. Both go through your own coding agent, run headless with every tool turned off, or through a local Ollama model.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting assistant allow claude
+voxtype meeting ask latest "what did Dana just say?" --last 5m
+voxtype meeting summarize latest --regenerate</code></pre>
+                    </div>
+                    <ul>
+                        <li>Supported agents are <code>claude</code>, <code>pi</code> and <code>codex</code>. Codex runs inside a bubblewrap jail that sees nothing from your home directory except its own <code>auth.json</code>, and needs <code>bwrap</code>.</li>
+                        <li>No transcript goes to an agent until you allow that agent once. <code>local_only = true</code> sends nothing to an agent.</li>
+                        <li>The prompt carries your speaker names, moves, notes and annotations as you see them.</li>
+                    </ul>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.assistant]
+agent = "claude"      # unset: the Omarchy default agent, then claude or pi on PATH
+local_only = false
+
+[meeting.summary]
+auto = true           # unset: on once an agent has been allowed</code></pre>
+                    </div>
+
+                    <h3>Action items to Todoist or a reminder</h3>
+                    <p>The summary's action items carry an owner, the deadline when someone said one, and the moment in the meeting it came up.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting actions latest                           # list them
+voxtype meeting actions latest --mine                    # only yours
+voxtype meeting todoist connect                          # once, in your browser
+voxtype meeting actions latest --send todoist            # every item, or --pick 1,3
+voxtype meeting actions latest --send reminder --in 30   # Omarchy reminders</code></pre>
+                    </div>
+                    <p>"Friday" in a Thursday meeting becomes the next day. Each send is remembered, so sending again never makes a second task. The Summary tab has the same items as rows with Send to Todoist and Remind me.</p>
+                    <p><code>todoist connect</code> signs voxtype in through Todoist's consent page and asks only to add tasks. It can't read your tasks or projects. The token is kept in <code>~/.local/state/voxtype/todoist.json</code>, never in <code>config.toml</code>. On a machine without a browser, point <code>[meeting.actions] todoist_token_file</code> at a file holding a personal API token.</p>
+                    <p><strong>Why use it:</strong> the follow-ups from a call end up where you already track work.</p>
+
+                    <h3>Share a meeting</h3>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting share latest                    # copy the notes to the clipboard
+voxtype meeting share latest --transcript       # ...with the transcript
+voxtype meeting share latest --to email         # open a mail draft
+voxtype meeting share latest --to file          # save to ~/Documents/Voxtype
+voxtype meeting share latest --to command       # pipe to [meeting.share] command
+voxtype meeting share latest --preview          # print what would be sent</code></pre>
+                    </div>
+                    <p>A share has the title, date, attendees, summary, action items, your notes and highlighted lines. Nothing is shared unless you run the command or pick the menu item, and there is no hosted link.</p>
+
+                    <h3>Keep the audio, check it first, play it back (<a href="https://github.com/peteonrails/voxtype/issues/529">#529</a>)</h3>
+                    <p><code>retain_audio = true</code> keeps a meeting's audio as <code>mic.opus</code>, <code>loopback.opus</code> and <code>mixed.opus</code> in its folder, or as WAV files when <code>ffmpeg</code> isn't installed. In 1.2.2 the setting did nothing. Reported by <a href="https://github.com/loicfavory">@loicfavory</a>.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting soundcheck                  # meters for mic and call before you join
+voxtype meeting play latest --segment 28
+voxtype meeting play latest --at 12:40
+voxtype meeting play --stop</code></pre>
+                    </div>
+                    <p>Playback needs <code>ffmpeg</code> and one of <code>pw-play</code>, <code>paplay</code> or <code>aplay</code>. Each meeting folder also has a <code>meeting.json</code> describing the meeting and its files, and <code>post_meeting_command</code> runs once the folder is final:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting]
+retain_audio = true
+post_meeting_command = 'rsync -a "$VOXTYPE_MEETING_DIR" nas:meetings/'</code></pre>
+                    </div>
+
+                    <h3>A crash no longer costs you the meeting</h3>
+                    <p>The transcript is saved after every chunk. If the daemon dies mid-meeting, the next start marks the meeting interrupted, and the view and a notification offer to finish it: transcribe the audio left over, write the summary and run <code>post_meeting_command</code>.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting recover
+voxtype meeting recover --finish 3f2a
+voxtype meeting recover --discard 3f2a</code></pre>
+                    </div>
+
+                    <h3>Import recordings, and transcribe meetings again (<a href="https://github.com/peteonrails/voxtype/issues/489">#489</a>)</h3>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting import call.mp3 --title "Client call"
+voxtype meeting import recording.wav --channels mic,loopback
+voxtype meeting retranscribe latest --model large-v3-turbo</code></pre>
+                    </div>
+                    <p><code>import</code> turns any file ffmpeg reads into a meeting. <code>--channels mic,loopback</code> attributes a two-channel call recording to You and Remote. <code>retranscribe</code> runs a meeting's kept audio through another engine, model or language, keeps the old transcript as <code>transcript.v1.json</code>, and carries your annotations, moves and corrections over. Requested by <a href="https://github.com/fidalgo">@fidalgo</a>.</p>
+
+                    <h3>Voxtype offers to record a call, and stops when it ends</h3>
+                    <p>When a call app starts using the mic, voxtype shows one notification offering to record it. Zoom and teams-for-linux count on that alone. A browser counts only when its Hyprland window title confirms a call, such as Google Meet or Teams on the web. Nothing records until you press Record.</p>
+                    <p>A browser call goes on while the browser still has the microphone or a window still shows it. Bringing another tab to the front doesn't end it. When the call ends, voxtype says so and stops the meeting 20 seconds later unless you press Keep recording.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.detect]
+enabled = true            # unset: on for Omarchy, off elsewhere
+auto_record_apps = []     # e.g. ["Zoom"] to record without asking
+on_call_end = "stop"      # stop | ask | keep
+stop_grace_secs = 20</code></pre>
+                    </div>
+                    <p><code>voxtype meeting suggest --dry-run --watch</code> prints what the detector sees and why.</p>
+
+                    <h3>Tell the call it's being recorded (off by default)</h3>
+                    <p>Laws on recording calls differ by place, and some need everyone's agreement. Until you acknowledge it, <code>meeting start</code> and the meeting view remind you to tell the other people (<code>voxtype meeting notice --ack</code>).</p>
+                    <p>Voxtype can also say it for you. With the announcement on, "This meeting is being recorded and transcribed with Voxtype." plays once when the meeting starts. It goes into the call app's own mic stream, so the other people hear it even when you wear headphones, and it plays on your speakers too. It stays out of the transcript.</p>
+                    <p>Call apps open the mic on their pre-join screen and again when you join. The announcement waits until the call app has kept the same microphone stream for five seconds, so it plays to the meeting and not to the lobby.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting]
+announce_recording = false                  # true to announce
+announcement_voice = "kokoro"               # or "jessica", downloaded on first use
+# announcement_file = "~/announce-de.wav"   # your own wording or language</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting start --announce
+voxtype meeting start --no-announce</code></pre>
+                    </div>
+                    <p><code>meeting status</code> and the view say whether it reached the call or played only on your speakers, and why. It needs PipeWire. It's a courtesy, not consent: it doesn't ask anyone anything, and a muted mic in the call app silences it. You remain responsible for the recording laws that apply to you.</p>
+                    <p>The built-in voice is AI-generated speech from Kokoro-82M (voice <code>af_heart</code>). It ships in every build, plays offline, and is MIT like the rest of voxtype. Voxtype never calls a speech service.</p>
+                    <p>You can pick an ElevenLabs voice, Jessica, instead. It isn't part of voxtype or any package: voxtype downloads it once from its models server, checks it against its published sha256 and keeps it in <code>~/.local/share/voxtype/sounds/</code>. Its terms aren't MIT: it may be redistributed only unmodified, with voxtype, and may not be used to train or improve AI models. Voxtype shows them when it downloads.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype meeting announcement --voice jessica              # download it now
+voxtype config set meeting.announcement_voice jessica</code></pre>
+                    </div>
+                    <p>If a meeting wants Jessica and can't download it within 15 seconds, the built-in voice plays, the meeting goes on, and <code>meeting status</code> says why.</p>
+
+                    <h3>Meeting settings in the terminal</h3>
+                    <p>The Meeting page of <code>voxtype configure</code> now lists every <code>[meeting]</code> setting, grouped the way the Settings panel groups them (General, Audio, Speakers, Calendar, Summary, Action items, Sharing, Call detection, Assistant), with the same labels and help. Before, it had three hand-written fields, and one of them wrote a key nothing read. Changes are saved in one go, comments in your config are kept, and the page says which settings need a daemon restart.</p>
+                    <p><strong>Why use it:</strong> you can set up meetings over SSH or without a desktop panel.</p>
+
+                    <h3>Failures show a notification that names the fix (<a href="https://github.com/peteonrails/voxtype/issues/880">#880</a> to <a href="https://github.com/peteonrails/voxtype/issues/896">#896</a>)</h3>
+                    <p>Before 1.3.0, most failures only reached the journal. You pressed the hotkey and nothing happened. Each of these now shows a desktop notification that says what failed and what to run:</p>
+                    <ul>
+                        <li><strong>The text couldn't be typed.</strong> "Voxtype: copied to clipboard, paste manually" lists each typing tool that was skipped and why. If nothing could deliver the text at all, "Voxtype: transcription not delivered" shows the text and saves it (<a href="https://github.com/peteonrails/voxtype/issues/880">#880</a>).</li>
+                        <li><strong>The microphone or the model failed to load.</strong> The notice names the device or the model and the command that fixes it (<a href="https://github.com/peteonrails/voxtype/issues/885">#885</a>).</li>
+                        <li><strong>The built-in hotkey can't open a keyboard.</strong> It shows once, and it names <code>[hotkey] enabled = false</code> for people who use a compositor keybinding (<a href="https://github.com/peteonrails/voxtype/issues/884">#884</a>).</li>
+                        <li><strong>VAD can't start.</strong> With <code>backend = "auto"</code>, voxtype now falls back to Energy VAD instead of running without any. With <code>backend = "whisper"</code> and no model, a notice at startup gives the fix (<a href="https://github.com/peteonrails/voxtype/issues/889">#889</a>).</li>
+                        <li><strong>Whisper or OpenVINO fell back from the GPU or NPU to the CPU</strong>, or a CUDA or MIGraphX build can't find its GPU libraries (<a href="https://github.com/peteonrails/voxtype/issues/895">#895</a>, <a href="https://github.com/peteonrails/voxtype/issues/891">#891</a>).</li>
+                        <li><strong>The OSD frontend you set can't run</strong> and another one took over (<a href="https://github.com/peteonrails/voxtype/issues/883">#883</a>).</li>
+                        <li><strong>A post-processing command or an output hook failed.</strong> The text is typed as transcribed, and the notice says what went wrong (<a href="https://github.com/peteonrails/voxtype/issues/892">#892</a>).</li>
+                        <li><strong>A meeting started without the other side's audio, without speaker separation or without echo cancellation</strong>, or its transcription failed (<a href="https://github.com/peteonrails/voxtype/issues/896">#896</a>).</li>
+                        <li><strong>A recording is about to hit <code>max_duration_secs</code></strong>, and again when it does (<a href="https://github.com/peteonrails/voxtype/issues/891">#891</a>).</li>
+                        <li><strong>A transcription failed.</strong> The notice gives the command that retries the recording (<a href="https://github.com/peteonrails/voxtype/issues/891">#891</a>).</li>
+                    </ul>
+                    <p>Notifications are delivered over D-Bus when <code>notify-send</code> is missing or fails, so they no longer depend on libnotify (<a href="https://github.com/peteonrails/voxtype/issues/881">#881</a>).</p>
+                    <p><strong>Why use it:</strong> a hotkey that does nothing now comes with a reason and a command.</p>
+
+                    <h3><code>voxtype doctor</code> (<a href="https://github.com/peteonrails/voxtype/issues/887">#887</a>)</h3>
+                    <p>One command checks the config, the model, the GPU runtime, the audio input, the output tools, input access, notifications, the OSD, meeting tools and the service. Every problem comes with its fix on the next line:</p>
+                    <div class="code-block">
+                        <pre><code>Transcription:
+  ✗ whisper model 'medium.en' is not downloaded
+      Fix: Run: voxtype setup --download --model medium.en</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <pre><code>voxtype doctor
+voxtype doctor --json</code></pre>
+                    </div>
+                    <p>It exits 1 when a check failed, and it only checks features your config turns on. The daemon runs the quick part of the same checks at startup and groups what it finds into one notification, "Voxtype: N problems need attention". <code>voxtype setup check</code> prints the same report under its old name.</p>
+                    <p><strong>Why use it:</strong> it's the first thing to run when voxtype doesn't work, and the first thing to paste into a bug report.</p>
+
+                    <h3>Failed recordings and undelivered text are kept (<a href="https://github.com/peteonrails/voxtype/issues/891">#891</a>, <a href="https://github.com/peteonrails/voxtype/issues/880">#880</a>)</h3>
+                    <p>A recording whose transcription fails is saved as a WAV in <code>~/.local/state/voxtype/failed-audio/</code>. The 20 most recent are kept, and <code>voxtype transcribe &lt;file&gt;</code> retries one.</p>
+                    <p>A transcription that could be neither typed nor copied is saved as a text file in <code>~/.local/state/voxtype/undelivered/</code>. The 200 most recent are kept.</p>
+                    <p>Both directories and their files are readable only by you. Both are on by default. Each has a setting:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[audio]
+keep_failed_recordings = false
+
+[output]
+keep_undelivered_text = false</code></pre>
+                    </div>
+                    <p><strong>Why use it:</strong> a failed dictation used to be gone. Now you can retry it or copy it out of a file.</p>
+
+                    <h3>Paste keys follow the window (<a href="https://github.com/peteonrails/voxtype/issues/882">#882</a>)</h3>
+                    <p><code>ctrl+v</code> doesn't paste in a terminal. With <code>output.paste_keys = "auto"</code>, paste mode sends <code>ctrl+v</code> to GUI apps and <code>output.paste_keys_terminal</code> (default <code>ctrl+shift+v</code>) to terminals. It works on Hyprland, Sway and niri. Elsewhere <code>auto</code> sends <code>ctrl+v</code>.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+mode = "paste"
+paste_keys = "auto"
+paste_keys_terminal = "ctrl+shift+v"</code></pre>
+                    </div>
+                    <p><code>auto</code> is the default when the key is absent. An explicit <code>paste_keys</code> is sent everywhere, as before.</p>
+
+                    <h3>OSD: a fixed level scale, placement per output, opacity (<a href="https://github.com/peteonrails/voxtype/issues/879">#879</a>, <a href="https://github.com/peteonrails/voxtype/issues/894">#894</a>)</h3>
+                    <ul>
+                        <li>The GTK4 and native waveform and level meter use a fixed dB scale, so the height shows how loud the mic is. <code>waveform_gain</code> shifts that scale: 10 is neutral, and every doubling shows the input 6 dB louder.</li>
+                        <li>Placement is computed from the focused output's own size, so monitors with different resolutions and scales get the same relative position.</li>
+                        <li><code>[osd] opacity</code> now applies in the GTK4 and native frontends.</li>
+                        <li>The native OSD renders sharp at fractional scales, follows the theme colors and picks up an Omarchy theme switch without a restart.</li>
+                    </ul>
+
+                    <h3><code>voxtype setup lard</code> downloads the cleanup model</h3>
+                    <p>The LARD disfluency model removes fillers and false starts from English dictation. It's on the model mirror now. Installing it is one command:</p>
+                    <div class="code-block">
+                        <pre><code>voxtype setup lard
+voxtype config set text.lard_disfluency true
+systemctl --user restart voxtype</code></pre>
+                    </div>
+                    <p>The model is 64 KB, checked against a pinned sha256, and licensed <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>, separately from voxtype's MIT code (<a href="https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md">model card</a>). Nothing downloads unless you run the command.</p>
+                    <p>When <code>text.lard_disfluency</code> is on and the model is missing, <code>voxtype doctor</code>, the startup notification, <code>voxtype config set</code>, the Settings panel and <code>voxtype configure</code> say so and name the command.</p>
+
+                    <h3>Dictated text stays out of the log</h3>
+                    <p>At the default level the log records lengths, not words:</p>
+                    <div class="code-block">
+                        <pre><code>Transcribed 29 chars (whisper engine)</code></pre>
+                    </div>
+                    <p>The same goes for meeting lines, undelivered text and text sent to a post-processing command. The systemd service logs to the journal, and the journal keeps what it's given for a long time. Run with <code>-v</code> to log the text when you report a recognition problem.</p>
+
+                    <h3><code>voxtype-git</code> for Arch (<a href="https://github.com/peteonrails/voxtype/issues/757">#757</a>)</h3>
+                    <p><code>packaging/arch-git/</code> is a source-package recipe that builds the development branch, with Whisper tuned for the machine that builds it, the Vulkan and ONNX variants, the GGUF workers and the desktop pieces. It isn't on AUR yet. Also by Carmine Paolino.</p>
+
+                    <h3>Models come only from Voxtype's mirror</h3>
+                    <p>Whisper models, the Silero VAD model, and the ECAPA and GTCRN models that meetings use now download from <code>models.voxtype.io</code>, like every other model voxtype downloads. Each file is checked against the mirror's manifest, size and sha256, before it takes the name voxtype loads, so a damaged or swapped download never runs. There's no Hugging Face or GitHub fallback any more. Files already on disk keep their names and aren't downloaded again when they match.</p>
+
+                    <h3>Meetings from the tray, and on for new installs</h3>
+                    <p>The tray has Start Meeting, then Stop, Pause and Resume while one runs, and opens the meeting view and the Voxtype panel. New installs get <code>[meeting] enabled = true</code>. Existing configs keep what they have, and while meeting mode is off the tray offers <strong>Turn on meetings...</strong>.</p>
+                    <p>The packages install a Voxtype Meetings launcher entry. The Nix flake now ships the meeting view, the GGUF worker and the desktop entries.</p>
+
+                    <h3>For scripts and status bars (<a href="https://github.com/peteonrails/voxtype/issues/518">#518</a>)</h3>
+                    <ul>
+                        <li><code>$XDG_RUNTIME_DIR/voxtype/meeting.sock</code> streams meeting events as newline-delimited JSON: a <code>hello</code> snapshot, then <code>segments</code>, <code>status</code>, <code>levels</code>, <code>speaker_renamed</code>, <code>segment_updated</code>, <code>segment_deleted</code>, <code>title_changed</code>, <code>notes_updated</code>, <code>summary_ready</code>, <code>summary_updated</code>, <code>announcement</code>, <code>playback</code> and import progress.</li>
+                        <li><code>meeting status</code>, <code>show</code>, <code>list</code>, <code>search</code>, <code>actions</code>, <code>share --preview</code>, <code>ask</code>, <code>play</code>, <code>reassign</code>, <code>edit</code>, <code>delete-line</code>, <code>annotate</code>, <code>notes</code> and <code>title</code> take <code>--json</code>.</li>
+                        <li><code>voxtype status --format json --extended</code> adds <code>meeting_active</code> and <code>meeting_status</code>, and <code>meeting_id</code> while a meeting runs.</li>
+                    </ul>
+                    <p>The contracts are in <a href="https://github.com/peteonrails/voxtype/blob/main/docs/INTEGRATIONS.md#meeting-mode">INTEGRATIONS.md</a>. Requested by <a href="https://github.com/malko">@malko</a>.</p>
+
+                    <h3>Bug fixes</h3>
+                    <ul>
+                        <li>A chunk holding one short sentence, such as an opening line while people join, was dropped. It is now transcribed</li>
+                        <li>Segment IDs repeated across chunks. They are now unique within a meeting</li>
+                        <li>With <code>loopback_device = "auto"</code>, the loopback took the first running monitor, so on a card with several outputs it could record an idle one. It now records the default output's monitor. Thanks to <a href="https://github.com/materemias">@materemias</a>, who proposed the same fix in <a href="https://github.com/peteonrails/voxtype/issues/516">#516</a></li>
+                        <li>Speaker labels given during a meeting were lost when the next chunk was saved</li>
+                        <li><code>meeting export --help</code> listed three formats while five worked</li>
+                        <li>Meeting notifications named the meeting by its UUID. They now use its title, and Ended says how long it ran</li>
+                        <li>A timed-out <code>post_meeting_command</code> is killed before it's reaped</li>
+                        <li>The OSD's and the daemon's theme watcher could abort the whole process when its file-watching loop hit an error. A dead watcher is now replaced, and the theme is reloaded only if it changed meanwhile</li>
+                        <li>A signal arriving at the wrong moment could turn an interrupted system call into a "Resource temporarily unavailable" error, behind the theme watcher failure above and spurious remote-transcription timeouts. signal-hook-registry 1.4.8 preserves errno</li>
+                        <li>With <code>[vad] backend = "auto"</code>, the Whisper engine and no Silero model, the daemon ran with no VAD at all. It now uses Energy VAD</li>
+                        <li>The native OSD drew a washed-out grey background and came out blurry on scaled outputs</li>
+                    </ul>
+
+                    <h3>Upgrading</h3>
+                    <p>This is what changes for an install that keeps its 1.2.2 config.</p>
+                    <p><strong>Notifications you may see without changing anything</strong></p>
+                    <p>No setting turns the failure notifications off. Each one stops when its cause is fixed, and some have a setting that avoids them:</p>
+                    <div class="code-block">
+                        <table>
+                            <thead><tr><th scope="col">Notification</th><th scope="col">When it shows</th><th scope="col">How to stop it</th></tr></thead>
+                            <tbody>
+                                <tr><td>Recording Limit Approaching, Recording Limit Reached</td><td>10 seconds before a recording hits <code>max_duration_secs</code> (30 seconds before, for limits of two minutes or more), and when it hits it. With the default 60-second limit the first shows at 50 seconds</td><td>Raise <code>[audio] max_duration_secs</code>. Limits under 30 seconds get no warning</td></tr>
+                                <tr><td>Voxtype: built-in hotkey unavailable</td><td>Once, when the built-in hotkey is on and voxtype can't open a keyboard</td><td><code>[hotkey] enabled = false</code> if you use a compositor keybinding, or join the <code>input</code> group</td></tr>
+                                <tr><td>Voxtype: copied to clipboard, paste manually</td><td>Once per problem per daemon start, when typing failed and the clipboard took the text</td><td>Fix the typing tool it names, or set <code>[output] mode = "clipboard"</code></td></tr>
+                                <tr><td>Voxtype: transcription not delivered</td><td>Every time nothing could deliver the text</td><td>Fix the output tools it names</td></tr>
+                                <tr><td>Transcription Failed</td><td>Every failed transcription. While the recording is kept, it stays until you dismiss it</td><td>Fix the cause. <code>keep_failed_recordings = false</code> stops the saving, not the notice</td></tr>
+                                <tr><td>Voxtype: no microphone found, microphone not found, could not open the microphone, model missing, model failed to load</td><td>When a recording can't start. A repeat of the same failure is quiet for five minutes</td><td>Fix the device or the model it names</td></tr>
+                                <tr><td>Voxtype: voice activity detection is off</td><td>At each start, only with <code>[vad] backend = "whisper"</code> and no Silero model</td><td><code>voxtype setup vad</code>, or <code>backend = "energy"</code></td></tr>
+                                <tr><td>Voxtype: Whisper is running on CPU, OpenVINO fell back, GPU unavailable, using CPU</td><td>At daemon start or first model load, on a GPU or NPU build that ends up on the CPU</td><td>Fix the driver or the libraries it names, or switch to a CPU build</td></tr>
+                                <tr><td>Voxtype: OSD frontend unavailable, no OSD available</td><td>Once per start, only when <code>[osd] frontend</code> names a frontend that can't run</td><td><code>frontend = "auto"</code>, or <code>[osd] enabled = false</code></td></tr>
+                                <tr><td>Voxtype: post-processing failed (and its variants), hook failed</td><td>Only with a post-process command or a hook configured. The same failure is quiet for five minutes</td><td>Fix or remove the command</td></tr>
+                                <tr><td>Voxtype: N problems need attention</td><td>At start, when the startup checks find an error. It doesn't repeat until the set of problems changes</td><td>Fix what it lists. <code>voxtype doctor</code> shows the same in full</td></tr>
+                                <tr><td>Meeting started with limitations, Meeting transcription failed</td><td>Meeting mode only</td><td>Fix what it names, or turn the missing piece off: <code>[meeting.audio] loopback_device = "disabled"</code>, <code>[meeting.audio] echo_cancel = "disabled"</code>, or <code>[meeting.diarization] backend = "simple"</code></td></tr>
+                                <tr><td>Turn on Voxtype meetings?</td><td>At most once a day at daemon start, while meeting mode is off</td><td>Choose "No, don't ask again", or set <code>[meeting] offer_enable = false</code></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>Every voxtype notification is sent under the app name <code>Voxtype</code>, so a rule in your notification daemon can mute them all.</p>
+                    <ul>
+                        <li><strong>If <code>notify-send</code> isn't installed,</strong> 1.2.2 showed you no notifications. 1.3.0 delivers them over D-Bus, so you'll now see all of them, including the one after each dictation. <code>[output.notification] on_transcription = false</code> turns that one off.</li>
+                        <li><strong>A working setup should stay quiet.</strong> If you get a notice for something that works, please report it.</li>
+                    </ul>
+                    <p><strong>Dictation</strong></p>
+                    <ul>
+                        <li><strong>Failed recordings and undelivered text are saved by default</strong>, in <code>~/.local/state/voxtype/failed-audio/</code> (20 files) and <code>~/.local/state/voxtype/undelivered/</code> (200 files), readable only by you. Set <code>[audio] keep_failed_recordings = false</code> and <code>[output] keep_undelivered_text = false</code> to write nothing. Files saved earlier stay until you delete them.</li>
+                        <li><strong>The log no longer has your words.</strong> Scripts that grep the journal for <code>Transcribed: "..."</code> will find <code>Transcribed N chars (engine)</code> instead. <code>voxtype -v</code> brings the text back.</li>
+                        <li><strong>Paste mode with no <code>paste_keys</code> in the config</strong> sent <code>ctrl+v</code> everywhere in 1.2.2. It now sends <code>ctrl+shift+v</code> to terminals on Hyprland, Sway and niri. Set <code>paste_keys = "ctrl+v"</code> for the old behaviour. A config with an explicit <code>paste_keys</code>, including the <code>shift+insert</code> in the packaged <code>/etc/voxtype/config.toml</code>, is unchanged.</li>
+                        <li><strong><code>[vad] backend = "auto"</code> with the Whisper engine and no Silero model</strong> now uses Energy VAD. In 1.2.2 it ran with no VAD.</li>
+                        <li><strong>Model downloads come from <code>models.voxtype.io</code> only.</strong> If a firewall or proxy allows Hugging Face for model downloads, allow <code>models.voxtype.io</code> instead. Models you already have are kept.</li>
+                    </ul>
+                    <p><strong>OSD</strong></p>
+                    <p>These apply to the GTK4 and native frontends unless a line says otherwise.</p>
+                    <ul>
+                        <li><strong>The card may move.</strong> Placement now uses the focused output's size. The GTK4 OSD used the first monitor's, and the native OSD ignored <code>top_margin</code>. <code>position = "top-center"</code> with the default <code>top_margin</code> now sits near the top edge, in Quickshell too.</li>
+                        <li><strong>The waveform looks different.</strong> It's on a fixed dB scale with no automatic gain, so normal speech lands around mid-height where it used to hit the edge of the card. A <code>waveform_gain</code> you tuned by hand means something else now: 10 is neutral.</li>
+                        <li><strong>The card is slightly see-through.</strong> <code>[osd] opacity</code> defaults to 0.95 and was ignored before. Set <code>opacity = 1.0</code> for a solid card.</li>
+                        <li><strong>The native OSD's colors follow your theme</strong>, so they can differ from 1.2.2. On current Omarchy themes the level meter's green, yellow and red zones now come from the theme in every frontend.</li>
+                    </ul>
+                    <p><strong>Meetings</strong></p>
+                    <ul>
+                        <li><strong>Meeting mode stays off on existing installs.</strong> Nothing changes until you turn it on with the tray's <strong>Turn on meetings...</strong>, the notification's Turn on button or <code>voxtype config set meeting.enabled true</code>, then restart the daemon. New installs have it on.</li>
+                        <li><strong>Without Quickshell, meetings open in a window.</strong> On GNOME, Plasma, Sway or X11 with the <code>voxtype-meetings-gtk4</code> window installed, a meeting opens it on start. It ships in every Linux package, as its own <code>voxtype-meetings-gtk4</code> subpackage in the source RPM and Debian packages. On Arch, install <code>gtk4</code> if your desktop doesn't have it already, and on Nix use the <code>meetings-gtk4</code> output (<code>nix build .#meetings-gtk4</code>). Set <code>[meeting] view = "none"</code> or <code>show_view_on_start = false</code> to keep it closed.</li>
+                        <li><strong>Your name is never set for you.</strong> Your side shows as "You" until you set <code>[meeting] my_name</code>. <code>voxtype meeting my-name</code> suggests the name on your account. It is a display name only: your side stays keyed <code>You</code> in the files and the index, and <code>--mine</code> matches either.</li>
+                        <li><strong>Kept audio uses disk.</strong> <code>retain_audio</code> worked in no earlier release, so a config that already says <code>retain_audio = true</code> starts keeping audio now: about 30 MB per hour of meeting for the three Opus files, and about ten times that as WAV when <code>ffmpeg</code> is missing. It's off by default.</li>
+                        <li><strong>Todoist needs a one-time sign-in.</strong> <code>voxtype meeting todoist connect</code> opens your browser and listens on <code>localhost</code>, on one of ports 47815 to 47819, for Todoist's answer. One of them must be free. <code>voxtype meeting todoist disconnect</code> forgets it, and Todoist's Settings &gt; Integrations removes voxtype's access.</li>
+                        <li><strong>The recording announcement is off.</strong> Turning it on doesn't replace telling people or asking for their consent where the law requires it.</li>
+                        <li><strong>Every package is plain MIT.</strong> The built-in announcement voice is a Kokoro-82M clip under voxtype's MIT licence. The optional Jessica voice is never shipped in a package. It is downloaded only when you choose it, under its own terms, which voxtype shows on download. See <a href="https://github.com/peteonrails/voxtype/blob/main/assets/sounds/README.md">assets/sounds/README.md</a>.</li>
+                        <li><code>echo_cancel = "auto"</code> runs the WebRTC canceller when a meeting records on speakers. Set <code>echo_cancel = "gtcrn"</code> for the 1.2.2 behaviour.</li>
+                        <li><strong>A detected call ending stops the meeting.</strong> When the call is over, voxtype shows <strong>Call ended</strong> and stops the meeting 20 seconds later unless you press <strong>Keep recording</strong>. Set <code>[meeting.detect] on_call_end = "ask"</code> or <code>"keep"</code> to change that, and <code>stop_grace_secs</code> to change the wait. A call tab left open after you hang up keeps the recording going until you close it or stop the meeting.</li>
+                        <li>A meeting that uses dictation's model shares it, so a dictation that arrives while a meeting chunk is transcribing waits for that chunk.</li>
+                        <li><strong>Coming from a release candidate:</strong> rc1 to rc3 could freeze the daemon when you named a speaker with more than about 30 lines during a meeting. 1.3.0 has the fix.</li>
+                    </ul>
+
+                    <h3>Known issues</h3>
+                    <ul>
+                        <li>Hybrid diarization separates clearly different voices but can merge similar ones.</li>
+                        <li>Browser calls are only detected on Hyprland, and so only reach the recording announcement there.</li>
+                        <li>The meeting view's elapsed time includes paused time.</li>
+                        <li><code>meeting show</code> doesn't say when a meeting is paused (<a href="https://github.com/peteonrails/voxtype/issues/845">#845</a>).</li>
+                        <li>The Nix flake's ONNX outputs don't build <code>ml-diarization</code>, so <code>hybrid</code> and <code>ml</code> fall back to <code>simple</code> there (<a href="https://github.com/peteonrails/voxtype/issues/838">#838</a>).</li>
+                        <li><code>voxtype doctor</code> reports an error when <code>[vad] backend = "auto"</code>, the engine is Whisper and the Silero model is missing. The daemon falls back to Energy VAD in that case, so dictation works.</li>
+                        <li>A service started with no <code>WAYLAND_DISPLAY</code> or <code>DISPLAY</code> sends two notifications for the one problem. Voxtype's notifications replace one another, so when several problems are reported at the same start you may only see the last. <code>voxtype doctor</code> lists them all.</li>
+                        <li>On a CUDA or MIGraphX build with its GPU libraries missing, "Voxtype: GPU unavailable, using CPU" shows at every daemon start, whichever engine is configured.</li>
+                        <li><code>voxtype info accel</code> can report "unknown" after a dictation when the systemd user journal has no entries for the daemon (<a href="https://github.com/peteonrails/voxtype/issues/1085">#1085</a>). On such a system <code>journalctl --user -u voxtype</code> prints nothing too. Use <code>journalctl _SYSTEMD_USER_UNIT=voxtype.service</code>.</li>
+                    </ul>
+
+                    <h3>Thanks</h3>
+                    <p>THANK YOU to <a href="https://github.com/crmne">Carmine Paolino</a> (@crmne). He wrote the fifteen pull requests, <a href="https://github.com/peteonrails/voxtype/issues/879">#879</a> to <a href="https://github.com/peteonrails/voxtype/issues/897">#897</a>, behind the failure notifications, <code>voxtype doctor</code>, kept failed recordings and undelivered text, terminal-aware paste keys, the D-Bus delivery and the OSD's level scale, placement and native rendering.</p>
+                    <p>The <code>voxtype-git</code> recipe (<a href="https://github.com/peteonrails/voxtype/issues/757">#757</a>) is his too. So is the diarization request (<a href="https://github.com/peteonrails/voxtype/issues/300">#300</a>) that set the direction hybrid diarization builds on. His fixes go back to 1.0: MPRIS timing around audio capture, the OSD waveform's refresh rate, man pages in the packages and <code>[parakeet] threads</code>.</p>
+                    <p>The meeting stack builds on earlier work from:</p>
+                    <ul>
+                        <li><a href="https://github.com/materemias">Máté Rémiás</a> (@materemias), for post-processing in meeting mode (<a href="https://github.com/peteonrails/voxtype/issues/292">#292</a>), the dual-source timestamp fix that keeps the two tracks on one timeline (<a href="https://github.com/peteonrails/voxtype/issues/330">#330</a>), the ECAPA VAD sub-windows and tunable threshold that hybrid's remote clustering runs on (<a href="https://github.com/peteonrails/voxtype/issues/418">#418</a>), the per-meeting <code>--diarization</code> flag (<a href="https://github.com/peteonrails/voxtype/issues/420">#420</a>), and the loopback fix in <a href="https://github.com/peteonrails/voxtype/issues/516">#516</a></li>
+                        <li><a href="https://github.com/sjug">Sebastian Jug</a> (@sjug), for the meeting audio capture and source diarization fixes (<a href="https://github.com/peteonrails/voxtype/issues/341">#341</a>) that the You and Remote split still uses, and the configurable meeting VAD threshold</li>
+                    </ul>
+                    <p>Thanks also to everyone who reported a bug or asked for a feature above.</p>
+
+                    <h3>Downloads and verification</h3>
+                    <div class="code-block">
+                        <table>
+                            <thead><tr><th scope="col">Platform</th><th scope="col">Download</th></tr></thead>
+                            <tbody>
+                                <tr><td>Linux binaries and companion workers</td><td>Choose the architecture and acceleration variant from the <a href="https://github.com/peteonrails/voxtype/releases/tag/v1.3.0">release assets</a>. Keep the matching GGUF worker and any provider libraries with the selected binary.</td></tr>
+                                <tr><td>GTK4 meetings window</td><td><code>voxtype-1.3.0-linux-x86_64-meetings-gtk4</code> or <code>voxtype-1.3.0-linux-aarch64-meetings-gtk4</code> from the release assets, beside the binary. The packages already include it.</td></tr>
+                                <tr><td>Debian and Ubuntu prebuilt package</td><td><a href="https://github.com/peteonrails/voxtype/releases/download/v1.3.0/voxtype_1.3.0-1_amd64.deb">voxtype_1.3.0-1_amd64.deb</a></td></tr>
+                                <tr><td>Fedora prebuilt package</td><td><a href="https://github.com/peteonrails/voxtype/releases/download/v1.3.0/voxtype-1.3.0-1.x86_64.rpm">voxtype-1.3.0-1.x86_64.rpm</a></td></tr>
+                                <tr><td>macOS</td><td>Choose the universal binary or DMG from the release assets.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>Verify Linux downloads against <code>SHA256SUMS.txt</code> and its detached signature, <code>SHA256SUMS.txt.asc</code>. The CI release signing key is <code>9CCF7915B750CAE8B095ED1AA3FC9F33FD209279</code>. macOS checksums are in <code>SHA256SUMS-macos.txt</code>.</p>
+                    <div class="code-block">
+                        <pre><code>gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt
+sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
+                    </div>
+                    <p>Only run the checksum command from a directory containing the intended downloads, and confirm each intended file is listed and passes. A valid manifest signature alone does not verify files you have not downloaded.</p>
+                </div>
+            </article>
 
             <article class="news-article" id="v122">
                 <div class="article-meta">
