@@ -14,8 +14,10 @@
 //!
 //! Run with `RUST_LOG=debug` for verbose logs.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -69,7 +71,10 @@ fn load_osd_config_from_file(explicit: Option<&std::path::Path>) -> OsdConfig {
 /// Application id for the GTK4 frontend.
 const APP_ID: &str = "io.voxtype.OsdGtk4";
 
-/// Visibility polling period. Drawing follows the GTK frame clock.
+/// Peak-decay and idle-check period while the surface is shown. Drawing
+/// follows the GTK frame clock. The timer stops once the surface hides and
+/// the IPC worker restarts it when the next frame arrives, so an idle OSD
+/// makes no wakeups.
 const RENDER_TICK_MS: u32 = 16;
 
 /// How long we wait without frames before treating the daemon as idle and
@@ -152,6 +157,11 @@ struct SharedState {
     peak: Mutex<PeakHold>,
     last_seq: Mutex<u64>,
     last_frame_at: Mutex<Instant>,
+    /// True while the GTK render timer is scheduled. Cleared by the timer
+    /// when it stops after hiding.
+    timer_running: AtomicBool,
+    /// Wakes the GTK main loop to restart the render timer.
+    wake: tokio::sync::Notify,
 }
 
 impl SharedState {
@@ -163,6 +173,8 @@ impl SharedState {
             peak: Mutex::new(PeakHold::new(decay_db_per_sec)),
             last_seq: Mutex::new(0),
             last_frame_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
+            timer_running: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
         }
     }
 }
@@ -312,6 +324,12 @@ fn spawn_ipc_worker(
                 }
                 if let Ok(mut t) = state.last_frame_at.lock() {
                     *t = Instant::now();
+                }
+                // Restart the render timer if it stopped while hidden. Notify
+                // stores a permit when nobody is waiting, so a wake sent
+                // before the GTK side starts waiting is not lost.
+                if !state.timer_running.load(Ordering::Acquire) {
+                    state.wake.notify_one();
                 }
 
                 total += 1;
@@ -469,69 +487,135 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
 
     // GTK pauses tick callbacks while the widget is hidden. While visible,
     // redraw even between audio deliveries so fractional scrolling continues.
-    drawing_area.add_tick_callback(|area, _clock| {
-        area.queue_draw();
-        glib::ControlFlow::Continue
-    });
-
-    // Visibility must be polled separately: a hidden widget has no frame clock
-    // ticks with which to notice the next recording.
-    let redraw_state = state.clone();
-    let redraw_window = window.clone();
-    // Tracks GTK visibility. Starts true because `window.present()` below maps
-    // the surface, the first tick's idle check then hides it.
-    let visible = Cell::new(true);
-
-    glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
-        let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
-        let last_at = redraw_state
-            .last_frame_at
-            .lock()
-            .map(|t| *t)
-            .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
-        let idle = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS || osd_suppressed();
-
-        if idle {
-            if visible.get() {
-                tracing::info!("hiding (idle for {:.2}s)", last_at.elapsed().as_secs_f32());
-                redraw_window.set_visible(false);
-                visible.set(false);
+    // Redraw on every frame while shown, so fractional scrolling continues
+    // between audio deliveries. The callback is removed while hidden: with no
+    // compositor frame callbacks to pace it, GDK's frame clock falls back to
+    // a ~60 Hz timer and would keep waking the process for nothing.
+    let tick_id: Rc<RefCell<Option<gtk4::TickCallbackId>>> = Rc::new(RefCell::new(None));
+    let set_ticking: Rc<dyn Fn(bool)> = {
+        let drawing_area = drawing_area.clone();
+        let tick_id = tick_id.clone();
+        Rc::new(move |on: bool| {
+            let mut slot = tick_id.borrow_mut();
+            match (on, slot.is_some()) {
+                (true, false) => {
+                    *slot = Some(drawing_area.add_tick_callback(|area, _clock| {
+                        area.queue_draw();
+                        glib::ControlFlow::Continue
+                    }));
+                }
+                (false, true) => {
+                    if let Some(id) = slot.take() {
+                        id.remove();
+                    }
+                }
+                _ => {}
             }
-            return glib::ControlFlow::Continue;
-        }
+        })
+    };
+    set_ticking(true);
 
-        if !visible.get() {
-            tracing::info!(
-                "showing (frame seq={}, last_at={:.3}s ago)",
-                cur_seq,
-                last_at.elapsed().as_secs_f32()
-            );
-            redraw_window.set_visible(true);
-            visible.set(true);
-        }
+    // Visibility is checked on a timer (a hidden widget has no frame clock
+    // ticks with which to notice the next recording), but only while there
+    // is something to do: the timer stops once the surface is hidden and the
+    // IPC worker wakes it again through `state.wake` on the next frame.
+    let visible = Rc::new(Cell::new(true));
 
-        // Decay the held peak even when no new frame arrived this tick.
-        if let Ok(mut p) = redraw_state.peak.lock() {
-            let dt = (RENDER_TICK_MS as f32) / 1000.0;
-            // We pass the most recent peak from the ring as the "current"
-            // value so a stale update doesn't snap the held value back up.
-            let cur_peak = redraw_state
-                .ring
-                .lock()
-                .ok()
-                .and_then(|r| r.latest())
-                .map(|f| f.peak_dbfs)
-                .unwrap_or(-120.0);
-            // Only decay; the IPC callback already snapped up on each
-            // received frame. Calling update here with a non-louder peak
-            // keeps the linear decay running at render rate.
-            if cur_peak <= p.held_dbfs {
-                p.update(cur_peak, dt);
+    let start_timer: Rc<dyn Fn()> = {
+        let state = state.clone();
+        let window = window.clone();
+        let visible = visible.clone();
+        let set_ticking = set_ticking.clone();
+        Rc::new(move || {
+            let redraw_state = state.clone();
+            let redraw_window = window.clone();
+            let visible = visible.clone();
+            let set_ticking = set_ticking.clone();
+            redraw_state.timer_running.store(true, Ordering::Release);
+            glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
+                let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
+                let last_at = redraw_state
+                    .last_frame_at
+                    .lock()
+                    .map(|t| *t)
+                    .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
+                let idle = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS || osd_suppressed();
+
+                if idle {
+                    if visible.get() {
+                        tracing::info!("hiding (idle for {:.2}s)", last_at.elapsed().as_secs_f32());
+                        redraw_window.set_visible(false);
+                        visible.set(false);
+                        set_ticking(false);
+                    }
+                    // Stop polling while hidden. Clear the flag first, then re-check:
+                    // a frame that landed in between saw the flag still set and sent
+                    // no wake, so keep running for it instead of stopping.
+                    redraw_state.timer_running.store(false, Ordering::Release);
+                    let raced = redraw_state
+                        .last_frame_at
+                        .lock()
+                        .map(|t| t.elapsed().as_secs_f32() <= IDLE_TIMEOUT_SECS)
+                        .unwrap_or(false)
+                        && !osd_suppressed();
+                    if raced && !redraw_state.timer_running.swap(true, Ordering::AcqRel) {
+                        return glib::ControlFlow::Continue;
+                    }
+                    return glib::ControlFlow::Break;
+                }
+
+                if !visible.get() {
+                    tracing::info!(
+                        "showing (frame seq={}, last_at={:.3}s ago)",
+                        cur_seq,
+                        last_at.elapsed().as_secs_f32()
+                    );
+                    set_ticking(true);
+                    redraw_window.set_visible(true);
+                    visible.set(true);
+                }
+
+                // Decay the held peak even when no new frame arrived this tick.
+                if let Ok(mut p) = redraw_state.peak.lock() {
+                    let dt = (RENDER_TICK_MS as f32) / 1000.0;
+                    // We pass the most recent peak from the ring as the "current"
+                    // value so a stale update doesn't snap the held value back up.
+                    let cur_peak = redraw_state
+                        .ring
+                        .lock()
+                        .ok()
+                        .and_then(|r| r.latest())
+                        .map(|f| f.peak_dbfs)
+                        .unwrap_or(-120.0);
+                    // Only decay; the IPC callback already snapped up on each
+                    // received frame. Calling update here with a non-louder peak
+                    // keeps the linear decay running at render rate.
+                    if cur_peak <= p.held_dbfs {
+                        p.update(cur_peak, dt);
+                    }
+                }
+
+                glib::ControlFlow::Continue
+            });
+        })
+    };
+
+    // Starts true because `window.present()` below maps the surface; the
+    // first tick's idle check then hides it and stops the timer.
+    start_timer();
+
+    {
+        let state = state.clone();
+        let start_timer = start_timer.clone();
+        glib::MainContext::default().spawn_local(async move {
+            loop {
+                state.wake.notified().await;
+                if !state.timer_running.swap(true, Ordering::AcqRel) {
+                    start_timer();
+                }
             }
-        }
-
-        glib::ControlFlow::Continue
-    });
+        });
+    }
 
     // Map the layer-shell surface once. The redraw timer will hide it
     // immediately on its first tick (no frames yet → idle), and toggle
