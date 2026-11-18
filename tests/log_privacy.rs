@@ -39,6 +39,10 @@ const TEXT_BINDINGS: &[&str] = &[
     "final_tail",
     "preview",
     "recent_context",
+    // Dictation history: an entry as heard, as typed and as corrected.
+    "raw_text",
+    "corrected_text",
+    "best_text",
 ];
 
 /// Calls that use one of those names for something that is not the user's
@@ -271,6 +275,9 @@ fn the_scan_recognizes_the_ways_text_was_logged() {
         r#"tracing::info!("Collapsed a repeated phrase in a {} line: {:?}", source, collapsed)"#,
         r#"tracing::info!("Line: {}", segment.text)"#,
         r#"tracing::info!("Post-processing context: {:?}", recent_context)"#,
+        r#"tracing::warn!("Could not index {}: {:?}", entry.id, entry.raw_text)"#,
+        r#"tracing::info!("History: pasted {}", entry.best_text())"#,
+        r#"tracing::info!("History: corrected to {corrected_text}")"#,
     ] {
         assert!(!text_logged_by(leaking).is_empty(), "{leaking}");
     }
@@ -285,6 +292,7 @@ fn the_scan_recognizes_the_ways_text_was_logged() {
         r#"tracing::info!("Post-processing, has_context: {}", recent_context.is_some())"#,
         r#"tracing::info!("{} words down to {}", segment.text.split_whitespace().count(), collapsed.split_whitespace().count())"#,
         r#"tracing::warn!("Failed to append text: {}", stderr)"#,
+        r#"tracing::info!("History: recorded {} ({} chars)", entry.id, entry.raw_text.chars().count())"#,
     ] {
         assert!(text_logged_by(fine).is_empty(), "{fine}");
         assert!(!previews_text(fine), "{fine}");

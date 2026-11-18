@@ -103,11 +103,38 @@ pub fn own_process(test: &str, prepare: impl FnOnce(&mut std::process::Command))
 /// and the capture then never sees it.
 pub struct LogCapture {
     lines: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    _guard: tracing::subscriber::DefaultGuard,
+    _guard: Option<tracing::subscriber::DefaultGuard>,
 }
 
 impl LogCapture {
     pub fn at(level: tracing::Level) -> Self {
+        let (lines, subscriber) = Self::subscriber(level);
+        Self {
+            lines,
+            _guard: Some(tracing::subscriber::set_default(subscriber)),
+        }
+    }
+
+    /// The same for every thread of the process, for code that logs from a
+    /// thread of its own (the history recorder writes on a blocking one).
+    /// It is the process's subscriber from here on, so only a test in its
+    /// own process ([`own_process`]) can use it, and only once.
+    pub fn for_process(level: tracing::Level) -> Self {
+        let (lines, subscriber) = Self::subscriber(level);
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("this process already has a subscriber");
+        Self {
+            lines,
+            _guard: None,
+        }
+    }
+
+    fn subscriber(
+        level: tracing::Level,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        impl tracing::Subscriber + Send + Sync + 'static,
+    ) {
         let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = CaptureWriter(lines.clone());
         let subscriber = tracing_subscriber::fmt()
@@ -115,10 +142,7 @@ impl LogCapture {
             .with_max_level(level)
             .with_ansi(false)
             .finish();
-        Self {
-            lines,
-            _guard: tracing::subscriber::set_default(subscriber),
-        }
+        (lines, subscriber)
     }
 
     /// Everything logged so far.

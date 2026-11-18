@@ -8186,6 +8186,109 @@ while True:
         );
     }
 
+    /// History is where the user chose to keep dictated words; the log is
+    /// not. A dictation recorded to history is in the day file and, at info
+    /// (the level the daemon and its systemd unit run at), nowhere in the
+    /// log, and a history write that fails says so without quoting the
+    /// dictation it lost. The rest of the history code is covered the same
+    /// way by `tests/history_privacy.rs`.
+    ///
+    /// Runs in a process of its own so the capture is the process's
+    /// subscriber: the recorder writes, and warns, on a blocking thread.
+    #[tokio::test]
+    async fn history_keeps_the_words_and_the_log_at_info_does_not() {
+        let scratch = TempDir::new().unwrap();
+        if !crate::test_support::own_process(
+            "daemon::tests::history_keeps_the_words_and_the_log_at_info_does_not",
+            |child| {
+                child
+                    .env("HOME", scratch.path())
+                    .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
+                    .env("XDG_STATE_HOME", scratch.path().join("state"))
+                    .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+                    .env("XDG_DATA_HOME", scratch.path().join("data"))
+                    .env("RUST_MIN_STACK", "16777216")
+                    .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                    .env_remove("WAYLAND_DISPLAY")
+                    .env_remove("DISPLAY");
+            },
+        ) {
+            return;
+        }
+        let capture = crate::test_support::LogCapture::for_process(tracing::Level::INFO);
+
+        const KEPT: &str = "meet me at the quarry at nine";
+        const LOST: &str = "the harbour master has the invoice";
+        let fixture = tempfile::tempdir().unwrap();
+        let history_dir = fixture.path().join("history");
+        let mut daemon = history_daemon(fixture.path());
+        daemon.config.engine = crate::config::TranscriptionEngine::Whisper;
+        daemon.config.output.wait_for_modifier_release = false;
+        daemon.config.output.notification.on_transcription = false;
+        let (finished, receiver) = std::sync::mpsc::channel();
+        daemon.history.lock().unwrap().test_finished = Some(finished);
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+
+        for spoken in [KEPT, LOST] {
+            if spoken == LOST {
+                // The store refuses a symlinked directory, so this write
+                // fails and the recorder has to say so.
+                let moved = fixture.path().join("history-moved");
+                std::fs::rename(&history_dir, &moved).unwrap();
+                std::os::unix::fs::symlink(&moved, &history_dir).unwrap();
+            }
+            let got = Arc::new(std::sync::Mutex::new(None));
+            daemon.history_test_output_chain = Some(vec![Box::new(RecordingOutput {
+                got: got.clone(),
+                succeed: true,
+            })]);
+            daemon.begin_osd_session(&State::Recording {
+                started_at: std::time::Instant::now(),
+                model_override: None,
+            });
+            let mut state = State::Transcribing { audio: Vec::new() };
+            daemon
+                .handle_transcription_result(&mut state, Ok(Ok(spoken.to_string())))
+                .await;
+            assert!(
+                got.lock().unwrap().is_some(),
+                "{spoken:?} was not delivered"
+            );
+            let receiver = receiver.clone();
+            tokio::task::spawn_blocking(move || {
+                receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the history write never finished")
+            })
+            .await
+            .unwrap();
+        }
+
+        let kept = crate::history::HistoryStore::at(fixture.path().join("history-moved"))
+            .all()
+            .unwrap();
+        assert_eq!(kept.len(), 1, "one dictation recorded, one write refused");
+        assert_eq!(kept[0].raw_text, KEPT, "history keeps the words");
+
+        let logged = capture.text();
+        for line in [
+            "Transcribed 29 chars (whisper engine)",
+            "Transcribed 34 chars (whisper engine)",
+            "Could not record dictation history",
+        ] {
+            assert!(logged.contains(line), "{line:?} not logged:\n{logged}");
+        }
+        let lowered = logged.to_lowercase();
+        for words in ["meet me", "quarry", "at nine", "harbour", "invoice"] {
+            assert!(
+                !lowered.contains(words),
+                "dictated text ({words:?}) in the log at info:\n{logged}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn history_delivered_text_is_untouched_when_delivery_changes_nothing() {
         let mut pending = crate::history::recorder::Recorder::with_paths(
