@@ -1753,6 +1753,17 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("whisper"),
     spec(
+        "whisper.gpu_required",
+        "whisper",
+        "gpu_required",
+        KeyType::Bool,
+        "Advanced",
+        "Require a GPU",
+        "Fail to load the model instead of falling back to the CPU when a GPU \
+         build finds no GPU.",
+    )
+    .for_engine("whisper"),
+    spec(
         "parakeet.max_window_secs",
         "parakeet",
         "max_window_secs",
@@ -2713,6 +2724,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
+        "whisper.gpu_required" => json!(cfg.whisper.gpu_required),
 
         "parakeet.model" => json!(pk().model),
         "parakeet.max_window_secs" => json!(pk().max_window_secs),

@@ -227,6 +227,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(gpu_device) = cli.gpu_device {
         config.whisper.gpu_device = Some(gpu_device);
     }
+    if cli.gpu_required {
+        config.whisper.gpu_required = true;
+    }
     if cli.flash_attention {
         config.whisper.flash_attention = true;
     }
