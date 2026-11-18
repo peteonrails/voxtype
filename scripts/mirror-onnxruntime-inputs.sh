@@ -29,10 +29,11 @@
 #           commit must be the pinned commit, and the unpacked bundle must
 #           hash back to that commit's git tree. Submodules are left out:
 #           see ATTRIBUTION.txt in the staged directory.
-#   cuda13  Microsoft's archive when it downloads; otherwise the copies
-#           Voxtype published in its own signed release $VOXTYPE_RELEASE
-#           (needs gh, gpg and the CI release key). Either way each library
-#           must match its sha256 pin below. LICENSE and
+#   cuda13  Microsoft's archive when it downloads ($ORT_CUDA13_ARCHIVE can
+#           name another copy of it); otherwise the copies Voxtype published
+#           in its own signed release $VOXTYPE_RELEASE (needs gh, gpg and
+#           the CI release key). Either way each library must match its
+#           sha256 pin below. LICENSE and
 #           ThirdPartyNotices.txt come from Microsoft's onnxruntime 1.24.4
 #           wheel on PyPI, pinned by sha256.
 #
@@ -227,8 +228,9 @@ TXT
 # release. Which one answered does not change a byte of the bundle.
 fetch_cuda13_libs() { # workdir destination
   local w="$1" out="$2" e f status
-  if curl -sSfL --retry 2 -o "$w/upstream.tgz" "$CUDA13_URL" 2>/dev/null; then
-    echo "libraries: from $CUDA13_URL"
+  local url="${ORT_CUDA13_ARCHIVE:-$CUDA13_URL}"
+  if curl -sSfL --retry 2 -o "$w/upstream.tgz" "$url" 2>/dev/null; then
+    echo "libraries: from $url"
     mkdir -p "$w/upstream"
     tar -xzf "$w/upstream.tgz" -C "$w/upstream" --strip-components=1
     for e in "${CUDA13_LIBS[@]}"; do cp -L "$w/upstream/lib/${e%%|*}" "$out/"; done
