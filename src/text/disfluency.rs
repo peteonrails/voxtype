@@ -4,6 +4,16 @@
 //! spans and lets the cleanup pipeline decide how to remove them, which keeps
 //! model inference testable and prevents punctuation policy from leaking into
 //! the model runtime.
+//!
+//! The model looks at one sentence at a time for a repair. Its strongest
+//! evidence is the same word coming up again a few tokens later, and the
+//! training data gave it no reason to care what sits in between. A speaker
+//! who restarts does so inside a sentence, though, while a word that comes
+//! back after a full stop is ordinary prose ("an old gray owl. The owl
+//! said"). So neither the repetition features nor the spread from a labeled
+//! token to its neighbours crosses a sentence boundary. This is a guard at
+//! inference time: `scripts/train-lard-disfluency.py` still counts repeats
+//! across the whole utterance, which is how the published weights were made.
 
 use regex::Regex;
 use thiserror::Error;
@@ -32,6 +42,17 @@ pub struct TaggedToken<'a> {
     pub start: usize,
     pub end: usize,
     pub disfluent: bool,
+    /// Index of the sentence the token is in, counted from the start of the
+    /// text. A sentence ends at `.`, `!` or `?` followed by whitespace or
+    /// the end of the text.
+    pub sentence: usize,
+}
+
+/// A token as the model sees it.
+struct Token<'a> {
+    raw: &'a str,
+    word: String,
+    sentence: usize,
 }
 
 /// A fixed-size hashed linear tagger trained from LARD token annotations.
@@ -90,14 +111,17 @@ impl DisfluencyTagger {
     /// Label the tokens in `text`, retaining byte spans into the original.
     pub fn tag<'a>(&self, text: &'a str) -> Vec<TaggedToken<'a>> {
         let matches: Vec<_> = self.tokenizer.find_iter(text).collect();
-        let words: Vec<_> = matches
+        let tokens: Vec<_> = matches
             .iter()
-            .map(|item| normalize(item.as_str()))
+            .zip(sentence_indices(&matches))
+            .map(|(item, sentence)| Token {
+                raw: item.as_str(),
+                word: normalize(item.as_str()),
+                sentence,
+            })
             .collect();
-        let scores: Vec<_> = matches
-            .iter()
-            .enumerate()
-            .map(|(index, item)| self.score(&words, index, item.as_str()))
+        let scores: Vec<_> = (0..tokens.len())
+            .map(|index| self.score(&tokens, index))
             .collect();
         let mut labels: Vec<_> = scores
             .iter()
@@ -109,13 +133,23 @@ impl DisfluencyTagger {
             .filter_map(|(index, label)| label.then_some(index))
             .collect::<Vec<_>>()
         {
+            // The spread stays inside the anchor's sentence, so a restart
+            // that opens a sentence cannot take the previous one's last
+            // words or its full stop with it.
+            let sentence = tokens[anchor].sentence;
             let mut left = anchor;
-            while left > 0 && scores[left - 1] >= self.continuation {
+            while left > 0
+                && tokens[left - 1].sentence == sentence
+                && scores[left - 1] >= self.continuation
+            {
                 left -= 1;
                 labels[left] = true;
             }
             let mut right = anchor + 1;
-            while right < scores.len() && scores[right] >= self.continuation {
+            while right < scores.len()
+                && tokens[right].sentence == sentence
+                && scores[right] >= self.continuation
+            {
                 labels[right] = true;
                 right += 1;
             }
@@ -128,18 +162,22 @@ impl DisfluencyTagger {
                 start: item.start(),
                 end: item.end(),
                 disfluent: labels[index],
+                sentence: tokens[index].sentence,
             })
             .collect()
     }
 
-    fn score(&self, words: &[String], index: usize, original: &str) -> f32 {
-        let word = &words[index];
-        let prev = index.checked_sub(1).map_or("<s>", |i| words[i].as_str());
-        let next = words.get(index + 1).map_or("</s>", String::as_str);
+    fn score(&self, tokens: &[Token], index: usize) -> f32 {
+        let token = &tokens[index];
+        let word = &token.word;
+        let prev = index
+            .checked_sub(1)
+            .map_or("<s>", |i| tokens[i].word.as_str());
+        let next = tokens.get(index + 1).map_or("</s>", |t| t.word.as_str());
         let raw_token = word.as_str();
         let position = if index < 2 {
             "start"
-        } else if index + 2 >= words.len() {
+        } else if index + 2 >= tokens.len() {
             "end"
         } else {
             "mid"
@@ -160,16 +198,18 @@ impl DisfluencyTagger {
             format!("n={next}"),
             format!("pw={prev}|{word}"),
             format!("wn={word}|{next}"),
-            format!("shape={}", shape(original)),
+            format!("shape={}", shape(token.raw)),
             format!("pre={prefix}"),
             format!("suf={suffix}"),
             format!("pos={position}"),
         ];
+        // A repeat only counts inside the token's own sentence.
+        let repeats = |other: &Token| other.word == *word && other.sentence == token.sentence;
         for distance in 1..=8 {
-            if index >= distance && words[index - distance] == *word {
+            if index >= distance && repeats(&tokens[index - distance]) {
                 features.push(format!("same-prev={distance}"));
             }
-            if words.get(index + distance) == Some(word) {
+            if tokens.get(index + distance).is_some_and(repeats) {
                 features.push(format!("same-next={distance}"));
             }
         }
@@ -183,6 +223,38 @@ impl DisfluencyTagger {
             })
             .sum()
     }
+}
+
+/// The sentence each token belongs to.
+///
+/// A sentence ends at `.`, `!` or `?` once whitespace or the end of the text
+/// follows, with any closing quote or bracket in between (`"Done!" he`). A
+/// mark with more text straight after it does not end one, which keeps
+/// "1.2" and "e.g., this" whole. An ellipsis does end one: the cautious
+/// reading, since a wrong deletion costs more than a restart left in.
+fn sentence_indices(matches: &[regex::Match]) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(matches.len());
+    let mut sentence = 0;
+    // A terminator has been seen with nothing but closers after it.
+    let mut closed = false;
+    let mut previous_end = 0;
+    for item in matches {
+        let token = item.as_str();
+        let terminator = matches!(token, "." | "!" | "?");
+        if item.start() > previous_end {
+            if closed {
+                sentence += 1;
+            }
+            closed = false;
+        } else if !terminator && !matches!(token, "\"" | "'" | ")" | "]" | "\u{201D}" | "\u{2019}")
+        {
+            closed = false;
+        }
+        indices.push(sentence);
+        closed |= terminator;
+        previous_end = item.end();
+    }
+    indices
 }
 
 fn normalize(token: &str) -> String {
@@ -271,5 +343,102 @@ mod tests {
             .map(|token| token.text)
             .collect();
         assert!(removed.is_empty(), "unexpected labels: {removed:?}");
+    }
+
+    fn removed<'a>(tagger: &DisfluencyTagger, text: &'a str) -> Vec<&'a str> {
+        tagger
+            .tag(text)
+            .into_iter()
+            .filter(|token| token.disfluent)
+            .map(|token| token.text)
+            .collect()
+    }
+
+    /// The model's strongest feature is the same word coming up again within
+    /// eight tokens. A full stop in between used to make no difference, so
+    /// the first "owl" in "an old gray owl. The owl said" was labeled.
+    #[test]
+    fn a_word_repeated_in_the_next_sentence_is_not_a_restart() {
+        let tagger = DisfluencyTagger::from_bytes(MODEL).unwrap();
+        for text in [
+            "It flew into the forest where it met an old gray owl. The owl said hello.",
+            "Send it to Bob. Bob will know.",
+            "It works! It works really well.",
+            "Is it done? It is done.",
+            "The owl sat. The owl said hello.",
+            "Good. Good work everyone.",
+        ] {
+            let removed = removed(&tagger, text);
+            assert!(removed.is_empty(), "{text}: unexpected labels {removed:?}");
+        }
+        // A closing quote does not hide the boundary before it.
+        assert!(!removed(&tagger, "He said \"No.\" No one came.").contains(&"No"));
+    }
+
+    #[test]
+    fn a_restart_inside_one_sentence_is_still_tagged() {
+        let tagger = DisfluencyTagger::from_bytes(MODEL).unwrap();
+        assert_eq!(removed(&tagger, "I want I want to go"), ["I", "want"]);
+        assert_eq!(
+            removed(&tagger, "Can you can you hear me? I can hear you."),
+            ["Can", "you"]
+        );
+        assert_eq!(
+            removed(&tagger, "We went to the the store. The store was closed."),
+            ["the"]
+        );
+    }
+
+    /// The spread from a labeled token used to run back over the previous
+    /// sentence's full stop and take it too.
+    #[test]
+    fn a_restart_that_opens_a_sentence_leaves_the_one_before_alone() {
+        let tagger = DisfluencyTagger::from_bytes(MODEL).unwrap();
+        assert_eq!(
+            removed(&tagger, "Okay. I want I want to go home. That is all."),
+            ["I", "want"]
+        );
+    }
+
+    #[test]
+    fn sentences_end_at_a_terminator_followed_by_whitespace() {
+        let tagger = DisfluencyTagger::from_bytes(MODEL).unwrap();
+        let sentences = |text| -> Vec<(&str, usize)> {
+            tagger
+                .tag(text)
+                .into_iter()
+                .map(|token| (token.text, token.sentence))
+                .collect()
+        };
+        assert_eq!(
+            sentences("Hi. Go on! Why? Fine"),
+            [
+                ("Hi", 0),
+                (".", 0),
+                ("Go", 1),
+                ("on", 1),
+                ("!", 1),
+                ("Why", 2),
+                ("?", 2),
+                ("Fine", 3)
+            ]
+        );
+        // A decimal point and an abbreviation's stops have text after them.
+        assert!(sentences("Version 1.2, e.g., is out")
+            .iter()
+            .all(|(_, sentence)| *sentence == 0));
+        // A closing quote belongs to the sentence it closes.
+        assert_eq!(
+            sentences("\"Done!\" he said"),
+            [
+                ("\"", 0),
+                ("Done", 0),
+                ("!", 0),
+                ("\"", 0),
+                ("he", 1),
+                ("said", 1)
+            ]
+        );
+        assert_eq!(sentences("Wait... what").last(), Some(&("what", 1)));
     }
 }

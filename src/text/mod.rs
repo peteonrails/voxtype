@@ -1033,6 +1033,35 @@ mod tests {
         );
     }
 
+    fn lard(text: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/models/lard-disfluency-v1.vxdf");
+        lard_processor("en", &path).process(text)
+    }
+
+    /// Reported against 1.3.1-rc1: the first "owl" was deleted because the
+    /// word comes back in the next sentence, leaving "an old gray . The owl".
+    /// Whether "that that" should lose a "that" is the model's call and not
+    /// what this test is about.
+    #[test]
+    fn lard_keeps_a_word_that_the_next_sentence_repeats() {
+        assert_eq!(
+            lard(
+                "After that, the fox walked slowly back to the forest, where it met an old \
+                 gray owl. The owl said that that was the best story it had heard all week."
+            ),
+            "After that, the fox walked slowly back to the forest, where it met an old \
+             gray owl. The owl said that was the best story it had heard all week."
+        );
+        for text in [
+            "Send it to Bob. Bob will know.",
+            "It works! It works really well.",
+            "Is it done? It is done. Good. Good work everyone.",
+        ] {
+            assert_eq!(lard(text), text);
+        }
+    }
+
     /// #566: "um" is the masculine indefinite article in Portuguese, so the
     /// English filler list silently turned "Faça um commit" into
     /// "Faça commit" with nothing to tell the user why.
