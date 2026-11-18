@@ -115,6 +115,9 @@ services:
       dockerfile: Dockerfile.onnx-cuda-13
       args:
         VERSION: ${VERSION:-0.6.2}
+        # Where the pinned ONNX Runtime archive is fetched from. Override to
+        # build from your own copy; its sha256 is fixed in the Dockerfile.
+        VOXTYPE_BUILD_INPUTS_URL: ${VOXTYPE_BUILD_INPUTS_URL:-https://models.voxtype.io/build-inputs}
     volumes:
       - ./releases/${VERSION:-0.6.2}:/output
     environment:
@@ -127,6 +130,7 @@ services:
       dockerfile: Dockerfile.onnx-migraphx
       args:
         VERSION: ${VERSION:-0.6.2}
+        VOXTYPE_BUILD_INPUTS_URL: ${VOXTYPE_BUILD_INPUTS_URL:-https://models.voxtype.io/build-inputs}
     volumes:
       - ./releases/${VERSION:-0.6.2}:/output
     environment:
