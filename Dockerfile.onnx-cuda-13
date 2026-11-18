@@ -94,11 +94,24 @@ COPY . .
 # the release; ort/load-dynamic dlopens it at runtime. Pinned to match the
 # api-24 ABI surface ort 2.0.0-rc.12 expects; bump in lockstep when the
 # ort crate version moves.
+#
+# The three libraries come from the project's mirror, pinned by sha256, not
+# from github.com/microsoft/onnxruntime: that repository returned 404 for
+# hours on 2026-11-18 and this build had nothing to fall back on. The mirrored
+# archive is a subset of Microsoft's (same layout, same three files, plus the
+# license texts); scripts/mirror-onnxruntime-inputs.sh builds it and pins the
+# same hash. There is no second download location on purpose: one path, one
+# hash. To build where the mirror is unreachable, serve the archive yourself
+# and pass --build-arg VOXTYPE_BUILD_INPUTS_URL=<base url>; the pin is not a
+# build argument, so any copy has to be the same bytes.
+ARG VOXTYPE_BUILD_INPUTS_URL=https://models.voxtype.io/build-inputs
 ENV ORT_VERSION=1.24.4
+ENV ORT_CUDA13_SHA256=25ae3230c9d0a044640f65dc3824a02c650132be2cfc44874419c34a34c0e954
 ENV ORT_DIR=/opt/onnxruntime
 RUN set -eux; \
-    curl -fsSL -o /tmp/ort-msft.tgz \
-      "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda13-${ORT_VERSION}.tgz"; \
+    bash scripts/ci/fetch-build-input.sh \
+      "${VOXTYPE_BUILD_INPUTS_URL}/onnxruntime/v${ORT_VERSION}-linux-x64-gpu_cuda13/onnxruntime-linux-x64-gpu_cuda13-${ORT_VERSION}-runtime.tar.gz" \
+      "${ORT_CUDA13_SHA256}" /tmp/ort-msft.tgz; \
     mkdir -p "${ORT_DIR}"; \
     tar -xzf /tmp/ort-msft.tgz --strip-components=1 -C "${ORT_DIR}"; \
     rm /tmp/ort-msft.tgz; \

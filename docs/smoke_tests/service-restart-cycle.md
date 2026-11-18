@@ -13,5 +13,6 @@ done
 
 # Verify clean restarts in logs:
 journalctl --user -u voxtype --since "1 minute ago" | grep -E "Starting|Ready|shutdown"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -E "Starting|Ready|shutdown"
 ```
 

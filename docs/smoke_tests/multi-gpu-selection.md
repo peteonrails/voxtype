@@ -30,5 +30,6 @@ voxtype record stop
 
 # Check logs for GPU selection
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i "GPU selection"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i "GPU selection"
 ```
 

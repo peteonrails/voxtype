@@ -102,6 +102,7 @@ Verify Parakeet is active:
 
 ```bash
 journalctl --user -u voxtype --since "1 minute ago" | grep -i parakeet
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -i parakeet
 # Should show: "Loading Parakeet Tdt model from..."
 ```
 

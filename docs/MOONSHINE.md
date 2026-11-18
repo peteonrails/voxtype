@@ -218,6 +218,7 @@ If Moonshine returns empty text, check that your audio is 16kHz mono. Moonshine 
 
 ```bash
 journalctl --user -u voxtype --since "1 minute ago" | grep -i moonshine
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -i moonshine
 ```
 
 ## Feedback

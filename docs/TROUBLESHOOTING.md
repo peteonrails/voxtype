@@ -59,7 +59,9 @@ no selectable language hint for Parakeet. No translation or streaming is added.
   step. A failed download needs network access to the model host; a busy daemon
   needs the current dictation or meeting to finish first. If the restarted
   daemon did not come up, voxtype puts the previous config back and restarts it;
-  `journalctl --user -u voxtype -n 50` shows why the new model failed.
+  `journalctl --user -u voxtype -n 50` shows why the new model failed (or
+  `journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50` when
+  [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 - **Without a terminal**, accepting needs `--yes`.
 - **The offer still shows after declining.** That is intended: declined offers
   stay listed, marked declined, so you can accept later. The tooltip line goes
@@ -557,7 +559,7 @@ systemctl --user status ydotool
 
 ### "Voxtype: microphone not found" or "could not open the microphone" notification
 
-The daemon posts this notification when you start a recording and the microphone can't be opened. It appears once per distinct failure (again after five minutes if the failure persists), so pressing the hotkey repeatedly doesn't stack notifications. The full error is in the log (`journalctl --user -u voxtype`).
+The daemon posts this notification when you start a recording and the microphone can't be opened. It appears once per distinct failure (again after five minutes if the failure persists), so pressing the hotkey repeatedly doesn't stack notifications. The full error is in the log (`journalctl --user -u voxtype`, or `journalctl _SYSTEMD_USER_UNIT=voxtype.service` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 
 - **microphone not found:** the device named in `[audio] device` isn't connected. List what is available with `voxtype info devices`, then `voxtype config set audio.device <name>` (or `default` to follow the system default) and restart voxtype.
 - **no microphone found:** the system has no default input source. Plug in or unmute a microphone and check `wpctl status` or `pactl list sources short`.
@@ -1319,7 +1321,7 @@ dotool: not installed. Fix: install it from https://sr.ht/~geb/dotool/
 ydotool: ydotoold is not running. Fix: systemctl --user enable --now ydotool
 ```
 
-**Solution:** Apply the fix for one of the listed tools, then try again. Paste the current text with Ctrl+V (Ctrl+Shift+V in most terminals). The warning is shown once per problem per daemon run; the full reason is also in `journalctl --user -u voxtype`.
+**Solution:** Apply the fix for one of the listed tools, then try again. Paste the current text with Ctrl+V (Ctrl+Shift+V in most terminals). The warning is shown once per problem per daemon run; the full reason is also in `journalctl --user -u voxtype` (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 
 If you set `mode = "clipboard"` or a `driver_order` with only clipboard drivers, voxtype does not warn: the clipboard is what you asked for.
 
@@ -1525,7 +1527,7 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 - **Returned nothing:** make the command print the cleaned text on stdout. If empty output is intended (to drop `[BLANK_AUDIO]`, say), set `fallback_on_empty = false`.
 - **Edit list rejected:** with `edit_list = true`, the command must print only a JSON array of `find`/`replace`/`reason` edits whose targets occur once in the transcription. The notification gives the reason the list was rejected; fix the prompt or script, or set `edit_list = false` in `[output.post_process]`.
 
-The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence.
+The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service -f` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 
 Meeting mode never shows these notifications, so a failing command can't pop up over a call. During a meeting the failure is only logged, and the transcript keeps the original text.
 
@@ -1783,6 +1785,7 @@ See [Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-perfor
 To verify the fast path is active after dictation:
 ```bash
 journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "5 min ago" | grep "typed via"
 ```
 - `Text typed via dotoolc (N chars)` — fast path
 - `Text typed via dotool (N chars)` — direct path; daemon not running or voxtype had a per-call XKB hint
@@ -1995,6 +1998,7 @@ Check which echo handling the meeting used:
 ```bash
 voxtype meeting status --json      # "echo_cancel": "webrtc", "gtcrn" or "none"
 journalctl --user -u voxtype | grep -i "echo handling"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep -i "echo handling"
 ```
 
 The log line gives the reason when it is not `webrtc`:
@@ -2017,7 +2021,7 @@ With `announce_recording` on, `voxtype meeting status` says where the announceme
 
 - **"no call app opened the microphone within 120 s"**: voxtype found no call. It recognizes calls the way meeting detection does, so run `voxtype meeting suggest --dry-run` during the call to see what it sees. A browser call (Meet, Teams on the web) needs Hyprland for its window title; on other compositors only Zoom and the Teams app are found. Add another app under `[meeting.detect]`, as in [Meeting Detection](MEETING_MODE.md#meeting-detection).
 - **"pw-play is not installed"** or **"cannot run pw-dump"**: the announcement needs PipeWire's command-line tools (`pw-play`, `pw-link`, `pw-dump`; the `pipewire` package on Arch, `pipewire-bin` on Debian and Ubuntu).
-- **"could not link into ...'s mic stream"**: PipeWire refused the link. `journalctl --user -u voxtype | grep -i announcement` shows `pw-link`'s error.
+- **"could not link into ...'s mic stream"**: PipeWire refused the link. `journalctl --user -u voxtype | grep -i announcement` shows `pw-link`'s error (use `journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep -i announcement` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 
 When it says "played into ...'s microphone", PipeWire carried it into the call app's mic stream. The others still will not hear it if you are muted in the call app, or if the app's noise suppression removes it; unmute before the meeting starts, or start it with `--no-announce` and tell them yourself.
 
@@ -2102,6 +2106,7 @@ final, and its outcome is in the daemon log:
 
 ```bash
 journalctl --user -u voxtype | grep post_meeting_command
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep post_meeting_command
 ```
 
 - **"failed ... (exit status: 127)"**: the shell could not find the program.
@@ -2136,7 +2141,9 @@ With `retain_audio` on, finishing transcribes the audio kept after the last
 transcribed chunk too (that needs ffmpeg and the meeting's model). Without
 it, what was said after the last chunk (up to `chunk_duration_secs`, 30
 seconds by default) is lost. If the daemon is crashing, its log has the
-reason: `journalctl --user -u voxtype -b`.
+reason: `journalctl --user -u voxtype -b`, or
+`journalctl _SYSTEMD_USER_UNIT=voxtype.service -b` when
+[the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries).
 
 ## Meetings: The Remote Side Shows Up Under "You"
 
@@ -2168,7 +2175,7 @@ When a meeting starts, the daemon opens the view `[meeting] view` resolves to (t
 - **"no display".** The command ran without `WAYLAND_DISPLAY` or `DISPLAY` (over SSH, or from a service started before the desktop). Run `voxtype meeting watch` there instead.
 - **Quickshell is installed but you want the window.** `voxtype config set meeting.view gtk4`.
 - **On Quickshell, nothing happens.** The Quickshell view opens only in a running Omarchy shell or voxtype's standalone shell (`voxtype setup quickshell`).
-- **`voxtype meeting view` works, but nothing opens when a meeting starts.** Check `voxtype config get meeting.show_view_on_start` (it must be `true`), then the daemon's log, which says what it decided for each meeting: `journalctl --user -u voxtype | grep "Meeting view on start"`. "no display" there means the service has no `WAYLAND_DISPLAY` or `DISPLAY`: import them into the user session (`systemctl --user import-environment WAYLAND_DISPLAY DISPLAY`, which most compositors' autostart does) and restart the daemon.
+- **`voxtype meeting view` works, but nothing opens when a meeting starts.** Check `voxtype config get meeting.show_view_on_start` (it must be `true`), then the daemon's log, which says what it decided for each meeting: `journalctl --user -u voxtype | grep "Meeting view on start"` (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep "Meeting view on start"` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)). "no display" there means the service has no `WAYLAND_DISPLAY` or `DISPLAY`: import them into the user session (`systemctl --user import-environment WAYLAND_DISPLAY DISPLAY`, which most compositors' autostart does) and restart the daemon.
 - **Both the Quickshell view and the window open.** The Quickshell view opens on its own unless `[meeting] view` is `gtk4`, `terminal` or `none`; set one of those, and run `omarchy-restart-shell` (or restart your Quickshell shell) once after upgrading so it reads the setting.
 - **The window closed when the daemon restarted.** A window the daemon opened runs as part of the voxtype service and stops with it. Open it again with `voxtype meeting view`, which starts it on its own.
 
@@ -2179,6 +2186,7 @@ Start with what the assistant sees:
 ```bash
 voxtype meeting assistant status
 journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 minutes ago" | grep -i summar
 ```
 
 **No summary after a meeting stops.** The summary at stop is off until an agent is allowed, unless `[meeting.summary] auto = true`. Allow one with `voxtype meeting assistant allow claude`, or summarize by hand with `voxtype meeting summarize latest`. A meeting with no transcript is never summarized. `auto = false` turns it off.
@@ -2224,6 +2232,7 @@ Start with what voxtype sees:
 ```bash
 voxtype meeting calendar status
 journalctl --user -u voxtype --since "15 minutes ago" | grep -i calendar
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "15 minutes ago" | grep -i calendar
 ```
 
 A meeting takes its title from the calendar only when it started without a title you chose, and an event was in progress or started within `[meeting.calendar] window_mins` of the start.
@@ -2246,6 +2255,7 @@ systemctl --user status voxtype
 
 # View logs
 journalctl --user -u voxtype -n 50
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50
 
 # Common issues:
 # - Not in input group (log out/in after adding)
@@ -2315,9 +2325,22 @@ systemctl --user edit voxtype
 #   Environment=RUST_LOG=voxtype=debug,warn
 systemctl --user restart voxtype
 journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
 
 `RUST_LOG` takes precedence over `-v` and `-q` on the command line. Remove the line and restart the service when you are done.
+
+### The user journal has no voxtype entries
+
+On some systems the per-user journal has no entries for the daemon. `journalctl --user -u voxtype` then prints `-- No entries --`, or stops at an old date, while the service is running and logging. Match on the unit name instead, which reads every journal your account can open:
+
+```bash
+journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
+```
+
+It takes the same options (`-f`, `-n 50`, `-b`, `--since "5 min ago"`) and pipes into `grep` the same way, so it can stand in for `journalctl --user -u voxtype` in any command in this documentation. If it prints nothing either, your account may not be allowed to read the system journal: add it to the `systemd-journal` group, or run the command with `sudo`.
+
+`voxtype info accel` reads the user journal too, so on such a system it can report "unknown" after a dictation.
 
 ### Dictated text in the log
 
@@ -2325,6 +2348,7 @@ At the default level the log does not contain what you say: a dictation is logge
 
 ```bash
 journalctl --user -u voxtype --since "5 min ago" | grep -E "Transcribed:|text:|After text processing|Post-processed result"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "5 min ago" | grep -E "Transcribed:|text:|After text processing|Post-processed result"
 ```
 
 - `Transcribed: "..."`: the text the engine returned

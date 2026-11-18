@@ -22,5 +22,6 @@ echo "Done."
 echo ""
 echo "Check logs:"
 journalctl --user -u voxtype --since "30 seconds ago" --no-pager | tail -10
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" --no-pager | tail -10
 ```
 

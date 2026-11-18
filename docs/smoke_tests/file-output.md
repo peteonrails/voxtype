@@ -15,6 +15,7 @@ cat /tmp/transcription.txt
 
 # Check logs for file output:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i "file"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i "file"
 ```
 
 ## CLI File Output with Config Path
@@ -57,6 +58,7 @@ cat /tmp/voxtype-transcriptions.txt
 
 # 5. Check logs for file output mode:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -E "file|output"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -E "file|output"
 ```
 
 ## File Append Mode
@@ -164,6 +166,7 @@ voxtype record stop
 
 # 2. Check logs for error handling:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "error|permission"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "error|permission"
 # Expected: error message about permission denied, falls back to clipboard
 ```
 

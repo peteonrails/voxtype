@@ -479,7 +479,7 @@ When the call is over while a meeting records, `on_call_end` decides:
 
 A meeting you started by hand, with no call detected while it ran, is never stopped this way.
 
-Each step is logged at info level, with what was seen:
+Each step is logged at info level, with what was seen. If the first command prints nothing, use `journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep "Meeting detection"` ([the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries)):
 
 ```text
 $ journalctl --user -u voxtype | grep "Meeting detection"
@@ -1169,7 +1169,7 @@ The command runs through `sh -c` in the meeting folder, with these variables set
 | `VOXTYPE_MEETING_DIR` | The meeting folder |
 | `VOXTYPE_MEETING_MANIFEST` | The path of its `meeting.json` |
 
-It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
+It runs in the background, so the daemon carries on and you can start the next meeting straight away. Its output and exit status go to the daemon log (`journalctl --user -u voxtype`, or `journalctl _SYSTEMD_USER_UNIT=voxtype.service` when [the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries)). A command still running after `post_meeting_timeout_secs` is killed, along with anything it started. A command that fails or hangs never affects the daemon.
 
 ### Integrations
 
@@ -1467,7 +1467,7 @@ A folder holds:
 
 ## Troubleshooting
 
-The daemon tells you with a desktop notification when a meeting cannot start or starts without something it needs. Each problem is also logged; see the full detail with `journalctl --user -u voxtype`.
+The daemon tells you with a desktop notification when a meeting cannot start or starts without something it needs. Each problem is also logged; see the full detail with `journalctl --user -u voxtype`, or with `journalctl _SYSTEMD_USER_UNIT=voxtype.service` when [the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries).
 
 **"Meeting Error: The meeting could not start".** The meeting was never created. The notification carries the error, for example a `[meeting] storage_path` that cannot be written or a transcription model that cannot be loaded. Fix the cause and run `voxtype meeting start` again.
 

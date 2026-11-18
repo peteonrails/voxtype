@@ -15,6 +15,7 @@ voxtype record start && sleep 3 && voxtype record stop
 
 # 4. Check logs for subprocess spawning:
 journalctl --user -u voxtype --since "1 minute ago" | grep -i subprocess
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -i subprocess
 
 # 5. Verify GPU memory is released after transcription:
 #    (AMD) watch -n1 "cat /sys/class/drm/card*/device/mem_info_vram_used"

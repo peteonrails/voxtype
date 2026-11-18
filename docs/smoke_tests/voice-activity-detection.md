@@ -27,6 +27,7 @@ systemctl --user restart voxtype
 
 # 3. Check logs confirm VAD is active:
 journalctl --user -u voxtype --since "10 seconds ago" | grep -i "vad"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 seconds ago" | grep -i "vad"
 # Expected: "Voice Activity Detection enabled (backend: Energy, threshold: 0.50, ...)"
 
 # 4. Record silence (don't speak, cover mic)
@@ -36,6 +37,7 @@ voxtype record stop
 
 # 5. Verify silence was rejected:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "vad|no speech|silence"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "vad|no speech|silence"
 # Expected: "VAD: no speech detected" and cancel feedback sound
 # Expected: no transcription attempt
 
@@ -46,6 +48,7 @@ voxtype record stop
 
 # 7. Verify speech was accepted:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "vad|speech detected"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "vad|speech detected"
 # Expected: "VAD: speech detected" followed by transcription
 ```
 
@@ -65,15 +68,18 @@ systemctl --user restart voxtype
 
 # 3. Check logs confirm Whisper VAD is active:
 journalctl --user -u voxtype --since "10 seconds ago" | grep -i "vad"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 seconds ago" | grep -i "vad"
 # Expected: "Using Whisper VAD backend with model ..."
 
 # 4. Record silence - should be rejected (same as Energy VAD test above)
 voxtype record start && sleep 3 && voxtype record stop
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "vad|no speech"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "vad|no speech"
 
 # 5. Record speech - should be accepted and transcribed
 voxtype record start && sleep 3 && voxtype record stop
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "vad|speech detected"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "vad|speech detected"
 ```
 
 ## Auto Backend Selection
@@ -89,6 +95,7 @@ systemctl --user restart voxtype
 
 # 3. Check which backend was selected:
 journalctl --user -u voxtype --since "10 seconds ago" | grep -i "vad"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 seconds ago" | grep -i "vad"
 # Expected with Whisper engine: "Using Whisper VAD backend"
 # Expected with Parakeet engine: "Using Energy VAD backend"
 ```
@@ -150,6 +157,7 @@ systemctl --user restart voxtype
 # 3. Record silence - should still attempt transcription (no VAD filtering)
 voxtype record start && sleep 3 && voxtype record stop
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i "vad"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i "vad"
 # Expected: no VAD messages in logs
 
 # 4. Restore VAD config when done testing

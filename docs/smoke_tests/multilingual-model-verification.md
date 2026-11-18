@@ -10,6 +10,7 @@ voxtype record stop
 
 # Check logs for language auto-detection:
 journalctl --user -u voxtype --since "30 seconds ago" | grep "auto-detected language"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep "auto-detected language"
 
 # Verify model menu shows multilingual options:
 echo "0" | voxtype setup model  # Should show tiny, base, small, medium (multilingual)

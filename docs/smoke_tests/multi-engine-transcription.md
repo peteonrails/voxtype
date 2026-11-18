@@ -45,10 +45,12 @@ Test each engine running as the daemon's active engine:
 systemctl --user restart voxtype
 # 3. Verify model loads
 journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "sensevoice|loading"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 seconds ago" | grep -iE "sensevoice|loading"
 # 4. Record and transcribe
 voxtype record start && sleep 3 && voxtype record stop
 # 5. Check logs for correct engine
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i "transcri"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i "transcri"
 
 # Repeat for: paraformer, dolphin, omnilingual, moonshine, parakeet
 # Then restore engine = "whisper" when done

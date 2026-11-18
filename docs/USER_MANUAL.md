@@ -487,7 +487,9 @@ with their fixes. Model and VAD model failures are left out of that
 notification because they get their own. If the daemon restarts with the
 same problems (for example in a systemd restart loop), it does not notify
 again until the set of problems changes or a start comes up clean. Warnings
-only go to the log (`journalctl --user -u voxtype`).
+only go to the log (`journalctl --user -u voxtype`, or
+`journalctl _SYSTEMD_USER_UNIT=voxtype.service` when
+[the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries)).
 
 ### `voxtype config`
 
@@ -3260,6 +3262,7 @@ voxtype -q        # Quiet (errors only)
 
 ```bash
 journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
 
 ### What the log contains
@@ -3279,6 +3282,7 @@ systemctl --user edit voxtype
 #   Environment=RUST_LOG=voxtype=debug,warn
 systemctl --user restart voxtype
 journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
 
 Remove the `Environment=` line and restart the service when you are done, or the journal keeps collecting what you dictate. A debug log contains your dictations, so read it before you attach it to a bug report.

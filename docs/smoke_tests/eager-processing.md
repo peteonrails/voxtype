@@ -19,6 +19,7 @@ voxtype record stop
 # 4. Check logs for chunk processing. The per-chunk lines are debug level:
 #    add voxtype::daemon=debug to the service's RUST_LOG to see them.
 journalctl --user -u voxtype --since "1 minute ago" | grep -iE "eager|chunk"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -iE "eager|chunk"
 # Expected: "Spawning eager transcription for chunk 0 (...s)"   (debug)
 #           "Spawning eager transcription for chunk 1 (...s)"   (debug)
 #           "Chunk 0 completed: ..."                            (debug)
@@ -37,6 +38,7 @@ voxtype record start
 sleep 5
 voxtype record cancel
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "cancel|abort"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "cancel|abort"
 # Expected: chunk tasks are cancelled, no transcription output
 
 # 7. Restore default (disabled) when done testing:

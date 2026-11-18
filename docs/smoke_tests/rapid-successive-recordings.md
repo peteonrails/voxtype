@@ -14,5 +14,6 @@ done
 # Verify daemon is still healthy
 voxtype status
 journalctl --user -u voxtype --since "1 minute ago" | grep -iE "error|panic"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -iE "error|panic"
 ```
 

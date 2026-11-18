@@ -16,5 +16,6 @@ voxtype record start && sleep 3 && voxtype record stop
 
 # 4. Check logs for post-processing:
 journalctl --user -u voxtype --since "1 minute ago" | grep -i "post.process"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -i "post.process"
 ```
 
