@@ -167,8 +167,8 @@ Expected:
 - Nothing is shown, and the meeting keeps recording throughout.
 - The journal says what was seen:
   `journalctl --user -u voxtype --since "2 minutes ago" | grep "Meeting detection"`
-  shows "call continues: Google Meet still has the mic, but no window title
-  shows the call any more", then "has the mic and its call window again".
+  shows "call continues: Google Meet still has the mic, but no window shows
+  the call any more", then "has the mic and its call window again".
   If muting made the browser release the microphone, it also shows
   "released the mic, but its call window is still open".
 
@@ -180,7 +180,7 @@ Expected:
   released the microphone. Stopping the recording in 20 s.`, with **Keep
   recording**. Leaving the call with its tab still open and in front does
   not end it: the call is over when the microphone is released and no
-  window title shows it.
+  window shows it.
 - Let it run out. After 20 seconds the meeting stops by itself.
 - The journal shows "call ended: Google Meet released the mic and no window
   shows the call any more" and "stopping the meeting, the Google Meet call

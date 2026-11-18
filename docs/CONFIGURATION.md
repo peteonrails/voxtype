@@ -4493,10 +4493,11 @@ What happens when a detected call ends while a meeting records. `"stop"` shows *
 
 A call has ended when nothing shows it any more for `debounce_secs`:
 
-- A call in a browser (an app with `titles`) has ended when the browser has released the microphone and no window title shows the call. While the browser still has the microphone, or a window title still shows the call, the call goes on. So bringing another tab to the front does not end it, and neither does the browser letting go of the microphone while the call's tab is still there. When Hyprland cannot be asked for its windows, the window is not taken to be gone.
-- A native client (an app without `titles`) has ended its call when it releases the microphone.
+- A call in a browser (an app with `titles` or `classes`) has ended when the browser has released the microphone and no window shows the call. While the browser still has the microphone, or a window still shows the call, the call goes on. So bringing another tab to the front does not end it, and neither does the browser letting go of the microphone while the call's tab or window is still there. When Hyprland cannot be asked for its windows, the window is not taken to be gone.
+- A call that has been seen in a window of its own (one found by `classes`, such as the Zoom web client's) is shown by that window alone from then on, not by `titles`. It has ended when that window is closed and the microphone released, even if a tab whose title matches is still in front.
+- A native client (an app with neither) has ended its call when it releases the microphone.
 
-A call tab left open after you hang up therefore keeps the recording going until you close it, stop the meeting, or [`max_duration_mins`](#max_duration_mins) is reached. See [When a call is over](MEETING_MODE.md#when-a-call-is-over).
+A call tab or call window left open after you hang up therefore keeps the recording going until you close it, stop the meeting, or [`max_duration_mins`](#max_duration_mins) is reached. See [When a call is over](MEETING_MODE.md#when-a-call-is-over).
 
 ### stop_grace_secs
 
@@ -4504,7 +4505,7 @@ A call tab left open after you hang up therefore keeps the recording going until
 **Default:** `20`
 **Required:** No
 
-Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call shows again in that time (its app takes the microphone again, or its window title comes back), it is the same call: the stop is called off and the call is not offered a second time. The same time applies with `"ask"`, whose question is withdrawn, and with `"keep"`. With `0` an ended call is forgotten at once.
+Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call shows again in that time (its app takes the microphone again, or its window comes back), it is the same call: the stop is called off and the call is not offered a second time. The same time applies with `"ask"`, whose question is withdrawn, and with `"keep"`. With `0` an ended call is forgotten at once.
 
 ### apps
 
@@ -4516,7 +4517,10 @@ The call apps to watch for. Setting `apps` replaces the built-in list, so copy t
 
 - `name` - shown in the prompt and used by `auto_record_apps`
 - `streams` - case-insensitive substrings of a PipeWire capture stream's `application.name`, `application.process.binary` or `node.name`
-- `titles` - case-insensitive substrings of a window title that confirm a call. Leave empty for a native client whose mic use always means a call. Browsers need titles, because they open the mic for many things.
+- `titles` - case-insensitive substrings of a window title that confirm a call.
+- `classes` - case-insensitive substrings of a window class that confirm a call, for a call that has a window of its own whose title does not name the service. The meeting is titled from that window.
+
+Leave both `titles` and `classes` empty for a native client whose mic use always means a call. Browsers need one of them, because they open the mic for many things. Both accept an array or one comma-separated string. An entry written before `classes` existed works as it did.
 
 ```toml
 [[meeting.detect.apps]]
@@ -4529,12 +4533,20 @@ streams = ["chromium", "chrome", "firefox", "brave"]
 titles = ["Meet - ", "Google Meet"]
 
 [[meeting.detect.apps]]
+name = "Zoom (web)"
+streams = ["chromium", "chrome", "firefox", "brave"]
+titles = ["Zoom Meeting", "Zoom Workplace"]
+classes = ["zoom.us__wc_join_"]
+
+[[meeting.detect.apps]]
 name = "Jitsi"
 streams = ["chromium", "firefox"]
 titles = ["Jitsi Meet"]
 ```
 
-Window titles come from Hyprland. On other compositors only apps with empty `titles` are detected.
+The built-in Zoom (web) entry is the only one with `classes`. A Chromium-based browser started with `--app=URL`, which is how Omarchy opens web apps and Zoom links, gives the window a class made from the address: `https://app.zoom.us/wc/join/123` becomes `chrome-app.zoom.us__wc_join_123-Default`. `hyprctl clients` shows the class of every open window. Pick a pattern that only a call's window has: a web app's home window is open whether or not a call is, so it confirms nothing. That is why the Zoom web app's own window (`...zoom.us__wc_home-...`) is not in the built-in pattern, and why Meet and Teams have no `classes`: their titles already show a call, and their web app windows are open all day.
+
+Windows come from Hyprland. On other compositors only apps with neither `titles` nor `classes` are detected.
 
 ---
 

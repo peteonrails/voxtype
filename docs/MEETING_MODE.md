@@ -125,7 +125,7 @@ voxtype meeting start --no-announce
 
 Playing it on your speakers would not reach the call: headphones keep it in, and the call app's echo cancellation removes speaker sound from your mic. So voxtype plays it into the call app's own microphone stream. PipeWire mixes it with your real mic for that app only, and nothing else that records the mic hears it. It also plays on your speakers so you hear it.
 
-The call app is found the way [Meeting Detection](#meeting-detection) finds it: Zoom or Teams by their mic stream, Meet or Teams in a browser by the mic stream plus a call window title (Hyprland only). When a meeting starts before the call does, voxtype waits up to two minutes for a call app to open the mic. It announces once the app has kept the same microphone stream for five seconds. Call apps open the mic on their pre-join screen, where nobody on the call hears anything, and open a new stream when you join, so an announcement played at the first sign of the mic was over before you were in the meeting. A meeting that call detection starts already has the call, and announces after the same five seconds. If you stay on a pre-join screen with the mic open for longer than that, the announcement still plays there.
+The call app is found the way [Meeting Detection](#meeting-detection) finds it: Zoom or Teams by their mic stream, a call in a browser by the mic stream plus a call window (Hyprland only): a window title for Meet and Teams, the web client's own window for Zoom. So a meeting you start by hand in the middle of a Zoom call reaches the call whatever tab is in front. For Meet and Teams the call's tab has to be in front when the announcement looks for it. When a meeting starts before the call does, voxtype waits up to two minutes for a call app to open the mic. It announces once the app has kept the same microphone stream for five seconds. Call apps open the mic on their pre-join screen, where nobody on the call hears anything, and open a new stream when you join, so an announcement played at the first sign of the mic was over before you were in the meeting. A meeting that call detection starts already has the call, and announces after the same five seconds. If you stay on a pre-join screen with the mic open for longer than that, the announcement still plays there.
 
 When it cannot reach the call (no call app opened the mic in time, a browser call off Hyprland, PipeWire's tools missing, or the link failed), it plays on your speakers only, logs why, and says so:
 
@@ -423,7 +423,7 @@ For scripts, `voxtype meeting watch --json` prints the daemon's meeting socket a
 
 ## Meeting Detection
 
-Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting as `voxtype meeting start --window-title` would, titled from the call window (and named from your calendar instead, when [it can be](#titles-from-your-calendar)) when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead.
+Voxtype can notice a call starting and offer to record it. When Zoom, Microsoft Teams, or Google Meet or Teams in a browser takes the microphone, a notification asks "Record ... as a meeting?", followed by "Let the others know you're transcribing." (see [Recording Consent](#recording-consent)), with **Record** and **Dismiss**. Clicking the notification itself also records. Record starts the meeting as `voxtype meeting start --window-title` would, titled from the call window (and named from your calendar instead, when [it can be](#titles-from-your-calendar)) when it names the meeting ("Meet - Weekly sync" gives "Weekly sync", "Budget review | Microsoft Teams" gives "Budget review"). A window title that only names the app, such as "Join from Zoom Workplace app - Zoom", "Zoom Meeting" or a bare Meet code, gives "Zoom call", "Google Meet call" or "Teams call" instead. A Zoom call in the web client's own window is titled with that window's title, which is the meeting's topic.
 
 Detection is on by default on Omarchy and off elsewhere. It only runs while meeting mode is enabled:
 
@@ -444,8 +444,12 @@ The setting is read when the daemon starts, so restart it after changing it.
 ### How calls are recognized
 
 - **The microphone.** A call app opening a PipeWire capture stream is the main signal. Native clients (Zoom, `teams-for-linux`) count on that alone.
-- **The window title.** A browser opens the microphone for many things, so a browser's stream only counts when a window title confirms a call: "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web, "Zoom Meeting" or "Zoom Workplace" for Zoom on the web. Titles come from Hyprland; on other compositors browser calls are not detected. A browser window's title is the title of its front tab, so the call's tab has to be in front for the call to be noticed. The Zoom web client titles its own window with the meeting's name, which says nothing about Zoom, so a Zoom call in a browser is noticed by the "Join from Zoom Workplace app" tab that launched it.
+- **The window.** A browser opens the microphone for many things, so a browser's stream only counts when a window confirms a call. Windows come from Hyprland; on other compositors browser calls are not detected.
+  - **By its title:** "Meet - ..." or "Google Meet" for Meet, "| Microsoft Teams" for Teams on the web, "Zoom Meeting" or "Zoom Workplace" for Zoom on the web. A browser window's title is the title of its front tab, so the call's tab has to be in front for the call to be noticed this way.
+  - **By its class, for the Zoom web client:** Omarchy opens a Zoom link in the web client's own app window, and the browser names that window after the address: its class is `chrome-app.zoom.us__wc_join_<meeting number>-Default`. Its title is the meeting's topic, which says nothing about Zoom, so the class is what finds it. With that window open and the browser on the microphone, it is a Zoom call, whatever tab is in front of the main browser window, and whether or not the "Join from Zoom Workplace app" tab that launched it is still there. The window with nobody on the microphone is not a call. The Zoom web app's home window is not counted: it is open whether or not you are in a meeting.
 - **Voxtype's own capture never counts**, nor do other dictation apps or the camera-effects virtual microphone.
+
+While the Zoom web client's window is open, anything in that browser that takes the microphone for `debounce_secs` counts as the Zoom call, so close the window when the call is over.
 
 ### When it prompts
 
@@ -459,14 +463,15 @@ Detection never records by itself, except for apps you list in `auto_record_apps
 
 Once a call has been noticed, it goes on for as long as anything still shows it. It is over when nothing has for `debounce_secs`:
 
-- **A call in a browser** is over when the browser has released the microphone and no window title shows the call. One without the other is not the end:
-  - The browser still has the microphone, but no title shows the call. You brought another tab to the front of that browser window, or closed the tab that launched the call. The call goes on.
-  - The browser released the microphone, but a window title still shows the call. The call goes on, however long the microphone stays released.
+- **A call in a browser** is over when the browser has released the microphone and no window shows the call. One without the other is not the end:
+  - The browser still has the microphone, but no window shows the call. You brought another tab to the front of that browser window, or closed the call's tab or window. The call goes on.
+  - The browser released the microphone, but a window still shows the call. The call goes on, however long the microphone stays released.
   - Hyprland cannot be asked for its windows. Voxtype does not take that to mean the window is gone, and the call goes on until the windows can be read again.
+- **A Zoom call in the web client's own window** is shown by that window alone once it has been seen. Tabs in the main browser window make no difference to it. When you leave the call and the web client's window closes, the call is over, even with the "Join from Zoom Workplace app" tab still in front: that tab's title is not the call.
 - **A native client** (Zoom, `teams-for-linux`) has only its microphone stream. Its call is over when it releases the microphone, whatever windows it still has open.
-- **A call back within `stop_grace_secs`** of ending (its app on the microphone again, or its window title back) is the same call. A stop that was waiting is called off (with `"ask"`, the question is withdrawn), and nothing is offered again.
+- **A call back within `stop_grace_secs`** of ending (its app on the microphone again, or its window back) is the same call. A stop that was waiting is called off (with `"ask"`, the question is withdrawn), and nothing is offered again.
 
-A call tab left open after you hang up keeps the call going by this rule, so the recording runs on until you close the tab, stop the meeting yourself, or it reaches `max_duration_mins`. Voxtype would rather record too long than stop in the middle of a call.
+A call tab, or the Zoom web client's window, left open after you hang up keeps the call going by this rule, so the recording runs on until you close it, stop the meeting yourself, or it reaches `max_duration_mins`. Voxtype would rather record too long than stop in the middle of a call.
 
 When the call is over while a meeting records, `on_call_end` decides:
 
@@ -480,9 +485,10 @@ Each step is logged at info level, with what was seen:
 
 ```text
 $ journalctl --user -u voxtype | grep "Meeting detection"
-Meeting detection: call seen: Zoom (web) - Chromium input has the mic (stream 115) and window "Join from Zoom Workplace app - Zoom - Chromium" matches; prompting if it lasts 5s
-Meeting detection: call continues: Zoom (web) still has the mic, but no window title shows the call any more (another tab or page is in front)
-Meeting detection: call continues: Zoom (web) has the mic and its call window again
+Meeting detection: call seen: Zoom (web) - Chromium input has the mic (stream 115) and its call window "Weekly sync" is open (class contains "zoom.us__wc_join_"); prompting if it lasts 5s
+Meeting detection: call seen: Google Meet - Chromium has the mic (stream 211) and window "Meet - abc-defg-hij - Chromium" matches; prompting if it lasts 5s
+Meeting detection: call continues: Google Meet still has the mic, but no window shows the call any more (another tab is in front, or its window was closed)
+Meeting detection: call continues: Google Meet has the mic and its call window again
 Meeting detection: call continues: Zoom (web) released the mic, but its call window is still open (muted, or reconnecting)
 Meeting detection: call ended: Zoom (web) released the mic and no window shows the call any more while a meeting records ([meeting.detect] on_call_end decides)
 Meeting detection: the Zoom (web) call ended; stopping the meeting in 20 s unless kept
