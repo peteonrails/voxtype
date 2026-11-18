@@ -344,21 +344,28 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
-* Sat Nov 14 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
+* Tue Nov 17 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
 - Meetings: live transcript view, echo cancellation and echo guard, hybrid
   diarization, notes, annotations, line edits, search, sharing, action
   items, recovery of interrupted meetings, import and retranscription
 - Ship the GTK4 meetings window in voxtype-meetings-gtk4
 - Built-in Kokoro recording announcement; the ElevenLabs voice is a download
 - Whisper, VAD, speaker and echo models download from models.voxtype.io
-- RC2: fix macOS meeting portability and verify baseline CI model downloads
-- RC3: notifications for failures that were silent, voxtype doctor, terminal-aware
-  paste keys, OSD scale and placement fixes, kept failed recordings and
-  undelivered text with settings to turn them off
-- RC4: fix a daemon freeze when a speaker with many lines is named during a
-  meeting, keep a detected call going while its window or mic shows it,
-  download the LARD model with voxtype setup lard, keep dictated text out of
-  the log at the default level
+- Notifications for failures that used to reach only the log: output
+  fallback and failure, microphone and model load, the evdev hotkey, VAD,
+  GPU and NPU fallback, OSD frontend fallback, post-processing and hooks,
+  degraded meetings; delivered over D-Bus when notify-send is missing
+- voxtype doctor, with the same checks grouped into one startup notification
+- Keep failed recordings and undelivered text, with settings to turn each off
+- Terminal-aware paste keys (paste_keys = "auto"); OSD scale, placement,
+  opacity and native rendering fixes
+- voxtype setup lard downloads the LARD model, and a missing model is reported
+- Dictated text is logged only at debug level
+- The recording announcement waits for the call app's settled mic stream, and
+  a detected browser call continues while its app has the mic or a window
+  shows it
+- Fix a daemon freeze when a speaker with many lines is named during a meeting
+- Fix macOS meeting portability
 
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
 - Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes
