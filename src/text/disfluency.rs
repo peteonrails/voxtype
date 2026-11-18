@@ -203,8 +203,14 @@ impl DisfluencyTagger {
             format!("suf={suffix}"),
             format!("pos={position}"),
         ];
-        // A repeat only counts inside the token's own sentence.
-        let repeats = |other: &Token| other.word == *word && other.sentence == token.sentence;
+        // A repeat only counts inside the token's own sentence. Every number
+        // normalizes to "#", which made any two of them a repeat and cost
+        // "between 10 and 20" its "10", so numbers are compared as written.
+        let repeats = |other: &Token| {
+            other.word == *word
+                && other.sentence == token.sentence
+                && (word != "#" || other.raw == token.raw)
+        };
         for distance in 1..=8 {
             if index >= distance && repeats(&tokens[index - distance]) {
                 features.push(format!("same-prev={distance}"));
@@ -387,6 +393,23 @@ mod tests {
             removed(&tagger, "We went to the the store. The store was closed."),
             ["the"]
         );
+    }
+
+    /// Numbers all normalize to "#", so the repetition features used to fire
+    /// between any two of them.
+    #[test]
+    fn two_different_numbers_are_not_a_repeat() {
+        let tagger = DisfluencyTagger::from_bytes(MODEL).unwrap();
+        for text in [
+            "between 10 and 20 people came",
+            "It costs 4.50 dollars",
+            "In 2025 and 2026 we shipped a lot.",
+            "Chapter 3, page 47 of the book.",
+        ] {
+            let removed = removed(&tagger, text);
+            assert!(removed.is_empty(), "{text}: unexpected labels {removed:?}");
+        }
+        assert_eq!(removed(&tagger, "a table for 2 for 2 people"), ["for", "2"]);
     }
 
     /// The spread from a labeled token used to run back over the previous

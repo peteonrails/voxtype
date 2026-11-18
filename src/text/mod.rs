@@ -1128,6 +1128,18 @@ mod tests {
     }
 
     #[test]
+    fn lard_keeps_numbers_that_differ() {
+        for text in [
+            "between 10 and 20 people came",
+            "In 2025 and 2026 we shipped a lot.",
+            "It costs 4.50 dollars",
+        ] {
+            assert_eq!(lard(text), text);
+        }
+        assert_eq!(lard("a table for 2 for 2 people"), "a table for 2 people");
+    }
+
+    #[test]
     fn lard_still_removes_a_restart_inside_a_sentence() {
         assert_eq!(lard("I want I want to go"), "I want to go");
         assert_eq!(
