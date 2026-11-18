@@ -16,6 +16,7 @@ grep "on_demand_loading" ~/.config/voxtype/config.toml || echo "on_demand_loadin
 # 3. Restart daemon and check model loading
 systemctl --user restart voxtype
 journalctl --user -u voxtype --since "10 seconds ago" | grep -E "Loading|Parakeet"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 seconds ago" | grep -E "Loading|Parakeet"
 # Expected: "Loading Parakeet Tdt model from..."
 # Expected: "Parakeet Tdt model loaded in X.XXs"
 
@@ -24,10 +25,12 @@ voxtype record start && sleep 2 && voxtype record stop
 
 # 5. Verify Parakeet was used (NOT Whisper)
 journalctl --user -u voxtype --since "10 seconds ago" | grep -E "Transcribing.*Parakeet"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 seconds ago" | grep -E "Transcribing.*Parakeet"
 # Expected: "Transcribing X.XXs of audio (XXXXX samples) with Parakeet Tdt"
 
 # 6. Verify NO whisper_init_state messages (indicates bug)
 journalctl --user -u voxtype --since "1 minute ago" | grep -c "whisper_init_state"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -c "whisper_init_state"
 # Expected: 0 (no Whisper initialization when using Parakeet)
 ```
 

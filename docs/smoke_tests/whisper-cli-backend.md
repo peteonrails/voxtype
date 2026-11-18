@@ -20,6 +20,7 @@ voxtype record start && sleep 3 && voxtype record stop
 
 # 4. Check logs for CLI backend usage:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i "cli"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i "cli"
 # Expected: "Using whisper-cli subprocess backend"
 
 # 5. Restore local backend:

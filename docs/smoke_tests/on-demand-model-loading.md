@@ -18,5 +18,6 @@ voxtype record start && sleep 3 && voxtype record stop
 
 # 5. Check logs for model load/unload:
 journalctl --user -u voxtype --since "1 minute ago" | grep -E "Loading|Unloading"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -E "Loading|Unloading"
 ```
 

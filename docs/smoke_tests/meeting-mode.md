@@ -167,6 +167,7 @@ Expected:
 - Nothing is shown, and the meeting keeps recording throughout.
 - The journal says what was seen:
   `journalctl --user -u voxtype --since "2 minutes ago" | grep "Meeting detection"`
+  (if that prints nothing: `journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "2 minutes ago" | grep "Meeting detection"`)
   shows "call continues: Google Meet still has the mic, but no window title
   shows the call any more", then "has the mic and its call window again".
   If muting made the browser release the microphone, it also shows
@@ -326,6 +327,7 @@ voxtype meeting start --title "Echo check"
 voxtype meeting status --json | jq .echo_cancel
 pactl list short sources | grep voxtype_meeting_aec_source
 journalctl --user -u voxtype --since "1 minute ago" | grep "echo handling"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep "echo handling"
 ```
 
 Then, with the meeting recording:
@@ -376,6 +378,7 @@ Headphones and a crash:
 voxtype meeting start --title "Headphones"
 voxtype meeting status --json | jq .echo_cancel      # "gtcrn"
 journalctl --user -u voxtype --since "1 minute ago" | grep "echo handling"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep "echo handling"
 voxtype meeting stop
 # Unplug, start a meeting on speakers again, and kill the daemon mid-meeting:
 voxtype meeting start --title "Crash"
@@ -482,7 +485,8 @@ Expected:
 - Close the window, stop the meeting with `voxtype meeting stop`, and start
   another with `voxtype meeting start --title "Auto open"`: the window opens
   by itself. The daemon log says so:
-  `journalctl --user -u voxtype | grep "Meeting view on start"`.
+  `journalctl --user -u voxtype | grep "Meeting view on start"`
+  (if that prints nothing: `journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep "Meeting view on start"`).
 - **Stop**, confirm: **Finalizing…**, then the summary under **Summary**.
 
 Put the view back:

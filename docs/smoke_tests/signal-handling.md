@@ -17,5 +17,6 @@ voxtype status  # Should show "transcribing" then "idle"
 
 # Check logs:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -E "USR1|USR2|signal"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -E "USR1|USR2|signal"
 ```
 

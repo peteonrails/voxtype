@@ -508,6 +508,7 @@ Or use the smoke-test command which exercises the full pipeline:
 voxtype info             # daemon state, active binary, engine, model
 systemctl --user status voxtype
 journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
 
 ---

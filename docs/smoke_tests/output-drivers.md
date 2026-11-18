@@ -23,6 +23,7 @@ suffix to an uncleared buffer is not a successful exact-text check.
 # Should work by default on Wayland - check logs confirm wtype is used:
 voxtype record start && sleep 2 && voxtype record stop
 journalctl --user -u voxtype --since "30 seconds ago" | grep -E "wtype|Text output"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -E "wtype|Text output"
 
 # Test clipboard mode
 # Edit config.toml: mode = "clipboard"

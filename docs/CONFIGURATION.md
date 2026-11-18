@@ -2496,6 +2496,7 @@ ls -la /tmp/dotool-pipe   # confirm FIFO exists
 After dictating a session, check the daemon log:
 ```bash
 journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "5 min ago" | grep "typed via"
 ```
 - `Text typed via dotoolc (N chars)` — fast path active
 - `Text typed via dotool (N chars)` — direct path; either the daemon is not running or voxtype had a per-call XKB hint
@@ -4746,7 +4747,7 @@ RUST_LOG=debug voxtype
 RUST_LOG=voxtype=trace voxtype
 ```
 
-**Dictated text and the log.** At the default level (info) voxtype does not log what you say. A dictation is logged as its length and its engine, for example `Transcribed 42 chars (whisper engine)`, and meeting transcript lines, undelivered text and post-processed text are logged the same way. The systemd service logs to the journal, so this is what keeps your words out of `journalctl --user -u voxtype` when `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` are off.
+**Dictated text and the log.** At the default level (info) voxtype does not log what you say. A dictation is logged as its length and its engine, for example `Transcribed 42 chars (whisper engine)`, and meeting transcript lines, undelivered text and post-processed text are logged the same way. The systemd service logs to the journal, so this is what keeps your words out of `journalctl --user -u voxtype` (and `journalctl _SYSTEMD_USER_UNIT=voxtype.service`, which reads the same log when [the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries)) when `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` are off.
 
 The text is logged at debug level (`voxtype -v`, or `RUST_LOG=voxtype=debug`), which you turn on yourself, typically to show what the engine heard in a report about a recognition problem. For the service:
 

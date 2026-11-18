@@ -14,6 +14,7 @@ voxtype record start && sleep 2 && voxtype record stop
 
 # 3. Check logs for ydotool usage:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -E "ydotool|Text output"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -E "ydotool|Text output"
 # Expected: "dotool not available, trying next" then "Text output via ydotool"
 
 # 4. Restore wtype and dotool
