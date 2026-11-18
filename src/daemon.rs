@@ -6358,6 +6358,7 @@ impl Daemon {
                         Some(e.to_string()),
                     )
                 });
+                self.notify_gpu_unavailable(&e, "").await;
                 self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                 self.keep_failed_recording(state).await;
                 self.reset_to_idle(state).await;
