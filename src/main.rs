@@ -28,14 +28,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Check if this is the worker command (needs stderr-only logging)
-    let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
     // Import, retranscribe, the sound check and the waveform print their
-    // own progress, meters or result, and with --json their stdout is
-    // NDJSON (the waveform's is one JSON object), so logs go to stderr and
-    // only warnings show unless -v asks for more. A sound check with no
-    // daemon running opens the audio itself, and its info lines (the echo
-    // canceller, the loopback source) landed in the NDJSON.
+    // own progress, meters or result, so only warnings show unless -v asks
+    // for more.
     let is_import = matches!(
         cli.command,
         Some(Commands::Meeting {
@@ -45,10 +40,6 @@ async fn main() -> anyhow::Result<()> {
                 | voxtype::MeetingAction::Waveform { .. }
         })
     );
-
-    // History's JSON contract includes output actions, whose drivers log at
-    // info level. Keep those diagnostics away from machine-readable stdout.
-    let is_history_json = matches!(cli.command, Some(Commands::History { json: true, .. }));
 
     // Initialize logging
     let log_level = if cli.quiet {
@@ -70,17 +61,16 @@ async fn main() -> anyhow::Result<()> {
             .add_directive("ureq=info".parse().expect("a valid directive"))
     };
 
-    if is_worker || is_import || is_history_json {
-        // Worker uses stderr for logging (stdout is reserved for IPC protocol)
+    if logs_to_stdout(cli.command.as_ref()) {
         tracing_subscriber::fmt()
             .with_env_filter(log_filter(log_level))
             .with_target(false)
-            .with_writer(std::io::stderr)
             .init();
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(log_filter(log_level))
             .with_target(false)
+            .with_writer(std::io::stderr)
             .init();
     }
 
@@ -100,4 +90,24 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load_config(cli.config.as_deref())?;
 
     app::run(cli, config_path, config).await
+}
+
+/// Whether this command's log belongs on stdout.
+///
+/// Only the long-running services log there: their stdout carries nothing
+/// else, and existing setups read it (`voxtype > voxtype.log`, the macOS
+/// app's `stdout.log`). Every other command prints its result on stdout,
+/// where a script, a pipe or a frontend parses it (`config get`, `status`,
+/// `transcribe`, anything with `--json`, the worker's IPC protocol), so its
+/// log goes to stderr. Logging to stdout used to be the default, with the
+/// commands known to need stderr listed one by one, and each command left
+/// off that list leaked log lines into its output: a warning about an
+/// unreadable config section came out of `config get` ahead of the value.
+fn logs_to_stdout(command: Option<&Commands>) -> bool {
+    match command {
+        None | Some(Commands::Daemon) => true,
+        #[cfg(target_os = "macos")]
+        Some(Commands::Menubar | Commands::AppLaunch) => true,
+        Some(_) => false,
+    }
 }

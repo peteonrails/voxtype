@@ -11,7 +11,7 @@ use ratatui::{
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec};
-use super::config_editor::{ConfigEditor, EditorError};
+use super::config_editor::{round_to_hundredths, ConfigEditor, EditorError};
 
 #[derive(Debug, Clone)]
 pub struct VadState {
@@ -108,7 +108,8 @@ impl VadState {
                 self.backend = BACKEND_CHOICES[n as usize].to_string();
             }
             Field::Threshold => {
-                self.threshold = (self.threshold + delta as f32 * 0.05).clamp(0.0, 1.0);
+                self.threshold =
+                    round_to_hundredths(self.threshold + delta as f32 * 0.05).clamp(0.0, 1.0);
             }
         }
         self.dirty_since_load = true;

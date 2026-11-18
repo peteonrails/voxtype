@@ -15,7 +15,7 @@ use super::app::{Action, App};
 use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
-use super::config_editor::{ConfigEditor, EditorError};
+use super::config_editor::{round_to_hundredths, ConfigEditor, EditorError};
 use crate::audio::devices::{list_input_device_names, probe_input_devices};
 use crate::config::AudioConfig;
 
@@ -344,7 +344,7 @@ impl AudioState {
             }
             Field::FeedbackVolume => {
                 let next = self.feedback_volume + delta as f32 * VOLUME_STEP;
-                self.feedback_volume = next.clamp(0.0, 1.0);
+                self.feedback_volume = round_to_hundredths(next).clamp(0.0, 1.0);
             }
         }
         self.dirty_since_load = true;

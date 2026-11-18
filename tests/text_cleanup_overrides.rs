@@ -151,17 +151,21 @@ fn dictation_language_has_file_env_and_cli_layers() {
         "en"
     );
     // A value that is not a language code: ignored from the environment
-    // with a warning ahead of the value, refused on the command line.
-    let ignored = get(
-        &path,
-        "text.language",
-        ("VOXTYPE_TEXT_LANGUAGE", "english"),
-        &[],
-    );
-    assert_eq!(ignored.lines().last(), Some("fr"), "{ignored}");
+    // with a warning, refused on the command line. The warning goes to
+    // stderr, so stdout is still only the value.
+    let ignored = Command::new(env!("CARGO_BIN_EXE_voxtype"))
+        .env("VOXTYPE_TEXT_LANGUAGE", "english")
+        .arg("--config")
+        .arg(&path)
+        .args(["config", "get", "text.language"])
+        .output()
+        .unwrap();
+    assert!(ignored.status.success());
+    assert_eq!(String::from_utf8_lossy(&ignored.stdout), "fr\n");
     assert!(
-        ignored.contains("VOXTYPE_TEXT_LANGUAGE is ignored"),
-        "{ignored}"
+        String::from_utf8_lossy(&ignored.stderr).contains("VOXTYPE_TEXT_LANGUAGE is ignored"),
+        "{}",
+        String::from_utf8_lossy(&ignored.stderr)
     );
     let refused = Command::new(env!("CARGO_BIN_EXE_voxtype"))
         .env_remove("VOXTYPE_TEXT_LANGUAGE")
