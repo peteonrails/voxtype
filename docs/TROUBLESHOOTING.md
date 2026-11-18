@@ -2371,13 +2371,39 @@ journalctl --user -u pulseaudio -n 20
 
 ### Trained LARD cleanup is not running
 
-- It is off by default. Enable `text.lard_disfluency` and select an explicit
-  English language. `auto`, unknown, and non-English languages skip it, and so
-  do engines that have no language setting.
+- It is off by default. Enable `text.lard_disfluency`. It then runs only when
+  the dictation is known to be English: the engine's language is set to
+  English, the model is English-only, or you declared English with
+  `text.language`.
 - Run `voxtype doctor`. With the setting on and nothing to run, the **Text
   cleanup** check fails and names the cause. The same problem is in the
   daemon's "Voxtype: N problems need attention" startup notification and in
   the log as `LARD cleanup unavailable; preserving text`.
+- "it only runs on English, and nothing says ... dictation with ... is
+  English": the model handles several languages and detects them
+  automatically, so Voxtype does not know what language the text is in. This
+  is the usual case with Parakeet v3, Whisper on `auto`, SenseVoice on `auto`,
+  Dolphin, Omnilingual and Soniox, and with any model given as a path. If you
+  dictate in English, declare it and restart the daemon:
+  `voxtype config set text.language en`. If you dictate in several languages,
+  leave it and turn the stage off instead.
+- "it only runs on English, and whisper.language is fr" (or another engine's
+  `language` key): the engine was told to write another language, and that
+  wins over `text.language`. If you do dictate in English, change that key:
+  `voxtype config set whisper.language en`.
+- "it only runs on English, and whisper.language is limited to fr, de" (or
+  `soniox.language_hints`): detection is limited to a set without English, so
+  a declared `en` would contradict it. Add `en` to that list.
+- "it only runs on English, and ... only writes ja": the model writes one
+  language and it is not English. No setting changes that. Pick another model
+  or turn the stage off.
+- "it only runs on English, and text.language is ...": you declared another
+  language, or a value that is not a language code (`english` rather than
+  `en`). Set it to `en`.
+- It runs for normal dictation but not with `--model` or the secondary-model
+  hotkey: an override recording is checked on its own, and the override model
+  is not known to write English. Declare `text.language en`, or use an
+  English-only override model.
 - "LARD disfluency cleanup is on but its model is not installed": the setting
   is on and the model file is not there. Turning the setting on does not
   download it. Run `voxtype setup lard`, then restart the daemon. Or turn the

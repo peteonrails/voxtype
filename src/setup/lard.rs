@@ -33,8 +33,8 @@ pub fn model_path() -> PathBuf {
 /// Why the LARD stage cannot run although `text.lard_disfluency` is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
-    /// The active engine's language is not an explicit English one.
-    NotEnglish,
+    /// The dictation is not known to be English, for the reason given.
+    NotEnglish(NotEnglish),
     /// No file at the model path. `custom` says the path came from
     /// `text.lard_model_path` rather than the default install location.
     ModelMissing { path: PathBuf, custom: bool },
@@ -46,12 +46,150 @@ pub enum Problem {
     },
 }
 
+/// Why a configuration's dictation does not count as English, which decides
+/// what the user is told to change. See [`Config::text_language`] for the
+/// rule these mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotEnglish {
+    /// Nothing says what language the text is in: a multilingual or unknown
+    /// model on automatic detection, and no `text.language`. Declaring the
+    /// language is the fix.
+    Undeclared { engine: &'static str, model: String },
+    /// The engine's own language key names another language.
+    Engine { key: &'static str, language: String },
+    /// The engine's detection is limited to a set without English, so a
+    /// declared `en` would contradict it.
+    EngineSet {
+        key: &'static str,
+        languages: Vec<String>,
+    },
+    /// The selected model only writes another language.
+    Model { model: String, language: String },
+    /// `text.language` declares another language.
+    Declared { language: String },
+    /// `text.language` holds something that is not a language code.
+    Malformed { value: String },
+    /// No configuration to explain it with: only the language a text
+    /// processor was built for.
+    Unexplained { language: Option<String> },
+}
+
+const ONLY_ENGLISH: &str =
+    "LARD disfluency cleanup is on but is being skipped: it only runs on English, and";
+const DECLARE: &str = "voxtype config set text.language en";
+
+impl NotEnglish {
+    /// Classify a configuration whose [`Config::text_language`] is not
+    /// English.
+    fn of(config: &Config) -> Self {
+        use crate::config::EngineLanguage;
+        let key = config.engine_language_key();
+        match config.engine_language() {
+            EngineLanguage::Fixed(language) => {
+                return NotEnglish::Engine {
+                    key,
+                    language: language.to_string(),
+                }
+            }
+            EngineLanguage::OneOf(languages) if !languages.iter().any(|l| is_english(Some(l))) => {
+                return NotEnglish::EngineSet {
+                    key,
+                    languages: languages.into_iter().map(str::to_string).collect(),
+                }
+            }
+            EngineLanguage::OneOf(_) | EngineLanguage::Open => {}
+        }
+        if let Some(language) = config.model_language() {
+            return NotEnglish::Model {
+                model: config.model_name().to_string(),
+                language: language.to_string(),
+            };
+        }
+        if config.text.language_is_malformed() {
+            return NotEnglish::Malformed {
+                value: config.text.language.clone(),
+            };
+        }
+        match config.text.declared_language() {
+            Some(language) => NotEnglish::Declared {
+                language: language.to_string(),
+            },
+            None => NotEnglish::Undeclared {
+                engine: config.engine.name(),
+                model: config.model_name().to_string(),
+            },
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            NotEnglish::Undeclared { engine, model } => {
+                format!("{ONLY_ENGLISH} nothing says {engine} dictation with {model} is English")
+            }
+            NotEnglish::Engine { key, language } => {
+                format!("{ONLY_ENGLISH} {key} is {language}")
+            }
+            NotEnglish::EngineSet { key, languages } => format!(
+                "{ONLY_ENGLISH} {key} is limited to {}",
+                languages.join(", ")
+            ),
+            NotEnglish::Model { model, language } => {
+                format!("{ONLY_ENGLISH} {model} only writes {language}")
+            }
+            NotEnglish::Declared { language } => {
+                format!("{ONLY_ENGLISH} text.language is {language}")
+            }
+            NotEnglish::Malformed { value } => {
+                format!("{ONLY_ENGLISH} text.language is \"{value}\", which is not a language code")
+            }
+            NotEnglish::Unexplained {
+                language: Some(language),
+            } => format!("{ONLY_ENGLISH} the dictation language is {language}"),
+            NotEnglish::Unexplained { language: None } => {
+                format!("{ONLY_ENGLISH} the dictation language is not known")
+            }
+        }
+    }
+
+    /// The change that gets the stage running, for someone who does dictate
+    /// in English. The off switch is appended by [`Problem::fix`].
+    fn fix(&self) -> String {
+        match self {
+            NotEnglish::Undeclared { .. } | NotEnglish::Unexplained { .. } => {
+                format!("If you dictate in English, declare it: {DECLARE}")
+            }
+            NotEnglish::Engine { key, .. } => {
+                format!("If you dictate in English, change it: voxtype config set {key} en")
+            }
+            NotEnglish::EngineSet { key, .. } => {
+                format!("If you dictate in English, add en to {key}")
+            }
+            NotEnglish::Model { .. } => {
+                "Choose a model that writes English to use this stage".to_string()
+            }
+            NotEnglish::Declared { .. } => {
+                format!("If you dictate in English, change it: {DECLARE}")
+            }
+            NotEnglish::Malformed { .. } => format!("Use a language code: {DECLARE}"),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            NotEnglish::Undeclared { .. } | NotEnglish::Unexplained { language: None } => {
+                "language not declared"
+            }
+            NotEnglish::Malformed { .. } => "text.language is not a code",
+            _ => "language is not English",
+        }
+    }
+}
+
 impl Problem {
     /// What is wrong, as one sentence without a trailing period.
     pub fn message(&self) -> String {
         match self {
-            Problem::NotEnglish => "LARD disfluency cleanup is on but is being skipped: it only runs when the engine language is set to English"
-                .to_string(),
+            Problem::NotEnglish(why) => why.message(),
             Problem::ModelMissing {
                 path,
                 custom: false,
@@ -70,15 +208,13 @@ impl Problem {
         }
     }
 
-    /// What to do about it: the command that installs the model, and always
-    /// the switch that turns the stage off. A path the user set is theirs to
-    /// correct, because `voxtype setup lard` installs to the default one.
+    /// What to do about it: the change that gets the stage running (the
+    /// exact command where there is one), and always the switch that turns
+    /// the stage off. A path the user set is theirs to correct, because
+    /// `voxtype setup lard` installs to the default one.
     pub fn fix(&self) -> String {
         match self {
-            Problem::NotEnglish => format!(
-                "Set the active engine's language to en instead of auto (engines \
-                 without a language setting cannot run this stage), {TURN_OFF}"
-            ),
+            Problem::NotEnglish(why) => format!("{}, {TURN_OFF}", why.fix()),
             Problem::ModelMissing { custom: true, .. }
             | Problem::ModelInvalid { custom: true, .. } => format!(
                 "Correct [text] lard_model_path, or remove it to use the model \
@@ -96,7 +232,7 @@ impl Problem {
     /// A few words for a table cell, where the full message does not fit.
     pub fn label(&self) -> &'static str {
         match self {
-            Problem::NotEnglish => "needs an English language",
+            Problem::NotEnglish(why) => why.label(),
             Problem::ModelMissing { .. } => "model not installed",
             Problem::ModelInvalid { .. } => "model does not load",
         }
@@ -109,7 +245,7 @@ impl Problem {
 }
 
 /// Whether `language` is an explicit English tag (`en`, `en-US`, `en_GB`).
-fn is_english(language: Option<&str>) -> bool {
+pub fn is_english(language: Option<&str>) -> bool {
     language.and_then(|l| l.split(['-', '_']).next()) == Some("en")
 }
 
@@ -122,10 +258,14 @@ fn resolved_model_path(text: &TextConfig) -> (PathBuf, bool) {
 }
 
 /// Load the tagger the way the daemon will, for a config that has the stage
-/// on. `Err` says exactly why the stage would be skipped.
+/// on. `language` is what [`Config::text_language`] resolved to. `Err` says
+/// why the stage would be skipped; [`problem`] says it in terms of the whole
+/// configuration.
 pub fn load_tagger(text: &TextConfig, language: Option<&str>) -> Result<DisfluencyTagger, Problem> {
     if !is_english(language) {
-        return Err(Problem::NotEnglish);
+        return Err(Problem::NotEnglish(NotEnglish::Unexplained {
+            language: language.map(str::to_string),
+        }));
     }
     let (path, custom) = resolved_model_path(text);
     let bytes = match std::fs::read(&path) {
@@ -148,8 +288,8 @@ pub fn load_tagger(text: &TextConfig, language: Option<&str>) -> Result<Disfluen
     })
 }
 
-/// Why the stage is not running for `text` with the given engine language,
-/// or `None` when it is off or working.
+/// Why the stage is not running for `text` when the dictation language is
+/// `language`, or `None` when it is off or working.
 pub fn problem_for(text: &TextConfig, language: Option<&str>) -> Option<Problem> {
     if !text.lard_disfluency {
         return None;
@@ -157,9 +297,14 @@ pub fn problem_for(text: &TextConfig, language: Option<&str>) -> Option<Problem>
     load_tagger(text, language).err()
 }
 
-/// [`problem_for`] for a whole configuration.
+/// Why the stage is not running for a whole configuration, or `None` when it
+/// is off or working. A language problem names what in this configuration
+/// makes the dictation not English, so the fix is the user's own.
 pub fn problem(config: &Config) -> Option<Problem> {
-    problem_for(&config.text, config.active_language())
+    match problem_for(&config.text, config.text_language())? {
+        Problem::NotEnglish(_) => Some(Problem::NotEnglish(NotEnglish::of(config))),
+        other => Some(other),
+    }
 }
 
 fn validate(bytes: &[u8]) -> Result<()> {
@@ -580,12 +725,17 @@ mod tests {
 
     #[test]
     fn language_is_checked_before_the_model() {
-        for language in [None, Some("fr"), Some("auto")] {
-            assert_eq!(
-                problem_for(&text_config(true, Some(&repo_model())), language),
-                Some(Problem::NotEnglish),
-                "{language:?}"
-            );
+        let missing = Path::new("/nonexistent/voxtype-test/lard.vxdf");
+        for model in [repo_model().as_path(), missing] {
+            for language in [None, Some("fr"), Some("auto")] {
+                assert_eq!(
+                    problem_for(&text_config(true, Some(model)), language),
+                    Some(Problem::NotEnglish(NotEnglish::Unexplained {
+                        language: language.map(str::to_string),
+                    })),
+                    "{language:?}"
+                );
+            }
         }
     }
 
@@ -605,13 +755,42 @@ mod tests {
         };
         let off = "or turn it off: voxtype config set text.lard_disfluency false";
 
-        for problem in [
-            Problem::NotEnglish,
+        let not_english = [
+            NotEnglish::Undeclared {
+                engine: "parakeet",
+                model: "parakeet-tdt-0.6b-v3".into(),
+            },
+            NotEnglish::Engine {
+                key: "whisper.language",
+                language: "fr".into(),
+            },
+            NotEnglish::EngineSet {
+                key: "whisper.language",
+                languages: vec!["fr".into(), "de".into()],
+            },
+            NotEnglish::Model {
+                model: "base-ja".into(),
+                language: "ja".into(),
+            },
+            NotEnglish::Declared {
+                language: "fr".into(),
+            },
+            NotEnglish::Malformed {
+                value: "english".into(),
+            },
+            NotEnglish::Unexplained { language: None },
+            NotEnglish::Unexplained {
+                language: Some("fr".into()),
+            },
+        ]
+        .map(Problem::NotEnglish);
+
+        for problem in not_english.into_iter().chain([
             missing(false),
             missing(true),
             invalid(false),
             invalid(true),
-        ] {
+        ]) {
             let fix = problem.fix();
             assert!(fix.ends_with(off), "{fix}");
             // The command is the fix. A URL in a notification is not.
@@ -670,9 +849,157 @@ mod tests {
         assert!(running.contains("LARD model installed and verified"));
         assert!(running.contains("the cleanup stage is running"));
 
+        config.whisper.model = "large-v3".into();
         config.whisper.language = crate::config::LanguageConfig::Single("auto".into());
         let skipped = status_lines(Ok(()), destination, &config).join("\n");
         assert!(skipped.contains("LARD model installed and verified"));
-        assert!(skipped.contains("only runs when the engine language is set to English"));
+        assert!(skipped.contains("it only runs on English"));
+        assert!(skipped.contains(
+            "Fix: If you dictate in English, declare it: voxtype config set text.language en"
+        ));
+    }
+    fn lard_on(mut config: Config) -> Config {
+        config.text = TextConfig {
+            language: config.text.language.clone(),
+            ..text_config(true, Some(&repo_model()))
+        };
+        config
+    }
+
+    fn engine_config(engine: crate::config::TranscriptionEngine, model: &str) -> Config {
+        let mut config = Config::default();
+        config.set_model_for(engine, model);
+        lard_on(config)
+    }
+
+    /// What doctor, the startup notification, `config set`, the panel and
+    /// `voxtype configure` all print: the reason in this configuration, and
+    /// the change that fixes it, ending with the off switch.
+    #[test]
+    fn a_language_problem_names_the_cause_and_the_exact_fix() {
+        use crate::config::TranscriptionEngine::*;
+        const SKIPPED: &str =
+            "LARD disfluency cleanup is on but is being skipped: it only runs on English, and";
+        const OFF: &str = "or turn it off: voxtype config set text.lard_disfluency false";
+        let report = |config: &Config| {
+            let problem = problem(config).expect("a problem");
+            assert!(matches!(problem, Problem::NotEnglish(_)), "{problem:?}");
+            (problem.message(), problem.fix())
+        };
+
+        // A multilingual model on automatic detection: declare the language.
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Paraformer, "paraformer-zh"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            let (message, fix) = report(&engine_config(engine, model));
+            assert_eq!(
+                message,
+                format!(
+                    "{SKIPPED} nothing says {} dictation with {model} is English",
+                    engine.name()
+                )
+            );
+            assert_eq!(
+                fix,
+                format!(
+                    "If you dictate in English, declare it: \
+                     voxtype config set text.language en, {OFF}"
+                )
+            );
+        }
+        // Engines with a language key on automatic get the same one answer.
+        let mut whisper = engine_config(Whisper, "large-v3-turbo");
+        whisper.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        assert!(report(&whisper).1.starts_with(
+            "If you dictate in English, declare it: voxtype config set text.language en,"
+        ));
+
+        // An English-only model: nothing to do, so nothing is reported.
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v2"),
+            (Parakeet, "parakeet-unified-en-0.6b"),
+            (Moonshine, "base"),
+            (Paraformer, "paraformer-en"),
+        ] {
+            assert_eq!(problem(&engine_config(engine, model)), None, "{model}");
+        }
+        // And following the advice clears it.
+        let mut declared = engine_config(Parakeet, "parakeet-tdt-0.6b-v3");
+        declared.text.language = "en".into();
+        assert_eq!(problem(&declared), None);
+
+        // The engine was told another language: that key is the one to change.
+        let mut french = engine_config(Whisper, "large-v3-turbo");
+        french.whisper.language = crate::config::LanguageConfig::Single("fr".into());
+        french.text.language = "en".into();
+        assert_eq!(
+            report(&french),
+            (
+                format!("{SKIPPED} whisper.language is fr"),
+                format!(
+                    "If you dictate in English, change it: \
+                     voxtype config set whisper.language en, {OFF}"
+                )
+            )
+        );
+
+        // Detection limited to a set without English.
+        let mut limited = engine_config(Whisper, "large-v3-turbo");
+        limited.whisper.language =
+            crate::config::LanguageConfig::Multiple(vec!["fr".into(), "de".into()]);
+        limited.text.language = "en".into();
+        assert_eq!(
+            report(&limited),
+            (
+                format!("{SKIPPED} whisper.language is limited to fr, de"),
+                format!("If you dictate in English, add en to whisper.language, {OFF}")
+            )
+        );
+
+        // A model that only writes another language: no setting helps.
+        let mut japanese = engine_config(Moonshine, "base-ja");
+        japanese.text.language = "en".into();
+        assert_eq!(
+            report(&japanese),
+            (
+                format!("{SKIPPED} base-ja only writes ja"),
+                format!("Choose a model that writes English to use this stage, {OFF}")
+            )
+        );
+
+        // Another language declared, and a value that is not a code.
+        let mut portuguese = engine_config(Parakeet, "parakeet-tdt-0.6b-v3");
+        portuguese.text.language = "pt-BR".into();
+        assert_eq!(
+            report(&portuguese),
+            (
+                format!("{SKIPPED} text.language is pt-BR"),
+                format!(
+                    "If you dictate in English, change it: \
+                     voxtype config set text.language en, {OFF}"
+                )
+            )
+        );
+        let mut typo = engine_config(Parakeet, "parakeet-tdt-0.6b-v3");
+        typo.text.language = "english".into();
+        assert_eq!(
+            report(&typo),
+            (
+                format!("{SKIPPED} text.language is \"english\", which is not a language code"),
+                format!("Use a language code: voxtype config set text.language en, {OFF}")
+            )
+        );
+
+        // The model is still checked once the language is right.
+        let mut no_model = engine_config(Parakeet, "parakeet-tdt-0.6b-v2");
+        no_model.text.lard_model_path = Some("/nonexistent/voxtype-test/lard.vxdf".into());
+        assert!(matches!(
+            problem(&no_model),
+            Some(Problem::ModelMissing { custom: true, .. })
+        ));
     }
 }

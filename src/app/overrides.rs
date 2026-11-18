@@ -367,6 +367,12 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(path) = &cli.lard_model_path {
         config.text.lard_model_path = Some(path.clone());
     }
+    if let Some(language) = &cli.text_language {
+        if let Err(message) = config.text.set_language(language) {
+            eprintln!("Error: --text-language: {message}");
+            std::process::exit(1);
+        }
+    }
     apply_bool_override(
         &mut config.text.punctuation_casing,
         cli.punctuation_casing,

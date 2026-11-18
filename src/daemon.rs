@@ -1177,6 +1177,10 @@ pub struct Daemon {
     pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
+    /// False while the current recording's `--model` override produces text
+    /// that is not known to be English, so English-only cleanup is skipped
+    /// for it. See `override_text_is_english`.
+    session_text_is_english: bool,
     /// Vocabulary matchers prepared once at startup, keyed by profile name.
     profile_vocabularies: HashMap<String, Vocabulary>,
     post_processor: Option<PostProcessor>,
@@ -1406,11 +1410,11 @@ impl Daemon {
         };
 
         // Initialize text processor
-        // Pass the active engine's language so filler filtering can skip
-        // words that are ordinary vocabulary there rather than disfluencies
-        // (#566).
+        // Pass the language of the text so filler filtering can skip words
+        // that are ordinary vocabulary there rather than disfluencies (#566)
+        // and English-only cleanup runs only on English (#696).
         let text_processor =
-            TextProcessor::new_for_config(&config.text, config.active_language(), &config);
+            TextProcessor::new_for_config(&config.text, config.text_language(), &config);
         let profile_vocabularies = config
             .profiles
             .iter()
@@ -1506,6 +1510,7 @@ impl Daemon {
             pid_file_path: None,
             audio_feedback,
             text_processor,
+            session_text_is_english: true,
             profile_vocabularies,
             post_processor,
             last_dictation: None,
@@ -1807,7 +1812,7 @@ impl Daemon {
             .then(|| ModelManager::new(&self.config.whisper, self.config_path.clone()));
         self.text_processor = TextProcessor::new_for_config(
             &self.config.text,
-            self.config.active_language(),
+            self.config.text_language(),
             &self.config,
         );
         tracing::info!(language = ?self.config.active_language(), "Tray language applied for next dictation");
@@ -1890,6 +1895,14 @@ impl Daemon {
     /// OSD reads.
     fn begin_osd_session(&mut self, state: &State) {
         self.active_transcriber = None;
+        self.session_text_is_english = match state {
+            State::Recording { model_override, .. }
+            | State::EagerRecording { model_override, .. } => {
+                self.override_text_is_english(model_override.as_deref())
+            }
+            // Streaming always runs the configured model.
+            _ => true,
+        };
         self.eager_decoded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.history_begin(state);
         self.osd_limit_reached = false;
@@ -1916,6 +1929,26 @@ impl Daemon {
                 model,
             },
         );
+    }
+
+    /// Whether English-only cleanup may run on a recording made with
+    /// `model_override`.
+    ///
+    /// The text processor is built for the configured engine and model. A
+    /// `--model` override swaps in another model, even another engine, for
+    /// one recording, and what made the configured one English (an
+    /// English-only model, most of all) may not hold for it. So the same
+    /// rule is asked of the configuration that recording runs with. Without
+    /// an override the processor's own language gate is the answer.
+    fn override_text_is_english(&self, model_override: Option<&str>) -> bool {
+        let Some(name) = model_override else {
+            return true;
+        };
+        match model_catalog::override_route(&self.config, name) {
+            Ok(route) => model_catalog::override_text_is_english(&self.config, name, &route),
+            // Refused before it records anything.
+            Err(_) => true,
+        }
     }
 
     /// The engine and model that will serve a recording, after any
@@ -5399,9 +5432,11 @@ impl Daemon {
                     let vocabulary = profile_override
                         .as_ref()
                         .and_then(|name| self.profile_vocabularies.get(name));
-                    let processed_text = self
-                        .text_processor
-                        .process_with_vocabulary(&text, vocabulary);
+                    let processed_text = self.text_processor.process_recording(
+                        &text,
+                        vocabulary,
+                        self.session_text_is_english,
+                    );
                     if processed_text != text {
                         tracing::debug!("After text processing: {:?}", processed_text);
                     }

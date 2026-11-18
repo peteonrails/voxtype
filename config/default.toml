@@ -262,6 +262,14 @@ show_edits = true
 # skipped and voxtype doctor says so.
 # lard_disfluency = false
 # lard_model_path = "/path/to/lard-disfluency-v1.vxdf"
+#
+# The language you dictate in, for cleanup that depends on it (the stage above
+# is English-only). Leave it on "auto" unless your model handles several
+# languages and detects them automatically: an engine language that is set,
+# or an English-only model, already answers the question and wins over this.
+# It is not sent to the transcription engine.
+# language = "auto"
+#
 # Text processing options (word replacements, spoken punctuation)
 #
 # Enable spoken punctuation conversion (e.g., say "period" to get ".")

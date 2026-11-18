@@ -129,22 +129,37 @@ impl TextProcessor {
     /// Only the built-in default is narrowed. A user who lists filler words
     /// explicitly gets exactly what they asked for.
     pub fn new_for_language(config: &TextConfig, language: Option<&str>) -> Self {
-        Self::build(config, language, false)
+        Self::build(config, language, false, None)
     }
 
     /// Build a processor for finished output from the active transcription
     /// configuration. Punctuation restoration is activated only when both
     /// the user opted in and that exact engine configuration emits plain CTC
     /// output (for example SenseVoice with its own ITN disabled).
+    ///
+    /// `language` is the language of the text, which callers take from
+    /// [`Config::text_language`](crate::config::Config::text_language): the
+    /// engine's language, else a single-language model's, else the one the
+    /// user declared.
     pub fn new_for_config(
         config: &TextConfig,
         language: Option<&str>,
         root: &crate::config::Config,
     ) -> Self {
-        Self::build(config, language, root.needs_punctuation_casing())
+        Self::build(
+            config,
+            language,
+            root.needs_punctuation_casing(),
+            Some(root),
+        )
     }
 
-    fn build(config: &TextConfig, language: Option<&str>, engine_needs_punctuation: bool) -> Self {
+    fn build(
+        config: &TextConfig,
+        language: Option<&str>,
+        engine_needs_punctuation: bool,
+        root: Option<&crate::config::Config>,
+    ) -> Self {
         #[cfg(not(feature = "punctuation-casing"))]
         if config.punctuation_casing && engine_needs_punctuation {
             tracing::warn!(
@@ -220,6 +235,11 @@ impl TextProcessor {
             match crate::setup::lard::load_tagger(config, language) {
                 Ok(model) => Some(model),
                 Err(problem) => {
+                    // With the whole configuration at hand, say what in it
+                    // makes the dictation not English.
+                    let problem = root
+                        .and_then(crate::setup::lard::problem)
+                        .unwrap_or(problem);
                     tracing::warn!(
                         "LARD cleanup unavailable; preserving text. {}. Fix: {}",
                         problem.message(),
@@ -264,6 +284,22 @@ impl TextProcessor {
 
     /// Process text with the vocabulary selected by the active profile.
     pub fn process_with_vocabulary(&self, text: &str, vocabulary: Option<&Vocabulary>) -> String {
+        self.process_recording(text, vocabulary, true)
+    }
+
+    /// Process the text of one recording. `english` is false when this
+    /// recording came from a model other than the configured one (a
+    /// `--model` override) and that model's text is not known to be English:
+    /// the English-only LARD stage is then skipped for it, whatever language
+    /// this processor was built for. It deletes words, so it must never run
+    /// on text that may not be English (#696). Every other stage runs as
+    /// configured.
+    pub fn process_recording(
+        &self,
+        text: &str,
+        vocabulary: Option<&Vocabulary>,
+        english: bool,
+    ) -> String {
         let mut result = text.to_string();
 
         // Vocabulary is the first cleanup stage so every later stage sees the
@@ -297,7 +333,7 @@ impl TextProcessor {
         // anyone using spoken_punctuation. Filler removal has already gone,
         // so a filler mid-stutter ("the uh the point") cannot hide the repeat
         // either, and the replacements pass below still gets the last word.
-        if let Some(tagger) = &self.disfluency_tagger {
+        if let Some(tagger) = self.disfluency_tagger.as_ref().filter(|_| english) {
             let tokens = tagger.tag(&result);
             let mut cleaned = String::with_capacity(result.len());
             let mut cursor = 0;
@@ -813,6 +849,149 @@ mod tests {
         ))
         .unwrap();
         super::TextProcessor::new_for_language(&config, Some(language))
+    }
+
+    /// The daemon's processor for a whole configuration with LARD on and the
+    /// pinned model: what `Daemon::new` builds.
+    fn lard_processor_for(mut config: crate::config::Config) -> super::TextProcessor {
+        config.text.lard_disfluency = true;
+        config.text.filter_filler_words = false;
+        config.text.lard_model_path = Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/models/lard-disfluency-v1.vxdf"),
+        );
+        super::TextProcessor::new_for_config(&config.text, config.text_language(), &config)
+    }
+
+    const DISFLUENT: &str = "I need a flight no I need a hotel";
+    const CLEANED: &str = "I need a hotel";
+
+    fn engine_config(
+        engine: crate::config::TranscriptionEngine,
+        model: &str,
+    ) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.set_model_for(engine, model);
+        config
+    }
+
+    /// LARD used to be unreachable for engines with no language setting.
+    /// It now runs when the model can only write English.
+    #[test]
+    fn lard_runs_for_an_english_only_model_without_a_language_setting() {
+        use crate::config::TranscriptionEngine::*;
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v2"),
+            (Parakeet, "parakeet-tdt-0.6b-v2-int8"),
+            (Parakeet, "parakeet-unified-en-0.6b"),
+            (Moonshine, "base"),
+            (Moonshine, "tiny"),
+            (Paraformer, "paraformer-en"),
+        ] {
+            let processor = lard_processor_for(engine_config(engine, model));
+            assert_eq!(processor.process(DISFLUENT), CLEANED, "{model}");
+        }
+
+        // Engines with a language key left on automatic detection.
+        let mut whisper = engine_config(Whisper, "base.en");
+        whisper.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        assert_eq!(lard_processor_for(whisper).process(DISFLUENT), CLEANED);
+        let gguf = engine_config(Gguf, "moonshine-streaming-small-Q8_0.gguf");
+        assert_eq!(gguf.gguf.as_ref().unwrap().language, "auto");
+        assert_eq!(lard_processor_for(gguf).process(DISFLUENT), CLEANED);
+        let mut openvino = engine_config(OpenVino, "base.en-int8");
+        openvino.openvino.as_mut().unwrap().language = "auto".into();
+        assert_eq!(lard_processor_for(openvino).process(DISFLUENT), CLEANED);
+    }
+
+    /// The default that must not move: a multilingual model on automatic
+    /// detection with nothing declared keeps every word.
+    #[test]
+    fn lard_stays_off_for_a_multilingual_model_on_automatic() {
+        use crate::config::TranscriptionEngine::*;
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Parakeet, "parakeet-tdt-0.6b-v3-int8"),
+            (Parakeet, "parakeet-ultra-Q8_0.gguf"),
+            (Parakeet, "/models/parakeet-tdt-0.6b-v2"),
+            (Moonshine, "base-ja"),
+            (SenseVoice, "sensevoice-small"),
+            (Paraformer, "paraformer-zh"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Gguf, "Qwen3-ASR-0.6B-Q8_0.gguf"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            let processor = lard_processor_for(engine_config(engine, model));
+            assert_eq!(processor.process(DISFLUENT), DISFLUENT, "{model}");
+        }
+        let mut whisper = engine_config(Whisper, "large-v3-turbo");
+        whisper.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        assert_eq!(lard_processor_for(whisper).process(DISFLUENT), DISFLUENT);
+    }
+
+    /// Declaring the dictation language is what turns it on for those
+    /// models, and only a declaration of English does.
+    #[test]
+    fn lard_runs_for_a_multilingual_model_once_english_is_declared() {
+        use crate::config::TranscriptionEngine::*;
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Parakeet, "parakeet-ultra-Q8_0.gguf"),
+            (SenseVoice, "sensevoice-small"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            for (declared, expected) in [
+                ("en", CLEANED),
+                ("en-US", CLEANED),
+                ("fr", DISFLUENT),
+                ("auto", DISFLUENT),
+            ] {
+                let mut config = engine_config(engine, model);
+                config.text.language = declared.into();
+                assert_eq!(
+                    lard_processor_for(config).process(DISFLUENT),
+                    expected,
+                    "{model} / {declared}"
+                );
+            }
+        }
+
+        // A declaration never overrides what the engine was told, or a
+        // model that only writes another language.
+        let mut french = engine_config(Whisper, "large-v3-turbo");
+        french.whisper.language = crate::config::LanguageConfig::Single("fr".into());
+        french.text.language = "en".into();
+        assert_eq!(lard_processor_for(french).process(DISFLUENT), DISFLUENT);
+        let mut japanese = engine_config(Moonshine, "base-ja");
+        japanese.text.language = "en".into();
+        assert_eq!(lard_processor_for(japanese).process(DISFLUENT), DISFLUENT);
+    }
+
+    /// A `--model` override recording whose model is not known to write
+    /// English skips LARD and nothing else.
+    #[test]
+    fn a_recording_that_is_not_english_skips_lard_only() {
+        let mut config = engine_config(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v2",
+        );
+        config
+            .text
+            .replacements
+            .insert("hotel".into(), "Hotel".into());
+        let processor = lard_processor_for(config);
+        assert_eq!(processor.process(DISFLUENT), "I need a Hotel");
+        assert_eq!(
+            processor.process_recording(DISFLUENT, None, true),
+            "I need a Hotel"
+        );
+        assert_eq!(
+            processor.process_recording(DISFLUENT, None, false),
+            "I need a flight no I need a Hotel"
+        );
     }
 
     #[test]

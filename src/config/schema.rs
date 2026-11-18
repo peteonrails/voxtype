@@ -221,6 +221,8 @@ const WHISPER_MODE_CHOICES: &[&str] = &["local", "remote", "cli"];
 const WHISPER_LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
+/// Presets for `text.language`. Any language code is accepted.
+const TEXT_LANG_CHOICES: &[&str] = WHISPER_LANG_CHOICES;
 const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
@@ -1289,6 +1291,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Text Cleanup",
         "LARD model file",
         "Path to the local VXDF model. By default use the model installed by voxtype setup lard in the XDG data directory.",
+    ),
+    spec(
+        "text.language",
+        "text",
+        "language",
+        open(TEXT_LANG_CHOICES),
+        "Text Cleanup",
+        "Dictation language",
+        "The language you dictate in (en, en-US, pt-BR), for cleanup that depends on it: LARD is English-only. Set it when a multilingual model detects the language automatically. auto declares nothing. It is not sent to the engine, and an engine language that is set or a single-language model wins over it.",
     ),
     spec(
         "text.punctuation_casing",
@@ -3006,6 +3017,22 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
             }
             Ok(TypedValue::Float(f))
         }
+        KeyType::Enum { .. } if spec.key == "text.language" => {
+            // Stored as the config loader normalizes it, and never anything
+            // that is not a language code: the loader would ignore it.
+            let value = super::text::normalize_language(raw);
+            if value == "auto" || super::text::is_language_tag(&value) {
+                Ok(TypedValue::Str(value))
+            } else if value.is_empty() {
+                Err(ValueError::Empty { key: spec.key })
+            } else {
+                Err(ValueError::NotAChoice {
+                    key: spec.key,
+                    value: raw.to_string(),
+                    choices: "auto, or a language code such as en, en-US or pt-BR".to_string(),
+                })
+            }
+        }
         KeyType::Enum { choices, open } => {
             if choices.contains(&raw) {
                 return Ok(TypedValue::Str(raw.to_string()));
@@ -3293,6 +3320,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
         "text.lard_model_path" => json!(cfg.text.lard_model_path),
+        "text.language" => json!(cfg.text.language),
         "text.punctuation_casing" => json!(cfg.text.punctuation_casing),
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
@@ -3538,11 +3566,13 @@ fn file_value(editor: &ConfigEditor, spec: &KeySpec) -> Json {
 /// something that cannot run. A settings UI shows it under the row, so the
 /// switch is never on without saying why it is doing nothing.
 ///
-/// Today only LARD cleanup has one: on with no model installed, or with a
-/// language that is not explicit English (#696).
+/// LARD cleanup has one when it is on with no model installed, or with
+/// dictation that is not known to be English (#696). The declared dictation
+/// language has one when the engine's language or the model overrides it.
 pub fn key_notice(spec: &KeySpec, cfg: &Config) -> Option<String> {
     match spec.key {
         "text.lard_disfluency" => crate::setup::lard::problem(cfg).map(|p| p.summary()),
+        "text.language" => cfg.text_language_conflict(),
         _ => None,
     }
 }
@@ -4232,6 +4262,61 @@ mod tests {
                 .join(crate::setup::lard::SOURCE_TREE_PATH),
         );
         assert_eq!(notices(&cfg), []);
+    }
+
+    /// The declared dictation language is an open choice that only takes
+    /// language codes, and the panel is told when it is not what cleanup
+    /// uses.
+    #[test]
+    fn text_language_is_a_language_code_and_reports_being_overridden() {
+        let spec = CONFIG_KEYS
+            .iter()
+            .find(|s| s.key == "text.language")
+            .expect("text.language is settable");
+        assert_eq!(spec.section, "Text Cleanup");
+        assert!(matches!(spec.ty, KeyType::Enum { open: true, .. }));
+        assert!(spec.restart_required);
+        assert_eq!(spec.engine, None, "one key for every engine");
+
+        let valid = |raw: &str| match validate_value(spec, raw) {
+            Ok(TypedValue::Str(value)) => Some(value),
+            _ => None,
+        };
+        assert_eq!(valid("auto").as_deref(), Some("auto"));
+        assert_eq!(valid("en").as_deref(), Some("en"));
+        assert_eq!(valid("EN").as_deref(), Some("en"));
+        assert_eq!(valid(" en-US ").as_deref(), Some("en-US"));
+        assert_eq!(valid("pt_BR").as_deref(), Some("pt_BR"));
+        assert_eq!(valid("yue").as_deref(), Some("yue"));
+        for bad in ["english", "e", "en us", "", "en,fr"] {
+            assert_eq!(valid(bad), None, "{bad:?}");
+        }
+
+        let cfg = Config::default();
+        assert_eq!(resolve("text.language", &cfg), Some(json!("auto")));
+        assert_eq!(key_notice(spec, &cfg), None);
+
+        // Declared and in effect: nothing to say.
+        let mut cfg = Config::default();
+        cfg.set_model_for(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v3",
+        );
+        cfg.text.language = "en".into();
+        assert_eq!(resolve("text.language", &cfg), Some(json!("en")));
+        assert_eq!(key_notice(spec, &cfg), None);
+
+        // Declared and overridden: the row says by what.
+        let mut cfg = Config::default();
+        cfg.whisper.language = LanguageConfig::Single("fr".into());
+        cfg.text.language = "en".into();
+        assert_eq!(
+            key_notice(spec, &cfg).as_deref(),
+            Some(
+                "text.language is en, but text cleanup treats dictation as fr: \
+                 whisper.language is fr, and the engine's language wins"
+            )
+        );
     }
 
     #[test]

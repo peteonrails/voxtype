@@ -89,6 +89,13 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
                      Rebuild with `--features itn` to use it."
                 );
             }
+            if config.text.language_is_malformed() {
+                tracing::warn!(
+                    "[text] language = {:?} is not a language code and is ignored. \
+                     Use one such as \"en\", \"en-US\" or \"pt-BR\", or \"auto\".",
+                    config.text.language
+                );
+            }
             // No punctuation_casing capability check here: helper binaries
             // such as voxtype-osd-quickshell load this config without the
             // engine features, so their build says nothing about the
@@ -311,6 +318,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Some(path) = std::env::var_os("VOXTYPE_LARD_MODEL_PATH") {
         config.text.lard_model_path = Some(path.into());
+    }
+    if let Ok(language) = std::env::var("VOXTYPE_TEXT_LANGUAGE") {
+        if let Err(message) = config.text.set_language(&language) {
+            tracing::warn!("VOXTYPE_TEXT_LANGUAGE is ignored: {message}");
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_PUNCTUATION_CASING") {
         config.text.punctuation_casing = parse_bool_env(&val);

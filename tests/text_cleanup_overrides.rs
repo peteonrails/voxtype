@@ -109,3 +109,74 @@ fn cleanup_config_env_and_cli_have_independent_parity() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
 }
+
+/// `text.language` is settable from the file, the environment and the
+/// command line, in that order of precedence, and stored in one spelling.
+#[test]
+fn dictation_language_has_file_env_and_cli_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let unset = ("VOXTYPE_TEXT_LANGUAGE", "auto");
+
+    // An old config says nothing and declares nothing.
+    std::fs::write(&path, "engine = 'whisper'\n").unwrap();
+    assert_eq!(get(&path, "text.language", unset, &[]), "auto");
+
+    let source = "[text]\nlanguage = 'FR'\n";
+    std::fs::write(&path, source).unwrap();
+    assert_eq!(
+        get(&path, "text.language", ("VOXTYPE_UNRELATED", "1"), &[]),
+        "fr"
+    );
+    assert_eq!(
+        get(
+            &path,
+            "text.language",
+            ("VOXTYPE_TEXT_LANGUAGE", "EN-US"),
+            &[]
+        ),
+        "en-US"
+    );
+    assert_eq!(
+        get(
+            &path,
+            "text.language",
+            ("VOXTYPE_TEXT_LANGUAGE", "en"),
+            &["--text-language", "pt-BR"]
+        ),
+        "pt-BR"
+    );
+    assert_eq!(
+        get(&path, "text.language", unset, &["--text-language", "en"]),
+        "en"
+    );
+    // A value that is not a language code: ignored from the environment
+    // with a warning ahead of the value, refused on the command line.
+    let ignored = get(
+        &path,
+        "text.language",
+        ("VOXTYPE_TEXT_LANGUAGE", "english"),
+        &[],
+    );
+    assert_eq!(ignored.lines().last(), Some("fr"), "{ignored}");
+    assert!(
+        ignored.contains("VOXTYPE_TEXT_LANGUAGE is ignored"),
+        "{ignored}"
+    );
+    let refused = Command::new(env!("CARGO_BIN_EXE_voxtype"))
+        .env_remove("VOXTYPE_TEXT_LANGUAGE")
+        .arg("--config")
+        .arg(&path)
+        .args([
+            "--text-language",
+            "english",
+            "config",
+            "get",
+            "text.language",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not a language code"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+}

@@ -119,6 +119,18 @@ the output settings in step 6, which come after the basics work.
 | A language nothing else covers | Whisper, or Omnilingual (ONNX Runtime, see below) |
 | Long recordings (meetings, files over a few minutes) | Parakeet. It splits long audio into windows. Whisper on very long files can get stuck repeating a sentence. Meetings use the dictation engine and model unless `voxtype meeting start --engine` or `--model` picks another for that meeting |
 
+If the user dictates in one language only and the plan uses a model that
+handles several and detects them automatically (Parakeet v3 or `parakeet-ultra`,
+Whisper with `language = "auto"`, SenseVoice, Dolphin, Omnilingual, Soniox),
+record that language for text cleanup:
+`voxtype config set text.language en`. It is not passed to the engine and does
+not change transcription. It tells cleanup that depends on the language what
+it is reading, which is what lets the English-only `text.lard_disfluency` stage
+run with such a model. Skip it for an English-only model (`base.en`,
+`parakeet-tdt-0.6b-v2`) or when the engine's own `language` is already set:
+both answer the question on their own. Leave it on `auto` for a user who
+switches languages.
+
 Voxtype 2.0 removes ONNX Runtime. Prefer Whisper and GGUF models (the `.gguf`
 names in `voxtype info models`) over the ONNX model directories for anything you
 set up now, so it keeps working after the upgrade. If an ONNX-only engine is the

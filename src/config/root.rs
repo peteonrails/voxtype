@@ -15,6 +15,27 @@ fn default_state_file() -> Option<String> {
     Some("auto".to_string())
 }
 
+/// What an engine's own settings say about the language it writes.
+pub(crate) enum EngineLanguage<'a> {
+    /// One explicit language.
+    Fixed(&'a str),
+    /// Detection limited to a set: a Whisper language array, Soniox hints.
+    OneOf(Vec<&'a str>),
+    /// Automatic detection, or an engine with no language setting.
+    Open,
+}
+
+/// Where [`Config::text_language`] got its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextLanguageSource {
+    /// The active engine's own language setting.
+    Engine,
+    /// The selected model writes only this language.
+    Model,
+    /// The user's `text.language`.
+    Declared,
+}
+
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -539,37 +560,183 @@ impl Config {
         }
     }
 
-    /// The language code configured for the active engine, if it has one.
+    /// The one language the active engine was told to write, if its own
+    /// settings name one.
     ///
-    /// Engines disagree about where language lives, and several do not take a
-    /// language at all (they detect it, or are single-language). Callers that
-    /// need to adapt behaviour to language — filler-word filtering is the
-    /// first — should ask here rather than reaching into one engine's config
-    /// and being wrong for the other eight.
+    /// This is the engine's answer and nothing else: the tray's language
+    /// selector and the history entry report it. Text cleanup asks
+    /// [`Self::text_language`], which starts here and then considers the
+    /// model and the user's declared dictation language.
     ///
-    /// Returns `None` for automatic detection and for engines without the
-    /// concept, so callers can distinguish "English" from "unknown".
+    /// Returns `None` for automatic detection, for a constrained detection
+    /// set, and for engines without a language setting.
     pub fn active_language(&self) -> Option<&str> {
+        match self.engine_language() {
+            EngineLanguage::Fixed(code) => Some(code),
+            EngineLanguage::OneOf(_) | EngineLanguage::Open => None,
+        }
+    }
+
+    /// What the active engine's own settings say about the language of the
+    /// text it writes.
+    ///
+    /// Engines disagree about where language lives, and several do not take
+    /// a language at all (they detect it, or their model is single-language).
+    pub(crate) fn engine_language(&self) -> EngineLanguage<'_> {
         let code = match self.engine {
             TranscriptionEngine::Whisper => match &self.whisper.language {
-                super::language::LanguageConfig::Single(code) => code.as_str(),
+                super::language::LanguageConfig::Single(code) => Some(code.as_str()),
                 // A constrained detection set is not one language.
-                super::language::LanguageConfig::Multiple(_) => return None,
+                super::language::LanguageConfig::Multiple(codes) => {
+                    return EngineLanguage::OneOf(codes.iter().map(String::as_str).collect())
+                }
             },
-            TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str())?,
-            TranscriptionEngine::Gguf => self.gguf.as_ref().map(|g| g.language.as_str())?,
+            TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str()),
+            TranscriptionEngine::Gguf => self.gguf.as_ref().map(|g| g.language.as_str()),
             TranscriptionEngine::SenseVoice => {
-                self.sensevoice.as_ref().map(|s| s.language.as_str())?
+                self.sensevoice.as_ref().map(|s| s.language.as_str())
             }
-            // Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual and Soniox
-            // either detect the language or are fixed to one.
-            _ => return None,
+            // The OpenVINO engine runs Whisper checkpoints and passes this
+            // language to them exactly as `whisper.language` is passed.
+            TranscriptionEngine::OpenVino => self.openvino.as_ref().map(|o| o.language.as_str()),
+            // Hints narrow what Soniox detects; they never pin one language.
+            TranscriptionEngine::Soniox => {
+                let hints = self
+                    .soniox
+                    .as_ref()
+                    .map(|s| s.language_hints.as_slice())
+                    .unwrap_or_default();
+                return if hints.is_empty() {
+                    EngineLanguage::Open
+                } else {
+                    EngineLanguage::OneOf(hints.iter().map(String::as_str).collect())
+                };
+            }
+            // Parakeet, Moonshine, Paraformer, Dolphin and Omnilingual have
+            // no language setting: they detect it, or their model is fixed
+            // to one. `model_language` knows which.
+            TranscriptionEngine::Parakeet
+            | TranscriptionEngine::Moonshine
+            | TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual => None,
         };
 
         match code {
-            "" | "auto" => None,
-            other => Some(other),
+            None | Some("" | "auto") => EngineLanguage::Open,
+            Some(code) => EngineLanguage::Fixed(code),
         }
+    }
+
+    /// The config key [`Self::engine_language`] reads for the active engine,
+    /// for messages that tell the user what to change. Engines without a
+    /// language setting name `text.language`, the only one that applies.
+    pub(crate) fn engine_language_key(&self) -> &'static str {
+        match self.engine {
+            TranscriptionEngine::Whisper => "whisper.language",
+            TranscriptionEngine::Cohere => "cohere.language",
+            TranscriptionEngine::Gguf => "gguf.language",
+            TranscriptionEngine::SenseVoice => "sensevoice.language",
+            TranscriptionEngine::OpenVino => "openvino.language",
+            TranscriptionEngine::Soniox => "soniox.language_hints",
+            TranscriptionEngine::Parakeet
+            | TranscriptionEngine::Moonshine
+            | TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual => "text.language",
+        }
+    }
+
+    /// The one language the selected model can write, when the model
+    /// registry knows the model and says it has only one: an English-only
+    /// checkpoint is `Some("en")`. `None` for a multilingual model, a custom
+    /// model path, and a remote Whisper server, whose model is not ours to
+    /// look up.
+    pub fn model_language(&self) -> Option<&'static str> {
+        if self.engine == TranscriptionEngine::Whisper
+            && self.whisper.effective_mode() == super::WhisperMode::Remote
+        {
+            return None;
+        }
+        crate::setup::model::model_only_language(self.engine, self.model_name())
+    }
+
+    /// The language text cleanup should treat finished dictation as, and
+    /// where that answer came from. `None` means unknown: language-specific
+    /// stages keep their language-neutral behaviour and English-only ones
+    /// (LARD, #696) do not run.
+    ///
+    /// In order:
+    ///
+    /// 1. A language the engine was told to write wins outright. Whatever
+    ///    else is configured, cleanup for one language never runs on text
+    ///    the engine was told to produce in another.
+    /// 2. A model that can only write one language settles it next: an
+    ///    English-only model counts as English with nothing set anywhere.
+    /// 3. Otherwise the language the user declared in `text.language`.
+    ///
+    /// When the engine's detection is limited to a set (a Whisper language
+    /// array, Soniox hints), 2 and 3 only count if the set includes them: a
+    /// declared language the engine was told not to detect is a
+    /// contradiction, and the answer is unknown rather than a guess.
+    pub fn text_language_source(&self) -> Option<(&str, TextLanguageSource)> {
+        let allowed = match self.engine_language() {
+            EngineLanguage::Fixed(code) => return Some((code, TextLanguageSource::Engine)),
+            EngineLanguage::OneOf(codes) => Some(codes),
+            EngineLanguage::Open => None,
+        };
+        let (code, source) = match self.model_language() {
+            Some(code) => (code, TextLanguageSource::Model),
+            None => (self.text.declared_language()?, TextLanguageSource::Declared),
+        };
+        let base = |code: &str| code.split(['-', '_']).next().map(str::to_ascii_lowercase);
+        match allowed {
+            Some(codes) if !codes.iter().any(|allowed| base(allowed) == base(code)) => None,
+            _ => Some((code, source)),
+        }
+    }
+
+    /// Why a declared `text.language` is not what text cleanup uses, as one
+    /// sentence, or `None` when nothing is declared or the declaration is in
+    /// effect (or merely repeats what the engine or model already says).
+    ///
+    /// `voxtype config set` and the settings panel show this, so a
+    /// declaration that the engine's language or the model overrides is
+    /// never left looking as if it applied.
+    pub fn text_language_conflict(&self) -> Option<String> {
+        let declared = self.text.declared_language()?;
+        let base = |code: &str| code.split(['-', '_']).next().map(str::to_ascii_lowercase);
+        let key = self.engine_language_key();
+        let (used, because) = match self.text_language_source() {
+            Some((_, TextLanguageSource::Declared)) => return None,
+            Some((code, _)) if base(code) == base(declared) => return None,
+            Some((code, TextLanguageSource::Engine)) => (
+                Some(code),
+                format!("{key} is {code}, and the engine's language wins"),
+            ),
+            Some((code, _)) => (
+                Some(code),
+                format!("{} only writes {code}", self.model_name()),
+            ),
+            None => (
+                None,
+                format!("{key} limits detection to languages that do not include it"),
+            ),
+        };
+        Some(match used {
+            Some(code) => format!(
+                "text.language is {declared}, but text cleanup treats dictation as {code}: {because}"
+            ),
+            None => format!(
+                "text.language is {declared}, but text cleanup does not use it: {because}"
+            ),
+        })
+    }
+
+    /// [`Self::text_language_source`] without the source: what to hand the
+    /// text processor.
+    pub fn text_language(&self) -> Option<&str> {
+        self.text_language_source().map(|(code, _)| code)
     }
 
     /// Whether the active backend configuration emits plain text that needs
@@ -945,5 +1112,569 @@ mod tests {
         // A different model's architecture is auto-detected, not inherited.
         config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
         assert!(config.parakeet.as_ref().unwrap().model_type.is_none());
+    }
+
+    // --- The language of the text, for cleanup (#696) ----------------------
+
+    /// What the English-only stages ask of a language tag.
+    fn is_english(language: Option<&str>) -> bool {
+        language.and_then(|l| l.split(['-', '_']).next()) == Some("en")
+    }
+
+    const ENGINES: [TranscriptionEngine; 11] = [
+        TranscriptionEngine::Whisper,
+        TranscriptionEngine::Parakeet,
+        TranscriptionEngine::Moonshine,
+        TranscriptionEngine::SenseVoice,
+        TranscriptionEngine::Paraformer,
+        TranscriptionEngine::Dolphin,
+        TranscriptionEngine::Omnilingual,
+        TranscriptionEngine::Cohere,
+        TranscriptionEngine::Gguf,
+        TranscriptionEngine::OpenVino,
+        TranscriptionEngine::Soniox,
+    ];
+
+    /// `engine` active with `model`, every other setting at its default.
+    fn config_for(engine: TranscriptionEngine, model: &str) -> Config {
+        let mut config = Config::default();
+        config.set_model_for(engine, model);
+        config
+    }
+
+    /// `config_for` with the engine's own language key set, for the engines
+    /// that have one.
+    fn with_engine_language(mut config: Config, language: &str) -> Config {
+        match config.engine {
+            TranscriptionEngine::Whisper => {
+                config.whisper.language = crate::config::LanguageConfig::Single(language.into())
+            }
+            TranscriptionEngine::Cohere => {
+                config.cohere.as_mut().unwrap().language = language.into()
+            }
+            TranscriptionEngine::Gguf => config.gguf.as_mut().unwrap().language = language.into(),
+            TranscriptionEngine::SenseVoice => {
+                config.sensevoice.as_mut().unwrap().language = language.into()
+            }
+            TranscriptionEngine::OpenVino => {
+                config.openvino.as_mut().unwrap().language = language.into()
+            }
+            other => panic!("{} has no language key", other.name()),
+        }
+        config
+    }
+
+    fn declaring(mut config: Config, language: &str) -> Config {
+        config.text.language = language.into();
+        config
+    }
+
+    /// Every model the registry lists for `engine`, plus what it cannot
+    /// know: a path and a name nobody registered.
+    fn models_of(engine: TranscriptionEngine) -> Vec<String> {
+        let mut models: Vec<String> = crate::model_catalog::model_catalog(engine.name())
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        models.push("/srv/models/custom".to_string());
+        models.push("somebody-elses-model".to_string());
+        if engine == TranscriptionEngine::Soniox {
+            models.push("stt-rt-v4".to_string());
+        }
+        models
+    }
+
+    /// `active_language` as it was before text cleanup had its own
+    /// resolution: the one answer every caller used, kept here so the tests
+    /// below can show exactly which configurations now answer differently.
+    fn language_before(config: &Config) -> Option<&str> {
+        let code = match config.engine {
+            TranscriptionEngine::Whisper => match &config.whisper.language {
+                crate::config::LanguageConfig::Single(code) => code.as_str(),
+                crate::config::LanguageConfig::Multiple(_) => return None,
+            },
+            TranscriptionEngine::Cohere => config.cohere.as_ref().map(|c| c.language.as_str())?,
+            TranscriptionEngine::Gguf => config.gguf.as_ref().map(|g| g.language.as_str())?,
+            TranscriptionEngine::SenseVoice => {
+                config.sensevoice.as_ref().map(|s| s.language.as_str())?
+            }
+            _ => return None,
+        };
+        match code {
+            "" | "auto" => None,
+            other => Some(other),
+        }
+    }
+
+    /// Engine language settings worth trying for `engine`: its default, and
+    /// the ones that mean something different.
+    fn engine_settings(engine: TranscriptionEngine, model: &str) -> Vec<Config> {
+        let base = config_for(engine, model);
+        let mut configs = vec![base.clone()];
+        let codes: &[&str] = match engine {
+            TranscriptionEngine::Whisper => &["auto", "", "en", "en-US", "fr", "pt", "de"],
+            TranscriptionEngine::Cohere => &["en", "fr", "de"],
+            TranscriptionEngine::Gguf => &["auto", "en", "en-US", "ja", "ru"],
+            TranscriptionEngine::SenseVoice => &["auto", "en", "zh", "yue"],
+            TranscriptionEngine::OpenVino => &["auto", "en", "fr", "pt"],
+            _ => &[],
+        };
+        configs.extend(
+            codes
+                .iter()
+                .map(|code| with_engine_language(base.clone(), code)),
+        );
+        if engine == TranscriptionEngine::Whisper {
+            for set in [vec!["en", "fr"], vec!["fr", "de"], vec!["en"]] {
+                let mut config = base.clone();
+                config.whisper.language = crate::config::LanguageConfig::Multiple(
+                    set.into_iter().map(str::to_string).collect(),
+                );
+                configs.push(config.clone());
+                config.whisper.mode = Some(crate::config::WhisperMode::Remote);
+                configs.push(config);
+            }
+            let mut remote = with_engine_language(base.clone(), "auto");
+            remote.whisper.mode = Some(crate::config::WhisperMode::Remote);
+            configs.push(remote);
+        }
+        if engine == TranscriptionEngine::Soniox {
+            for hints in [vec![], vec!["en"], vec!["hu"], vec!["en", "de"]] {
+                let mut config = base.clone();
+                config.soniox.as_mut().unwrap().language_hints =
+                    hints.into_iter().map(str::to_string).collect();
+                configs.push(config);
+            }
+        }
+        configs
+    }
+
+    /// The models that count as English with nothing set anywhere, engine by
+    /// engine. This list is the whole of change (1): adding a model to it is
+    /// a decision, so it is spelled out rather than derived.
+    const ENGLISH_ONLY: &[(TranscriptionEngine, &[&str])] = &[
+        (
+            TranscriptionEngine::Whisper,
+            &["tiny.en", "base.en", "small.en", "medium.en"],
+        ),
+        (
+            TranscriptionEngine::Parakeet,
+            &[
+                "parakeet-tdt-0.6b-v2",
+                "parakeet-tdt-0.6b-v2-int8",
+                "parakeet-unified-en-0.6b",
+            ],
+        ),
+        (TranscriptionEngine::Moonshine, &["base", "tiny"]),
+        (TranscriptionEngine::Paraformer, &["paraformer-en"]),
+        (
+            TranscriptionEngine::Gguf,
+            &["moonshine-streaming-small-Q8_0.gguf"],
+        ),
+        (
+            TranscriptionEngine::OpenVino,
+            &[
+                "tiny.en-int4",
+                "tiny.en-int8",
+                "tiny.en-fp16",
+                "base.en-int4",
+                "base.en-int8",
+                "base.en-fp16",
+                "small.en-int4",
+                "small.en-int8",
+                "small.en-fp16",
+                "medium.en-int4",
+                "medium.en-int8",
+                "medium.en-fp16",
+            ],
+        ),
+    ];
+
+    fn english_only(engine: TranscriptionEngine, model: &str) -> bool {
+        ENGLISH_ONLY
+            .iter()
+            .any(|(e, models)| *e == engine && models.contains(&model))
+    }
+
+    /// The engine's language key on automatic detection, where it has one.
+    fn on_automatic(config: Config) -> Config {
+        match config.engine {
+            TranscriptionEngine::Whisper
+            | TranscriptionEngine::Gguf
+            | TranscriptionEngine::SenseVoice
+            | TranscriptionEngine::OpenVino => with_engine_language(config, "auto"),
+            // Cohere has no automatic setting; the rest have no key.
+            _ => config,
+        }
+    }
+
+    #[test]
+    fn an_english_only_model_counts_as_english_with_nothing_set() {
+        for engine in ENGINES {
+            for model in models_of(engine) {
+                let config = on_automatic(config_for(engine, &model));
+                let expected = english_only(engine, &model);
+                assert_eq!(
+                    config.model_language() == Some("en"),
+                    expected,
+                    "{} / {model}",
+                    engine.name()
+                );
+                if engine == TranscriptionEngine::Cohere {
+                    // Always has a language of its own (default en).
+                    assert_eq!(config.text_language(), Some("en"));
+                    continue;
+                }
+                assert_eq!(
+                    is_english(config.text_language()),
+                    expected,
+                    "{} / {model}",
+                    engine.name()
+                );
+                if expected {
+                    assert_eq!(
+                        config.text_language_source(),
+                        Some(("en", TextLanguageSource::Model))
+                    );
+                }
+            }
+        }
+        // Every name in the list is a real catalog entry, so a rename in the
+        // registry cannot quietly empty it.
+        for (engine, models) in ENGLISH_ONLY {
+            let catalog = crate::model_catalog::model_catalog(engine.name());
+            for model in *models {
+                assert!(catalog.contains(model), "{} / {model}", engine.name());
+            }
+        }
+    }
+
+    /// The other names a registry model answers to, and the models that only
+    /// write some other language.
+    #[test]
+    fn model_language_follows_the_registry_not_the_spelling() {
+        let language = |engine, model: &str| config_for(engine, model).model_language();
+        use TranscriptionEngine::*;
+
+        // Directory names and short names of the same checkpoint agree.
+        assert_eq!(language(Moonshine, "moonshine-base"), Some("en"));
+        assert_eq!(language(Moonshine, "moonshine-tiny"), Some("en"));
+        assert_eq!(language(Paraformer, "en"), Some("en"));
+        assert_eq!(language(OpenVino, "base.en"), Some("en"));
+        assert_eq!(
+            language(OpenVino, "openvino-whisper-base.en-int8-ov"),
+            Some("en")
+        );
+
+        // One language, and it is not English.
+        assert_eq!(language(Moonshine, "base-ja"), Some("ja"));
+        assert_eq!(language(Moonshine, "base-zh"), Some("zh"));
+        assert_eq!(language(Moonshine, "tiny-ko"), Some("ko"));
+        assert_eq!(language(Moonshine, "tiny-ar"), Some("ar"));
+        assert_eq!(language(Gguf, "moonshine-base-ja-Q8_0.gguf"), Some("ja"));
+        assert_eq!(language(Gguf, "gigaam-v3-e2e-rnnt-Q8_0.gguf"), Some("ru"));
+
+        // Multilingual, whatever the name suggests.
+        for (engine, model) in [
+            (Whisper, "large-v3-turbo"),
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Parakeet, "parakeet-tdt-0.6b-v3-Q8_0.gguf"),
+            (Parakeet, "parakeet-ultra-Q8_0.gguf"),
+            (Paraformer, "paraformer-zh"),
+            (SenseVoice, "sensevoice-small"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Gguf, "Qwen3-ASR-0.6B-Q8_0.gguf"),
+            (Gguf, "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"),
+            (Gguf, "SenseVoiceSmall-Q8_0.gguf"),
+            (OpenVino, "large-v3-int8"),
+            (OpenVino, "base-int8"),
+            (Cohere, "cohere-transcribe-03-2026-Q4_K_M.gguf"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            assert_eq!(language(engine, model), None, "{model}");
+        }
+
+        // Nothing is read out of a name the registry does not hold: a path
+        // to a file called like an English model, an English-looking name
+        // nobody registered, a distil export.
+        for (engine, model) in [
+            (Whisper, "/models/ggml-base.en.bin"),
+            (Whisper, "ggml-base.en.bin"),
+            (Whisper, "distil-small.en"),
+            (Parakeet, "/models/parakeet-tdt-0.6b-v2"),
+            (Parakeet, "parakeet-tdt-0.6b-v2-custom"),
+            (Parakeet, "my-parakeet-en-model"),
+            (Moonshine, "/models/moonshine-base"),
+            (Paraformer, "/models/paraformer-en"),
+            (Gguf, "/models/moonshine-streaming-small-Q8_0.gguf"),
+            (OpenVino, "/models/openvino-whisper-base.en-int8-ov"),
+            (OpenVino, "distil-large-v3-int8"),
+        ] {
+            assert_eq!(language(engine, model), None, "{model}");
+        }
+
+        // A remote Whisper server runs its own model; ours says nothing.
+        let mut remote = config_for(Whisper, "base.en");
+        remote.whisper.mode = Some(crate::config::WhisperMode::Remote);
+        assert_eq!(remote.model_language(), None);
+        let mut cli = config_for(Whisper, "base.en");
+        cli.whisper.mode = Some(crate::config::WhisperMode::Cli);
+        assert_eq!(cli.model_language(), Some("en"));
+    }
+
+    /// With nothing declared, the language text cleanup sees is what it saw
+    /// before, for every engine, model and engine language setting, with two
+    /// exceptions and no others: a single-language model on automatic
+    /// detection now has its language, and the OpenVINO engine's language
+    /// key now counts as Whisper's always did.
+    #[test]
+    fn nothing_declared_changes_only_single_language_models_and_openvino() {
+        let mut checked = 0;
+        for engine in ENGINES {
+            for model in models_of(engine) {
+                for config in engine_settings(engine, &model) {
+                    assert_eq!(config.text.language, "auto");
+                    let before = language_before(&config);
+                    let now = config.text_language();
+                    let context = format!("{} / {model} / {config:?}", engine.name());
+                    checked += 1;
+
+                    if engine == TranscriptionEngine::OpenVino {
+                        let own = config.openvino.as_ref().unwrap().language.as_str();
+                        let expected = match own {
+                            "auto" => config.model_language(),
+                            code => Some(code),
+                        };
+                        assert_eq!(now, expected, "{context}");
+                        assert_eq!(before, None, "{context}");
+                        continue;
+                    }
+                    match before {
+                        // An engine language that was set is still the answer.
+                        Some(code) => assert_eq!(now, Some(code), "{context}"),
+                        None => {
+                            let allowed = match &config.whisper.language {
+                                crate::config::LanguageConfig::Multiple(set)
+                                    if engine == TranscriptionEngine::Whisper =>
+                                {
+                                    config
+                                        .model_language()
+                                        .filter(|code| set.iter().any(|allowed| allowed == code))
+                                }
+                                _ => config.model_language(),
+                            };
+                            assert_eq!(now, allowed, "{context}");
+                        }
+                    }
+                    // The engine's own answer is untouched everywhere.
+                    assert_eq!(config.active_language(), before, "{context}");
+                }
+            }
+        }
+        assert!(checked > 300, "{checked} configurations");
+    }
+
+    /// The multilingual defaults, spelled out: automatic detection and
+    /// nothing declared is still "unknown", so LARD stays off.
+    #[test]
+    fn a_multilingual_model_on_automatic_is_still_unknown() {
+        use TranscriptionEngine::*;
+        for (engine, model) in [
+            (Whisper, "large-v3-turbo"),
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Parakeet, "parakeet-ultra-Q8_0.gguf"),
+            (SenseVoice, "sensevoice-small"),
+            (Paraformer, "paraformer-zh"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Gguf, "Qwen3-ASR-0.6B-Q8_0.gguf"),
+            (OpenVino, "large-v3-int8"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            let config = on_automatic(config_for(engine, model));
+            assert_eq!(config.text_language(), None, "{model}");
+            assert_eq!(config.text_language_conflict(), None);
+        }
+    }
+
+    #[test]
+    fn a_declared_language_fills_in_for_automatic_detection() {
+        for engine in ENGINES {
+            if engine == TranscriptionEngine::Cohere {
+                continue; // no automatic setting to fill in for
+            }
+            for model in models_of(engine) {
+                let config = on_automatic(config_for(engine, &model));
+                if config.model_language().is_some() {
+                    continue;
+                }
+                for declared in ["en", "en-US", "en_GB", "pt-BR", "fr"] {
+                    let config = declaring(config.clone(), declared);
+                    let context = format!("{} / {model} / {declared}", engine.name());
+                    // Soniox's default hints are hu and en.
+                    let hinted_out =
+                        engine == TranscriptionEngine::Soniox && !declared.starts_with("en");
+                    if hinted_out {
+                        assert_eq!(config.text_language(), None, "{context}");
+                        assert!(config.text_language_conflict().is_some(), "{context}");
+                        continue;
+                    }
+                    assert_eq!(
+                        config.text_language_source(),
+                        Some((declared, TextLanguageSource::Declared)),
+                        "{context}"
+                    );
+                    assert_eq!(config.text_language_conflict(), None, "{context}");
+                    // The declaration is about text: the engine still hears
+                    // nothing about it.
+                    assert_eq!(config.active_language(), None, "{context}");
+                }
+                for nothing in ["auto", "", "english", "e", "en us"] {
+                    let config = declaring(config.clone(), nothing);
+                    assert_eq!(config.text_language(), None, "{model} / {nothing:?}");
+                }
+            }
+        }
+    }
+
+    /// Precedence, case by case: the engine's language, then a
+    /// single-language model, then the declaration.
+    #[test]
+    fn engine_language_wins_then_the_model_then_the_declaration() {
+        use TextLanguageSource::{Declared, Engine, Model};
+        use TranscriptionEngine::*;
+        let resolve = |config: &Config| {
+            config
+                .text_language_source()
+                .map(|(code, source)| (code.to_string(), source))
+        };
+        let is = |code: &str, source| Some((code.to_string(), source));
+
+        // 1. A set engine language beats a declaration that disagrees.
+        for (engine, model, engine_language) in [
+            (Whisper, "large-v3-turbo", "fr"),
+            (Cohere, "cohere-transcribe-03-2026-Q4_K_M.gguf", "de"),
+            (Gguf, "Qwen3-ASR-0.6B-Q8_0.gguf", "ja"),
+            (SenseVoice, "sensevoice-small", "zh"),
+            (OpenVino, "large-v3-int8", "pt"),
+        ] {
+            let config = declaring(
+                with_engine_language(config_for(engine, model), engine_language),
+                "en",
+            );
+            assert_eq!(resolve(&config), is(engine_language, Engine), "{model}");
+            let conflict = config.text_language_conflict().expect("a contradiction");
+            assert!(
+                conflict.contains(&format!("treats dictation as {engine_language}")),
+                "{conflict}"
+            );
+            assert!(
+                conflict.contains(config.engine_language_key()),
+                "{conflict}"
+            );
+        }
+        // ...and one that agrees is nothing to report.
+        let agreed = declaring(
+            with_engine_language(config_for(Whisper, "large-v3-turbo"), "en"),
+            "en-US",
+        );
+        assert_eq!(resolve(&agreed), is("en", Engine));
+        assert_eq!(agreed.text_language_conflict(), None);
+
+        // 2. A set engine language beats the model too: `.en` with French
+        //    set is treated as before, as French.
+        let config = with_engine_language(config_for(Whisper, "base.en"), "fr");
+        assert_eq!(resolve(&config), is("fr", Engine));
+
+        // 3. A single-language model beats the declaration.
+        let config = declaring(config_for(Parakeet, "parakeet-tdt-0.6b-v2"), "fr");
+        assert_eq!(resolve(&config), is("en", Model));
+        assert!(config
+            .text_language_conflict()
+            .unwrap()
+            .contains("parakeet-tdt-0.6b-v2 only writes en"));
+        let config = declaring(config_for(Moonshine, "base-ja"), "en");
+        assert_eq!(resolve(&config), is("ja", Model));
+        let config = declaring(
+            with_engine_language(config_for(Gguf, "gigaam-v3-e2e-rnnt-Q8_0.gguf"), "auto"),
+            "en",
+        );
+        assert_eq!(resolve(&config), is("ru", Model));
+
+        // 4. Otherwise the declaration.
+        let config = declaring(config_for(Parakeet, "parakeet-tdt-0.6b-v3"), "en");
+        assert_eq!(resolve(&config), is("en", Declared));
+
+        // 5. A detection set that leaves the candidate out makes it unknown,
+        //    whether the candidate is declared or the model's.
+        let whisper_set = |model: &str, set: &[&str]| {
+            let mut config = config_for(Whisper, model);
+            config.whisper.language = crate::config::LanguageConfig::Multiple(
+                set.iter().map(|code| code.to_string()).collect(),
+            );
+            config
+        };
+        assert_eq!(
+            resolve(&declaring(whisper_set("large-v3", &["en", "fr"]), "en")),
+            is("en", Declared)
+        );
+        assert_eq!(
+            resolve(&declaring(whisper_set("large-v3", &["en", "fr"]), "en-GB")),
+            is("en-GB", Declared)
+        );
+        let excluded = declaring(whisper_set("large-v3", &["fr", "de"]), "en");
+        assert_eq!(resolve(&excluded), None);
+        assert!(excluded
+            .text_language_conflict()
+            .unwrap()
+            .contains("whisper.language limits detection"));
+        assert_eq!(
+            resolve(&whisper_set("base.en", &["en", "fr"])),
+            is("en", Model)
+        );
+        assert_eq!(resolve(&whisper_set("base.en", &["fr", "de"])), None);
+
+        let soniox = |hints: &[&str]| {
+            let mut config = config_for(Soniox, "stt-rt-v4");
+            config.soniox.as_mut().unwrap().language_hints =
+                hints.iter().map(|code| code.to_string()).collect();
+            declaring(config, "en")
+        };
+        assert_eq!(resolve(&soniox(&[])), is("en", Declared));
+        assert_eq!(resolve(&soniox(&["hu", "en"])), is("en", Declared));
+        assert_eq!(resolve(&soniox(&["hu"])), None);
+    }
+
+    /// The guarantee behind the precedence: whatever is declared and
+    /// whichever model is selected, text the engine was told to write in
+    /// another language never counts as English.
+    #[test]
+    fn a_non_english_engine_language_is_never_english() {
+        for engine in ENGINES {
+            for model in models_of(engine) {
+                for config in engine_settings(engine, &model) {
+                    let told_other = match config.engine_language() {
+                        EngineLanguage::Fixed(code) => !is_english(Some(code)),
+                        EngineLanguage::OneOf(codes) => {
+                            !codes.iter().any(|code| is_english(Some(code)))
+                        }
+                        EngineLanguage::Open => false,
+                    };
+                    if !told_other {
+                        continue;
+                    }
+                    for declared in ["auto", "en", "en-US", "EN", "english"] {
+                        let config = declaring(config.clone(), declared);
+                        assert!(
+                            !is_english(config.text_language()),
+                            "{} / {model} / {declared} / {:?}",
+                            engine.name(),
+                            config.text_language()
+                        );
+                    }
+                }
+            }
+        }
     }
 }

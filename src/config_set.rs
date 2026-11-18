@@ -358,14 +358,27 @@ pub struct SetOutcome {
 /// the LARD keys always reports what is wrong. Any other write reports it only
 /// when it changed the answer (turning an engine's language to `auto`, say),
 /// so unrelated settings do not nag about it.
+///
+/// Setting `text.language` to something the engine's language or the model
+/// overrides is reported too: the write succeeds and changes nothing, and
+/// saying so beats two settings that silently disagree.
 fn lard_warning(
     key: &str,
     before: Option<crate::setup::lard::Problem>,
     editor: &ConfigEditor,
 ) -> Option<String> {
-    let after = crate::setup::lard::problem(&editor.candidate_config().ok()?)?;
-    let lard_key = matches!(key, "text.lard_disfluency" | "text.lard_model_path");
-    (lard_key || before.as_ref() != Some(&after)).then(|| after.summary())
+    let candidate = editor.candidate_config().ok()?;
+    let lard = crate::setup::lard::problem(&candidate).and_then(|after| {
+        let lard_key = matches!(key, "text.lard_disfluency" | "text.lard_model_path");
+        (lard_key || before.as_ref() != Some(&after)).then(|| after.summary())
+    });
+    let unused = (key == "text.language")
+        .then(|| candidate.text_language_conflict())
+        .flatten();
+    match (unused, lard) {
+        (Some(unused), Some(lard)) => Some(format!("{unused}. {lard}")),
+        (unused, lard) => unused.or(lard),
+    }
 }
 
 /// The LARD problem of the config an editor holds, before it is edited.
@@ -1079,10 +1092,20 @@ gguf_backend = "cpu"
         let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
         assert_eq!(out.warning, None);
 
-        // A write to another key that stops the stage running is reported
-        // once, where it happens.
+        // The default model is English-only, so automatic detection changes
+        // nothing: the text is still English.
         let out = set_key(path.clone(), "whisper.language", "auto").unwrap();
-        assert!(out.warning.expect("language change").contains("English"));
+        assert_eq!(out.warning, None);
+
+        // A write to another key that stops the stage running is reported
+        // once, where it happens: a multilingual model on automatic.
+        let out = set_key(path.clone(), "whisper.model", "large-v3-turbo").unwrap();
+        let warning = out.warning.expect("model change");
+        assert!(warning.contains("it only runs on English"), "{warning}");
+        assert!(
+            warning.contains("voxtype config set text.language en"),
+            "{warning}"
+        );
         let out = set_key(path.clone(), "hotkey.mode", "toggle").unwrap();
         assert_eq!(out.warning, None);
 
@@ -1091,6 +1114,64 @@ gguf_backend = "cpu"
         assert_eq!(out.warning, None);
         let out = unset_key(path.clone(), "text.lard_model_path").unwrap();
         assert!(out.warning.expect("still not English").contains("English"));
+
+        // Declaring the language is the fix the warning named.
+        set_key(
+            path.clone(),
+            "text.lard_model_path",
+            model.to_str().unwrap(),
+        )
+        .unwrap();
+        let out = set_key(path.clone(), "text.language", "EN").unwrap();
+        assert_eq!(out.warning, None);
+        assert_eq!(out.value, TypedValue::Str("en".into()));
+        assert_eq!(reload(&path).text_language(), Some("en"));
+        assert_eq!(crate::setup::lard::problem(&reload(&path)), None);
+
+        // Taking it back stops the stage again, and says so.
+        let out = unset_key(path.clone(), "text.language").unwrap();
+        assert!(out
+            .warning
+            .expect("undeclared again")
+            .contains("voxtype config set text.language en"));
+    }
+
+    #[test]
+    fn text_language_takes_codes_and_reports_a_declaration_that_is_not_used() {
+        let (_dir, path) = full_config();
+        set_key(path.clone(), "whisper.model", "large-v3-turbo").unwrap();
+
+        for bad in ["english", "e", "en us", ""] {
+            let err = set_key(path.clone(), "text.language", bad).unwrap_err();
+            assert!(matches!(err, ConfigSetError::BadValue(_)), "{bad:?}: {err}");
+        }
+        assert_eq!(reload(&path).text.language, "auto");
+
+        // The engine was told French: the declaration is written, changes
+        // nothing, and the output says which setting wins.
+        set_key(path.clone(), "whisper.language", "fr").unwrap();
+        let out = set_key(path.clone(), "text.language", "en").unwrap();
+        assert_eq!(
+            out.warning.as_deref(),
+            Some(
+                "text.language is en, but text cleanup treats dictation as fr: \
+                 whisper.language is fr, and the engine's language wins"
+            )
+        );
+        assert_eq!(reload(&path).text_language(), Some("fr"));
+
+        // Agreeing with the engine, or filling in for automatic detection,
+        // is nothing to warn about.
+        let out = set_key(path.clone(), "text.language", "fr-CA").unwrap();
+        assert_eq!(out.warning, None);
+        set_key(path.clone(), "whisper.language", "auto").unwrap();
+        let out = set_key(path.clone(), "text.language", "pt-BR").unwrap();
+        assert_eq!(out.warning, None);
+        assert_eq!(reload(&path).text_language(), Some("pt-BR"));
+
+        let out = set_key(path.clone(), "text.language", "auto").unwrap();
+        assert_eq!(out.warning, None);
+        assert_eq!(reload(&path).text_language(), None);
     }
 
     #[test]
