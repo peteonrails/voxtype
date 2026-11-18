@@ -327,30 +327,15 @@ impl TextProcessor {
             result = self.apply_spoken_punctuation(&result);
         }
 
-        // Restart collapsing keys on sentence boundaries, so it has to run
-        // after spoken punctuation has turned a dictated "period" into a real
-        // ".". Running it earlier would make every boundary invisible for
-        // anyone using spoken_punctuation. Filler removal has already gone,
-        // so a filler mid-stutter ("the uh the point") cannot hide the repeat
-        // either, and the replacements pass below still gets the last word.
+        // Disfluency removal and restart collapsing both key on sentence
+        // boundaries, so they have to run after spoken punctuation has turned
+        // a dictated "period" into a real ".". Running them earlier would
+        // make every boundary invisible for anyone using spoken_punctuation.
+        // Filler removal has already gone, so a filler mid-stutter ("the uh
+        // the point") cannot hide the repeat either, and the replacements
+        // pass below still gets the last word.
         if let Some(tagger) = self.disfluency_tagger.as_ref().filter(|_| english) {
-            let tokens = tagger.tag(&result);
-            let mut cleaned = String::with_capacity(result.len());
-            let mut cursor = 0;
-            for token in tokens.iter().filter(|token| token.disfluent) {
-                cleaned.push_str(&result[cursor..token.start]);
-                cursor = token.end;
-                while result[cursor..].starts_with(char::is_whitespace) {
-                    cursor += result[cursor..].chars().next().unwrap().len_utf8();
-                }
-            }
-            cleaned.push_str(&result[cursor..]);
-            // A model that labels everything must never erase a dictation.
-            if !cleaned.trim().is_empty() {
-                // Segment separators belong to the streaming protocol. Do not
-                // trim them or adjacent fluent Final events will join words.
-                result = cleaned;
-            }
+            result = remove_disfluencies(&result, &tagger.tag(&result));
         }
 
         if self.collapse_restarts {
@@ -599,8 +584,9 @@ fn load_punctuation_caser(
     }
 }
 
-/// Stand-ins for a removed filler while its surroundings are cleaned up.
-/// Private-use code points, so they cannot collide with transcribed text.
+/// Stand-ins for a removed filler or disfluent word while its surroundings
+/// are cleaned up. Private-use code points, so they cannot collide with
+/// transcribed text.
 const FILLER_UPPER: char = '\u{E000}';
 const FILLER_LOWER: char = '\u{E001}';
 
@@ -750,6 +736,78 @@ fn finish_filler_runs(text: String) -> String {
     } else {
         text
     }
+}
+
+/// Remove the words the disfluency tagger labeled and repair the
+/// punctuation and capital they leave behind.
+///
+/// The tagger labels tokens. What a label may delete is decided here, and it
+/// is less than the model asks for:
+///
+/// - Whole written words only. The model splits "that's", "1.2" and
+///   "well-known" into several tokens and can label one of them, which used
+///   to leave "'s", ".2" or "-known" in the text. A word goes when every
+///   part of it is labeled, and not otherwise.
+/// - Never a punctuation mark by its label. A labeled comma used to be cut
+///   out along with the space after it, joining its neighbours ("a flight,
+///   no" became "a flightno"). A removed word takes the connector that
+///   closes it, and the rest is settled by `remove_filler_runs`, the same
+///   rules that tidy up after a filler: the capital of a removed sentence
+///   opener moves to the word that now opens the sentence, a connector
+///   stranded at either end of a sentence goes, and no space is left in
+///   front of a full stop.
+/// - Never a whole sentence. If the model labels every word of one, that
+///   sentence is kept as it was, so a dictation cannot be erased either.
+fn remove_disfluencies(text: &str, tokens: &[disfluency::TaggedToken]) -> String {
+    let spoken = |token: &&disfluency::TaggedToken| token.text.contains(char::is_alphanumeric);
+
+    let sentences = tokens.last().map_or(0, |token| token.sentence + 1);
+    let mut keeps_a_word = vec![false; sentences];
+    for token in tokens.iter().filter(spoken) {
+        keeps_a_word[token.sentence] |= !token.disfluent;
+    }
+
+    let mut marked = String::with_capacity(text.len());
+    let mut cursor = 0;
+    // The tokenizer covers every character that is not whitespace, so tokens
+    // that touch make up one written word with its punctuation.
+    for word in tokens.chunk_by(|left, right| left.end == right.start) {
+        let (Some(first), Some(last)) = (word.iter().find(spoken), word.iter().rfind(spoken))
+        else {
+            continue;
+        };
+        let labeled = word.iter().filter(spoken).all(|token| token.disfluent);
+        if !labeled || !keeps_a_word[first.sentence] {
+            continue;
+        }
+        marked.push_str(&text[cursor..first.start]);
+        marked.push(if first.text.starts_with(char::is_uppercase) {
+            FILLER_UPPER
+        } else {
+            FILLER_LOWER
+        });
+        // A connector that closes a removed word marks where the speaker
+        // broke off, so it goes with the word ("to the store, the store on
+        // Main Street").
+        cursor = word
+            .iter()
+            .skip_while(|token| token.end <= last.end)
+            .take_while(|token| token.text.chars().all(is_connector))
+            .last()
+            .map_or(last.end, |token| token.end);
+    }
+    // Fluent streaming deltas carry their own separators. With nothing
+    // removed there is nothing to clean up.
+    if cursor == 0 {
+        return text.to_string();
+    }
+    marked.push_str(&text[cursor..]);
+
+    // Only discard separators created by removing a word, not the original
+    // segment boundary carried by a streaming backend.
+    let leading = &text[..text.len() - text.trim_start().len()];
+    let trailing = &text[text.trim_end().len()..];
+    format!("{leading}{}{trailing}", remove_filler_runs(&marked).trim())
 }
 
 /// Replace a word/phrase case-insensitively using regex for proper word boundaries
@@ -1031,6 +1089,183 @@ mod tests {
             lard_processor("en", &path).process("Please book a hotel in Boston for Tuesday"),
             "Please book a hotel in Boston for Tuesday"
         );
+    }
+
+    fn lard(text: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/models/lard-disfluency-v1.vxdf");
+        lard_processor("en", &path).process(text)
+    }
+
+    /// Reported against 1.3.1-rc1: the first "owl" was deleted because the
+    /// word comes back in the next sentence, leaving "an old gray . The owl".
+    /// Whether "that that" should lose a "that" is the model's call and not
+    /// what this test is about.
+    #[test]
+    fn lard_keeps_a_word_that_the_next_sentence_repeats() {
+        assert_eq!(
+            lard(
+                "After that, the fox walked slowly back to the forest, where it met an old \
+                 gray owl. The owl said that that was the best story it had heard all week."
+            ),
+            "After that, the fox walked slowly back to the forest, where it met an old \
+             gray owl. The owl said that was the best story it had heard all week."
+        );
+        for text in [
+            "Send it to Bob. Bob will know.",
+            "It works! It works really well.",
+            "Is it done? It is done. Good. Good work everyone.",
+        ] {
+            assert_eq!(lard(text), text);
+        }
+    }
+
+    /// Reported against 1.3.1-rc1: the first "Hello world" went and
+    /// ", hello world!" was typed.
+    #[test]
+    fn lard_repairs_the_punctuation_and_capital_a_deletion_leaves() {
+        assert_eq!(lard("Hello world, hello world!"), "Hello world!");
+    }
+
+    #[test]
+    fn lard_keeps_numbers_that_differ() {
+        for text in [
+            "between 10 and 20 people came",
+            "In 2025 and 2026 we shipped a lot.",
+            "It costs 4.50 dollars",
+        ] {
+            assert_eq!(lard(text), text);
+        }
+        assert_eq!(lard("a table for 2 for 2 people"), "a table for 2 people");
+    }
+
+    #[test]
+    fn lard_still_removes_a_restart_inside_a_sentence() {
+        assert_eq!(lard("I want I want to go"), "I want to go");
+        assert_eq!(
+            lard("Okay. I want I want to go home. That is all."),
+            "Okay. I want to go home. That is all."
+        );
+        assert_eq!(
+            lard("Can you can you hear me? I can hear you."),
+            "Can you hear me? I can hear you."
+        );
+        assert_eq!(
+            lard("We went to the the store. The store was closed."),
+            "We went to the store. The store was closed."
+        );
+    }
+
+    /// Run the removal step on hand-labeled text: `[word]` is a token the
+    /// model labeled. The real tagger supplies the tokens and sentences, and
+    /// its own labels are thrown away.
+    fn removal(labeled: &str) -> String {
+        let model = include_bytes!("../../assets/models/lard-disfluency-v1.vxdf");
+        let tagger = super::disfluency::DisfluencyTagger::from_bytes(model).unwrap();
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for (index, part) in labeled.split(['[', ']']).enumerate() {
+            if index % 2 == 1 {
+                spans.push(text.len()..text.len() + part.len());
+            }
+            text.push_str(part);
+        }
+        let mut tokens = tagger.tag(&text);
+        for token in &mut tokens {
+            token.disfluent = spans
+                .iter()
+                .any(|span| span.start <= token.start && token.end <= span.end);
+        }
+        super::remove_disfluencies(&text, &tokens)
+    }
+
+    #[test]
+    fn removing_a_sentence_opener_hands_on_its_capital() {
+        assert_eq!(removal("[Hello] [world], hello world!"), "Hello world!");
+        assert_eq!(removal("[The] the owl sat."), "The owl sat.");
+        assert_eq!(
+            removal("Okay. [I] [want] I want to go."),
+            "Okay. I want to go."
+        );
+        assert_eq!(
+            removal("[I] [need] [a] [flight][,] [no][,] I need a hotel"),
+            "I need a hotel"
+        );
+        // Lower case stays lower case: plain CTC output has no capitals.
+        assert_eq!(removal("[i] [want] i want to go"), "i want to go");
+        // A capital in the middle of a sentence is a name, not an opener.
+        assert_eq!(removal("so [I] I think so"), "so I think so");
+    }
+
+    #[test]
+    fn removing_the_end_of_a_sentence_leaves_no_space_before_the_mark() {
+        assert_eq!(
+            removal("an old gray [owl]. The owl said"),
+            "an old gray. The owl said"
+        );
+        assert_eq!(removal("We can go, [we] [can]."), "We can go.");
+        assert_eq!(removal("Is that it [it]? Yes."), "Is that it? Yes.");
+    }
+
+    #[test]
+    fn a_removed_word_takes_the_connector_that_closes_it() {
+        assert_eq!(
+            removal("I went to [the] [store], the store on Main Street"),
+            "I went to the store on Main Street"
+        );
+        assert_eq!(
+            removal("we could go, [we] [could], we could leave"),
+            "we could go, we could leave"
+        );
+        assert_eq!(removal("(see [above], above)"), "(see above)");
+    }
+
+    /// A label on a punctuation mark alone used to delete the mark and the
+    /// space after it, joining two words.
+    #[test]
+    fn a_labeled_punctuation_mark_is_not_removed() {
+        for text in [
+            "I need a flight[,] no, I need a hotel.",
+            "It is done[.] No more.",
+            "a push[-]to-talk tool",
+            "Wait[.].. what",
+        ] {
+            assert_eq!(removal(text), text.replace(['[', ']'], ""));
+        }
+    }
+
+    #[test]
+    fn only_whole_words_are_removed() {
+        for text in [
+            "It costs [4].50 dollars",
+            "[that]'s fine",
+            "a [well]-known tool",
+            "at [3]:30 today",
+        ] {
+            assert_eq!(removal(text), text.replace(['[', ']'], ""));
+        }
+        assert_eq!(removal("[That]['s] that's fine"), "That's fine");
+        assert_eq!(
+            removal("a [well][-][known] well-known tool"),
+            "a well-known tool"
+        );
+    }
+
+    #[test]
+    fn a_sentence_the_model_labels_whole_is_kept() {
+        assert_eq!(
+            removal("It is done. [Good]. Good work."),
+            "It is done. Good. Good work."
+        );
+        assert_eq!(removal("[No] [no] [no]"), "No no no");
+        assert_eq!(removal("[Yes][.] [Yes] yes I can."), "Yes. Yes I can.");
+    }
+
+    #[test]
+    fn removal_keeps_streaming_segment_separators() {
+        assert_eq!(removal(" [I] [want] I want to go "), " I want to go ");
+        assert_eq!(removal(" I want to go [go] "), " I want to go ");
+        assert_eq!(removal(" nothing labeled "), " nothing labeled ");
     }
 
     /// #566: "um" is the masculine indefinite article in Portuguese, so the

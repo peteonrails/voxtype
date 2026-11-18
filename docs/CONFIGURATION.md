@@ -3504,6 +3504,15 @@ Vocabulary correction runs first, followed by filler filtering
 and trained disfluency cleanup, punctuation/casing, number formatting, then user
 replacements. User replacements remain authoritative.
 
+The stage looks for a restart inside one sentence. A word that comes back after
+a full stop, question mark or exclamation mark is ordinary prose, so
+`an old gray owl. The owl said` keeps both. It removes whole words only, never a
+punctuation mark on its own or one part of a word such as `that's`, `1.2` or
+`well-known`, and it never removes every word of a sentence. Where it does
+remove words it tidies what they leave: `Hello world, hello world!` becomes
+`Hello world!`, with the comma gone and the capital moved to the word that now
+opens the sentence.
+
 The compact VXDF model is licensed under
 [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), separately from
 Voxtype's MIT code. Its

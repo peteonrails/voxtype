@@ -2633,7 +2633,11 @@ To clear it, run `voxtype setup lard` or turn the stage off with
 
 This opt-in stage can remove a discarded phrase such as "I need a flight no"
 from "I need a flight no I need a hotel". It does not generate replacement
-words. Missing or invalid weights leave the remaining cleanup available.
+words. It works one sentence at a time, so a word you say again in the next
+sentence ("an old gray owl. The owl said") is left alone, and it repairs the
+punctuation and capital around what it removes ("Hello world, hello world!"
+becomes "Hello world!"). Missing or invalid weights leave the remaining cleanup
+available.
 
 The model is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/),
 separately from Voxtype's MIT code. It was trained on the LARD dataset
