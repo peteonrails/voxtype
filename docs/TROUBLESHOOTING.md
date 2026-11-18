@@ -638,6 +638,8 @@ voxtype meeting retranscribe latest
 
 If the notification says the threshold is already at or below the default, the track is too quiet: raise the microphone's input volume, or the call's volume in the app that plays it, or lower the threshold to the value the notification gives. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for when it is raised and where else it shows.
 
+The notification is shown whatever `[meeting] status_notifications` is set to, like the other meeting error notifications; it comes at most once per side per meeting.
+
 The notification does not cover a track with no sound at all: a muted or wrong microphone, a loopback that records nothing, or an echo canceller that delivers silence. Check those with `voxtype meeting soundcheck`.
 
 ---

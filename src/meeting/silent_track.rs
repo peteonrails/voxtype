@@ -28,6 +28,11 @@
 //! [`Monitor`] raises the condition when three such chunks fall within a
 //! track's last ten with no line among them, and clears it when a line
 //! arrives. Only the first raise in a meeting is announced, per track.
+//!
+//! The announcement is a desktop notification that `[meeting]
+//! status_notifications` does not govern, like the other meeting error
+//! notices: it reports transcript being lost, and a user who has turned
+//! the Meeting Started and Ended notices off still has to hear that.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -36,7 +41,6 @@ use serde::{Deserialize, Serialize};
 
 use super::chunk::{ChunkConfig, VoiceActivityDetector, MIN_SPEECH_MS, MIN_UTTERANCE_SECS};
 use super::data::AudioSource;
-use super::status_notice::StatusMode;
 
 /// The notification's title, and the heading of its troubleshooting entry.
 pub const TITLE: &str = "One side of the meeting is not being transcribed";
@@ -506,16 +510,6 @@ impl Monitor {
             .filter_map(|d| d.active.clone())
             .collect()
     }
-}
-
-/// Whether to raise the desktop notification, given `[meeting]
-/// status_notifications`. `never` is the user saying no meeting
-/// notifications, and `meeting status`, the views and the log still carry
-/// this one. `auto` does not skip it for a visible meeting view the way it
-/// skips Meeting Started: a view minimized to its pill shows no banner, and
-/// this is a notice to act on.
-pub fn notify_desktop(mode: StatusMode) -> bool {
-    mode != StatusMode::Never
 }
 
 /// Write the running meeting's untranscribed tracks for `meeting status`,
@@ -1110,13 +1104,6 @@ mod tests {
         assert_eq!(two_digits(0.01), "0.01");
         assert_eq!(two_digits(0.3), "0.3");
         assert_eq!(two_digits(0.0), "0");
-    }
-
-    #[test]
-    fn never_is_the_only_mode_that_holds_the_notification_back() {
-        assert!(notify_desktop(StatusMode::Auto));
-        assert!(notify_desktop(StatusMode::Always));
-        assert!(!notify_desktop(StatusMode::Never));
     }
 
     #[test]

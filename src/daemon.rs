@@ -4353,8 +4353,6 @@ impl Daemon {
         silent_track::write_status(&Config::runtime_dir(), &daemon.silent_tracks());
         let audio_kept = daemon.keeps_audio();
         let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
-        let mode =
-            meeting::status_notice::StatusMode::parse(&self.config.meeting.status_notifications);
         // Both sides raised by the same pair go out together: voxtype's
         // notifications share a slot, and the views' banner holds one error.
         let announced: Vec<silent_track::SilentTrack> = changes
@@ -4375,10 +4373,10 @@ impl Daemon {
         if let Some(ref hub) = self.meeting_event_hub {
             hub.publish_track_notice(&announced);
         }
-        if !silent_track::notify_desktop(mode) {
-            tracing::debug!(?announced, "Untranscribed track notification skipped");
-            return;
-        }
+        // Whatever `[meeting] status_notifications` says and whether or not
+        // a meeting view is on screen, like the other meeting errors: this
+        // is transcript being lost, and a view minimized to its pill shows
+        // no banner.
         send_notification_with_lifetime(
             title,
             &body,

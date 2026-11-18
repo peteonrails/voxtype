@@ -3825,7 +3825,7 @@ The Meeting Started, Paused, Resumed and Ended notifications, and "A meeting did
 - `"always"` - Always show them.
 - `"never"` - Never show them.
 
-`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. ["One side of the meeting is not being transcribed"](MEETING_MODE.md#troubleshooting) is shown under `"auto"` and `"always"`, meeting view or not, and held back only by `"never"`; `voxtype meeting status`, the meeting view and the log report it either way. Changing it needs a daemon restart.
+`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. That includes ["One side of the meeting is not being transcribed"](MEETING_MODE.md#troubleshooting), which reports transcript being lost: `"never"` does not turn it off, and `"auto"` does not skip it for a meeting view on screen. Changing it needs a daemon restart.
 
 ### my_name
 
