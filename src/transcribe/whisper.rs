@@ -56,33 +56,7 @@ impl WhisperTranscriber {
         let start = std::time::Instant::now();
 
         let mut ctx_params = WhisperContextParameters::default();
-        // An explicit gpu_device always wins. Otherwise, if the user asked for
-        // a vendor with VOXTYPE_VULKAN_DEVICE, resolve that to an index and
-        // set it: the loader hint alone has been observed not to take effect,
-        // leaving a hybrid machine on its iGPU while reporting otherwise
-        // (#577).
-        let device_index = config.gpu_device.or_else(|| {
-            let vendor = crate::setup::gpu::get_selected_gpu_vendor()?;
-            match crate::setup::gpu::resolve_vulkan_device_index(vendor) {
-                Some(idx) => {
-                    tracing::info!(
-                        "VOXTYPE_VULKAN_DEVICE={:?} resolved to Vulkan device index {}",
-                        vendor,
-                        idx
-                    );
-                    Some(idx)
-                }
-                None => {
-                    tracing::warn!(
-                        "VOXTYPE_VULKAN_DEVICE={:?} could not be matched to a Vulkan \
-                         device (is vulkan-tools installed?); leaving device selection \
-                         to the loader. Set [whisper] gpu_device to pick one directly.",
-                        vendor
-                    );
-                    None
-                }
-            }
-        });
+        let device_index = gpu_device_index(config);
         if let Some(device) = device_index {
             tracing::info!("Using GPU device index {}", device);
             ctx_params.gpu_device(device);
@@ -131,6 +105,15 @@ impl WhisperTranscriber {
             decoded: AtomicBool::new(false),
             state: Mutex::new(None),
         })
+    }
+
+    /// Fail if `[whisper] gpu_required` is set and loading the model now
+    /// would put it on the CPU. Loads nothing.
+    pub fn check_gpu(config: &WhisperConfig) -> Result<(), TranscribeError> {
+        if !config.gpu_required {
+            return Ok(());
+        }
+        require_gpu(gpu_device_index(config).unwrap_or(0))
     }
 
     fn build_params<'a, 'b>(
@@ -634,6 +617,37 @@ fn collapse_repetition_loops(text: &str) -> String {
     words.join(" ")
 }
 
+/// The GPU index to ask whisper.cpp for, if any.
+///
+/// An explicit gpu_device always wins. Otherwise, if the user asked for a
+/// vendor with VOXTYPE_VULKAN_DEVICE, resolve that to an index and set it:
+/// the loader hint alone has been observed not to take effect, leaving a
+/// hybrid machine on its iGPU while reporting otherwise (#577).
+fn gpu_device_index(config: &WhisperConfig) -> Option<i32> {
+    config.gpu_device.or_else(|| {
+        let vendor = crate::setup::gpu::get_selected_gpu_vendor()?;
+        match crate::setup::gpu::resolve_vulkan_device_index(vendor) {
+            Some(idx) => {
+                tracing::info!(
+                    "VOXTYPE_VULKAN_DEVICE={:?} resolved to Vulkan device index {}",
+                    vendor,
+                    idx
+                );
+                Some(idx)
+            }
+            None => {
+                tracing::warn!(
+                    "VOXTYPE_VULKAN_DEVICE={:?} could not be matched to a Vulkan \
+                     device (is vulkan-tools installed?); leaving device selection \
+                     to the loader. Set [whisper] gpu_device to pick one directly.",
+                    vendor
+                );
+                None
+            }
+        }
+    })
+}
+
 /// Whether whisper-rs was built with a GPU backend, which is also when it
 /// asks whisper.cpp to use the GPU at all.
 const GPU_BUILD: bool = cfg!(any(
@@ -658,14 +672,19 @@ enum DeviceKind {
 /// Fail before the model loads if whisper.cpp would put it on the CPU.
 fn require_gpu(gpu_device: i32) -> Result<(), TranscribeError> {
     let devices = ggml_devices();
-    tracing::info!(
-        "ggml devices: {}",
-        devices
-            .iter()
-            .map(|(kind, name)| format!("{name} ({kind:?})"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    // The list is fixed for the life of the process, and the daemon checks
+    // at startup before the model loads, so say it once.
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        tracing::info!(
+            "ggml devices: {}",
+            devices
+                .iter()
+                .map(|(kind, name)| format!("{name} ({kind:?})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    });
     let kinds: Vec<DeviceKind> = devices.iter().map(|(kind, _)| *kind).collect();
     match cpu_fallback_reason(GPU_BUILD, &kinds, gpu_device) {
         Some(reason) => Err(TranscribeError::GpuUnavailable(reason)),

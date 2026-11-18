@@ -522,6 +522,31 @@ fn sliding_window_config_from_openvino(
     sliding_window_config(config, legacy, "openvino")
 }
 
+/// Check `[whisper] gpu_required` when the daemon starts, before any model
+/// loads.
+///
+/// ggml lists its devices once per process, so an in-process Whisper that
+/// finds no GPU now will not find one at the first dictation either. The
+/// daemon keeps the error and exits when someone tries to dictate, so the
+/// service manager retries in a fresh process.
+/// With gpu_isolation every recording loads in a new worker that does its
+/// own check, so there is nothing to decide here.
+pub fn check_whisper_gpu_at_startup(config: &Config) -> Result<(), TranscribeError> {
+    let whisper = &config.whisper;
+    if config.engine != TranscriptionEngine::Whisper
+        || !whisper.gpu_required
+        || whisper.effective_mode() != WhisperMode::Local
+        || whisper.gpu_isolation
+    {
+        return Ok(());
+    }
+    // The first device listing is the one ggml keeps (#611).
+    if cfg!(feature = "gpu-vulkan") {
+        gpu::wait_for_render_node(Duration::from_secs(whisper.gpu_wait_secs));
+    }
+    whisper::WhisperTranscriber::check_gpu(whisper)
+}
+
 /// Factory function to create transcriber with optional config path
 /// The config path is passed to subprocess transcriber for isolated GPU execution
 pub fn create_transcriber_with_config_path(
