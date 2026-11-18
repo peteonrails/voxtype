@@ -1336,7 +1336,7 @@ GGML_VK_VISIBLE_DEVICES=1 voxtype
 [whisper]
 gpu_required = true
 ```
-Voxtype then refuses to load the model without a GPU. See [gpu_required](CONFIGURATION.md#gpu_required).
+Voxtype then refuses to load the model without a GPU. When you start a dictation it shows a notification and exits, and systemd restarts it to look for the GPU again. See [gpu_required](CONFIGURATION.md#gpu_required).
 
 ### High CPU usage
 
