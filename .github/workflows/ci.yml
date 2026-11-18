@@ -115,6 +115,11 @@ jobs:
       - name: GGUF worker package-layout regressions
         run: python3 testing/test-gguf-worker-packaging.py
 
+      # A release Dockerfile that downloads an unpinned input from outside the
+      # project's mirror fails here, on the pull request, not at tag time.
+      - name: Release build-input pin regressions
+        run: python3 testing/test-build-input-pins.py
+
       - name: cargo test
         # The GGUF client every release binary ships, not transcribe.cpp itself.
         run: cargo test --features gguf,cohere-gguf,parakeet-gguf
