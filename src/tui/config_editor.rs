@@ -239,8 +239,13 @@ impl ConfigEditor {
     /// repeat the widening cast at every call site (the missing `as f64`
     /// is exactly how the audio.feedback.volume and vad.threshold fields
     /// ended up serialized as quoted strings — see #451).
+    ///
+    /// The value is written with the fewest digits that read back as the
+    /// same `f32`. Widening it with `as f64` keeps the binary value instead,
+    /// and TOML then prints every digit of it: 0.7 came out as
+    /// `0.699999988079071`.
     pub fn set_f32(&mut self, table: &str, key: &str, value: f32) {
-        self.set_float(table, key, value as f64);
+        self.set_float(table, key, shortest_f64(value));
     }
 
     /// Read an `f32`, tolerating older TOML representations where the TUI
@@ -763,6 +768,24 @@ fn render(item: &Item) -> String {
     }
 }
 
+/// The `f64` that prints as `value` does: `f32`'s `Display` gives the fewest
+/// digits that read back as the same `f32`, and parsing those as an `f64`
+/// gives the double a person would have typed for it.
+fn shortest_f64(value: f32) -> f64 {
+    value.to_string().parse().unwrap_or(f64::from(value))
+}
+
+/// Round an `f32` setting to two decimal places.
+///
+/// The forms step a value with `f32` arithmetic, and the sum is not always
+/// the `f32` nearest the decimal it stands for: 0.6 + 0.1 is 0.70000005,
+/// one step above the `f32` for 0.7, and that is what was saved. Dividing a
+/// whole number by 100 is correctly rounded, so the result is the `f32`
+/// nearest the two-decimal value and is written back as those two decimals.
+pub fn round_to_hundredths(value: f32) -> f32 {
+    (value * 100.0).round() / 100.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -992,8 +1015,6 @@ mod tests {
         // load, and `get_f32_or` must round-trip it back.
         let (_dir, path) = temp_config("");
         let mut ed = ConfigEditor::load_from(path.clone()).unwrap();
-        // 0.5 and 0.25 are exact in IEEE-754 so the f32 -> f64 widening
-        // doesn't decorate the serialized form with a long mantissa.
         ed.set_f32("audio.feedback", "volume", 0.5);
         ed.set_f32("vad", "threshold", 0.25);
         let serialized = ed.document.to_string();
@@ -1024,6 +1045,65 @@ mod tests {
         let reloaded = ConfigEditor::load_from(path).unwrap();
         assert_eq!(reloaded.get_f32_or("audio.feedback", "volume", -1.0), 0.5);
         assert_eq!(reloaded.get_f32_or("vad", "threshold", -1.0), 0.25);
+    }
+
+    /// The configure TUI saved `volume = 0.7000000476837158` after a change
+    /// to Audio > Volume: an `f32` widened to `f64` and printed in full.
+    #[test]
+    fn set_f32_writes_the_shortest_number_that_reads_back_the_same() {
+        let (_dir, path) = temp_config("");
+        let mut ed = ConfigEditor::load_from(path).unwrap();
+        for (value, written) in [
+            (0.7_f32, "0.7"),
+            (0.1, "0.1"),
+            (0.05, "0.05"),
+            (0.35, "0.35"),
+            (0.005, "0.005"),
+            (1.0, "1.0"),
+            (0.0, "0.0"),
+            // Not the f32 nearest 0.7, so it keeps the digits that tell it
+            // apart, and no more than that.
+            (0.6_f32 + 0.1_f32, "0.70000005"),
+        ] {
+            ed.set_f32("audio.feedback", "volume", value);
+            let serialized = ed.document.to_string();
+            assert!(
+                serialized.contains(&format!("volume = {written}\n")),
+                "{value:?} should be written as {written}, got: {serialized}"
+            );
+            assert_eq!(ed.get_f32_or("audio.feedback", "volume", -1.0), value);
+        }
+    }
+
+    #[test]
+    fn round_to_hundredths_lands_on_the_f32_for_the_two_decimal_value() {
+        // Every sum a form can produce by stepping across 0..=1, in either
+        // direction and from either step size, written out and read back.
+        let (_dir, path) = temp_config("");
+        let mut ed = ConfigEditor::load_from(path).unwrap();
+        for step in [0.1_f32, 0.05] {
+            for direction in [1.0_f32, -1.0] {
+                let mut value: f32 = if direction > 0.0 { 0.0 } else { 1.0 };
+                for _ in 0..=20 {
+                    value = round_to_hundredths(value + direction * step).clamp(0.0, 1.0);
+                    ed.set_f32("vad", "threshold", value);
+                    let serialized = ed.document.to_string();
+                    let written = serialized
+                        .trim()
+                        .rsplit("threshold = ")
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    let decimals = written.split('.').nth(1).map_or(0, str::len);
+                    assert!(
+                        decimals <= 2,
+                        "stepping by {step} wrote {written} for {value:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(round_to_hundredths(0.6 + 0.1), 0.7);
+        assert_eq!(round_to_hundredths(0.433), 0.43);
     }
 
     #[test]
