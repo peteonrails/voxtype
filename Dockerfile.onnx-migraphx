@@ -10,6 +10,11 @@
 # rc.12 wraps) against AMD's ROCm SDK, then builds voxtype against that local
 # ORT via ORT_LIB_LOCATION. Total build time: 45-60 minutes.
 #
+# The ONNX Runtime source comes from the project's mirror, pinned by sha256
+# (see "Fetch ONNX Runtime" below). Its build still downloads the CMake
+# dependencies listed in its cmake/deps.txt from their own GitHub
+# repositories, each checked against the SHA1 in that file.
+#
 # Usage:
 #   docker build -f Dockerfile.onnx-migraphx -t voxtype-onnx-migraphx-builder .
 #   docker run --rm -v $(pwd)/releases:/output voxtype-onnx-migraphx-builder
@@ -84,15 +89,57 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
-# Clone and build ONNX Runtime from source with MIGraphX EP.
+# Fetch ONNX Runtime's source from the project's mirror, pinned by sha256.
+# This used to be a `git clone` of github.com/microsoft/onnxruntime, which
+# returned 404 for hours on 2026-11-18 and failed this build. The archive is
+# the unmodified tree of tag v1.24.2 without its submodules, none of which
+# this build reads: --skip_submodule_sync is passed, ONNX comes from the
+# archive pinned in cmake/deps.txt, and the other two are the WebAssembly
+# toolchain and a fuzzing library. scripts/mirror-onnxruntime-inputs.sh
+# builds it and pins the same hash. There is no second download location on
+# purpose: one path, one hash. To build where the mirror is unreachable,
+# serve the archive yourself and pass
+# --build-arg VOXTYPE_BUILD_INPUTS_URL=<base url>; the pin is not a build
+# argument, so any copy has to be the same bytes.
+#
+# ONNX Runtime's CMake writes `git log -1 --format=%h` and the branch name
+# into its build info string, which ends up in the voxtype binary. The
+# archive has no .git, so recreate what `git clone --depth 1` left behind:
+# one commit object (shipped raw in the archive, and it has to hash to the
+# pinned commit id) marked shallow, with a detached HEAD. The string stays
+# "git-branch=HEAD, git-commit-id=058787c", which is what the 1.3.0-rc3 binary
+# carries.
+ARG VOXTYPE_BUILD_INPUTS_URL=https://models.voxtype.io/build-inputs
+ENV ORT_SOURCE_SHA256=41f2cd14842a288887aeef5942d44eb4ce18f031db30bd1207eed120aa5edb69
+ENV ORT_SOURCE_COMMIT=058787ceead760166e3c50a0a4cba8a833a6f53f
+COPY scripts/ci/fetch-build-input.sh /usr/local/bin/fetch-build-input.sh
+RUN set -eux; \
+    bash /usr/local/bin/fetch-build-input.sh \
+      "${VOXTYPE_BUILD_INPUTS_URL}/onnxruntime/v${ORT_VERSION}-source/onnxruntime-${ORT_VERSION}-source.tar.gz" \
+      "${ORT_SOURCE_SHA256}" /tmp/ort-source.tar.gz; \
+    mkdir /tmp/ort-source; \
+    tar -xzf /tmp/ort-source.tar.gz --strip-components=1 -C /tmp/ort-source; \
+    mv /tmp/ort-source/onnxruntime /build/onnxruntime; \
+    cd /build/onnxruntime; \
+    git init -q; \
+    commit=$(git hash-object -t commit -w /tmp/ort-source/upstream-commit); \
+    test "${commit}" = "${ORT_SOURCE_COMMIT}" \
+      || { echo "FAIL: the archive's commit object is ${commit}, pinned ${ORT_SOURCE_COMMIT}."; exit 1; }; \
+    echo "${commit}" > .git/shallow; \
+    git update-ref --no-deref HEAD "${commit}"; \
+    stamp="git-branch=$(git rev-parse --abbrev-ref HEAD), git-commit-id=$(git log -1 --format=%h)"; \
+    test "${stamp}" = "git-branch=HEAD, git-commit-id=$(printf %.7s "${ORT_SOURCE_COMMIT}")" \
+      || { echo "FAIL: ONNX Runtime would be stamped '${stamp}'."; exit 1; }; \
+    rm -rf /tmp/ort-source /tmp/ort-source.tar.gz; \
+    echo "ONNX Runtime ${ORT_VERSION} source staged at /build/onnxruntime (${stamp})."
+
+# Build ONNX Runtime from source with MIGraphX EP.
 # - --build_shared_lib produces libonnxruntime.so for the EP bridge.
 # - FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER forces ORT to use its bundled
 #   abseil-cpp/re2/protobuf instead of the system versions, which can have
 #   ABI drift across patch releases (the original v0.6 ROCm/CUDA Dockerfiles
 #   relied on pyke prebuilts so this wasn't an issue then).
-RUN git clone --depth 1 --branch v${ORT_VERSION} --recurse-submodules --shallow-submodules \
-        https://github.com/microsoft/onnxruntime.git /build/onnxruntime \
-    && cd /build/onnxruntime \
+RUN cd /build/onnxruntime \
     && ./build.sh \
         --config Release \
         --use_migraphx \

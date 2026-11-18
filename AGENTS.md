@@ -540,6 +540,30 @@ the .so files sit alongside the binary.
 
 Note: ONNX binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
+### ONNX Runtime Build Inputs
+
+Two ONNX builds need ONNX Runtime itself and not just the `ort` crate's prebuilt. Neither downloads it from `github.com/microsoft/onnxruntime`: that repository returned 404 for hours on 2026-11-18 and left `v1.3.0-rc4` without Linux assets. Both inputs are served from the project's mirror, the bucket that holds the models, under a separate `build-inputs/` prefix that the runtime never reads.
+
+| Build | Input | Path under `https://models.voxtype.io/build-inputs/onnxruntime/` |
+|-------|-------|------|
+| onnx-cuda-13 | The three libraries from Microsoft's 1.24.4 CUDA 13 archive, the only 1.24.4 build with kernels for RTX 50-series cards | `v1.24.4-linux-x64-gpu_cuda13/onnxruntime-linux-x64-gpu_cuda13-1.24.4-runtime.tar.gz` |
+| onnx-migraphx | ONNX Runtime v1.24.2 source, compiled with the MIGraphX provider because no prebuilt has it | `v1.24.2-source/onnxruntime-1.24.2-source.tar.gz` |
+
+- Each Dockerfile fetches its archive with `scripts/ci/fetch-build-input.sh`, which keeps the file only if it matches the sha256 fixed in the Dockerfile. The pin is an `ENV`, not a build argument, so it cannot be overridden.
+- There is no fallback to Microsoft's URL: one path, one hash. To build while the mirror is unreachable, or before a new archive is uploaded, serve a copy yourself and pass `--build-arg VOXTYPE_BUILD_INPUTS_URL=<base url>` (docker compose reads the same variable from the environment). The pin still applies.
+- `scripts/mirror-onnxruntime-inputs.sh` builds both archives reproducibly, checks them against the same pins, uploads them with `rclone copy --immutable` and verifies the public URLs. When the ONNX Runtime version changes, run it, then update the pins in the script and the Dockerfile together.
+- `testing/test-build-input-pins.py` fails CI when a release Dockerfile downloads anything from outside the mirror without a pin, or when the Dockerfile and script pins differ.
+- The MIGraphX build still downloads ONNX Runtime's own CMake dependencies (abseil, protobuf, ONNX, re2 and the others in its `cmake/deps.txt`) from their GitHub repositories. ONNX Runtime checks each against the SHA1 in that file. They are not mirrored.
+
+```bash
+# Build from a local copy of the archives, for example before they are uploaded
+./scripts/mirror-onnxruntime-inputs.sh stage    # writes ~/.cache/voxtype-mirror/stage/build-inputs/
+(cd ~/.cache/voxtype-mirror/stage && python3 -m http.server 18431 --bind 127.0.0.1) &
+docker build --network=host -f Dockerfile.onnx-cuda-13 -t voxtype-onnx-cuda-13 \
+    --build-arg VERSION=${VERSION} \
+    --build-arg VOXTYPE_BUILD_INPUTS_URL=http://127.0.0.1:18431/build-inputs .
+```
+
 ### GGUF Worker Companions
 
 Every release binary compiles the GGUF client (`gguf,cohere-gguf,parakeet-gguf`; `gpu-vulkan` implies them) and ships `voxtype-${VERSION}-linux-<arch>-<variant>.gguf-worker`, built in the same Dockerfile. The application looks beside its resolved executable for `voxtype-gguf-worker-<variant>` (the executable name minus `voxtype-`), then the generic `voxtype-gguf-worker`, then `PATH`; `VOXTYPE_GGUF_WORKER` overrides all of it.
