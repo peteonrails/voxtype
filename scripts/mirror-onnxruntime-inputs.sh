@@ -45,7 +45,8 @@
 # Prerequisites: git, GNU tar, gzip, curl, sha256sum, python3; for upload an
 # rclone remote named `r2` on the Cloudflare account holding `voxtype-models`.
 #
-# Staging uses $STAGE (default ~/.cache/voxtype-mirror/build-inputs). The
+# Staging uses $STAGE (default ~/.cache/voxtype-mirror/stage, shared with
+# scripts/mirror-flat-models-to-r2.sh and laid out like the bucket). The
 # bundles are a few hundred MB, so keep it on disk, never on a tmpfs /tmp.
 # gzip output can differ between gzip releases. If a rebuilt bundle misses
 # its pin, compare the uncompressed sha256 the script prints with the
@@ -55,7 +56,7 @@ set -euo pipefail
 umask 022
 export LC_ALL=C TZ=UTC
 
-STAGE="${STAGE:-${XDG_CACHE_HOME:-$HOME/.cache}/voxtype-mirror/build-inputs}"
+STAGE="${STAGE:-${XDG_CACHE_HOME:-$HOME/.cache}/voxtype-mirror/stage}"
 REMOTE="r2:voxtype-models"
 PUBLIC="${PUBLIC:-https://models.voxtype.io}"
 PREFIX="build-inputs/onnxruntime"
