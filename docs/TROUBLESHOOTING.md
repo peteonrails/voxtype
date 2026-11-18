@@ -19,7 +19,7 @@ Before reading further, run:
 voxtype doctor
 ```
 
-It checks your model files, VAD model, GPU runtime libraries, audio device,
+It checks your model files, VAD model, LARD cleanup model, GPU runtime libraries, audio device,
 output tools, display environment of the systemd service, input device
 access, notifications, OSD and meeting-mode tools, and the systemd unit, and
 prints the exact fix for anything that is wrong (`✗` means broken, `!` means
@@ -1390,8 +1390,9 @@ type_delay_ms = 10  # Try 10-50ms
 **Symptom:** Dictating text with non-ASCII characters (umlauts, accents, ß)
 into GTK applications (GNOME Terminal, GNOME Text Editor) delivers them
 clustered at the start of the output: `Müll äöüß` arrives as `üäöüß Mll `.
-The log (`journalctl --user -u voxtype`) shows the correct transcription,
-and Chrome or other non-GTK apps receive the same text correctly. Short
+The log shows the correct transcription once
+[debug logging](#enable-verbose-logging) is on (the text is not logged by
+default), and Chrome or other non-GTK apps receive the same text correctly. Short
 dictations often arrive intact, longer ones reliably fail.
 
 **Cause:** IBus, GNOME's default input method, reorders non-ASCII key
@@ -1730,7 +1731,7 @@ API key is invalid, revoked, or out of credit. Check the dashboard at https://co
 Soniox occasionally revises tail tokens between non-final and final states (`tévedések,` → `tévedések.`, `fejeztem` → `fejezte`). Voxtype emits a `StreamingEvent::Replace { backspace, text }` in this case so the cursor is patched up — but the patch only works if a backspace-capable driver is in the chain. The current backspace path tries `wtype`, then `dotool` (via `dotoolc` if the daemon is running), then `ydotool`. `eitype` does not have a backspace implementation.
 
 If you see persistent duplication or wrong tails:
-1. Check `journalctl --user -u voxtype` for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing.
+1. Turn on [debug logging](#enable-verbose-logging) and check the log for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing. These lines quote the revised text, so they are not logged by default.
 2. If you also see `Streaming replace: no backspace-capable backend available; skipping backspace and accepting cursor artifact`, none of wtype/dotool/ydotool was usable — the original tail stayed at the cursor and the corrected text appended. Install at least one of them (`pacman -S wtype` or `pacman -S dotool` on Arch).
 3. Disable partial typing entirely: `[soniox] type_partials = false`. Finals are still typed, but no live cursor feedback. Trade-off: feels slower, zero divergence risk.
 
@@ -2121,7 +2122,7 @@ With speakers instead of headphones, your microphone hears the call. Voxtype rem
 - **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track, including the guard's. Check `[meeting.audio] echo_guard` is on (the default). Keep `echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones. A line that mixes your voice with the echo stays yours, echo included: the guard only removes lines that are nothing but echo.
 - **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. The guard drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
 - **"Thank you." under You while you said nothing.** Speech engines write a few stock phrases ("Thank you.", "Thanks for watching.") for faint sound, such as the echo canceller's residual. The guard drops them when the remote is talking and your microphone held no voice of yours at the time. One that comes while the call is silent stays: delete it with `voxtype meeting delete-line`.
-- **One sentence repeated over and over in a line.** On faint audio, such as the echo of the other side, a speech engine can get stuck and write the same phrase until the audio ends ("I don't know what you're talking about." six times). Voxtype keeps one copy of any phrase of three or more words that comes three or more times in a row, for every engine, and logs "Collapsed a repeated phrase". Two repeats ("Yes. Yes.") and short words said over and over ("No, no, no.") are left as they are. If the collapsed line was echo, the guard then drops it when it is at most eight words, opens with three words in a row from the other side's line at the same time, and your microphone held no voice of yours. A line that keeps repeating after this was most likely said that way, or is long enough to be left: delete it with `voxtype meeting delete-line`.
+- **One sentence repeated over and over in a line.** On faint audio, such as the echo of the other side, a speech engine can get stuck and write the same phrase until the audio ends ("I don't know what you're talking about." six times). Voxtype keeps one copy of any phrase of three or more words that comes three or more times in a row, for every engine, and logs "Collapsed a repeated phrase" with the number of words before and after (the line itself at debug level). Two repeats ("Yes. Yes.") and short words said over and over ("No, no, no.") are left as they are. If the collapsed line was echo, the guard then drops it when it is at most eight words, opens with three words in a row from the other side's line at the same time, and your microphone held no voice of yours. A line that keeps repeating after this was most likely said that way, or is long enough to be left: delete it with `voxtype meeting delete-line`.
 - **"Thank you." or "you" from a remote speaker nobody heard.** The same stock phrases, written for silence or a join sound on the call's side. The guard drops them when the loopback held no speech at the time. A tone or chime is sound, so a phrase written over one can stay: delete it with `voxtype meeting delete-line`.
 - **A remote line shows up twice, once under the remote speaker from your microphone.** The guard moved an echo line to the remote side because the loopback's transcript did not have its words. Delete the copy with `voxtype meeting delete-line`.
 - **A line of yours went missing or moved to the remote.** The guard keeps a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud call can still read as echo. Speak up or lower the call volume; move a line back with `voxtype meeting reassign <meeting> <line> You`; or set `echo_guard = false` to keep only exact-word matching.
@@ -2272,16 +2273,43 @@ systemctl --user list-dependencies default.target
 ### Enable verbose logging
 
 ```bash
-# Verbose
+# Debug level: each step of a dictation, and the transcribed text
 voxtype -v
 
-# Debug (most verbose)
+# Trace level (most verbose)
 voxtype -vv
 
 # Or via environment
 RUST_LOG=debug voxtype
 RUST_LOG=voxtype=trace voxtype
 ```
+
+Stop the service first (`systemctl --user stop voxtype`) when you run the daemon in a terminal. To get debug logs from the service instead:
+
+```bash
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+journalctl --user -u voxtype -f
+```
+
+`RUST_LOG` takes precedence over `-v` and `-q` on the command line. Remove the line and restart the service when you are done.
+
+### Dictated text in the log
+
+At the default level the log does not contain what you say: a dictation is logged as its length and its engine (`Transcribed 42 chars (whisper engine)`). To see what the engine heard, which is what a report about wrong or missing words needs, turn on debug logging as above and look for these lines:
+
+```bash
+journalctl --user -u voxtype --since "5 min ago" | grep -E "Transcribed:|text:|After text processing|Post-processed result"
+```
+
+- `Transcribed: "..."`: the text the engine returned
+- `Cohere transcription text: "..."` (`Transcription text:` for Whisper, and so on for the other engines): the same, from the engine itself
+- `After text processing: "..."`: after replacements, spoken punctuation and the other `[text]` steps
+- `Post-processed result: "..."`: after the `[output.post_process]` command
+
+With debug logging on, the journal keeps every dictation until it rotates out, so turn it off again afterwards. A debug log contains your dictations: read it before you attach it to an issue, and cut out anything you do not want to publish.
 
 ### Debug specific components
 
@@ -2321,15 +2349,33 @@ journalctl --user -u pulseaudio -n 20
 ### Trained LARD cleanup is not running
 
 - It is off by default. Enable `text.lard_disfluency` and select an explicit
-  English language. `auto`, unknown, and non-English languages skip it.
-- Run `voxtype setup lard --status`. Install the pinned local artifact with
+  English language. `auto`, unknown, and non-English languages skip it, and so
+  do engines that have no language setting.
+- Run `voxtype doctor`. With the setting on and nothing to run, the **Text
+  cleanup** check fails and names the cause. The same problem is in the
+  daemon's "Voxtype: N problems need attention" startup notification and in
+  the log as `LARD cleanup unavailable; preserving text`.
+- "LARD disfluency cleanup is on but its model is not installed": the setting
+  is on and the model file is not there. Turning the setting on does not
+  download it. Run `voxtype setup lard`, then restart the daemon. Or turn the
+  stage off: `voxtype config set text.lard_disfluency false`.
+- `voxtype setup lard` fails with "answered HTTP ..." or "could not reach":
+  the download did not complete. Nothing was installed and an existing model
+  is untouched. Check your connection and run it again, or install from a copy
+  of the file with
   `voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`.
-- Model publication still requires approval. Do not expect a default download;
-  an explicit HTTPS URL must return the exact pinned artifact. Checksum failures
-  preserve any existing installed model.
+- `voxtype setup lard` fails with "checksum mismatch": what was downloaded (or
+  the file given to `--source`) is not the pinned model. The message shows the
+  size and SHA-256 it got and the ones it expected. Nothing was installed. A
+  captive portal or a proxy that rewrites downloads is the usual cause.
+- Run `voxtype setup lard --status` to see the installed file and whether the
+  stage is running for your configuration.
+- An explicit `--url` must be HTTPS and return the exact pinned artifact.
+- The model is licensed CC BY-SA 4.0, separately from Voxtype's MIT code. See
+  the [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md).
 - Check `text.lard_model_path` and the XDG data directory used by the daemon.
-  Restart after changing configuration. Missing or invalid models produce a
-  warning and skip only this stage; startup never tries a download.
+  Restart after changing configuration. Missing or invalid models skip only
+  this stage; startup never tries a download.
 - Streaming partials stay raw. Cleanup runs only at finalization and can revise
   already typed partials only when backspace output succeeds. For cross-segment
   cleanup, use batch or file output. LLM post-processing is still batch-only.
@@ -2355,7 +2401,7 @@ journalctl --user -u pulseaudio -n 20
 If you're still having issues:
 
 1. **Run the health check:** `voxtype doctor` (attach `voxtype doctor --json` to bug reports)
-2. **Gather debug logs:** `voxtype -vv 2>&1 | tee debug.log`
+2. **Gather debug logs:** `voxtype -vv 2>&1 | tee debug.log`. Debug logs include the text of what you dictate while they are on, so read the file before you attach it
 3. **Check system info:**
    ```bash
    uname -a

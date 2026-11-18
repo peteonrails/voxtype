@@ -60,6 +60,87 @@ pub fn wait_until_executable(path: &Path) {
     }
 }
 
+/// Run the calling test in a process of its own, for a test that depends
+/// on process-wide state. `test` is its full path
+/// (`module::tests::name`), and `prepare` sets up the child's command, its
+/// environment for instance.
+///
+/// Returns true in the child, where the test goes on, and false in the
+/// parent once the child has passed: `if !own_process(..) { return; }`.
+pub fn own_process(test: &str, prepare: impl FnOnce(&mut std::process::Command)) -> bool {
+    const CHILD: &str = "VOXTYPE_TEST_OWN_PROCESS";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return true;
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD, test);
+    prepare(&mut command);
+    let output = command.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // "1 passed": a path that matches no test also exits successfully.
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} in its own process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+/// What the code under test logs, as the daemon's own formatter writes it.
+///
+/// Installs a subscriber for the current thread that keeps events at
+/// `level` and above (`INFO` is what the daemon and its systemd unit run
+/// at) and collects the formatted lines. Dropping it restores the previous
+/// subscriber. It follows the thread, so on a current-thread runtime it
+/// also sees what is logged across `.await`s.
+///
+/// Use it from a test in its own process ([`own_process`]) whenever the
+/// test asserts that something was logged. tracing caches, per call site,
+/// whether any subscriber wants it. A call site first reached on another
+/// test's thread while this is the only subscriber is cached as unwanted,
+/// and the capture then never sees it.
+pub struct LogCapture {
+    lines: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+impl LogCapture {
+    pub fn at(level: tracing::Level) -> Self {
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = CaptureWriter(lines.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_max_level(level)
+            .with_ansi(false)
+            .finish();
+        Self {
+            lines,
+            _guard: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    /// Everything logged so far.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.lines.lock().unwrap()).into_owned()
+    }
+}
+
+#[derive(Clone)]
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

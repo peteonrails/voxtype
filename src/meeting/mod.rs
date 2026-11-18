@@ -162,6 +162,30 @@ pub enum MeetingEvent {
     Error(String),
 }
 
+/// The sending end of a meeting's event channel, held by [`MeetingDaemon`].
+pub type MeetingEventSender = mpsc::UnboundedSender<MeetingEvent>;
+
+/// The receiving end of a meeting's event channel, read by the daemon's
+/// event loop.
+pub type MeetingEventReceiver = mpsc::UnboundedReceiver<MeetingEvent>;
+
+/// The channel a [`MeetingDaemon`] publishes its events on.
+///
+/// Unbounded, so that sending never waits. The meeting runs on the task
+/// that reads this channel: the daemon's event loop awaits `process_pair`,
+/// `apply_segment_edits`, `retitle` and the rest inline, and only gets back
+/// to reading events once they return. With a bounded channel, a call that
+/// published more events than the channel had room for waited for a reader
+/// that was waiting for the call, and the whole daemon stopped: no more
+/// chunks, no dictation, no `meeting stop`. Naming a speaker who had 52
+/// lines did that against a capacity of 32.
+///
+/// What can pile up is bounded by the transcript: one event per line a
+/// call changes, and a few per chunk.
+pub fn event_channel() -> (MeetingEventSender, MeetingEventReceiver) {
+    mpsc::unbounded_channel()
+}
+
 /// Meeting daemon for continuous transcription
 pub struct MeetingDaemon {
     config: MeetingConfig,
@@ -173,7 +197,7 @@ pub struct MeetingDaemon {
     /// Why the configured diarization backend was replaced, for the user
     diarization_notice: Option<String>,
     engine_name: String,
-    event_tx: mpsc::Sender<MeetingEvent>,
+    event_tx: MeetingEventSender,
     post_processor: Option<PostProcessor>,
     /// Previous chunk's post-processed text, tracked per audio source
     /// so mic and loopback contexts don't bleed into each other
@@ -236,7 +260,7 @@ impl MeetingDaemon {
     pub fn new(
         config: MeetingConfig,
         meeting_app_config: &crate::config::Config,
-        event_tx: mpsc::Sender<MeetingEvent>,
+        event_tx: MeetingEventSender,
         resident: Option<Arc<dyn Transcriber>>,
     ) -> Result<Self> {
         let storage = MeetingStorage::open(config.storage.clone()).map_err(|e| {
@@ -326,7 +350,7 @@ impl MeetingDaemon {
         config: MeetingConfig,
         transcriber: Arc<dyn Transcriber>,
         diarizer: Option<Box<dyn diarization::Diarizer>>,
-        event_tx: mpsc::Sender<MeetingEvent>,
+        event_tx: MeetingEventSender,
     ) -> Self {
         Self {
             storage: MeetingStorage::open(config.storage.clone()).unwrap(),
@@ -437,16 +461,13 @@ impl MeetingDaemon {
         self.silent_tracks = silent_track::Monitor::new(self.config.vad_threshold);
         self.track_changes.clear();
 
-        let _ = self
-            .event_tx
-            .send(MeetingEvent::Started {
-                meeting_id,
-                title,
-                started_at,
-                diarization_enabled,
-                diarization_backend,
-            })
-            .await;
+        self.emit(MeetingEvent::Started {
+            meeting_id,
+            title,
+            started_at,
+            diarization_enabled,
+            diarization_backend,
+        });
         tracing::info!("Meeting started: {}", meeting_id);
 
         Ok(meeting_id)
@@ -459,7 +480,7 @@ impl MeetingDaemon {
         }
 
         self.state = std::mem::take(&mut self.state).pause();
-        let _ = self.event_tx.send(MeetingEvent::Paused).await;
+        self.emit(MeetingEvent::Paused);
         tracing::info!("Meeting paused");
 
         Ok(())
@@ -472,7 +493,7 @@ impl MeetingDaemon {
         }
 
         self.state = std::mem::take(&mut self.state).resume();
-        let _ = self.event_tx.send(MeetingEvent::Resumed).await;
+        self.emit(MeetingEvent::Resumed);
         tracing::info!("Meeting resumed");
 
         Ok(())
@@ -519,10 +540,7 @@ impl MeetingDaemon {
             .map(|m| m.metadata.id)
             .unwrap_or_default();
 
-        let _ = self
-            .event_tx
-            .send(MeetingEvent::Stopped { meeting_id })
-            .await;
+        self.emit(MeetingEvent::Stopped { meeting_id });
         tracing::info!("Meeting stopped: {}", meeting_id);
 
         // Clean up
@@ -637,7 +655,10 @@ impl MeetingDaemon {
             return Ok(None);
         };
         self.persist_transcript();
-        self.emit_chunk(chunk_id, segments.clone()).await;
+        self.emit(MeetingEvent::ChunkProcessed {
+            chunk_id,
+            segments: segments.clone(),
+        });
         Ok(Some(segments))
     }
 
@@ -840,7 +861,7 @@ impl MeetingDaemon {
 
         self.persist_transcript();
         for (chunk_id, segments) in done {
-            self.emit_chunk(chunk_id, segments).await;
+            self.emit(MeetingEvent::ChunkProcessed { chunk_id, segments });
         }
         first_error
     }
@@ -894,7 +915,7 @@ impl MeetingDaemon {
     /// Rename a speaker in the segments already transcribed, carry over any
     /// name `meeting label` gave it, and tell the daemon so the HUD's
     /// backlog follows.
-    async fn rename_speaker(&mut self, from: &str, to: &str) {
+    fn rename_speaker(&mut self, from: &str, to: &str) {
         let Some(ref mut meeting) = self.current_meeting else {
             return;
         };
@@ -921,18 +942,12 @@ impl MeetingDaemon {
                 0
             }
         };
-        let _ = self
-            .event_tx
-            .send(MeetingEvent::SpeakerRenamed {
-                from: from.to_string(),
-                to: to.to_string(),
-            })
-            .await;
+        self.emit(MeetingEvent::SpeakerRenamed {
+            from: from.to_string(),
+            to: to.to_string(),
+        });
         if owners > 0 {
-            let _ = self
-                .event_tx
-                .send(MeetingEvent::SummaryUpdated { meeting_id })
-                .await;
+            self.emit(MeetingEvent::SummaryUpdated { meeting_id });
         }
     }
 
@@ -1001,7 +1016,7 @@ impl MeetingDaemon {
         self.persist_transcript();
         let count = events.len();
         for event in events {
-            let _ = self.event_tx.send(event).await;
+            self.emit(event);
         }
         tracing::info!("{} transcript line(s) changed by hand", count);
         count
@@ -1091,11 +1106,11 @@ impl MeetingDaemon {
         }
     }
 
-    async fn emit_chunk(&self, chunk_id: u32, segments: Vec<TranscriptSegment>) {
-        let _ = self
-            .event_tx
-            .send(MeetingEvent::ChunkProcessed { chunk_id, segments })
-            .await;
+    /// Publish an event without ever waiting for it to be read: see
+    /// [`event_channel`] for why waiting here stops the daemon. With nobody
+    /// listening (an import, a retranscribe) the event is dropped.
+    fn emit(&self, event: MeetingEvent) {
+        let _ = self.event_tx.send(event);
     }
 
     /// Transcribe, post-process, diarize and label one chunk of one track
@@ -1168,12 +1183,14 @@ impl MeetingDaemon {
         // times running: keep one instance.
         for segment in &mut result.segments {
             if let Some(collapsed) = repeat::collapse(&segment.text) {
+                // What was said stays out of the default log level.
                 tracing::info!(
-                    "Collapsed a repeated phrase in a {} line: {:?} (was {} words)",
+                    "Collapsed a repeated phrase in a {} line ({} words down to {})",
                     source,
-                    collapsed,
-                    segment.text.split_whitespace().count()
+                    segment.text.split_whitespace().count(),
+                    collapsed.split_whitespace().count()
                 );
+                tracing::debug!("Collapsed line: {:?}", collapsed);
                 segment.text = collapsed;
             }
         }
@@ -1204,7 +1221,7 @@ impl MeetingDaemon {
             let renames = diarizer.take_speaker_renames();
             let merges = diarizer.merge_similar_speakers();
             for (from, to) in renames {
-                self.rename_speaker(&from, &to).await;
+                self.rename_speaker(&from, &to);
             }
             // Speakers found to be one voice become one, labels included.
             for (from, to) in merges {
@@ -1215,7 +1232,7 @@ impl MeetingDaemon {
                         seg.speaker_id = Some(to.clone());
                     }
                 }
-                self.rename_speaker(&from, &to).await;
+                self.rename_speaker(&from, &to);
             }
         }
 
@@ -1332,7 +1349,7 @@ mod tests {
     struct Harness {
         daemon: MeetingDaemon,
         config: MeetingConfig,
-        events: mpsc::Receiver<MeetingEvent>,
+        events: MeetingEventReceiver,
         _dir: tempfile::TempDir,
     }
 
@@ -1354,7 +1371,7 @@ mod tests {
             ..Default::default()
         };
         tweak(&mut config);
-        let (tx, events) = mpsc::channel(64);
+        let (tx, events) = event_channel();
         let mut daemon = MeetingDaemon::for_test(
             config.clone(),
             Arc::new(CountingTranscriber(AtomicU32::new(0))),
@@ -1533,7 +1550,7 @@ mod tests {
         };
         assert_ne!(app.model_name(), "small.en");
         let effective = app.with_meeting_mode_overrides(&options).unwrap();
-        let (tx, _events) = mpsc::channel(8);
+        let (tx, _events) = event_channel();
         let resident: Arc<dyn Transcriber> = Arc::new(CountingTranscriber(AtomicU32::new(0)));
         let mut daemon =
             MeetingDaemon::new(config.clone(), &effective, tx, Some(resident)).unwrap();
@@ -2912,7 +2929,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let (tx, events) = mpsc::channel(64);
+        let (tx, events) = event_channel();
         let mut daemon = MeetingDaemon::for_test(
             config.clone(),
             Arc::new(CountingTranscriber(AtomicU32::new(0))),
@@ -2932,7 +2949,7 @@ mod tests {
     }
 
     /// Each live line as "speaker key: name shown".
-    fn live_names(events: &mut mpsc::Receiver<MeetingEvent>) -> Vec<String> {
+    fn live_names(events: &mut MeetingEventReceiver) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(event) = events.try_recv() {
             match event {
@@ -3113,7 +3130,7 @@ mod tests {
             ..Default::default()
         };
         title_labels::set_account_name_for_test(Some("Pete Jackson"));
-        let (tx, _events) = mpsc::channel(64);
+        let (tx, _events) = event_channel();
         let mut app = crate::config::Config::default();
         app.whisper.model = "/nonexistent/ggml-model.bin".into();
         // Constructing the real daemon resolves the user only when on.
@@ -3144,7 +3161,7 @@ mod tests {
     async fn my_name_wins_over_the_account_name_for_title_labels() {
         let dir = tempfile::TempDir::new().unwrap();
         title_labels::set_account_name_for_test(Some("Pete Jackson"));
-        let (tx, _events) = mpsc::channel(64);
+        let (tx, _events) = event_channel();
         let mut app = crate::config::Config::default();
         app.whisper.model = "/nonexistent/ggml-model.bin".into();
         let daemon = MeetingDaemon::new(
@@ -3173,7 +3190,7 @@ mod tests {
         );
     }
 
-    fn drain(events: &mut mpsc::Receiver<MeetingEvent>) -> Vec<String> {
+    fn drain(events: &mut MeetingEventReceiver) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(event) = events.try_recv() {
             match event {
@@ -3263,6 +3280,78 @@ mod tests {
             .map(|s| s.speaker_label.as_deref())
             .collect();
         assert_eq!(remote, vec![Some("Chris"), Some("Chris")]);
+    }
+
+    /// Naming a speaker who has many lines changes every one of them in a
+    /// single call, and the only reader of the events is the daemon's event
+    /// loop, the very task that awaits the call. So the call must return with
+    /// nobody reading. When the channel was bounded (32 events in the daemon,
+    /// 64 in this harness) it waited for room instead, and a live meeting
+    /// froze: no more chunks, no dictation, no `meeting stop`.
+    #[tokio::test]
+    async fn naming_a_speaker_with_many_lines_never_waits_for_a_reader() {
+        let mut h = harness().await;
+        // Seven remote lines in each of ten chunks.
+        let remote: Vec<(f32, f32)> = (0..7)
+            .map(|i| (1.0 + 4.0 * i as f32, 3.0 + 4.0 * i as f32))
+            .collect();
+        for _ in 0..10 {
+            h.pair(&[], &remote).await;
+        }
+        drain(&mut h.events);
+        let lines = h
+            .saved()
+            .transcript
+            .segments
+            .iter()
+            .filter(|s| s.speaker_key() == "Remote")
+            .count();
+        assert!(lines > 64, "only {lines} remote lines to name");
+
+        let cli = MeetingStorage::open(h.config.storage.clone()).unwrap();
+        let id = cli.resolve_meeting_id("latest").unwrap();
+        cli.set_speaker_label(&id, "Remote", "Chris").unwrap();
+        // Nothing reads `h.events` while the edit is applied.
+        let wait = std::time::Duration::from_secs(5);
+        let changed = tokio::time::timeout(wait, h.daemon.apply_segment_edits())
+            .await
+            .expect("the edit waited for its events to be read: the daemon would hang here");
+        assert_eq!(changed, lines);
+
+        // The next command goes through, and every event is there to read.
+        tokio::time::timeout(wait, h.daemon.pause())
+            .await
+            .expect("pause waited for the events to be read")
+            .unwrap();
+        let events: Vec<MeetingEvent> = std::iter::from_fn(|| h.events.try_recv().ok()).collect();
+        assert_eq!(events.len(), lines + 1);
+        assert!(events[..lines].iter().all(|event| matches!(
+            event,
+            MeetingEvent::SegmentUpdated { segment }
+                if segment.speaker_label.as_deref() == Some("Chris")
+        )));
+        assert!(matches!(events[lines], MeetingEvent::Paused));
+    }
+
+    /// The same for chunks: the daemon works through a backlog of them, and
+    /// flushes the tail at stop, before it reads any of their events.
+    #[tokio::test]
+    async fn a_backlog_of_chunks_never_waits_for_a_reader() {
+        let mut h = harness().await;
+        let wait = std::time::Duration::from_secs(5);
+        for _ in 0..40 {
+            let pair = h
+                .daemon
+                .process_pair(track(2.0, &[(0.5, 1.5)]), track(2.0, &[(0.5, 1.5)]));
+            let error = tokio::time::timeout(wait, pair)
+                .await
+                .expect("a chunk waited for its events to be read");
+            assert_eq!(error, None);
+        }
+        let chunks = std::iter::from_fn(|| h.events.try_recv().ok())
+            .filter(|event| matches!(event, MeetingEvent::ChunkProcessed { .. }))
+            .count();
+        assert_eq!(chunks, 80);
     }
 
     /// A client offers "Restore original" from `original_speaker`; after a
@@ -3459,7 +3548,7 @@ mod tests {
             busy: std::sync::Mutex::new(()),
         });
         let resident: Arc<dyn Transcriber> = shared.clone();
-        let (tx, mut events) = mpsc::channel(64);
+        let (tx, mut events) = event_channel();
         // An app config whose engine cannot load here: proves no second load.
         let mut app = crate::config::Config::default();
         app.whisper.model = "/nonexistent/ggml-model.bin".into();
@@ -3516,7 +3605,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_resident_transcriber_the_meeting_loads_its_own() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (tx, _events) = mpsc::channel(64);
+        let (tx, _events) = event_channel();
         let mut app = crate::config::Config::default();
         app.whisper.model = "/nonexistent/ggml-model.bin".into();
         app.whisper.on_demand_loading = false;

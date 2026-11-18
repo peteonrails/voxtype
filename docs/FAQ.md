@@ -325,7 +325,7 @@ Include:
 - Linux distribution and version
 - Wayland compositor
 - Steps to reproduce
-- Debug output (`voxtype -vv`)
+- Debug output (`voxtype -vv`). It includes the text of what you dictate while it runs, so read it before you post it
 
 ### Can I request a feature?
 

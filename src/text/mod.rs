@@ -213,29 +213,20 @@ impl TextProcessor {
             "BUG: connector-before-terminator regex is a compile-time constant and must be valid",
         );
 
+        // Fail open: a stage that cannot run leaves the text alone. The same
+        // `Problem` drives `voxtype doctor` and the startup notification, so
+        // this log line is no longer the only sign (#696).
         let disfluency_tagger = if config.lard_disfluency {
-            if language.and_then(|l| l.split(['-', '_']).next()) == Some("en") {
-                let path = config
-                    .lard_model_path
-                    .clone()
-                    .unwrap_or_else(crate::setup::lard::model_path);
-                match std::fs::read(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| {
-                        disfluency::DisfluencyTagger::from_bytes(&bytes).map_err(|e| e.to_string())
-                    }) {
-                    Ok(model) => Some(model),
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error,
-                            "LARD cleanup unavailable; preserving text. Run voxtype setup lard --source <verified-model.vxdf>");
-                        None
-                    }
+            match crate::setup::lard::load_tagger(config, language) {
+                Ok(model) => Some(model),
+                Err(problem) => {
+                    tracing::warn!(
+                        "LARD cleanup unavailable; preserving text. {}. Fix: {}",
+                        problem.message(),
+                        problem.fix()
+                    );
+                    None
                 }
-            } else {
-                tracing::warn!(
-                    "LARD cleanup requires an explicit English language; preserving text"
-                );
-                None
             }
         } else {
             None

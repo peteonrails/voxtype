@@ -447,7 +447,7 @@ pub(crate) async fn dispatch(
                     status,
                 }) => {
                     warn_if_root("lard");
-                    setup::lard::setup(source.as_deref(), url.as_deref(), status)?;
+                    setup::lard::setup(source.as_deref(), url.as_deref(), status, &config)?;
                 }
                 Some(SetupAction::Punctuation { status }) => {
                     warn_if_root("punctuation");

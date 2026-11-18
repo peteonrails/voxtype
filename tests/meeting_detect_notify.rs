@@ -170,6 +170,7 @@ async fn prompt_answered_with(answer: &str) -> Option<(Vec<String>, Option<Strin
             title: "Meet - abc-defg-hij".into(),
             reason: "test".into(),
             auto_record: false,
+            by_window: false,
         }))
         .await;
 
@@ -278,6 +279,7 @@ async fn auto_stop_answered_with(answer: &str) -> Option<(Vec<String>, Option<St
                 title: "Zoom call".into(),
                 reason: "test".into(),
                 auto_record: false,
+                by_window: false,
             },
             offer_stop: true,
         })

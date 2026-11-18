@@ -158,15 +158,33 @@ Expected:
 
 ## 7. Stop and the summary (2 minutes)
 
-Leave the Meet call while still recording.
+First, while still in the call and recording, bring another tab to the
+front of the call's browser window and leave it there for 30 seconds. Then
+go back to the call's tab, mute yourself in Meet for 30 seconds, and unmute.
 
 Expected:
 
-- About 5 seconds later: **Call ended**, `Chromium released the microphone.
-  Stopping the recording in 20 s.`, with **Keep recording**.
+- Nothing is shown, and the meeting keeps recording throughout.
+- The journal says what was seen:
+  `journalctl --user -u voxtype --since "2 minutes ago" | grep "Meeting detection"`
+  shows "call continues: Google Meet still has the mic, but no window title
+  shows the call any more", then "has the mic and its call window again".
+  If muting made the browser release the microphone, it also shows
+  "released the mic, but its call window is still open".
+
+Now leave the Meet call and close its tab.
+
+Expected:
+
+- About 5 seconds after the tab closes: **Call ended**, `Google Meet
+  released the microphone. Stopping the recording in 20 s.`, with **Keep
+  recording**. Leaving the call with its tab still open and in front does
+  not end it: the call is over when the microphone is released and no
+  window title shows it.
 - Let it run out. After 20 seconds the meeting stops by itself.
-- The journal says so: `journalctl --user -u voxtype --since "2 minutes ago" | grep "Meeting detection"`
-  shows the call ending and "stopping the meeting, the Google Meet call ended".
+- The journal shows "call ended: Google Meet released the mic and no window
+  shows the call any more" and "stopping the meeting, the Google Meet call
+  ended".
 - To check **Keep recording**, run a second short call and press it within
   the 20 seconds: the meeting keeps recording; stop it with **Stop**.
 

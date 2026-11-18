@@ -156,6 +156,16 @@ def schema(state):
          "engine": "parakeet", "compiled": True, "restart_required": True},
         model_type,
     ]
+    if state.get("lard") is not None:
+        # text.lard_disfluency as `config schema --json` prints it. `notice` is
+        # only present while the switch is on with nothing to run; a voxtype
+        # that predates the field never sends it.
+        lard = {"key": "text.lard_disfluency", "type": "bool", "section": "Text Cleanup",
+                "label": "LARD disfluency cleanup", "description": "", "value": True, "file_value": True,
+                "engine": None, "compiled": True, "restart_required": True}
+        if state["lard"].get("notice"):
+            lard["notice"] = state["lard"]["notice"]
+        keys.append(lard)
     if "cohere_models" in state:
         cohere = state.get("cohere_model", state["cohere_models"][0])
         keys.append({"key": "cohere.model", "type": "dynamic_enum", "source": "models", "section": "Engine",

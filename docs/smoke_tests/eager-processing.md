@@ -22,7 +22,8 @@ journalctl --user -u voxtype --since "1 minute ago" | grep -iE "eager|chunk"
 # Expected: "Spawning eager transcription for chunk 0 (...s)"   (debug)
 #           "Spawning eager transcription for chunk 1 (...s)"   (debug)
 #           "Chunk 0 completed: ..."                            (debug)
-#           "Combined eager transcription: ..."                 (info)
+#           "Combined eager transcription: N chars from M chunk(s)" (info;
+#           a second line with the text itself follows at debug)
 
 # 5. Verify combined output is coherent: no word duplicated where chunks
 # meet, and a word said twice on purpose ("that that") is kept twice

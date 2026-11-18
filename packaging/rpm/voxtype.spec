@@ -355,6 +355,10 @@ fi
 - RC3: notifications for failures that were silent, voxtype doctor, terminal-aware
   paste keys, OSD scale and placement fixes, kept failed recordings and
   undelivered text with settings to turn them off
+- RC4: fix a daemon freeze when a speaker with many lines is named during a
+  meeting, keep a detected call going while its window or mic shows it,
+  download the LARD model with voxtype setup lard, keep dictated text out of
+  the log at the default level
 
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
 - Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes

@@ -194,15 +194,7 @@ impl Transcriber for OmnilingualTranscriber {
             )));
         };
 
-        tracing::info!(
-            "Omnilingual transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if result.chars().count() > 50 {
-                format!("{}...", result.chars().take(50).collect::<String>())
-            } else {
-                result.clone()
-            }
-        );
+        super::log_transcription("Omnilingual transcription", start, &result);
 
         Ok(result)
     }

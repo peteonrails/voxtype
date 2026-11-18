@@ -2393,6 +2393,8 @@ When `true`, a transcription that no output method could deliver (typing failed 
 
 Set it to `false` to save no file. The notification then shows neither a file nor the text, because notification daemons keep a log of what they display. It still lists what failed and how to fix it, and says the text was not kept. A dictation that can't be typed or copied is then lost. Files saved earlier stay until you delete them.
 
+Whatever this is set to, voxtype's own log records the failure with the length of the text, not the text.
+
 ```toml
 [output]
 keep_undelivered_text = false
@@ -3174,6 +3176,7 @@ Run voxtype with `-v` or `-vv` to see detailed logs about post-processing:
 ```bash
 voxtype -vv
 ```
+These logs show the text going into and coming out of the command. Without `-v` the log only says whether post-processing changed the text.
 
 ### Example LM Studio Script
 
@@ -3376,24 +3379,55 @@ skip this stage. Vocabulary correction runs first, followed by filler filtering
 and trained disfluency cleanup, punctuation/casing, number formatting, then user
 replacements. User replacements remain authoritative.
 
-The compact VXDF model is separately licensed under CC BY-SA 4.0; see
-`assets/models/lard-disfluency-v1.MODEL_CARD.md` for provenance and evaluation.
-Install it explicitly, then enable cleanup:
+The compact VXDF model is licensed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), separately from
+Voxtype's MIT code. Its
+[model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md)
+gives the attribution, provenance and evaluation (also in the source tree as
+`assets/models/lard-disfluency-v1.MODEL_CARD.md`). Install it explicitly, then
+enable cleanup:
 
 ```bash
-voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+voxtype setup lard            # download from the Voxtype model mirror and verify
 voxtype setup lard --status
 voxtype config set text.lard_disfluency true
 ```
 
-No default download URL is enabled until publication approval. An explicit
-`voxtype setup lard --url https://your-approved-host/model.vxdf` also works,
-but must match the pinned 65,560-byte artifact and SHA-256
-`f11b45d644b2d829349df2ac2ad3d69c9cf19cd3fae888c69268bddf64cfb354`.
-A failed download or checksum check does not replace an installed model.
-Startup never downloads weights. Missing, corrupt, or unsupported models skip
+`voxtype setup lard` downloads
+`https://models.voxtype.io/text/lard-disfluency-v1.vxdf` and installs it only
+if it is the pinned 65,560-byte artifact with SHA-256
+`f11b45d644b2d829349df2ac2ad3d69c9cf19cd3fae888c69268bddf64cfb354`. A model
+that is already installed and verified is left alone. Two alternatives install
+the same pinned bytes from somewhere else:
+
+```bash
+voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf   # a local file, no network
+voxtype setup lard --url https://your-mirror/lard-disfluency-v1.vxdf
+```
+
+A failed install says what went wrong (the HTTP status, an unreachable host, or
+the checksum it received against the one it expected) and never replaces an
+installed model.
+Startup never downloads weights, and turning the setting on does not either:
+installing is always this command. Missing, corrupt, or unsupported models skip
 only the LARD stage; other configured cleanup still applies. The stage never
 replaces a whole dictation with empty output.
+
+With `lard_disfluency = true` and nothing to run (no model at the path, a file
+that does not load, or an engine language that is not explicit English), the
+stage is skipped and Voxtype says so:
+
+- `voxtype doctor` fails the `text.lard_disfluency` check under **Text
+  cleanup** and prints the fix.
+- The daemon logs it and includes it in the grouped "Voxtype: N problems need
+  attention" startup notification, once per boot until it is fixed.
+- `voxtype config set` writes the value, exits 0, and prints a `warning:` line
+  on stderr. Writes to other keys print it only when they cause the problem,
+  for example setting the engine language back to `auto`.
+- `voxtype config schema --json` adds a `notice` string to the
+  `text.lard_disfluency` entry, which the graphical app shows under the switch.
+  The field is absent when there is nothing to report.
+- `voxtype configure` shows it in the switch's row and help pane.
 
 Use `--lard-disfluency`, `--no-lard-disfluency`, or `--lard-model-path FILE`
 for a CLI override. Environment variables are `VOXTYPE_LARD_DISFLUENCY` and
@@ -4449,7 +4483,7 @@ auto_record_apps = ["Zoom"]
 **Default:** `5`
 **Required:** No
 
-How long a call app must hold the microphone before voxtype prompts, and how long it must be gone before the call counts as over. Keeps a quick mic test or a permission check from prompting.
+How long a call app must hold the microphone before voxtype prompts, and how long a call must show no sign of itself before it counts as over. Keeps a quick mic test or a permission check from prompting.
 
 ### on_call_end
 
@@ -4459,13 +4493,20 @@ How long a call app must hold the microphone before voxtype prompts, and how lon
 
 What happens when a detected call ends while a meeting records. `"stop"` shows **Call ended** with **Keep recording** and stops the meeting after `stop_grace_secs` unless you keep it; the stop runs the summary at stop as usual. `"ask"` offers **Stop meeting** and **Keep recording** and waits for you. `"keep"` leaves the meeting recording. A meeting started by hand with no detected call is never stopped. Changing it needs a daemon restart.
 
+A call has ended when nothing shows it any more for `debounce_secs`:
+
+- A call in a browser (an app with `titles`) has ended when the browser has released the microphone and no window title shows the call. While the browser still has the microphone, or a window title still shows the call, the call goes on. So bringing another tab to the front does not end it, and neither does the browser letting go of the microphone while the call's tab is still there. When Hyprland cannot be asked for its windows, the window is not taken to be gone.
+- A native client (an app without `titles`) has ended its call when it releases the microphone.
+
+A call tab left open after you hang up therefore keeps the recording going until you close it, stop the meeting, or [`max_duration_mins`](#max_duration_mins) is reached. See [When a call is over](MEETING_MODE.md#when-a-call-is-over).
+
 ### stop_grace_secs
 
 **Type:** Integer (0 to 600)
 **Default:** `20`
 **Required:** No
 
-Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call app takes the microphone again in that time, the stop is called off.
+Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call shows again in that time (its app takes the microphone again, or its window title comes back), it is the same call: the stop is called off and the call is not offered a second time. The same time applies with `"ask"`, whose question is withdrawn, and with `"keep"`. With `0` an ended call is forgotten at once.
 
 ### apps
 
@@ -4700,12 +4741,25 @@ voxtype status --format json --icon-theme nerd-font
 
 ### RUST_LOG
 
-Controls log verbosity via the tracing crate.
+Controls log verbosity via the tracing crate. It takes precedence over `-v`, `-vv` and `-q`.
 
 ```bash
 RUST_LOG=debug voxtype
 RUST_LOG=voxtype=trace voxtype
 ```
+
+**Dictated text and the log.** At the default level (info) voxtype does not log what you say. A dictation is logged as its length and its engine, for example `Transcribed 42 chars (whisper engine)`, and meeting transcript lines, undelivered text and post-processed text are logged the same way. The systemd service logs to the journal, so this is what keeps your words out of `journalctl --user -u voxtype` when `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` are off.
+
+The text is logged at debug level (`voxtype -v`, or `RUST_LOG=voxtype=debug`), which you turn on yourself, typically to show what the engine heard in a report about a recognition problem. For the service:
+
+```bash
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+```
+
+Remove the line and restart when you are done: while it is set, the journal keeps every dictation. See [Troubleshooting](TROUBLESHOOTING.md#dictated-text-in-the-log) for the lines to look for.
 
 ### XDG_CONFIG_HOME
 

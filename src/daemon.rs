@@ -1224,6 +1224,9 @@ pub struct Daemon {
     // keyboard-layout hints to eitype/dotool, see issue #180) after the task
     // completes. Cleared when transcription_task is taken.
     active_transcriber: Option<Arc<dyn Transcriber>>,
+    // Engine serving the current recording, after any `--model` override,
+    // for the "Transcribed" log line.
+    recording_engine: String,
     // Engine instance preloaded at startup when on_demand_loading is off.
     // Whisper draws its transcriber from model_manager instead; every other
     // engine clones from here. A field rather than a `run()` local so the
@@ -1255,7 +1258,7 @@ pub struct Daemon {
     meeting_mic_buffer: Vec<f32>,
     meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
-    meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    meeting_event_rx: Option<meeting::MeetingEventReceiver>,
     // The recording announcement's progress, while it runs
     meeting_announce_rx: Option<tokio::sync::mpsc::Receiver<meeting::announce::Update>>,
     meeting_announce_task: Option<tokio::task::JoinHandle<meeting::announce::Status>>,
@@ -1416,6 +1419,7 @@ impl Daemon {
             &crate::model_upgrade::state_path(),
             config.model_name(),
         );
+        let recording_engine = config.engine.to_string();
 
         Self {
             start_request: None,
@@ -1448,6 +1452,7 @@ impl Daemon {
             whisper_prepare_task: None,
             transcription_task: None,
             active_transcriber: None,
+            recording_engine,
             transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
             vad,
@@ -3012,6 +3017,7 @@ impl Daemon {
             .get_transcriber_for_recording_inner(model_override)
             .await;
         if result.is_ok() {
+            self.recording_engine = self.recording_engine_and_model(model_override).0;
             self.model_notices.clear();
         } else {
             self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
@@ -3476,8 +3482,9 @@ impl Daemon {
             tracing::info!("Single audio capture: mic only");
         }
 
-        // Create event channel
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        // The meeting's events, read by the event loop. Sending never
+        // waits: the meeting runs on the loop's own task.
+        let (tx, rx) = meeting::event_channel();
         self.meeting_event_rx = Some(rx);
 
         // Create meeting daemon, on dictation's loaded model when it is the
@@ -4194,10 +4201,8 @@ impl Daemon {
         }
 
         if check_meeting_edit() {
-            if let Some(ref mut daemon) = self.meeting_daemon {
-                tracing::debug!("Meeting transcript edit requested via file trigger");
-                daemon.apply_segment_edits().await;
-            }
+            tracing::debug!("Meeting transcript edit requested via file trigger");
+            self.apply_meeting_edits().await;
         }
 
         if let Some(retitle) = meeting::retitle::take_trigger(&Config::runtime_dir()) {
@@ -4253,6 +4258,16 @@ impl Daemon {
         }
 
         changed
+    }
+
+    /// Bring the running meeting up to date with what the user changed in
+    /// its transcript (`meeting label`, `reassign`, `annotate`, `edit`,
+    /// `delete-line`). The changed lines reach the views as meeting events,
+    /// once the event loop is back to reading them.
+    async fn apply_meeting_edits(&mut self) {
+        if let Some(ref mut daemon) = self.meeting_daemon {
+            daemon.apply_segment_edits().await;
+        }
     }
 
     /// Tell the user a meeting is losing transcript, once per meeting: a
@@ -4769,8 +4784,15 @@ impl Daemon {
         }
 
         // Combine all chunk results
+        let chunk_count = chunk_results.len();
         let combined = eager::combine_chunk_results(chunk_results);
-        tracing::info!("Combined eager transcription: {:?}", combined);
+        // The words themselves only at debug: see the "Transcribed" line.
+        tracing::info!(
+            "Combined eager transcription: {} chars from {} chunk(s)",
+            combined.chars().count(),
+            chunk_count
+        );
+        tracing::debug!("Combined eager transcription: {:?}", combined);
 
         if combined.is_empty() {
             None
@@ -4964,7 +4986,17 @@ impl Daemon {
                     self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                     self.reset_to_idle(state).await;
                 } else {
-                    tracing::info!("Transcribed: {:?}", text);
+                    // The length and the engine at info, the words only at
+                    // debug. The service logs to the journal at info, and the
+                    // journal keeps what it is given: logging the text there
+                    // would retain every dictation whatever the user chose
+                    // for history, failed recordings and undelivered text.
+                    tracing::info!(
+                        "Transcribed {} chars ({} engine)",
+                        text.chars().count(),
+                        self.recording_engine
+                    );
+                    tracing::debug!("Transcribed: {:?}", text);
                     self.record_model_upgrade_success();
 
                     // Resolve the profile before cleanup because vocabulary is
@@ -7221,6 +7253,97 @@ while True:
         }
     }
 
+    /// The dictation path end to end (text cleanup, post-processing, file
+    /// output), with what it logs captured as the daemon's formatter writes
+    /// it. At info, the level the daemon and its systemd unit run at, the
+    /// log says a dictation happened and how long it was, and carries none
+    /// of its words at any stage. At debug the words are there, which is
+    /// how a recognition problem gets reported.
+    ///
+    /// Runs in a process of its own so the daemon's runtime directory
+    /// (state file, per-recording override files) is a scratch one, not
+    /// the session's, and so the log capture is the only subscriber.
+    #[tokio::test]
+    async fn dictated_text_stays_out_of_the_log_at_the_default_level() {
+        let scratch = TempDir::new().unwrap();
+        if !crate::test_support::own_process(
+            "daemon::tests::dictated_text_stays_out_of_the_log_at_the_default_level",
+            |child| {
+                child
+                    .env("HOME", scratch.path())
+                    .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
+                    .env("XDG_STATE_HOME", scratch.path().join("state"))
+                    .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+                    .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                    .env_remove("WAYLAND_DISPLAY")
+                    .env_remove("DISPLAY");
+            },
+        ) {
+            return;
+        }
+
+        let spoken = "meet me at the quarry at nine";
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("dictation.txt");
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        config
+            .text
+            .replacements
+            .insert("quarry".to_string(), "harbour".to_string());
+        config.output.mode = OutputMode::File;
+        config.output.file_path = Some(target.clone());
+        config.output.fallback_to_clipboard = false;
+        config.output.post_process = Some(crate::config::PostProcessConfig {
+            command: "tr '[:lower:]' '[:upper:]'".to_string(),
+            timeout_ms: 5000,
+            trim: true,
+            fallback_on_empty: true,
+            edit_list: false,
+        });
+
+        for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            let _ = fs::remove_file(&target);
+            let capture = crate::test_support::LogCapture::at(level);
+            let mut daemon = Daemon::new(config.clone(), None);
+            let mut state = State::Transcribing { audio: Vec::new() };
+            daemon
+                .handle_transcription_result(&mut state, Ok(Ok(spoken.to_string())))
+                .await;
+            let logged = capture.text();
+            drop(capture);
+
+            assert!(state.is_idle());
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "MEET ME AT THE HARBOUR AT NINE\n",
+                "the dictation went through cleanup and post-processing"
+            );
+            assert!(
+                logged.contains("Transcribed 29 chars (whisper engine)"),
+                "{logged}"
+            );
+            assert!(logged.contains("Post-processed: changed: true"), "{logged}");
+
+            // The words as recognized, after cleanup and after
+            // post-processing.
+            let stages = ["at the quarry", "at the harbour", "AT THE HARBOUR"];
+            if level == tracing::Level::INFO {
+                let lowered = logged.to_lowercase();
+                for words in ["meet me", "quarry", "harbour", "at nine"] {
+                    assert!(
+                        !lowered.contains(words),
+                        "dictated text in the log at info: {logged}"
+                    );
+                }
+            } else {
+                for words in stages {
+                    assert!(logged.contains(words), "{words:?} not at debug: {logged}");
+                }
+            }
+        }
+    }
+
     /// Output config whose hooks log to `log`, noting whether `target`
     /// existed when each ran, so tests can see order relative to the write.
     fn hooked_output_config(log: &Path, target: &Path) -> crate::config::OutputConfig {
@@ -7367,6 +7490,88 @@ while True:
         fn transcribe(&self, _samples: &[f32]) -> TranscriptionResult {
             Ok(self.0.to_string())
         }
+    }
+
+    /// The event loop is the only reader of a meeting's events, and it runs
+    /// the meeting's work inline, so nothing the meeting publishes may wait
+    /// for a reader. Naming a speaker who had 52 lines published 52 events
+    /// into a channel that held 32: the loop waited on itself, and the
+    /// daemon stopped transcribing, dictating and answering `meeting stop`
+    /// until it was restarted. Here the daemon applies that edit with its
+    /// receiver unread, as inside the loop's trigger handler, and then
+    /// takes the next command.
+    #[tokio::test]
+    async fn an_edit_of_many_lines_leaves_the_daemon_running() {
+        const LINES: u32 = 52;
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        // Nothing written to the runtime directory, nothing shown.
+        config.state_file = None;
+        config.meeting.status_notifications = "never".to_string();
+        let mut daemon = Daemon::new(config, None);
+
+        let meeting_config = meeting::MeetingConfig {
+            enabled: true,
+            storage: StorageConfig {
+                storage_path: dir.path().to_path_buf(),
+                retain_audio: false,
+                max_meetings: 0,
+                my_name: None,
+            },
+            ..Default::default()
+        };
+        // The channel `start_meeting` gives a meeting.
+        let (tx, mut rx) = meeting::event_channel();
+        let mut running =
+            MeetingDaemon::for_test(meeting_config, Arc::new(FixedTranscriber("")), None, tx);
+        let id = running.start(Some("Call".to_string()), None).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(MeetingEvent::Started { .. })));
+        let transcript = &mut running.current_meeting_mut().unwrap().transcript;
+        for i in 0..LINES {
+            let start = u64::from(i) * 5_000;
+            let mut line =
+                meeting::TranscriptSegment::new(i, start, start + 4_000, format!("line {i}"), i);
+            line.source = meeting::AudioSource::Loopback;
+            line.speaker_id = Some("Remote 2".to_string());
+            transcript.add_segment(line);
+        }
+        // Saved as after every chunk, then what `voxtype meeting label`
+        // stores before it drops its trigger.
+        let saved = transcript.clone();
+        running.storage().save_transcript(&id, &saved).unwrap();
+        running
+            .storage()
+            .set_speaker_label(&id, "Remote 2", "Chris")
+            .unwrap();
+        daemon.meeting_daemon = Some(running);
+        daemon.meeting_event_rx = Some(rx);
+
+        let wait = Duration::from_secs(5);
+        tokio::time::timeout(wait, daemon.apply_meeting_edits())
+            .await
+            .expect("the daemon waited on its own meeting events: it would hang here");
+        tokio::time::timeout(wait, daemon.pause_meeting())
+            .await
+            .expect("the daemon did not get to the next command")
+            .unwrap();
+        assert!(daemon.meeting_daemon.as_ref().unwrap().state().is_paused());
+
+        // Back in the loop, every changed line is there to publish.
+        let rx = daemon.meeting_event_rx.as_mut().unwrap();
+        let events: Vec<MeetingEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let named = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    MeetingEvent::SegmentUpdated { segment }
+                        if segment.speaker_label.as_deref() == Some("Chris")
+                )
+            })
+            .count();
+        assert_eq!(named, LINES as usize);
+        assert!(matches!(events.last(), Some(MeetingEvent::Paused)));
     }
 
     fn parakeet_daemon(on_demand: bool) -> Daemon {
