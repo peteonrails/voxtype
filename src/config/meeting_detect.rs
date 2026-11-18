@@ -35,8 +35,8 @@ pub struct MeetingDetectConfig {
     /// button), "ask" offers to stop it, "keep" leaves it running. A meeting
     /// started by hand with no detected call is never stopped.
     ///
-    /// A browser call (an app with `titles`) has ended when the browser has
-    /// released the mic and no window title shows the call; a native
+    /// A browser call (an app with `titles` or `classes`) has ended when the
+    /// browser has released the mic and no window shows the call; a native
     /// client's when it releases the mic.
     #[serde(default = "default_on_call_end")]
     pub on_call_end: String,
@@ -78,7 +78,7 @@ fn default_stop_grace_secs() -> u32 {
 }
 
 /// One call app: which mic streams belong to it and, for apps that run in a
-/// browser, which window titles confirm that a call is in progress.
+/// browser, which windows confirm that a call is in progress.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CallAppPattern {
     /// Display name, used in the prompt and in `auto_record_apps`.
@@ -91,10 +91,26 @@ pub struct CallAppPattern {
     pub streams: Vec<String>,
 
     /// Case-insensitive substrings of a window title that confirm the call.
-    /// Empty means the mic stream alone is enough. Browsers need this,
-    /// since a browser opens the mic for many things besides calls.
+    /// With `classes` empty too, the mic stream alone is enough. Browsers
+    /// need one of the two, since a browser opens the mic for many things
+    /// besides calls.
     #[serde(default, deserialize_with = "string_list")]
     pub titles: Vec<String>,
+
+    /// Case-insensitive substrings of a window class that confirm the call:
+    /// the call's own window, when the call app opens one whose class names
+    /// it and whose title does not. A browser started with `--app=URL`
+    /// names the window after the URL (`chrome-app.zoom.us__wc_join_...`).
+    #[serde(default, deserialize_with = "string_list")]
+    pub classes: Vec<String>,
+}
+
+impl CallAppPattern {
+    /// Whether a window has to confirm the call: `false` for a native
+    /// client, whose mic stream alone is a call.
+    pub fn needs_window(&self) -> bool {
+        !self.titles.is_empty() || !self.classes.is_empty()
+    }
 }
 
 fn default_debounce_secs() -> u32 {
@@ -118,11 +134,22 @@ fn pattern(name: &str, streams: &[&str], titles: &[&str]) -> CallAppPattern {
         name: name.to_string(),
         streams: streams.iter().map(|s| s.to_string()).collect(),
         titles: titles.iter().map(|s| s.to_string()).collect(),
+        classes: Vec::new(),
     }
 }
 
+/// The class of the Zoom web client's own window, as a browser started
+/// with `--app=https://app.zoom.us/wc/join/<meeting>` names it:
+/// `chrome-app.zoom.us__wc_join_<meeting>-Default`. That is how Omarchy
+/// opens a Zoom link. The window is titled with the meeting's topic, so no
+/// title pattern can find it. The Zoom web app's home window
+/// (`...zoom.us__wc_home-...`) is left out on purpose: it is open whether
+/// or not a call is.
+pub const ZOOM_WEB_CLIENT_CLASS: &str = "zoom.us__wc_join_";
+
 /// The built-in call apps. Native clients count on the mic alone; browser
-/// calls need a matching window title as well.
+/// calls need a matching window as well: its title or, for the Zoom web
+/// client, its class.
 pub fn default_apps() -> Vec<CallAppPattern> {
     vec![
         // Zoom's capture stream is "ZOOM VoiceEngine" from the "zoom" binary.
@@ -130,7 +157,10 @@ pub fn default_apps() -> Vec<CallAppPattern> {
         pattern("Microsoft Teams", &["teams-for-linux", "teams"], &[]),
         pattern("Google Meet", BROWSERS, &["Meet - ", "Google Meet"]),
         pattern("Microsoft Teams (web)", BROWSERS, &["| Microsoft Teams"]),
-        pattern("Zoom (web)", BROWSERS, &["Zoom Meeting", "Zoom Workplace"]),
+        CallAppPattern {
+            classes: vec![ZOOM_WEB_CLIENT_CLASS.to_string()],
+            ..pattern("Zoom (web)", BROWSERS, &["Zoom Meeting", "Zoom Workplace"])
+        },
     ]
 }
 
@@ -224,6 +254,46 @@ mod tests {
             vec![pattern("Jitsi", &["firefox"], &["Jitsi Meet"])]
         );
         assert_eq!(w.detect.enabled, None);
+    }
+
+    #[test]
+    fn only_the_zoom_web_client_is_found_by_its_window_class() {
+        for app in default_apps() {
+            if app.name == "Zoom (web)" {
+                assert_eq!(app.classes, vec!["zoom.us__wc_join_"]);
+                assert!(!app.titles.is_empty(), "its titles still count");
+            } else {
+                assert!(app.classes.is_empty(), "{}", app.name);
+            }
+        }
+        let native: Vec<_> = default_apps()
+            .into_iter()
+            .filter(|a| !a.needs_window())
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(native, vec!["Zoom", "Microsoft Teams"]);
+    }
+
+    #[test]
+    fn classes_accept_an_array_or_a_comma_string_and_default_to_none() {
+        let w: Wrap = toml::from_str(
+            "[[detect.apps]]\nname = \"Jitsi\"\nstreams = [\"chromium\"]\nclasses = [\"meet.jit.si__\"]\n\
+             [[detect.apps]]\nname = \"Whereby\"\nstreams = \"chromium\"\nclasses = \"whereby.com__, whereby\"\n\
+             [[detect.apps]]\nname = \"Old\"\nstreams = [\"firefox\"]\ntitles = [\"Old Meet\"]\n",
+        )
+        .unwrap();
+        assert_eq!(w.detect.apps[0].classes, vec!["meet.jit.si__"]);
+        assert!(w.detect.apps[0].titles.is_empty());
+        assert!(
+            w.detect.apps[0].needs_window(),
+            "a class is a window to find"
+        );
+        assert_eq!(w.detect.apps[1].classes, vec!["whereby.com__", "whereby"]);
+        // An entry written before `classes` existed reads as it did.
+        assert_eq!(
+            w.detect.apps[2],
+            pattern("Old", &["firefox"], &["Old Meet"])
+        );
     }
 
     #[test]

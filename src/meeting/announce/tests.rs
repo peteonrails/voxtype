@@ -689,6 +689,7 @@ mod live {
                 name: "Fake Call".into(),
                 streams: vec![app.into()],
                 titles: Vec::new(),
+                classes: Vec::new(),
             }],
             ..Default::default()
         }
