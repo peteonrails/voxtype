@@ -314,27 +314,212 @@ fn deletion_reports_a_blocked_wal_checkpoint_and_retries_after_the_reader_closes
     );
 }
 
-/// The Privacy note in the configuration guide used to say dictated text is
-/// never logged at the default level. It is: the daemon logs each
-/// transcription at info. The note and the code are checked together so a
-/// change to either one sends the author to the other.
+/// The Privacy note under `[history]` says where dictated words are stored
+/// (history, recordings kept after a failed transcription, undelivered
+/// text) and that the log is not one of those places: lengths at the default
+/// level, the words only at debug. The note and the code are checked
+/// together so a change to either one sends the author to the other.
 #[test]
-fn the_docs_do_not_promise_that_dictated_text_stays_out_of_the_logs() {
+fn the_privacy_note_says_where_dictated_words_are_kept_and_what_the_log_holds() {
     let root = env!("CARGO_MANIFEST_DIR");
     let docs = std::fs::read_to_string(format!("{root}/docs/CONFIGURATION.md")).unwrap();
-    assert!(
-        !docs.contains("never written to the log"),
-        "the guide must not promise that dictated text is kept out of the logs"
-    );
-    assert!(
-        docs.contains("History is not the only place your words are written")
-            && docs.contains("journalctl --user -u voxtype"),
-        "the Privacy note must say that transcriptions are logged and where"
-    );
+    let history = &docs[docs.find("\n## [history]").expect("the [history] section")..];
+    let note = &history[history.find("\n### Privacy").expect("its Privacy note")..];
+    let note = &note[..note[1..].find("\n## ").map_or(note.len(), |end| end + 1)];
+    let note = note.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for said in [
+        // The three places the words are kept, each with its setting.
+        "History is one of three places",
+        "`[audio] keep_failed_recordings`",
+        "`[output] keep_undelivered_text`",
+        // The log is not a fourth.
+        "voxtype does not log what you say",
+        "journalctl --user -u voxtype",
+        "Transcribed 42 chars (whisper engine)",
+        "logged only at debug level",
+        "the journal keeps every dictation whatever the history settings say",
+    ] {
+        assert!(
+            note.contains(said),
+            "the Privacy note must say {said:?}:\n{note}"
+        );
+    }
+    for stale in [
+        "History is not the only place your words are written",
+        "logs each transcription",
+        "never written to the log",
+    ] {
+        assert!(
+            !note.contains(stale),
+            "the Privacy note still says {stale:?}"
+        );
+    }
+
+    // What the note promises is what the daemon does.
     let daemon = std::fs::read_to_string(format!("{root}/src/daemon.rs")).unwrap();
     assert!(
-        daemon.contains(r#"tracing::info!("Transcribed: {:?}", text)"#),
-        "the daemon no longer logs transcriptions at info: rewrite the Privacy note in \
+        daemon.contains(r#""Transcribed {} chars ({} engine)""#)
+            && daemon.contains(r#"tracing::debug!("Transcribed: {:?}", text)"#)
+            && !daemon.contains(r#"tracing::info!("Transcribed: {:?}", text)"#),
+        "the daemon's transcription log lines changed: rewrite the Privacy note in \
          docs/CONFIGURATION.md to match, then update this test"
     );
+}
+
+#[derive(Clone)]
+struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The promise the Privacy note makes, for the history code itself: storing,
+/// correcting, searching, offering a replacement rule, deleting and pruning
+/// dictations logs none of their words at info, the level the daemon and
+/// its systemd unit run at, on the paths that work and on the ones that
+/// warn. The words are in the day file, which is where the user chose to
+/// keep them, and nowhere in the log.
+///
+/// Runs in a process of its own so its subscriber is the process-wide one
+/// and sees every thread. The daemon's side, a dictation recorded while it
+/// is logged, is `daemon::tests::history_keeps_the_words_and_the_log_at_info_does_not`,
+/// and `tests/log_privacy.rs` scans the source of every log call.
+#[test]
+fn the_history_code_logs_none_of_the_dictated_words_at_the_default_level() {
+    use voxtype::history::{suggest_rule, HistoryIndex, HistoryQuery};
+    const NAME: &str = "the_history_code_logs_none_of_the_dictated_words_at_the_default_level";
+    const CHILD: &str = "VOXTYPE_HISTORY_LOG_PRIVACY_CHILD";
+    if std::env::var(CHILD).as_deref() != Ok(NAME) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(CHILD, NAME)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // "1 passed": a name that matches no test also exits successfully.
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{NAME} in its own process:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = LogSink(lines.clone());
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish(),
+    )
+    .unwrap();
+
+    let t = tempfile::tempdir().unwrap();
+    let store = HistoryStore::open(t.path().join("history")).unwrap();
+    let index = HistoryIndex::open(&t.path().join("meetings/index.db")).unwrap();
+
+    // A dictation as the engine heard it, as it was typed, and as the user
+    // corrected it afterwards.
+    let heard = "um ask the cone ogres about the quarry invoice";
+    let typed = "Ask the cone ogres about the quarry invoice.";
+    let corrected = "Ask the CODEOWNERS about the harbour invoice.";
+    let mut entry = HistoryEntry::new(chrono::Local::now());
+    entry.raw_text = heard.into();
+    entry.text = typed.into();
+    entry.edits = voxtype::history::edits_between(heard, typed);
+    entry.window_title = Some("Quarry invoice draft".into());
+    store.append(&entry).unwrap();
+    index.add(&store, &entry).unwrap();
+    store
+        .update(&entry.id, |e| e.corrected_text = Some(corrected.into()))
+        .unwrap();
+    index.sync(&store).unwrap();
+    let query = HistoryQuery {
+        text: "quarry".into(),
+        limit: 20,
+        since: None,
+    };
+    assert_eq!(index.search(&store, &query).unwrap().len(), 1);
+    assert!(
+        suggest_rule(
+            "ask the cone ogres about it",
+            "ask the CODEOWNERS about it",
+            &Default::default()
+        )
+        .is_some(),
+        "the correction must be one a rule is offered for"
+    );
+    assert_eq!(store.recent(5).unwrap()[0].best_text(), corrected);
+
+    // An older day, for retention and compression to work on.
+    let mut old = HistoryEntry::new(chrono::Local::now() - chrono::Duration::days(40));
+    old.raw_text = "the lighthouse keeper owes us nothing".into();
+    old.text = old.raw_text.clone();
+    store.append(&old).unwrap();
+    let today = chrono::Local::now().date_naive();
+    store.compress_old(today).unwrap();
+    assert_eq!(store.prune(30, today).unwrap().len(), 1);
+
+    // The paths that warn. A line that is not an entry, holding words, is
+    // counted and not quoted; an append refused for a symlinked day names
+    // the file, not the dictation.
+    let day = store.dir().join(format!("{}.jsonl", entry.day().unwrap()));
+    let mut bytes = std::fs::read(&day).unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("cone ogres"),
+        "the words are kept in the day file"
+    );
+    bytes.extend_from_slice(b"{\"raw_text\": \"the quarry gate code is four one\n");
+    std::fs::write(&day, bytes).unwrap();
+    assert_eq!(store.all().unwrap().len(), 1);
+    index.sync(&store).unwrap();
+    assert!(store.delete(&entry.id).unwrap().is_some());
+    index.sync(&store).unwrap();
+    let mut refused = HistoryEntry::new(chrono::Local::now() + chrono::Duration::days(1));
+    refused.raw_text = "the harbour master knows about the quarry".into();
+    refused.text = refused.raw_text.clone();
+    let sentinel = t.path().join("sentinel");
+    std::fs::write(&sentinel, "").unwrap();
+    symlink(
+        &sentinel,
+        store
+            .dir()
+            .join(format!("{}.jsonl", refused.day().unwrap())),
+    )
+    .unwrap();
+    assert!(store.append(&refused).is_err());
+    let _ = store.all();
+    let _ = index.sync(&store);
+    let _ = store.clear(None);
+
+    let logged = String::from_utf8_lossy(&lines.lock().unwrap()).into_owned();
+    assert!(
+        logged.contains("Skipped 1 unreadable line(s)"),
+        "the capture is not seeing what the history code logs:\n{logged}"
+    );
+    let lowered = logged.to_lowercase();
+    for words in [
+        "cone ogres",
+        "codeowners",
+        "quarry",
+        "harbour",
+        "invoice",
+        "lighthouse",
+        "gate code",
+    ] {
+        assert!(
+            !lowered.contains(words),
+            "dictated text ({words:?}) in the log at info:\n{logged}"
+        );
+    }
 }

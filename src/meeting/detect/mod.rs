@@ -6,6 +6,15 @@
 //! window title confirms a call ("Meet - ...", "| Microsoft Teams"). Window
 //! titles come from Hyprland and are skipped on other compositors.
 //!
+//! Both signals come and go during a call. A browser's window title is its
+//! front tab's, so it stops matching when another tab is brought forward,
+//! and the Zoom web client is confirmed by its "Join from Zoom Workplace
+//! app" launcher tab, not by the call's own window, which is titled with
+//! the meeting's name. A call app may also let go of the mic for a while.
+//! So once a call has settled it goes on while either signal is left (see
+//! [`Evidence`]), and it is over when the mic is released and no window
+//! shows the call.
+//!
 //! [`Detector`] is the pure decision logic: it takes [`Snapshot`]s of the
 //! system and emits [`Event`]s, prompting once per call after a debounce.
 //! The live loop around it (PipeWire watching, notifications, starting the
@@ -119,6 +128,9 @@ pub struct Call {
     pub reason: String,
     /// Recorded without asking (`auto_record_apps`).
     pub auto_record: bool,
+    /// A window title confirmed it (a browser call); `false` for a native
+    /// client, which counts on its mic stream alone.
+    pub by_window: bool,
 }
 
 /// One line of explanation about a stream that did not become a call.
@@ -244,12 +256,10 @@ fn confirm(
             title,
             reason: format!("{} has the mic (stream {})", stream.label(), stream.id),
             auto_record,
+            by_window: false,
         });
     }
-    let window = windows.iter().find(|w| {
-        let t = w.title.to_lowercase();
-        app.titles.iter().any(|p| t.contains(&p.to_lowercase()))
-    })?;
+    let window = windows.iter().find(|w| title_confirms(app, w))?;
     Some(Call {
         app: app.name.clone(),
         title: meeting_title(&app.name, Some(&window.title)),
@@ -260,7 +270,56 @@ fn confirm(
             window.title
         ),
         auto_record,
+        by_window: true,
     })
+}
+
+/// Whether a window title confirms a call of `app`.
+fn title_confirms(app: &CallAppPattern, window: &Window) -> bool {
+    let t = window.title.to_lowercase();
+    app.titles.iter().any(|p| t.contains(&p.to_lowercase()))
+}
+
+/// What a snapshot shows of a call that has already settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Evidence {
+    /// Everything that made it a call: the mic and, for a browser call, a
+    /// window title.
+    Full,
+    /// The app let go of the mic, but a window title still shows the call.
+    WindowOnly,
+    /// The app still has the mic, but no window title shows the call: its
+    /// tab is behind another one, or was renamed or closed.
+    MicOnly,
+    /// A browser call whose windows cannot be read right now. Not knowing
+    /// is not the window being gone, so the call goes on. `mic` is whether
+    /// the app still has the mic.
+    WindowsUnknown { mic: bool },
+    /// The mic is released and no window shows the call.
+    Gone,
+}
+
+/// The [`Evidence`] for a settled call of `app` in `snapshot`.
+pub fn evidence(app: &CallAppPattern, snapshot: &Snapshot) -> Evidence {
+    let mic = snapshot
+        .streams
+        .iter()
+        .any(|s| s.ignore_reason().is_none() && s.matches_any(&app.streams));
+    if app.titles.is_empty() {
+        // A native client has no second signal: its mic is all there is.
+        return if mic { Evidence::Full } else { Evidence::Gone };
+    }
+    let window = snapshot
+        .windows
+        .as_deref()
+        .map(|windows| windows.iter().any(|w| title_confirms(app, w)));
+    match (mic, window) {
+        (true, Some(true)) => Evidence::Full,
+        (true, Some(false)) => Evidence::MicOnly,
+        (false, Some(true)) => Evidence::WindowOnly,
+        (false, Some(false)) => Evidence::Gone,
+        (mic, None) => Evidence::WindowsUnknown { mic },
+    }
 }
 
 /// Which service a call app is, for its titles.
@@ -436,9 +495,16 @@ pub enum Event {
     /// The mic closed again before the debounce: a permission check or a
     /// device test, not a call.
     Brief { call: Call },
-    /// The call app released the mic. `offer_stop` is set when a meeting is
-    /// recording, so the user can be offered to stop it (never automatic).
+    /// A settled call lost part of its evidence, or got it back, and goes
+    /// on. Sent when what is seen of it changes.
+    Continues { call: Call, evidence: Evidence },
+    /// The call is over: its app released the mic and, for a browser call,
+    /// no window shows it any more. `offer_stop` is set when a meeting is
+    /// recording, so `on_call_end` can stop it or offer to.
     Ended { call: Call, offer_stop: bool },
+    /// A call that had just ended is back within the grace period: the
+    /// same call, so nothing is offered again and a waiting stop is off.
+    Returned { call: Call },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,20 +515,29 @@ enum Phase {
     WaitingForDictation,
     /// Prompted, recorded, or deliberately skipped. Never prompts again.
     Done,
+    /// Over since `at`, and remembered for the grace period: if its app
+    /// takes the mic again or its window comes back in that time, it is the
+    /// same call, not a new one to prompt for.
+    Ended { at: Instant },
 }
 
 #[derive(Debug, Clone)]
 struct Track {
     call: Call,
     first_seen: Instant,
+    /// When there was last any evidence of the call
     last_seen: Instant,
     phase: Phase,
+    /// What was last seen of it, so a change is reported once
+    evidence: Evidence,
 }
 
 /// Prompts once per call, after the call has held the mic for the debounce.
 pub struct Detector {
     config: MeetingDetectConfig,
     debounce: Duration,
+    /// How long an ended call is remembered (`stop_grace_secs`)
+    grace: Duration,
     tracks: BTreeMap<String, Track>,
 }
 
@@ -473,9 +548,11 @@ impl Detector {
     }
 
     pub fn with_debounce(config: MeetingDetectConfig, debounce: Duration) -> Self {
+        let grace = Duration::from_secs(u64::from(config.stop_grace_secs));
         Self {
             config,
             debounce,
+            grace,
             tracks: BTreeMap::new(),
         }
     }
@@ -504,8 +581,7 @@ impl Detector {
         for call in calls {
             match self.tracks.get_mut(&call.app) {
                 Some(track) => {
-                    track.last_seen = now;
-                    if track.phase != Phase::Done {
+                    if matches!(track.phase, Phase::Settling | Phase::WaitingForDictation) {
                         // Titles settle as the call page loads.
                         track.call = call;
                     }
@@ -522,6 +598,7 @@ impl Detector {
                             first_seen: now,
                             last_seen: now,
                             phase: Phase::Settling,
+                            evidence: Evidence::Full,
                         },
                     );
                 }
@@ -530,54 +607,92 @@ impl Detector {
 
         let mut ended = Vec::new();
         for (app, track) in self.tracks.iter_mut() {
-            let present = track.last_seen == now;
-            if !present {
-                match track.phase {
-                    Phase::Settling | Phase::WaitingForDictation => {
+            // Every track is of an app in the config.
+            let seen = self
+                .config
+                .apps
+                .iter()
+                .find(|a| a.name == *app)
+                .map_or(Evidence::Gone, |a| evidence(a, snapshot));
+            match track.phase {
+                // Until it has settled, a call needs all of its evidence:
+                // a browser with the mic and no call window is no call yet.
+                Phase::Settling | Phase::WaitingForDictation => {
+                    if seen != Evidence::Full {
                         if track.phase == Phase::Settling {
                             events.push(Event::Brief {
                                 call: track.call.clone(),
                             });
                         }
                         ended.push(app.clone());
+                        continue;
                     }
+                    track.last_seen = now;
+                    if now.duration_since(track.first_seen) < self.debounce {
+                        continue;
+                    }
+                    if activity.meeting_active {
+                        events.push(Event::Held {
+                            call: track.call.clone(),
+                            why: "a meeting is already recording".to_string(),
+                        });
+                        track.phase = Phase::Done;
+                    } else if activity.dictating {
+                        if track.phase != Phase::WaitingForDictation {
+                            events.push(Event::Held {
+                                call: track.call.clone(),
+                                why: "dictation is using the mic; will ask when it ends"
+                                    .to_string(),
+                            });
+                            track.phase = Phase::WaitingForDictation;
+                        }
+                    } else {
+                        track.phase = Phase::Done;
+                        events.push(if track.call.auto_record {
+                            Event::AutoRecord(track.call.clone())
+                        } else {
+                            Event::Prompt(track.call.clone())
+                        });
+                    }
+                }
+                Phase::Done if seen == Evidence::Gone => {
                     // A short gap (device switch, reconnect) is not the end
                     // of the call; wait the debounce before saying it is.
-                    Phase::Done if now.duration_since(track.last_seen) >= self.debounce => {
-                        events.push(Event::Ended {
+                    if now.duration_since(track.last_seen) < self.debounce {
+                        continue;
+                    }
+                    events.push(Event::Ended {
+                        call: track.call.clone(),
+                        offer_stop: activity.meeting_active,
+                    });
+                    if self.grace.is_zero() {
+                        ended.push(app.clone());
+                    } else {
+                        track.phase = Phase::Ended { at: now };
+                    }
+                }
+                Phase::Done => {
+                    track.last_seen = now;
+                    if seen != track.evidence {
+                        track.evidence = seen;
+                        events.push(Event::Continues {
                             call: track.call.clone(),
-                            offer_stop: activity.meeting_active,
+                            evidence: seen,
                         });
+                    }
+                }
+                Phase::Ended { at } => {
+                    if seen != Evidence::Gone {
+                        track.phase = Phase::Done;
+                        track.last_seen = now;
+                        track.evidence = seen;
+                        events.push(Event::Returned {
+                            call: track.call.clone(),
+                        });
+                    } else if now.duration_since(at) >= self.grace {
                         ended.push(app.clone());
                     }
-                    Phase::Done => {}
                 }
-                continue;
-            }
-            if track.phase == Phase::Done || now.duration_since(track.first_seen) < self.debounce {
-                continue;
-            }
-            if activity.meeting_active {
-                events.push(Event::Held {
-                    call: track.call.clone(),
-                    why: "a meeting is already recording".to_string(),
-                });
-                track.phase = Phase::Done;
-            } else if activity.dictating {
-                if track.phase != Phase::WaitingForDictation {
-                    events.push(Event::Held {
-                        call: track.call.clone(),
-                        why: "dictation is using the mic; will ask when it ends".to_string(),
-                    });
-                    track.phase = Phase::WaitingForDictation;
-                }
-            } else {
-                track.phase = Phase::Done;
-                events.push(if track.call.auto_record {
-                    Event::AutoRecord(track.call.clone())
-                } else {
-                    Event::Prompt(track.call.clone())
-                });
             }
         }
         for app in ended {
@@ -606,16 +721,47 @@ pub fn describe(event: &Event) -> String {
             "ignored a brief mic open by {} (shorter than the debounce)",
             call.app
         ),
+        Event::Continues { call, evidence } => {
+            let saw = match evidence {
+                Evidence::Full if call.by_window => "has the mic and its call window again",
+                Evidence::Full => "has the mic again",
+                Evidence::WindowOnly => {
+                    "released the mic, but its call window is still open (muted, or reconnecting)"
+                }
+                Evidence::MicOnly => {
+                    "still has the mic, but no window title shows the call any more \
+                     (another tab or page is in front)"
+                }
+                Evidence::WindowsUnknown { mic: true } => {
+                    "still has the mic; window titles cannot be read right now"
+                }
+                Evidence::WindowsUnknown { mic: false } => {
+                    "released the mic, and window titles cannot be read right now, \
+                     so the call is not taken to be over"
+                }
+                Evidence::Gone => "left no sign",
+            };
+            format!("call continues: {} {}", call.app, saw)
+        }
         Event::Ended { call, offer_stop } => {
+            let gone = if call.by_window {
+                "released the mic and no window shows the call any more"
+            } else {
+                "released the mic"
+            };
             if *offer_stop {
                 format!(
-                    "call ended: {} released the mic while a meeting records ([meeting.detect] on_call_end decides)",
-                    call.app
+                    "call ended: {} {} while a meeting records ([meeting.detect] on_call_end decides)",
+                    call.app, gone
                 )
             } else {
-                format!("call ended: {} released the mic", call.app)
+                format!("call ended: {} {}", call.app, gone)
             }
         }
+        Event::Returned { call } => format!(
+            "call is back: {} is seen again within the grace period; the same call, so nothing is offered again",
+            call.app
+        ),
     }
 }
 

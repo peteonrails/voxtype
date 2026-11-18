@@ -17,6 +17,11 @@ use chrono::Utc;
 use serde::Deserialize;
 use thiserror::Error;
 
+/// How a [`SummaryError::Parse`] message starts. The rest of it can quote
+/// the model's answer, so a log line at the default level stops here (see
+/// `assistant::summarize::error_for_log`).
+pub(crate) const PARSE_FAILED: &str = "Failed to parse LLM response";
+
 /// Summary-related errors
 #[derive(Error, Debug)]
 pub enum SummaryError {
@@ -26,7 +31,7 @@ pub enum SummaryError {
     #[error("LLM request failed: {0}")]
     Request(String),
 
-    #[error("Failed to parse LLM response: {0}")]
+    #[error("{}: {0}", PARSE_FAILED)]
     Parse(String),
 
     #[error("Transcript is empty")]

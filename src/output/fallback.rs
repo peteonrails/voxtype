@@ -265,6 +265,32 @@ pub fn failure_notice(
     kept: &Undelivered,
     env: &FixEnv,
 ) -> Notice {
+    let mut body = failure_details(report, err, kept, env);
+    if *kept != Undelivered::NotKept {
+        let preview = if text.chars().count() > 300 {
+            format!("{}...", text.chars().take(300).collect::<String>())
+        } else {
+            text.to_string()
+        };
+        body.push_str(&format!("\nText: {preview}"));
+    }
+    Notice {
+        key: "all-failed".to_string(),
+        title: FAILURE_TITLE.to_string(),
+        body,
+    }
+}
+
+const FAILURE_TITLE: &str = "Voxtype: transcription not delivered";
+
+/// Everything the failure notification says except the text: what failed,
+/// the fixes, and where the text was saved or that it was not kept.
+fn failure_details(
+    report: &OutputReport,
+    err: &OutputError,
+    kept: &Undelivered,
+    env: &FixEnv,
+) -> String {
     let mut body = short_error(&err.to_string());
     let lines: Vec<String> = report
         .skipped
@@ -275,25 +301,37 @@ pub fn failure_notice(
         body.push('\n');
         body.push_str(&lines.join("\n"));
     }
-    if *kept == Undelivered::NotKept {
-        body.push('\n');
-        body.push_str(NOT_KEPT_LINE);
-    } else {
-        if let Undelivered::Saved(path) = kept {
+    match kept {
+        Undelivered::NotKept => {
+            body.push('\n');
+            body.push_str(NOT_KEPT_LINE);
+        }
+        Undelivered::Saved(path) => {
             body.push_str(&format!("\nText saved to {}", path.display()));
         }
-        let preview = if text.chars().count() > 300 {
-            format!("{}...", text.chars().take(300).collect::<String>())
-        } else {
-            text.to_string()
-        };
-        body.push_str(&format!("\nText: {preview}"));
+        Undelivered::SaveFailed => {}
     }
-    Notice {
-        key: "all-failed".to_string(),
-        title: "Voxtype: transcription not delivered".to_string(),
-        body,
-    }
+    body
+}
+
+/// The log line for a run where no method delivered the text: the failure
+/// notification without the text. The notification quotes the dictation so
+/// it is not lost; the log (the journal, for the service) must not, or it
+/// would keep the words of a user who turned `keep_undelivered_text` off or
+/// deletes the saved files.
+fn failure_log_line(
+    report: &OutputReport,
+    err: &OutputError,
+    text: &str,
+    kept: &Undelivered,
+    env: &FixEnv,
+) -> String {
+    format!(
+        "{}: {} | {} chars not delivered",
+        FAILURE_TITLE,
+        failure_details(report, err, kept, env).replace('\n', " | "),
+        text.chars().count()
+    )
 }
 
 /// Problems already reported this run, so a missing tool is reported once
@@ -380,8 +418,10 @@ pub async fn notify_failed(report: &OutputReport, err: &OutputError, text: &str,
         text,
         UNDELIVERED_KEEP,
     );
-    let notice = failure_notice(report, err, text, &kept, &FixEnv::gather());
-    tracing::error!("{}: {}", notice.title, notice.body.replace('\n', " | "));
+    let env = FixEnv::gather();
+    let notice = failure_notice(report, err, text, &kept, &env);
+    let line = failure_log_line(report, err, text, &kept, &env);
+    tracing::error!("{}", line);
     crate::notification::send_status(
         &notice.title,
         &notice.body,
@@ -703,6 +743,48 @@ mod tests {
             "Text saved to /home/u/.local/state/voxtype/undelivered/20261020-093900-123.txt"
         ));
         assert!(notice.body.ends_with("Text: hello world"));
+    }
+
+    /// The notification quotes the dictation so it is not lost; the log
+    /// line for the same failure must not, whatever became of the text.
+    #[test]
+    fn failure_log_line_leaves_the_text_out() {
+        let report = OutputReport {
+            delivered_by: None,
+            skipped: vec![unavailable("wtype"), unavailable("clipboard (wl-copy)")],
+            modifier_skip: false,
+        };
+        let text = "meet me at the quarry at nine";
+        let saved =
+            PathBuf::from("/home/u/.local/state/voxtype/undelivered/20261020-093900-123.txt");
+        for kept in [
+            Undelivered::Saved(saved.clone()),
+            Undelivered::SaveFailed,
+            Undelivered::NotKept,
+        ] {
+            let env = env(DisplaySession::Wayland, false);
+            let err = OutputError::AllMethodsFailed;
+            let notice = failure_notice(&report, &err, text, &kept, &env);
+            let line = failure_log_line(&report, &err, text, &kept, &env);
+
+            for word in ["meet", "quarry", "nine"] {
+                assert!(!line.contains(word), "{kept:?}: {line}");
+            }
+            // Everything else the notification says is still logged.
+            assert!(line.starts_with("Voxtype: transcription not delivered: "));
+            assert!(line.contains("wtype: not installed. Fix: sudo pacman -S wtype"));
+            assert!(line.ends_with("| 29 chars not delivered"), "{line}");
+            assert!(!line.contains('\n'));
+            assert_eq!(
+                line.contains(&format!("Text saved to {}", saved.display())),
+                matches!(kept, Undelivered::Saved(_))
+            );
+            assert_eq!(
+                notice.body.contains(text),
+                kept != Undelivered::NotKept,
+                "the notification still carries the text when it may: {kept:?}"
+            );
+        }
     }
 
     #[test]

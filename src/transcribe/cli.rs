@@ -178,15 +178,7 @@ impl Transcriber for CliTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
         let text = self.run(samples)?.text();
-        tracing::info!(
-            "Transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if text.chars().count() > 50 {
-                format!("{}...", text.chars().take(50).collect::<String>())
-            } else {
-                text.clone()
-            }
-        );
+        super::log_transcription("Transcription", start, &text);
         Ok(text)
     }
 

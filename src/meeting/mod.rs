@@ -1096,12 +1096,14 @@ impl MeetingDaemon {
         // times running: keep one instance.
         for segment in &mut result.segments {
             if let Some(collapsed) = repeat::collapse(&segment.text) {
+                // What was said stays out of the default log level.
                 tracing::info!(
-                    "Collapsed a repeated phrase in a {} line: {:?} (was {} words)",
+                    "Collapsed a repeated phrase in a {} line ({} words down to {})",
                     source,
-                    collapsed,
-                    segment.text.split_whitespace().count()
+                    segment.text.split_whitespace().count(),
+                    collapsed.split_whitespace().count()
                 );
+                tracing::debug!("Collapsed line: {:?}", collapsed);
                 segment.text = collapsed;
             }
         }

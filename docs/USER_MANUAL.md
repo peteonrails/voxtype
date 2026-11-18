@@ -384,9 +384,11 @@ $ voxtype
 [INFO] Recording started...
 [INFO] Recording stopped (1.2s)
 [INFO] Transcribing...
-[INFO] Transcribed: "Hello world"
+[INFO] Transcribed 11 chars (whisper engine)
 [INFO] Typed 11 characters
 ```
+
+The log says that you dictated and how long the text was, not what you said. See [What the log contains](#what-the-log-contains) to make it show the text when you are reporting a recognition problem.
 
 ---
 
@@ -654,7 +656,14 @@ The running daemon reloads history settings without a restart. Explicit daemon
 flags and environment overrides still take precedence. An invalid config edit
 does not replace the daemon's last valid settings; check the command's exit
 status rather than assuming a failed write paused history. Disabling history
-keeps existing entries and does not change the daemon's logging policy.
+keeps existing entries.
+
+History, recordings kept after a failed transcription (`[audio]
+keep_failed_recordings`) and text that could not be delivered (`[output]
+keep_undelivered_text`) are the places dictated words are stored, each with
+its own setting. The log is not one of them: at the normal level it holds the
+length of each dictation, not the words, whether history is on, paused or
+off. See [What the log contains](#what-the-log-contains).
 
 The built-in excluded apps include KeePassXC, Bitwarden, 1Password and Proton
 Pass. An exclusion suppresses the entry when the focused app is identified at
@@ -3213,9 +3222,9 @@ While Voxtype is running:
 ### Verbosity Levels
 
 ```bash
-voxtype           # Normal output
-voxtype -v        # Verbose (shows transcription progress)
-voxtype -vv       # Debug (shows all internal operations)
+voxtype           # Normal output (info level)
+voxtype -v        # Debug level: each step of a dictation, and the transcribed text
+voxtype -vv       # Trace level: everything
 voxtype -q        # Quiet (errors only)
 ```
 
@@ -3224,6 +3233,29 @@ voxtype -q        # Quiet (errors only)
 ```bash
 journalctl --user -u voxtype -f
 ```
+
+### What the log contains
+
+At the normal level voxtype does not log what you say. A dictation is logged as its length and the engine that produced it (`Transcribed 42 chars (whisper engine)`), and the same goes for meeting transcript lines, text that could not be typed or copied, and text sent to a post-processing command. This matters because the systemd service logs to the journal, which keeps what it is given for weeks or months: with the text in it, the journal would hold everything you dictate even with [dictation history](#voxtype-history), `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` turned off.
+
+The text is logged at debug level, which is off unless you turn it on. Turn it on when you are reporting a recognition problem and want the log to show what the engine heard:
+
+```bash
+# In a terminal, with the service stopped
+systemctl --user stop voxtype
+voxtype -v
+
+# Or for the service: add the variable, restart, reproduce the problem
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+journalctl --user -u voxtype -f
+```
+
+Remove the `Environment=` line and restart the service when you are done, or the journal keeps collecting what you dictate. A debug log contains your dictations, so read it before you attach it to a bug report.
+
+Two things are logged as they come, at any level: the output of a command you configured (`post_meeting_command`, and the error output of a failing post-processing command or hook), and meeting titles.
 
 ### Environment Variables
 

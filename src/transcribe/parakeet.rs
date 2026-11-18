@@ -221,15 +221,10 @@ impl ParakeetTranscriber {
     fn transcribe_one(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
         let text = self.infer(samples)?.text.trim().to_string();
-        tracing::info!(
-            "Parakeet {:?} transcription completed in {:.2}s: {:?}",
-            self.model_type,
-            start.elapsed().as_secs_f32(),
-            if text.chars().count() > 50 {
-                format!("{}...", text.chars().take(50).collect::<String>())
-            } else {
-                text.clone()
-            }
+        super::log_transcription(
+            &format!("Parakeet {:?} transcription", self.model_type),
+            start,
+            &text,
         );
         Ok(text)
     }
