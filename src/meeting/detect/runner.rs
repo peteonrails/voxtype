@@ -1177,6 +1177,89 @@ mod tests {
         assert_eq!(log.take(), vec!["close 2", "stop"]);
     }
 
+    /// [`look`], with the Zoom web client's own window open as well: an
+    /// app window named after the meeting's address and titled with the
+    /// meeting's name.
+    fn look_with_web_client(mic: bool, front_tab: &str) -> Snapshot {
+        let mut snapshot = look(mic, Some(front_tab));
+        snapshot.windows.get_or_insert_with(Vec::new).push(Window {
+            class: "chrome-app.zoom.us__wc_join_1234567890-Default".into(),
+            title: "Weekly sync".into(),
+            pid: Some(42000),
+        });
+        snapshot
+    }
+
+    /// A Zoom call joined with another tab in front: found by the web
+    /// client's window, offered under the meeting's name, and stopped when
+    /// that window closes, though the launcher tab is in front by then.
+    #[tokio::test]
+    async fn a_zoom_call_found_by_its_own_window_is_recorded_and_stopped() {
+        let log = Log::default();
+        let t0 = Instant::now();
+        let mut d = Detector::new(crate::config::MeetingDetectConfig::default());
+        let mut c = controller(&log);
+
+        // The window alone, before the browser has the mic, shows nothing.
+        let waiting = look_with_web_client(false, OTHER_TAB);
+        live(&mut d, &mut c, &waiting, false, t0, 0, 60).await;
+        assert!(log.take().is_empty(), "no mic, no prompt");
+
+        let joined = look_with_web_client(true, OTHER_TAB);
+        live(&mut d, &mut c, &joined, false, t0, 60, 70).await;
+        c.on_response((1, "record".into())).await;
+        assert_eq!(
+            log.take(),
+            vec![
+                "show 1 Record \"Weekly sync\" as a meeting?\nLet the others know you're transcribing. [default,record,dismiss]",
+                "start Weekly sync",
+                "close 1",
+            ]
+        );
+
+        // Tabs come and go, and the mic is released for ten minutes.
+        live(
+            &mut d,
+            &mut c,
+            &look_with_web_client(true, LAUNCHER_TAB),
+            true,
+            t0,
+            70,
+            130,
+        )
+        .await;
+        live(
+            &mut d,
+            &mut c,
+            &look_with_web_client(false, OTHER_TAB),
+            true,
+            t0,
+            130,
+            730,
+        )
+        .await;
+        live(&mut d, &mut c, &joined, true, t0, 730, 790).await;
+        assert!(
+            log.take().is_empty(),
+            "no notice, no stop, no second prompt"
+        );
+        assert_eq!(c.stop_due_at(), None);
+
+        // Leaving: the mic is released and the web client's window closes.
+        let left = look(false, Some(LAUNCHER_TAB));
+        live(&mut d, &mut c, &left, true, t0, 790, 794).await;
+        assert_eq!(c.stop_due_at(), None, "not before the debounce");
+        live(&mut d, &mut c, &left, true, t0, 794, 800).await;
+        assert_eq!(
+            log.take(),
+            vec![
+                "show 2 Zoom (web) released the microphone. Stopping the recording in 20 s. [keep]"
+            ]
+        );
+        c.fire_due_stop(true).await;
+        assert_eq!(log.take(), vec!["close 2", "stop"]);
+    }
+
     #[tokio::test]
     async fn the_call_back_within_the_grace_period_calls_the_stop_off() {
         for back in [

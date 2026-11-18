@@ -3,17 +3,24 @@
 //! A call shows up as a call app opening a microphone capture stream in
 //! PipeWire. Native clients (Zoom, Teams) count on that alone; a browser
 //! opens the mic for many things, so a browser stream only counts when a
-//! window title confirms a call ("Meet - ...", "| Microsoft Teams"). Window
-//! titles come from Hyprland and are skipped on other compositors.
+//! window confirms a call: by its title ("Meet - ...", "| Microsoft
+//! Teams") or by its class, when the call has a window of its own (the Zoom
+//! web client, `chrome-app.zoom.us__wc_join_...`). Windows come from
+//! Hyprland and are skipped on other compositors.
 //!
 //! Both signals come and go during a call. A browser's window title is its
-//! front tab's, so it stops matching when another tab is brought forward,
-//! and the Zoom web client is confirmed by its "Join from Zoom Workplace
-//! app" launcher tab, not by the call's own window, which is titled with
-//! the meeting's name. A call app may also let go of the mic for a while.
-//! So once a call has settled it goes on while either signal is left (see
-//! [`Evidence`]), and it is over when the mic is released and no window
-//! shows the call.
+//! front tab's, so it stops matching when another tab is brought forward.
+//! A call app may also let go of the mic for a while. So once a call has
+//! settled it goes on while either signal is left (see [`Evidence`]), and
+//! it is over when the mic is released and no window shows the call.
+//!
+//! The Zoom web client's window is titled with the meeting's name, so no
+//! title finds it: only the "Join from Zoom Workplace app" tab that
+//! launched it has a title that says Zoom, and that tab is neither in
+//! front for long nor closed when the call ends. Its class finds the
+//! window itself. Once a call's own window has been seen, a title no
+//! longer speaks for that call: when the window closes and the mic is
+//! released, the call is over, whatever tab is in front.
 //!
 //! [`Detector`] is the pure decision logic: it takes [`Snapshot`]s of the
 //! system and emits [`Event`]s, prompting once per call after a debounce.
@@ -179,11 +186,19 @@ pub fn find_calls(snapshot: &Snapshot, config: &MeetingDetectConfig) -> (Vec<Cal
             let why = if snapshot.windows.is_none() {
                 "window titles are unavailable (not on Hyprland)".to_string()
             } else {
-                let wanted: Vec<String> = apps
-                    .iter()
-                    .flat_map(|a| a.titles.iter().map(|t| format!("\"{}\"", t)))
-                    .collect();
-                format!("no window title contains {}", wanted.join(" or "))
+                let quoted = |list: &[String]| -> Vec<String> {
+                    list.iter().map(|t| format!("\"{}\"", t)).collect()
+                };
+                let titles: Vec<String> = apps.iter().flat_map(|a| quoted(&a.titles)).collect();
+                let classes: Vec<String> = apps.iter().flat_map(|a| quoted(&a.classes)).collect();
+                let mut why = Vec::new();
+                if !titles.is_empty() {
+                    why.push(format!("no window title contains {}", titles.join(" or ")));
+                }
+                if !classes.is_empty() {
+                    why.push(format!("no window class contains {}", classes.join(" or ")));
+                }
+                why.join(" and ")
             };
             notes.push(Note(format!(
                 "mic stream {} ({}) has the mic, but {}",
@@ -232,7 +247,7 @@ fn confirm(
         .iter()
         .any(|a| a.trim().eq_ignore_ascii_case(&app.name));
     let windows = windows.unwrap_or(&[]);
-    if app.titles.is_empty() {
+    if !app.needs_window() {
         // Native client: the mic is enough. Title from its own window,
         // preferring one that looks like a meeting.
         let own: Vec<&Window> = windows
@@ -259,6 +274,28 @@ fn confirm(
             by_window: false,
         });
     }
+    // The call's own window first: its title is the meeting's, where a
+    // title match may only be the tab that launched the call.
+    if let Some((window, class)) = windows
+        .iter()
+        .find_map(|w| class_confirms(app, w).map(|class| (w, class)))
+    {
+        return Some(Call {
+            app: app.name.clone(),
+            title: meeting_title(&app.name, Some(&window.title)),
+            // The pattern, not the class: the class holds the meeting's
+            // number, which has no place in the journal.
+            reason: format!(
+                "{} has the mic (stream {}) and its call window \"{}\" is open (class contains \"{}\")",
+                stream.label(),
+                stream.id,
+                window.title,
+                class
+            ),
+            auto_record,
+            by_window: true,
+        });
+    }
     let window = windows.iter().find(|w| title_confirms(app, w))?;
     Some(Call {
         app: app.name.clone(),
@@ -280,16 +317,35 @@ fn title_confirms(app: &CallAppPattern, window: &Window) -> bool {
     app.titles.iter().any(|p| t.contains(&p.to_lowercase()))
 }
 
+/// The class pattern of `app` that makes `window` the call's own window,
+/// if one does.
+fn class_confirms<'a>(app: &'a CallAppPattern, window: &Window) -> Option<&'a str> {
+    let class = window.class.to_lowercase();
+    app.classes
+        .iter()
+        .find(|p| class.contains(&p.to_lowercase()))
+        .map(String::as_str)
+}
+
+/// Whether the snapshot shows a window of `app`'s call itself, found by
+/// its class.
+pub fn has_own_window(app: &CallAppPattern, snapshot: &Snapshot) -> bool {
+    snapshot
+        .windows
+        .as_deref()
+        .is_some_and(|windows| windows.iter().any(|w| class_confirms(app, w).is_some()))
+}
+
 /// What a snapshot shows of a call that has already settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Evidence {
     /// Everything that made it a call: the mic and, for a browser call, a
-    /// window title.
+    /// window.
     Full,
-    /// The app let go of the mic, but a window title still shows the call.
+    /// The app let go of the mic, but a window still shows the call.
     WindowOnly,
-    /// The app still has the mic, but no window title shows the call: its
-    /// tab is behind another one, or was renamed or closed.
+    /// The app still has the mic, but no window shows the call: its tab is
+    /// behind another one, or was renamed or closed.
     MicOnly,
     /// A browser call whose windows cannot be read right now. Not knowing
     /// is not the window being gone, so the call goes on. `mic` is whether
@@ -299,20 +355,26 @@ pub enum Evidence {
     Gone,
 }
 
-/// The [`Evidence`] for a settled call of `app` in `snapshot`.
-pub fn evidence(app: &CallAppPattern, snapshot: &Snapshot) -> Evidence {
+/// The [`Evidence`] for a call of `app` in `snapshot`.
+///
+/// `own_window_only` is for a call whose own window has been seen
+/// ([`has_own_window`]): only that window shows it then, not a title. The
+/// tab that launched a Zoom call keeps its "Join from Zoom Workplace app"
+/// title long after the call's window has closed.
+pub fn evidence(app: &CallAppPattern, snapshot: &Snapshot, own_window_only: bool) -> Evidence {
     let mic = snapshot
         .streams
         .iter()
         .any(|s| s.ignore_reason().is_none() && s.matches_any(&app.streams));
-    if app.titles.is_empty() {
+    if !app.needs_window() {
         // A native client has no second signal: its mic is all there is.
         return if mic { Evidence::Full } else { Evidence::Gone };
     }
-    let window = snapshot
-        .windows
-        .as_deref()
-        .map(|windows| windows.iter().any(|w| title_confirms(app, w)));
+    let window = snapshot.windows.as_deref().map(|windows| {
+        windows.iter().any(|w| {
+            class_confirms(app, w).is_some() || (!own_window_only && title_confirms(app, w))
+        })
+    });
     match (mic, window) {
         (true, Some(true)) => Evidence::Full,
         (true, Some(false)) => Evidence::MicOnly,
@@ -410,9 +472,12 @@ pub fn meeting_title(app: &str, window_title: Option<&str>) -> String {
         Service::Zoom => {
             let t = without_suffix(&cleaned, &[" - zoom", " | zoom", " – zoom"]).trim();
             let lower = t.to_lowercase();
+            // "app.zoom.us_/wc/join/...": the web client's window before
+            // its page has a title.
             (!ZOOM_GENERIC.contains(&lower.as_str())
                 && !lower.contains("join from zoom")
-                && !lower.contains("zoom workplace"))
+                && !lower.contains("zoom workplace")
+                && !lower.contains("zoom.us"))
             .then(|| t.to_string())
         }
         Service::Meet => {
@@ -530,6 +595,9 @@ struct Track {
     phase: Phase,
     /// What was last seen of it, so a change is reported once
     evidence: Evidence,
+    /// The call's own window has been seen (by its class), so titles no
+    /// longer count as its window
+    own_window: bool,
 }
 
 /// Prompts once per call, after the call has held the mic for the debounce.
@@ -599,6 +667,7 @@ impl Detector {
                             last_seen: now,
                             phase: Phase::Settling,
                             evidence: Evidence::Full,
+                            own_window: false,
                         },
                     );
                 }
@@ -608,12 +677,11 @@ impl Detector {
         let mut ended = Vec::new();
         for (app, track) in self.tracks.iter_mut() {
             // Every track is of an app in the config.
-            let seen = self
-                .config
-                .apps
-                .iter()
-                .find(|a| a.name == *app)
-                .map_or(Evidence::Gone, |a| evidence(a, snapshot));
+            let pattern = self.config.apps.iter().find(|a| a.name == *app);
+            if pattern.is_some_and(|a| has_own_window(a, snapshot)) {
+                track.own_window = true;
+            }
+            let seen = pattern.map_or(Evidence::Gone, |a| evidence(a, snapshot, track.own_window));
             match track.phase {
                 // Until it has settled, a call needs all of its evidence:
                 // a browser with the mic and no call window is no call yet.
@@ -729,8 +797,8 @@ pub fn describe(event: &Event) -> String {
                     "released the mic, but its call window is still open (muted, or reconnecting)"
                 }
                 Evidence::MicOnly => {
-                    "still has the mic, but no window title shows the call any more \
-                     (another tab or page is in front)"
+                    "still has the mic, but no window shows the call any more \
+                     (another tab is in front, or its window was closed)"
                 }
                 Evidence::WindowsUnknown { mic: true } => {
                     "still has the mic; window titles cannot be read right now"
