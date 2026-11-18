@@ -1192,7 +1192,7 @@ mod tests {
 
     /// A Zoom call joined with another tab in front: found by the web
     /// client's window, offered under the meeting's name, and stopped when
-    /// that window closes.
+    /// that window closes, though the launcher tab is in front by then.
     #[tokio::test]
     async fn a_zoom_call_found_by_its_own_window_is_recorded_and_stopped() {
         let log = Log::default();
@@ -1246,7 +1246,7 @@ mod tests {
         assert_eq!(c.stop_due_at(), None);
 
         // Leaving: the mic is released and the web client's window closes.
-        let left = look(false, Some(OTHER_TAB));
+        let left = look(false, Some(LAUNCHER_TAB));
         live(&mut d, &mut c, &left, true, t0, 790, 794).await;
         assert_eq!(c.stop_due_at(), None, "not before the debounce");
         live(&mut d, &mut c, &left, true, t0, 794, 800).await;

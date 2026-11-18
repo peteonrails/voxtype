@@ -16,8 +16,11 @@
 //!
 //! The Zoom web client's window is titled with the meeting's name, so no
 //! title finds it: only the "Join from Zoom Workplace app" tab that
-//! launched it has a title that says Zoom, and that tab is not in front
-//! for long. Its class finds the window itself.
+//! launched it has a title that says Zoom, and that tab is neither in
+//! front for long nor closed when the call ends. Its class finds the
+//! window itself. Once a call's own window has been seen, a title no
+//! longer speaks for that call: when the window closes and the mic is
+//! released, the call is over, whatever tab is in front.
 //!
 //! [`Detector`] is the pure decision logic: it takes [`Snapshot`]s of the
 //! system and emits [`Event`]s, prompting once per call after a debounce.
@@ -324,6 +327,15 @@ fn class_confirms<'a>(app: &'a CallAppPattern, window: &Window) -> Option<&'a st
         .map(String::as_str)
 }
 
+/// Whether the snapshot shows a window of `app`'s call itself, found by
+/// its class.
+pub fn has_own_window(app: &CallAppPattern, snapshot: &Snapshot) -> bool {
+    snapshot
+        .windows
+        .as_deref()
+        .is_some_and(|windows| windows.iter().any(|w| class_confirms(app, w).is_some()))
+}
+
 /// What a snapshot shows of a call that has already settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Evidence {
@@ -343,8 +355,13 @@ pub enum Evidence {
     Gone,
 }
 
-/// The [`Evidence`] for a settled call of `app` in `snapshot`.
-pub fn evidence(app: &CallAppPattern, snapshot: &Snapshot) -> Evidence {
+/// The [`Evidence`] for a call of `app` in `snapshot`.
+///
+/// `own_window_only` is for a call whose own window has been seen
+/// ([`has_own_window`]): only that window shows it then, not a title. The
+/// tab that launched a Zoom call keeps its "Join from Zoom Workplace app"
+/// title long after the call's window has closed.
+pub fn evidence(app: &CallAppPattern, snapshot: &Snapshot, own_window_only: bool) -> Evidence {
     let mic = snapshot
         .streams
         .iter()
@@ -354,9 +371,9 @@ pub fn evidence(app: &CallAppPattern, snapshot: &Snapshot) -> Evidence {
         return if mic { Evidence::Full } else { Evidence::Gone };
     }
     let window = snapshot.windows.as_deref().map(|windows| {
-        windows
-            .iter()
-            .any(|w| class_confirms(app, w).is_some() || title_confirms(app, w))
+        windows.iter().any(|w| {
+            class_confirms(app, w).is_some() || (!own_window_only && title_confirms(app, w))
+        })
     });
     match (mic, window) {
         (true, Some(true)) => Evidence::Full,
@@ -578,6 +595,9 @@ struct Track {
     phase: Phase,
     /// What was last seen of it, so a change is reported once
     evidence: Evidence,
+    /// The call's own window has been seen (by its class), so titles no
+    /// longer count as its window
+    own_window: bool,
 }
 
 /// Prompts once per call, after the call has held the mic for the debounce.
@@ -647,6 +667,7 @@ impl Detector {
                             last_seen: now,
                             phase: Phase::Settling,
                             evidence: Evidence::Full,
+                            own_window: false,
                         },
                     );
                 }
@@ -656,12 +677,11 @@ impl Detector {
         let mut ended = Vec::new();
         for (app, track) in self.tracks.iter_mut() {
             // Every track is of an app in the config.
-            let seen = self
-                .config
-                .apps
-                .iter()
-                .find(|a| a.name == *app)
-                .map_or(Evidence::Gone, |a| evidence(a, snapshot));
+            let pattern = self.config.apps.iter().find(|a| a.name == *app);
+            if pattern.is_some_and(|a| has_own_window(a, snapshot)) {
+                track.own_window = true;
+            }
+            let seen = pattern.map_or(Evidence::Gone, |a| evidence(a, snapshot, track.own_window));
             match track.phase {
                 // Until it has settled, a call needs all of its evidence:
                 // a browser with the mic and no call window is no call yet.

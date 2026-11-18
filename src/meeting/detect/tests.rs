@@ -518,6 +518,7 @@ fn no_call_means_no_targets() {
 //
 //   clients-zoom-web.json            launcher tab in front, web client open
 //   clients-zoom-web-other-tab.json  another tab in front, web client open
+//   clients-zoom-web-left.json       launcher tab in front, web client closed
 //   clients-browsing.json            another tab in front, web client closed
 
 const RECORDING: Activity = Activity {
@@ -647,7 +648,7 @@ fn evidence_is_the_mic_and_for_a_browser_call_its_window() {
         ),
     ] {
         assert_eq!(
-            evidence(app(name), &snap(pw, clients)),
+            evidence(app(name), &snap(pw, clients), false),
             want,
             "{name} {pw} {clients:?}"
         );
@@ -655,27 +656,83 @@ fn evidence_is_the_mic_and_for_a_browser_call_its_window() {
 }
 
 /// The Zoom web client's window counts by its class, whatever tab is in
-/// front.
+/// front. Once that window has been seen (`own`), the launcher tab's title
+/// no longer stands in for it.
 #[test]
 fn the_zoom_web_client_window_is_evidence_by_its_class() {
     let cfg = config();
     let zoom = cfg.apps.iter().find(|a| a.name == "Zoom (web)").unwrap();
     const MIC: &str = "pw-chromium-zoom-web.json";
     const NO_MIC: &str = "pw-idle.json";
-    for (pw, clients, want) in [
-        (MIC, Some("clients-zoom-web.json"), Evidence::Full),
-        (MIC, Some("clients-zoom-web-other-tab.json"), Evidence::Full),
+    for (pw, clients, own, want) in [
+        (MIC, Some("clients-zoom-web.json"), false, Evidence::Full),
+        (MIC, Some("clients-zoom-web.json"), true, Evidence::Full),
+        (
+            MIC,
+            Some("clients-zoom-web-other-tab.json"),
+            false,
+            Evidence::Full,
+        ),
+        (
+            MIC,
+            Some("clients-zoom-web-other-tab.json"),
+            true,
+            Evidence::Full,
+        ),
         (
             NO_MIC,
             Some("clients-zoom-web-other-tab.json"),
+            true,
             Evidence::WindowOnly,
         ),
-        (MIC, Some("clients-browsing.json"), Evidence::MicOnly),
-        (NO_MIC, Some("clients-browsing.json"), Evidence::Gone),
-        (MIC, None, Evidence::WindowsUnknown { mic: true }),
-        (NO_MIC, None, Evidence::WindowsUnknown { mic: false }),
+        // The web client closed, the launcher tab still in front.
+        (
+            MIC,
+            Some("clients-zoom-web-left.json"),
+            false,
+            Evidence::Full,
+        ),
+        (
+            MIC,
+            Some("clients-zoom-web-left.json"),
+            true,
+            Evidence::MicOnly,
+        ),
+        (
+            NO_MIC,
+            Some("clients-zoom-web-left.json"),
+            false,
+            Evidence::WindowOnly,
+        ),
+        (
+            NO_MIC,
+            Some("clients-zoom-web-left.json"),
+            true,
+            Evidence::Gone,
+        ),
+        (NO_MIC, Some("clients-browsing.json"), true, Evidence::Gone),
+        (MIC, None, true, Evidence::WindowsUnknown { mic: true }),
+        (NO_MIC, None, true, Evidence::WindowsUnknown { mic: false }),
     ] {
-        assert_eq!(evidence(zoom, &snap(pw, clients)), want, "{pw} {clients:?}");
+        assert_eq!(
+            evidence(zoom, &snap(pw, clients), own),
+            want,
+            "{pw} {clients:?} own={own}"
+        );
+    }
+    assert!(has_own_window(
+        zoom,
+        &snap(NO_MIC, Some("clients-zoom-web-other-tab.json"))
+    ));
+    for clients in [
+        Some("clients-zoom-web-left.json"),
+        // The native client's windows are class "zoom", not the web
+        // client's.
+        Some("clients-zoom.json"),
+        Some("clients-meet-chromium.json"),
+        None,
+    ] {
+        assert!(!has_own_window(zoom, &snap(MIC, clients)), "{clients:?}");
     }
 }
 
@@ -1256,27 +1313,35 @@ fn a_released_mic_with_the_web_client_window_open_is_not_the_end() {
 }
 
 /// Leaving the call closes the web client's window and releases the mic.
-/// With no window title that says Zoom either, that is the end after the
-/// debounce.
+/// That is the end after the debounce, with another tab in front or with
+/// the launcher tab still there: its title is not this call's window.
 #[test]
-fn closing_the_web_client_window_ends_the_call() {
-    let t0 = Instant::now();
-    let mut d = recorded_zoom_web_call(t0);
-    let left = snap("pw-idle.json", Some("clients-browsing.json"));
-    assert!(watch(&mut d, &left, RECORDING, t0, 60, 64).is_empty());
-    let end = d.evaluate(&left, RECORDING, secs(t0, 64));
-    assert!(
-        matches!(
-            end.as_slice(),
-            [Event::Ended {
-                offer_stop: true,
-                ..
-            }]
-        ),
-        "{end:?}"
-    );
-    assert!(watch(&mut d, &left, RECORDING, t0, 66, 200).is_empty());
-    assert!(!d.is_tracking());
+fn closing_the_web_client_window_ends_the_call_whatever_tab_is_in_front() {
+    for after in ["clients-browsing.json", "clients-zoom-web-left.json"] {
+        let t0 = Instant::now();
+        let mut d = recorded_zoom_web_call(t0);
+        let left = snap("pw-idle.json", Some(after));
+        assert!(
+            watch(&mut d, &left, RECORDING, t0, 60, 64).is_empty(),
+            "{after}"
+        );
+        let end = d.evaluate(&left, RECORDING, secs(t0, 64));
+        assert!(
+            matches!(
+                end.as_slice(),
+                [Event::Ended {
+                    offer_stop: true,
+                    ..
+                }]
+            ),
+            "{after}: {end:?}"
+        );
+        assert!(
+            watch(&mut d, &left, RECORDING, t0, 66, 200).is_empty(),
+            "{after}"
+        );
+        assert!(!d.is_tracking(), "{after}");
+    }
 }
 
 /// Muted first and then the window closed: the same end.
@@ -1284,8 +1349,8 @@ fn closing_the_web_client_window_ends_the_call() {
 fn closing_the_web_client_window_while_muted_ends_the_call() {
     let t0 = Instant::now();
     let mut d = recorded_zoom_web_call(t0);
-    let muted = snap("pw-idle.json", Some("clients-zoom-web-other-tab.json"));
-    let left = snap("pw-idle.json", Some("clients-browsing.json"));
+    let muted = snap("pw-idle.json", Some("clients-zoom-web.json"));
+    let left = snap("pw-idle.json", Some("clients-zoom-web-left.json"));
     let held = watch(&mut d, &muted, RECORDING, t0, 60, 660);
     assert!(acted(&held).is_empty(), "{held:?}");
     let end = watch(&mut d, &left, RECORDING, t0, 660, 668);
@@ -1319,10 +1384,10 @@ fn the_web_client_window_closed_with_the_mic_held_is_not_the_end() {
 fn the_web_client_window_back_within_the_grace_period_is_the_same_call() {
     let t0 = Instant::now();
     let mut d = recorded_zoom_web_call(t0);
-    let left = snap("pw-idle.json", Some("clients-browsing.json"));
+    let left = snap("pw-idle.json", Some("clients-zoom-web-left.json"));
     let end = watch(&mut d, &left, RECORDING, t0, 60, 66);
     assert!(matches!(end.as_slice(), [Event::Ended { .. }]), "{end:?}");
-    let back = snap("pw-idle.json", Some("clients-zoom-web-other-tab.json"));
+    let back = snap("pw-idle.json", Some("clients-zoom-web.json"));
     let again = d.evaluate(&back, RECORDING, secs(t0, 76));
     assert!(
         matches!(again.as_slice(), [Event::Returned { .. }]),
@@ -1342,6 +1407,26 @@ fn unreadable_windows_do_not_end_a_zoom_call() {
         vec![Evidence::WindowsUnknown { mic: false }],
         "{all:?}"
     );
+}
+
+/// A Zoom call that never had a window of its own (joined inside a normal
+/// tab) is found and kept by its titles, as before.
+#[test]
+fn a_zoom_call_never_seen_in_its_own_window_goes_by_titles() {
+    let mut d = Detector::new(config());
+    let call = snap(
+        "pw-chromium-zoom-web.json",
+        Some("clients-zoom-web-left.json"),
+    );
+    let muted = snap("pw-idle.json", Some("clients-zoom-web-left.json"));
+    let t0 = Instant::now();
+    let start = watch(&mut d, &call, IDLE, t0, 0, 10);
+    assert_eq!(prompts(&start).len(), 1, "{start:?}");
+    assert_eq!(prompts(&start)[0].title, "Zoom call");
+    assert!(prompts(&start)[0].reason.contains("matches"));
+    let all = watch(&mut d, &muted, RECORDING, t0, 10, 610);
+    assert!(acted(&all).is_empty(), "{all:?}");
+    assert_eq!(continues(&all), vec![Evidence::WindowOnly], "{all:?}");
 }
 
 /// The announcement plays into the streams of the calls detection finds,

@@ -1,0 +1,131 @@
+[
+ {
+  "address": "0x55550001",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "chromium",
+  "title": "Join from Zoom Workplace app - Zoom - Chromium",
+  "initialClass": "chromium",
+  "initialTitle": "Join from Zoom Workplace app - Zoom - Chromium",
+  "pid": 42000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 1,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000001"
+ },
+ {
+  "address": "0x55550002",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "slack",
+  "title": "General - Example - Slack",
+  "initialClass": "slack",
+  "initialTitle": "General - Example - Slack",
+  "pid": 5000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 2,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000002"
+ },
+ {
+  "address": "0x55550003",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+   1887,
+   40
+  ],
+  "size": [
+   1861,
+   2063
+  ],
+  "workspace": {
+   "id": 1,
+   "name": "1"
+  },
+  "floating": false,
+  "monitor": 0,
+  "class": "foot",
+  "title": "~/src",
+  "initialClass": "foot",
+  "initialTitle": "~/src",
+  "pid": 6000,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [],
+  "swallowing": "0x0",
+  "focusHistoryID": 3,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "00000003"
+ }
+]
