@@ -38,6 +38,21 @@ struct WorkerResponse {
     /// Older workers that do not emit this field deserialize to `None`.
     #[serde(default)]
     language: Option<String>,
+    /// The worker refused to load the model on the CPU (`gpu_required`).
+    #[serde(default)]
+    gpu_unavailable: bool,
+}
+
+impl WorkerResponse {
+    /// The error a worker reported instead of READY, if it reported one.
+    fn load_error(self) -> Option<TranscribeError> {
+        let error = self.error?;
+        Some(if self.gpu_unavailable {
+            TranscribeError::GpuUnavailable(error)
+        } else {
+            TranscribeError::InitFailed(error)
+        })
+    }
 }
 
 /// A prepared worker process ready to receive audio
@@ -103,6 +118,11 @@ impl SubprocessTranscriber {
         if let Some(ref config_path) = self.config_path {
             cmd.arg("--config").arg(config_path);
         }
+        // Also parent-level. The config file and VOXTYPE_GPU_REQUIRED reach
+        // the worker on their own, but the daemon's --gpu-required flag doesn't.
+        if self.config.gpu_required {
+            cmd.arg("--gpu-required");
+        }
 
         cmd.arg("transcribe-worker")
             .stdin(Stdio::piped())
@@ -164,8 +184,8 @@ impl SubprocessTranscriber {
         if ready_line.trim() != READY_SIGNAL {
             // Worker failed during model load - try to get error from JSON
             if let Ok(response) = serde_json::from_str::<WorkerResponse>(&ready_line) {
-                if let Some(error) = response.error {
-                    return Err(TranscribeError::InitFailed(error));
+                if let Some(error) = response.load_error() {
+                    return Err(error);
                 }
             }
             return Err(TranscribeError::InitFailed(format!(
@@ -361,6 +381,23 @@ mod tests {
             serde_json::from_str(r#"{"ok": false, "error": "Model not found"}"#).unwrap();
         assert!(!error.ok);
         assert_eq!(error.error, Some("Model not found".to_string()));
+    }
+
+    #[test]
+    fn worker_load_errors_keep_the_gpu_unavailable_kind() {
+        let parse = |json: &str| {
+            serde_json::from_str::<WorkerResponse>(json)
+                .unwrap()
+                .load_error()
+        };
+        assert!(matches!(
+            parse(r#"{"ok": false, "error": "No GPU found", "gpu_unavailable": true}"#),
+            Some(TranscribeError::GpuUnavailable(reason)) if reason == "No GPU found"
+        ));
+        assert!(matches!(
+            parse(r#"{"ok": false, "error": "Model not found"}"#),
+            Some(TranscribeError::InitFailed(_))
+        ));
     }
 
     #[test]

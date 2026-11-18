@@ -977,7 +977,7 @@ Voxtype reads the device list from ggml, the same list whisper.cpp picks from. A
 What happens when there is no GPU:
 
 - The daemon checks when it starts, with or without `on_demand_loading`. Without a GPU it logs a warning, skips loading the model and keeps running. When you start a dictation, it shows a notification and exits with an error instead of recording. ggml lists devices once per process, so a daemon that started without a GPU would never find one later. Under the systemd unit (`Restart=on-failure`) it starts again 5 seconds later and picks the GPU up if it is back
-- With `gpu_isolation = true`, each recording loads the model in a new worker process, and the worker does the check. When it fails, Voxtype discards the recording when it stops
+- With `gpu_isolation = true`, each recording loads the model in a new worker process, and the worker does the check. When it fails, Voxtype shows the notification and discards the recording when it stops
 
 The notification is always critical, like the streaming error notification, and follows `show_engine_icon` from `[output.notification]`.
 

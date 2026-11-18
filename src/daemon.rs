@@ -4109,6 +4109,7 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.notify_if_gpu_unavailable(&e).await;
                 self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                 self.reset_to_idle(state).await;
             }
