@@ -121,6 +121,27 @@ Upgrade to a build where `voxtype status --format json --extended` reports
 has loaded the model and reported Vulkan or CPU; with `on_demand_loading = true`
 that happens at the first dictation.
 
+## `voxtype info accel` with a GGUF model
+
+A `.gguf` model runs in `voxtype-gguf-worker`, not in the main binary, so the
+binary variant, the daemon's journal and the daemon's VRAM say nothing about
+it. `voxtype info accel` reports what the worker bound instead: `State: gpu`,
+the `Backend` (`vulkan`, `cuda`, `rocm` or `metal`) and the `Device`, or
+`cpu-fallback` with backend `cpu` when the model runs on the CPU. The evidence
+line says why: `<engine>.gguf_backend = "cpu"` asks for the CPU, while `auto`
+lands there when the worker finds no usable GPU.
+
+Before the first dictation, or with `on_demand_loading = true`, the worker has
+not loaded the model yet. The state is `unknown` and the backend is the
+configured `gguf_backend`. Dictate once and run it again.
+
+`voxtype setup gpu --status` gives GGUF-specific advice too. The ONNX and
+Vulkan variants ship a worker that can use Vulkan, so the backend is set with
+`voxtype config set <engine>.gguf_backend vulkan` (or `cpu`) and
+`setup gpu --enable` is not needed. The CPU variants ship a CPU-only worker;
+there, `sudo voxtype setup gpu --enable` switches to the Vulkan variant and its
+worker.
+
 ## Parakeet is compiled but startup requests an unavailable ONNX feature
 
 Check the exact model with `voxtype config get parakeet.model`. A name such as

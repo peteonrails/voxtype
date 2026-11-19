@@ -861,8 +861,10 @@ fn disable_simple_mode() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Show current GPU/backend status
-pub fn show_status() {
+/// Show current GPU/backend status. `config` says which engine is active: a
+/// GGUF model runs in voxtype-gguf-worker on its own `gguf_backend`, so the
+/// variant hints below do not apply to it.
+pub fn show_status(config: &crate::config::Config) {
     println!("=== Voxtype Backend Status ===\n");
 
     let tiered = is_tiered_mode();
@@ -1101,7 +1103,15 @@ pub fn show_status() {
 
     // Usage hints
     println!();
-    if is_parakeet {
+    if let Some(active) = config.active_gguf() {
+        // A source build's worker has whatever features it was built with;
+        // don't send its owner to a packaged variant switch.
+        let worker_has_vulkan = is_parakeet || current == Some(Backend::Vulkan) || !tiered;
+        let vulkan_variant_available = available.contains(&Backend::Vulkan);
+        for line in gguf_status_hint(&active, worker_has_vulkan, vulkan_variant_available) {
+            println!("{}", line);
+        }
+    } else if is_parakeet {
         // Parakeet-specific hints
         let current_target = fs::read_link(active_bin)
             .ok()
@@ -1125,6 +1135,51 @@ pub fn show_status() {
         println!("To switch back to CPU:");
         println!("  sudo voxtype setup gpu --disable");
     }
+}
+
+/// Hints for a GGUF engine. The model runs in voxtype-gguf-worker on
+/// `<section>.gguf_backend`, so `setup gpu --enable` only helps when the
+/// current variant's worker cannot use Vulkan at all: the Vulkan variant and
+/// every ONNX variant ship a Vulkan-capable worker, the CPU variants do not.
+pub(crate) fn gguf_status_hint(
+    active: &crate::config::ActiveGguf,
+    worker_has_vulkan: bool,
+    vulkan_variant_available: bool,
+) -> Vec<String> {
+    let section = active.section;
+    let key = format!("{section}.gguf_backend");
+    let on_cpu = matches!(
+        active.backend.to_ascii_lowercase().as_str(),
+        "cpu" | "cpu_accel"
+    );
+    let mut lines = vec![format!(
+        "GGUF model: the {section} engine runs in voxtype-gguf-worker with {key} = \"{}\".",
+        active.backend
+    )];
+    if worker_has_vulkan {
+        lines.push(format!(
+            "  This variant's worker can use Vulkan, so {key} decides, not the variant."
+        ));
+        lines.push("  See what it is running on: voxtype info accel".to_string());
+        if on_cpu {
+            lines.push("To enable GPU acceleration:".to_string());
+            lines.push(format!("  voxtype config set {key} vulkan"));
+        } else {
+            lines.push("To switch to CPU:".to_string());
+            lines.push(format!("  voxtype config set {key} cpu"));
+        }
+    } else {
+        lines.push("  This variant's worker runs on the CPU only.".to_string());
+        lines.push("  See what it is running on: voxtype info accel".to_string());
+        if vulkan_variant_available {
+            lines.push("To enable GPU acceleration:".to_string());
+            lines.push("  sudo voxtype setup gpu --enable".to_string());
+            if on_cpu {
+                lines.push(format!("  voxtype config set {key} vulkan"));
+            }
+        }
+    }
+    lines
 }
 
 /// Detect the best ONNX GPU backend based on available hardware and installed binaries
@@ -1491,6 +1546,65 @@ mod tests {
             super::pick_parakeet_gpu_backend(false, true, Some(12), have),
             Some(("voxtype-onnx-cuda-12", "CUDA 12"))
         );
+    }
+
+    /// #1085: a Vulkan GGUF model on an ONNX MIGraphX install was told to run
+    /// `sudo voxtype setup gpu --enable`, which changes a binary the model
+    /// never runs on.
+    #[test]
+    fn a_gguf_engine_is_pointed_at_its_gguf_backend_not_the_variant() {
+        let vulkan = crate::config::ActiveGguf {
+            section: "cohere",
+            model: "cohere-transcribe-03-2026-Q4_K_M.gguf",
+            backend: "vulkan",
+        };
+        let text = super::gguf_status_hint(&vulkan, true, true).join("\n");
+        assert!(!text.contains("sudo"), "{text}");
+        assert!(text.contains("cohere.gguf_backend = \"vulkan\""), "{text}");
+        assert!(
+            text.contains("voxtype config set cohere.gguf_backend cpu"),
+            "{text}"
+        );
+
+        let cpu = crate::config::ActiveGguf {
+            backend: "cpu",
+            ..vulkan
+        };
+        let text = super::gguf_status_hint(&cpu, true, true).join("\n");
+        assert!(text.contains("To enable GPU acceleration:"), "{text}");
+        assert!(
+            text.contains("voxtype config set cohere.gguf_backend vulkan"),
+            "{text}"
+        );
+        assert!(!text.contains("sudo"), "{text}");
+    }
+
+    /// A CPU variant's worker has no Vulkan, so there the variant switch is
+    /// what the GPU needs, and only when the Vulkan variant is installed.
+    #[test]
+    fn a_gguf_engine_on_a_cpu_only_worker_still_needs_the_vulkan_variant() {
+        let cpu = crate::config::ActiveGguf {
+            section: "parakeet",
+            model: "parakeet-ultra-Q8_0.gguf",
+            backend: "cpu",
+        };
+        let text = super::gguf_status_hint(&cpu, false, true).join("\n");
+        assert!(text.contains("sudo voxtype setup gpu --enable"), "{text}");
+        assert!(
+            text.contains("voxtype config set parakeet.gguf_backend vulkan"),
+            "{text}"
+        );
+
+        let auto = crate::config::ActiveGguf {
+            backend: "auto",
+            ..cpu
+        };
+        let text = super::gguf_status_hint(&auto, false, true).join("\n");
+        assert!(text.contains("sudo voxtype setup gpu --enable"), "{text}");
+        assert!(!text.contains("config set"), "{text}");
+
+        let text = super::gguf_status_hint(&auto, false, false).join("\n");
+        assert!(!text.contains("setup gpu --enable"), "{text}");
     }
 
     fn advice(vendors: &[super::GpuVendor], selected: Option<super::GpuVendor>) -> String {

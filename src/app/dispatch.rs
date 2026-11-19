@@ -312,14 +312,14 @@ pub(crate) async fn dispatch(
                     status,
                 }) => {
                     if status {
-                        setup::gpu::show_status();
+                        setup::gpu::show_status(&config);
                     } else if enable {
                         setup::gpu::enable()?;
                     } else if disable {
                         setup::gpu::disable()?;
                     } else {
                         // Default: show status
-                        setup::gpu::show_status();
+                        setup::gpu::show_status(&config);
                     }
                 }
                 Some(SetupAction::Npu {

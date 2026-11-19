@@ -191,6 +191,15 @@ impl Default for OmarchyConfig {
     }
 }
 
+/// What [`Config::active_gguf`] returns: the engine's config section (also
+/// its `--engine` name for the worker), its model, and its `gguf_backend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveGguf<'a> {
+    pub section: &'static str,
+    pub model: &'a str,
+    pub backend: &'a str,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -834,6 +843,37 @@ impl Config {
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
         }
+    }
+
+    /// The active engine's GGUF settings when it runs a `.gguf` model. voxtype
+    /// hands those to `voxtype-gguf-worker` instead of loading them itself,
+    /// so they run on `<section>.gguf_backend` whatever the main binary's
+    /// variant is.
+    pub fn active_gguf(&self) -> Option<ActiveGguf<'_>> {
+        use crate::model_selection::is_gguf;
+        let (section, model, backend) = match self.engine {
+            TranscriptionEngine::Gguf => self
+                .gguf
+                .as_ref()
+                .map(|g| ("gguf", g.model.as_str(), g.gguf_backend.as_str()))?,
+            TranscriptionEngine::Parakeet => {
+                self.parakeet
+                    .as_ref()
+                    .filter(|p| is_gguf(&p.model))
+                    .map(|p| ("parakeet", p.model.as_str(), p.gguf_backend.as_str()))?
+            }
+            TranscriptionEngine::Cohere => self
+                .cohere
+                .as_ref()
+                .filter(|c| is_gguf(&c.model))
+                .map(|c| ("cohere", c.model.as_str(), c.gguf_backend.as_str()))?,
+            _ => return None,
+        };
+        Some(ActiveGguf {
+            section,
+            model,
+            backend,
+        })
     }
 
     /// Make `engine` active with `model` as its model, materializing the

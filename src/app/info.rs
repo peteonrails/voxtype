@@ -23,7 +23,7 @@ pub(crate) fn run_info_command(action: InfoAction, config: &Config) -> anyhow::R
             if json {
                 println!("{}", serde_json::to_string_pretty(&inv)?);
             } else {
-                print_variants_text(&inv);
+                print_variants_text(&inv, config);
             }
         }
         InfoAction::Devices { json } => run_devices(json)?,
@@ -32,15 +32,15 @@ pub(crate) fn run_info_command(action: InfoAction, config: &Config) -> anyhow::R
             engine,
             verify,
         } => run_models(json, engine.as_deref(), verify)?,
-        InfoAction::Accel { json } => run_accel(json)?,
+        InfoAction::Accel { json } => run_accel(json, config)?,
         InfoAction::Engines { json } => run_engines(json, config)?,
         InfoAction::Styles { json } => run_styles(json, config)?,
     }
     Ok(())
 }
 
-fn run_accel(json: bool) -> anyhow::Result<()> {
-    let report = setup::accel::report();
+fn run_accel(json: bool, config: &Config) -> anyhow::Result<()> {
+    let report = setup::accel::report(config);
     if json {
         println!("{}", serde_json::to_string_pretty(&report.to_json())?);
         return Ok(());
@@ -49,6 +49,9 @@ fn run_accel(json: bool) -> anyhow::Result<()> {
     println!("Acceleration");
     println!("  State:    {}", report.state.tag());
     println!("  Backend:  {}", report.backend.unwrap_or("(none in play)"));
+    if let Some(device) = &report.device {
+        println!("  Device:   {}", device);
+    }
     println!(
         "  Variant:  {}",
         report
@@ -417,7 +420,26 @@ fn run_styles(json: bool, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_variants_text(inv: &setup::binary::Inventory) {
+/// GGUF models run in voxtype-gguf-worker on their own `gguf_backend`. The
+/// variant only decides which worker: the Vulkan and ONNX variants ship one
+/// that can use Vulkan, the CPU variants one that cannot.
+fn gguf_variant_note(config: &Config) -> [String; 2] {
+    let first = match config.active_gguf() {
+        Some(active) => format!(
+            "the {section} GGUF model runs in voxtype-gguf-worker with {section}.gguf_backend = \"{backend}\"",
+            section = active.section,
+            backend = active.backend
+        ),
+        None => "GGUF models run in voxtype-gguf-worker with <engine>.gguf_backend".to_string(),
+    };
+    [
+        first,
+        "(the Vulkan and ONNX variants' workers can use Vulkan; the CPU variants' cannot)"
+            .to_string(),
+    ]
+}
+
+fn print_variants_text(inv: &setup::binary::Inventory, config: &Config) {
     use setup::binary::InstallKind;
 
     println!("Voxtype install");
@@ -459,6 +481,9 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
         inv.recommendation.onnx.display(),
         inv.recommendation.onnx_reason
     );
+    let [gguf, workers] = gguf_variant_note(config);
+    println!("  GGUF:          {}", gguf);
+    println!("                 {}", workers);
 
     println!();
     if matches!(inv.install_kind, InstallKind::Source) {
