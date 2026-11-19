@@ -20,9 +20,25 @@ Item {
   property int opens: 0
   property bool wasOpen: false
 
+  // The two-hosts scenarios run the Omarchy plugin and, beside it, the
+  // standalone shell, as an Omarchy desktop with the Quickshell OSD does.
+  // two-hosts-handoff starts the plugin late.
+  readonly property bool twoHosts: String(__SCENARIO__).indexOf("two-hosts") === 0
+  property bool ownerOn: __SCENARIO__ !== "two-hosts-handoff"
+  readonly property var standalone: standaloneLoader.item
+  property int standaloneOpens: 0
+  property bool standaloneWasOpen: false
+
   Loader {
     id: hostLoader
+    active: host.ownerOn
     sourceComponent: host.omarchy ? omarchyHost : standaloneHost
+  }
+
+  Loader {
+    id: standaloneLoader
+    active: host.twoHosts
+    sourceComponent: standaloneHost
   }
 
   Component {
@@ -43,6 +59,9 @@ Item {
       var open = host.viewOpen()
       if (open && !host.wasOpen) host.opens++
       host.wasOpen = open
+      var other = !!(host.standalone && host.standalone.open)
+      if (other && !host.standaloneWasOpen) host.standaloneOpens++
+      host.standaloneWasOpen = other
     }
   }
 
@@ -69,7 +88,8 @@ Item {
   Process {
     id: helper
     property bool done: true
-    onExited: helper.done = true
+    property int exitCode: 0
+    onExited: function(code) { helper.exitCode = code; helper.done = true }
   }
 
   TestCase {
@@ -189,6 +209,8 @@ Item {
           else if (s === "announcement") tc.driveAnnouncement()
           else if (s === "notice-announce") tc.driveNoticeAnnounced()
           else if (s === "rename-owner") tc.driveRenameOwner()
+          else if (s === "two-hosts") tc.driveTwoHosts()
+          else if (s === "two-hosts-handoff") tc.driveTwoHostsHandoff()
           else tc.check(false, "unknown scenario " + s)
         } catch (e) {
           if (tc.failure === "") tc.failure = String(e && e.message ? e.message : e)
@@ -1896,6 +1918,107 @@ Item {
     function viewState() {
       stateFileView.reload()
       try { return JSON.parse(stateFileView.text()) } catch (e) { return null }
+    }
+
+    // ------------------------------------------------------------ one view
+
+    FileView { id: ownerFileView; path: __RUNTIME__ + "/meeting-view.owner"; blockLoading: true; printErrors: false }
+    function ownerClaim() {
+      ownerFileView.reload()
+      try { return JSON.parse(ownerFileView.text()) } catch (e) { return null }
+    }
+    function touchFlag() {
+      sh(["sh", "-c", 'mkdir -p "$1" && touch "$1/meeting-controls.flag"', "_", __RUNTIME__])
+    }
+    function requestPending() {
+      helper.done = false
+      helper.command = ["test", "-e", __RUNTIME__ + "/meeting-view.request"]
+      helper.running = true
+      waitFor(function() { return helper.done }, "test -e")
+      return helper.exitCode === 0
+    }
+    function closeOwner() {
+      host.hostItem.close()
+      waitFor(function() { return !host.viewOpen() }, "plugin view closed")
+    }
+
+    // Both hosts running: only the plugin's view ever opens.
+    function driveTwoHosts() {
+      var other = host.standalone
+      check(other !== null, "standalone shell loaded")
+      waitFor(function() { return feed().connected && other.meetings.feed.connected }, "both hosts on meeting.sock")
+      waitFor(function() { var c = ownerClaim(); return c && c.host === "omarchy" && c.pid > 1 }, "the plugin claims the view")
+      waitFor(function() { return other.meetings.standingBy() }, "the standalone shell stands by")
+
+      // A meeting starts: both hosts see it, one view opens.
+      ctl({ cmd: "start", title: "Design review" })
+      waitFor(function() { return host.viewOpen() && view() !== null }, "the plugin opened its view")
+      waitFor(function() { return other.meetings.feed.title === "Design review" }, "the standalone shell saw the start too")
+      wait(1500)
+      check(!other.open && host.standaloneOpens === 0, "the standalone shell opened nothing on the start")
+      check(fakeShell.summons.length === 1, "one summon: " + JSON.stringify(fakeShell.summons))
+      var s = viewState()
+      check(s && s.host === "omarchy" && s.visible === true, "the plugin's view is the one in the state file: " + JSON.stringify(s))
+      // A standing-by host that has not been on screen never says the view is gone.
+      other.meetings.writeViewState()
+      wait(300)
+      s = viewState()
+      check(s && s.host === "omarchy" && s.visible === true, "state left alone by the standalone shell: " + JSON.stringify(s))
+      closeOwner()
+
+      // `voxtype meeting view`: the plugin answers, the standalone shell
+      // leaves the request alone.
+      request({ open: true })
+      waitFor(function() { return host.viewOpen() && view() !== null }, "request opened the plugin's view")
+      waitFor(function() { return !requestPending() }, "the plugin consumed the request")
+      wait(800)
+      check(!other.open && host.standaloneOpens === 0, "the standalone shell ignored the request")
+      closeOwner()
+
+      // The standalone shell's keybinding opens the plugin's view.
+      touchFlag()
+      waitFor(function() { return host.viewOpen() }, "the flag opened the plugin's view")
+      wait(800)
+      check(!other.open && host.standaloneOpens === 0, "the flag opened no second view")
+      closeOwner()
+
+      // The plugin goes away (omarchy-shell quit or crashed) just as a
+      // meeting starts: once its claim is stale the standalone shell opens it.
+      ctl({ cmd: "stop" })
+      waitFor(function() { return other.meetings.feed.status === "idle" }, "first meeting over", 8000)
+      host.ownerOn = false
+      ctl({ cmd: "start", title: "Retro" })
+      waitFor(function() { return other.meetings.feed.title === "Retro" }, "the standalone shell saw the second start")
+      check(!other.open, "not while the claim is still fresh")
+      waitFor(function() { return other.open }, "the standalone shell took over", 16000)
+      wait(500)
+      check(host.standaloneOpens === 1, "opened once: " + host.standaloneOpens)
+      waitFor(function() { var t = viewState(); return t && t.host === "standalone" && t.visible === true }, "the standalone shell's view in the state file")
+    }
+
+    // The standalone shell had the view up when the plugin started (it took
+    // over while omarchy-shell restarted): it hands the view over.
+    function driveTwoHostsHandoff() {
+      var other = host.standalone
+      check(other !== null && host.hostItem === null, "only the standalone shell to begin with")
+      waitFor(function() { return other.meetings.feed.connected && other.meetings.feed.meetingId !== "" }, "standalone shell has the meeting")
+      check(!other.meetings.standingBy(), "nothing to stand by for")
+      touchFlag()
+      waitFor(function() { return other.open && other.meetings.window !== null }, "standalone view open")
+      other.meetings.showTab("notes")
+      other.meetings.minimize()
+      waitFor(function() { return other.meetings.placement.minimized }, "standalone view minimized")
+
+      host.ownerOn = true
+      waitFor(function() { return host.hostItem !== null }, "plugin loaded")
+      waitFor(function() { return !other.open }, "the standalone shell closed its view")
+      waitFor(function() { return host.viewOpen() && view() !== null }, "the plugin opened the view")
+      check(placement().minimized, "still the pill")
+      waitFor(function() { return view().currentTab === "notes" }, "still on Notes: " + view().currentTab)
+      wait(1000)
+      check(host.standaloneOpens === 1 && host.opens === 1 && !other.open, "one view: " + host.standaloneOpens + "/" + host.opens)
+      var s = viewState()
+      check(s && s.host === "omarchy" && s.visible === true && s.minimized === true, "the plugin's pill in the state file: " + JSON.stringify(s))
     }
 
     function driveViewState() {

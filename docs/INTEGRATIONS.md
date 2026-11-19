@@ -1219,7 +1219,8 @@ runs after the final rewrite with the folder and the manifest's path in
 
 The meeting view runs in the Voxtype plugin for the Omarchy shell and in
 voxtype's standalone Quickshell shell. Two files connect it to everything
-else, and another host (a different shell, a GTK window) can use both.
+else, and another host (a different shell, a GTK window) can use both. A
+third decides which host shows it when more than one is running.
 
 #### Opening it: `meeting-view.request`
 
@@ -1245,9 +1246,11 @@ voxtype meeting view [<meeting>] [--tab transcript|notes|ask|summary] [--ask-id 
 | `window` | `minimize`, `expand`, or `null` |
 | `requested_at` | Unix time in milliseconds |
 
-The file is written whole and renamed into place. A host reads it when it
-changes, deletes it, and ignores a request more than 30 seconds old, so a
-host that starts later does not act on an old one. `meeting_id` and
+The file is written whole and renamed into place. The host that shows the
+view (see [Which host shows it](#which-host-shows-it-meeting-viewowner))
+reads it when it changes, deletes it, and ignores a request more than 30
+seconds old, so a host that starts later does not act on an old one. A host
+that is standing by leaves the file for the owner. `meeting_id` and
 `ask_id` default to `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which is how
 an Ask notification's Open action lands on its answer.
 
@@ -1266,7 +1269,43 @@ replaced whole on every show, hide and minimize, and every 10 seconds while
 visible; closing the view writes `"visible": false`. A minimized pill counts
 as visible. A shell that dies leaves the file behind, so a reader counts the
 view as visible only while `pid` is alive and `updated_at` is under 30
-seconds old.
+seconds old. A host that has not been on screen since it started never
+overwrites another host's visible state, so a shell starting up (or reloading)
+beside the one showing the view does not make the daemon think the view
+closed.
+
+#### Which host shows it: `meeting-view.owner`
+
+On Omarchy with the Quickshell OSD, both the Omarchy shell's Voxtype plugin
+and voxtype's standalone Quickshell shell run the view, and both see every
+meeting start and every request. Only one of them opens it: the plugin owns
+the view, and the standalone shell stands by while the plugin is running.
+
+The plugin claims the view in `$XDG_RUNTIME_DIR/voxtype/meeting-view.owner`
+for as long as it runs, whether or not its view is up:
+
+```json
+{"host": "omarchy", "pid": 12345, "updated_at": 1794434659}
+```
+
+It rewrites the file whole every 3 seconds. Another host treats the claim as
+live while `updated_at` is under 10 seconds old. While it is live, the
+standalone shell:
+
+- does not open the view, or expand its pill, when a meeting starts
+- leaves `meeting-view.request` for the plugin to read and delete
+- turns its `meeting-controls.flag` toggle into a request to open the
+  plugin's view
+- hands its own view over if it had one up when the claim appeared (it took
+  over while omarchy-shell was restarting, say): it writes a request for the
+  same meeting, tab and pill state, then closes
+
+A claim that goes stale is a plugin that stopped: omarchy-shell quit or
+crashed, or the plugin was removed. The standalone shell then acts on its
+own again, and a meeting that started while the claim was going stale opens
+in it once the claim is stale. Without the plugin (any desktop other than
+Omarchy, or Omarchy without it) there is no claim and the standalone shell
+behaves as it always has.
 
 ### Files under the runtime and state directories
 
@@ -1279,11 +1318,12 @@ can change in any release; use the command named instead.
 | `$XDG_RUNTIME_DIR/voxtype/meeting.sock` | Yes | |
 | `$XDG_RUNTIME_DIR/voxtype/meeting-view.request` | Yes | `voxtype meeting view` to write it |
 | `$XDG_RUNTIME_DIR/voxtype/meeting-view.state` | Yes | |
+| `$XDG_RUNTIME_DIR/voxtype/meeting-view.owner` | Yes | |
 | `<transcript>.done` beside a `--file` transcript | Yes | `voxtype record stop --wait` |
 | `$XDG_RUNTIME_DIR/voxtype/meeting_state` | No | `voxtype meeting status --json` |
 | `$XDG_RUNTIME_DIR/voxtype/meeting_start`, `meeting_stop`, `meeting_pause`, `meeting_resume` and the other request files | No | the `voxtype meeting` commands |
 | `$XDG_RUNTIME_DIR/voxtype/meeting_playback.json` | No | `voxtype meeting play --status --json` |
-| `$XDG_RUNTIME_DIR/voxtype/meeting-controls.flag` | No | `voxtype meeting view`; touching it toggles the standalone shell's view, for old keybindings |
+| `$XDG_RUNTIME_DIR/voxtype/meeting-controls.flag` | No | `voxtype meeting view`; touching it toggles the standalone shell's view, for old keybindings (with the Omarchy plugin running, it opens the plugin's view instead) |
 | `$XDG_STATE_HOME/voxtype/assistant-consent.json` | No | `voxtype meeting assistant status --json`, `allow`, `revoke` |
 | `$XDG_STATE_HOME/voxtype/meeting-view.json` | No | Where the view was left, per host and screen; the view's **Reset position and size** |
 | `$XDG_STATE_HOME/voxtype/meeting_offer.json` | No | The answers to the "Turn on meetings" offer |

@@ -17,6 +17,16 @@
 //
 //   The flag is removed once read, so the next touch toggles again.
 //
+// ## Standing by
+//
+// On Omarchy the Voxtype plugin in the Omarchy shell shows the same view, and
+// it owns it: while the plugin is running (it keeps
+// `$XDG_RUNTIME_DIR/voxtype/meeting-view.owner` fresh), this shell opens
+// nothing on a meeting start, leaves `voxtype meeting view` requests to the
+// plugin, and turns the keybinding's toggle into a request to open the
+// plugin's view. If the plugin stops, this shell takes over within about ten
+// seconds. See voxtype-meetings/MeetingOwner.js.
+//
 // It replaces the earlier MeetingControls popup (status plus start, stop,
 // pause and resume), whose controls are all in the view's header; the file
 // keeps its name and the `open` and `screen` properties shell.qml binds.
@@ -77,7 +87,12 @@ Scope {
         printErrors: false
 
         onLoaded: {
-            root.open = !root.open;
+            // While the Omarchy plugin owns the view, the keybinding opens
+            // it there instead of a second view here.
+            if (meetings.standingBy())
+                meetings.askOwnerToOpen();
+            else
+                root.open = !root.open;
             removeFlag.running = true;
         }
 

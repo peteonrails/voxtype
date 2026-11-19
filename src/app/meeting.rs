@@ -955,7 +955,7 @@ pub(crate) async fn run_meeting_command(
                 println!("Nothing to do: --no-open without --ask.");
             } else {
                 println!(
-                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin or voxtype's Quickshell shell, whichever is running.",
+                    "Asked the meeting view to {}. It opens in the Omarchy shell's Voxtype plugin when that is running, otherwise in voxtype's Quickshell shell.",
                     if no_open { "ask" } else { "open" }
                 );
             }

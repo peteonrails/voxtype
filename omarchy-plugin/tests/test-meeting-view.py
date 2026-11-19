@@ -88,6 +88,14 @@ Scenarios:
               after the linger; the keyboard is asked for only while typing
   view-state  meeting-view.state: visible, minimized, heartbeat, and the
               close write
+  two-hosts   the plugin and the standalone shell running together: the
+              plugin claims meeting-view.owner, and a meeting start, a
+              `meeting view` request and the standalone keybinding open only
+              its view; the standalone shell leaves meeting-view.state alone;
+              when the plugin goes away the standalone shell takes over
+  two-hosts-handoff  the standalone shell has the view up (minimized, on
+              Notes) when the plugin starts: it closes, and the plugin opens
+              the same pill on the same tab
   play        ▶ on a line plays from it (`meeting play --segment`); the header
               transport and Stop; the line being heard follows position_ms;
               a stop from elsewhere arrives as a playback event
@@ -261,7 +269,8 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "share-real", "share-real-unavailable",
              "actions", "actions-connect", "actions-old", "actions-real", "waveform-real", "waveform-real-mixed",
              "undo-edit", "undo-reassign", "seek", "waveform", "waveform-missing", "follow", "follow-live",
-             "title", "title-external", "title-past", "title-fail", "title-labelled", "title-real")
+             "title", "title-external", "title-past", "title-fail", "title-labelled", "title-real",
+             "two-hosts", "two-hosts-handoff")
 
 FAKE_CLI = h.HERE / "fake-voxtype-meeting.py"
 DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the tag after lunch [00:50]. "
@@ -269,7 +278,9 @@ DEFAULT_ANSWER = ("[00:35] The build went green overnight, and Pete will cut the
 STANDALONE = h.PLUGIN.parent / "quickshell"
 HOSTS = ("omarchy", "standalone")
 # Scenarios about the Omarchy Settings panel itself.
-OMARCHY_ONLY = {"autoopen-settings"}
+# two-hosts runs the plugin and the standalone shell together, so it is listed
+# under the plugin's host only.
+OMARCHY_ONLY = {"autoopen-settings", "two-hosts", "two-hosts-handoff"}
 FAKE_SOCK = h.HERE / "fake-meeting-sock.py"
 
 MEETING_WINDOW_OLD = """PanelWindow {
@@ -510,6 +521,7 @@ INITIAL = {
     "regenerate": lambda: [running_meeting()],
     "scroll-tabs": lambda: [scroll_meeting()],
     "view-request": lambda: [running_meeting()],
+    "two-hosts-handoff": lambda: [running_meeting()],
     "ask-error": lambda: [running_meeting()],
     "agent-missing": lambda: [running_meeting()],
     "old-voxtype": lambda: [running_meeting()],
