@@ -14,12 +14,15 @@
 //! 1. Find the call: the capture streams of the apps call detection
 //!    confirms ([`crate::meeting::detect::call_streams`]), waiting up to
 //!    [`WAIT_FOR_CALL`] for one to open the mic.
-//! 2. Start `pw-play --target 0` on the clip. Unlinked, the node is never
-//!    scheduled, so it holds the clip until it is linked.
+//! 2. Start `pw-play --target 0` on the clip, at `announcement_volume`
+//!    ([`inject_args`]). Unlinked, the node is never scheduled, so it holds
+//!    the clip until it is linked.
 //! 3. `pw-link` its output ports to the call stream's input ports, then
 //!    check in `pw-dump` that the links exist. The first link starts it.
 //! 4. Play the clip on the speakers too, with an ordinary `pw-play`, so the
-//!    user hears it.
+//!    user hears it. It plays at whatever the user's mixer gives `pw-play`:
+//!    `announcement_volume` is for the people on the call, and the user
+//!    already sets their own speakers.
 //!
 //! Whatever fails, the clip still plays locally, the reason is logged, and
 //! the [`Status`] says it only played locally. It never claims the call
@@ -62,6 +65,69 @@ pub mod jessica;
 
 /// The built-in announcement's voices (`[meeting] announcement_voice`).
 pub const VOICES: &[&str] = crate::cli::ANNOUNCEMENT_VOICES;
+
+/// `[meeting] announcement_volume` when unset: half the clip's full level.
+/// Full level is what every announcement played at before the setting, and
+/// the other people on a call found it too loud.
+///
+/// The volume is `pw-play --volume`, which PipeWire applies as a linear
+/// amplitude gain (`SPA_PROP_volume`), so 0.5 is about 6 dB down. Loudness
+/// as heard roughly halves every 10 dB, so about 0.3 sounds half as loud.
+pub const DEFAULT_VOLUME: f32 = 0.5;
+
+/// `announcement_volume` in range: 0.0 to 1.0, with anything else (a
+/// hand-edited config, NaN) clamped, or [`DEFAULT_VOLUME`] for NaN.
+pub fn clamp_volume(volume: f32) -> f32 {
+    if volume.is_nan() {
+        DEFAULT_VOLUME
+    } else {
+        volume.clamp(0.0, 1.0)
+    }
+}
+
+/// The volume a meeting started with `options` announces at: the
+/// per-meeting `--announcement-volume`, else the config's, in range.
+pub fn volume_for_meeting(config: &MeetingConfig, options: &MeetingStartOptions) -> f32 {
+    let volume = options
+        .announcement_volume
+        .unwrap_or(config.announcement_volume);
+    let clamped = clamp_volume(volume);
+    if clamped != volume {
+        tracing::warn!(
+            "announcement_volume {} is outside 0.0 to 1.0; using {}",
+            volume,
+            clamped
+        );
+    }
+    clamped
+}
+
+/// Parse an announcement volume given on the command line or in
+/// `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME`: a number from 0.0 to 1.0, refused
+/// with the range otherwise.
+pub(crate) use crate::cli::parse_announcement_volume as parse_volume;
+
+/// The arguments of the `pw-play` that is linked into the call: held
+/// (`--target 0`), at `volume` (a linear gain, see [`DEFAULT_VOLUME`]),
+/// with `node` as its name. The volume is set here
+/// and WirePlumber is told not to restore a remembered volume over it
+/// (`state.restore-props = false`), or a volume left on some earlier
+/// `pw-play` stream (0.34 on the test machine) would decide how loud the
+/// call hears it.
+pub fn inject_args(node: &str, volume: f32, clip: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "--target".into(),
+        "0".into(),
+        "--volume".into(),
+        format!("{:.4}", clamp_volume(volume)).into(),
+        "-P".into(),
+        format!(
+            "{{ node.name = \"{node}\" node.description = \"Voxtype recording announcement\" state.restore-props = false }}"
+        )
+        .into(),
+        clip.as_os_str().to_owned(),
+    ]
+}
 
 /// How long a meeting waits for a call app to open the mic before it plays
 /// the announcement on the speakers only.
@@ -272,8 +338,9 @@ fn expand_home(path: &str) -> PathBuf {
 
 /// `voxtype meeting start`'s announcement choices, resolved against the
 /// config it read: `--no-announce` beats `--announce` beats the config,
-/// `--announcement-file` beats `announcement_file`, and
-/// `--announcement-voice` beats `announcement_voice`. The file is made
+/// `--announcement-file` beats `announcement_file`,
+/// `--announcement-voice` beats `announcement_voice`, and
+/// `--announcement-volume` beats `announcement_volume`. The file is made
 /// absolute, since the daemon does not share this command's directory, and
 /// a missing one refuses the start rather than announcing nothing.
 pub fn resolve_start_options(
@@ -283,6 +350,7 @@ pub fn resolve_start_options(
     no_announce: bool,
     file: Option<&Path>,
     voice: Option<&str>,
+    volume: Option<f32>,
 ) -> Result<MeetingStartOptions, String> {
     let on = if no_announce {
         false
@@ -299,6 +367,10 @@ pub fn resolve_start_options(
             .trim()
             .to_lowercase(),
     );
+    options.announcement_volume = Some(match volume {
+        Some(v) => clamp_volume(v),
+        None => volume_for_meeting(config, &options),
+    });
     let file = match file {
         Some(f) => Some(f.to_path_buf()),
         None => config
@@ -667,6 +739,8 @@ mod live {
         /// Where the local copy plays: `None` for the default output, as
         /// PipeWire routes it. Tests send it to a null sink.
         pub local_target: Option<String>,
+        /// How loud the call hears it (`announcement_volume`, in range)
+        pub volume: f32,
         /// Where the Jessica voice is downloaded from ([`jessica::url`])
         pub jessica_url: String,
         /// How long that download may take ([`jessica::MEETING_TIMEOUT`])
@@ -688,6 +762,7 @@ mod live {
                 wait: WAIT_FOR_CALL,
                 settle: SETTLE,
                 local_target: None,
+                volume: DEFAULT_VOLUME,
                 jessica_url: jessica::url(),
                 jessica_timeout: jessica::MEETING_TIMEOUT,
             }
@@ -845,19 +920,17 @@ mod live {
         /// confirm the links. Returns the player and the app's name.
         async fn inject(&self, clip: &Path, call: &Call) -> Result<(Child, String), String> {
             let node = format!("voxtype-announce-{}", std::process::id());
-            // Full volume, whatever WirePlumber remembers for pw-play
-            // streams: a restored volume (0.34 on the test machine) would
-            // make the call hear it faint.
+            tracing::info!(
+                "Recording announcement: pw-play --volume {:.4} (announcement_volume)",
+                self.volume
+            );
             let mut player = Command::new("pw-play")
-                .arg("--target")
-                .arg("0")
-                .arg("--volume")
-                .arg("1.0")
-                .arg("-P")
-                .arg(format!(
-                    "{{ node.name = \"{node}\" node.description = \"Voxtype recording announcement\" state.restore-props = false }}"
-                ))
-                .arg(clip)
+                .args(inject_args(&node, self.volume, clip))
+                // pw-play reads --volume in the locale's number format (its
+                // man page says so), and under a comma locale "0.5000"
+                // could be read as 0 and play nothing into the call.
+                .env_remove("LC_ALL")
+                .env("LC_NUMERIC", "C")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

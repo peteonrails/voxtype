@@ -3835,7 +3835,11 @@ impl Daemon {
                 tracing::error!("Refusing to start the meeting: {}", e);
                 crate::error::VoxtypeError::Config(e)
             })?;
-        let announce_clip = meeting::announce::Clip::for_meeting(&self.config.meeting, &options);
+        let announce_clip = meeting::announce::Clip::for_meeting(&self.config.meeting, &options)
+            .map(|clip| {
+                let volume = meeting::announce::volume_for_meeting(&self.config.meeting, &options);
+                (clip, volume)
+            });
         let announces = announce_clip.is_some();
 
         // CLI override (validated against DIARIZATION_BACKENDS by clap) wins over config.
@@ -4007,8 +4011,8 @@ impl Daemon {
                         // After the start cue, with capture up: the
                         // announcement goes into the call once there is one.
                         self.meeting_capture_started = Some(capture_started);
-                        if let Some(clip) = announce_clip {
-                            self.start_announcement(clip);
+                        if let Some((clip, volume)) = announce_clip {
+                            self.start_announcement(clip, volume);
                         }
 
                         // Degradations replace the usual "started" notice
@@ -4189,12 +4193,13 @@ impl Daemon {
     }
 
     /// Run the recording announcement beside the meeting that just started.
-    fn start_announcement(&mut self, clip: meeting::announce::Clip) {
+    fn start_announcement(&mut self, clip: meeting::announce::Clip, volume: f32) {
         let runtime_dir = Config::runtime_dir();
         let _ = std::fs::remove_file(runtime_dir.join(meeting::announce::STATUS_FILE));
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let runner =
+        let mut runner =
             meeting::announce::Runner::new(clip, self.config.meeting.detect.clone(), runtime_dir);
+        runner.volume = volume;
         self.meeting_announce_rx = Some(rx);
         self.meeting_announce_task = Some(tokio::spawn(runner.run(tx)));
     }

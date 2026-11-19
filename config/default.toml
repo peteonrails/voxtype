@@ -387,3 +387,13 @@ icon_theme = "emoji"
 # exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
 # record_app = true              # which app the text went to
 # record_window_title = false    # titles can hold subjects, names and URLs
+
+# Meeting mode: record and transcribe calls with `voxtype meeting start`.
+# Off here because this file is also the system-wide fallback; turn it on
+# with `voxtype config set meeting.enabled true`. docs/MEETING_MODE.md has
+# every option.
+# [meeting]
+# enabled = false
+# announce_recording = false     # say "This meeting is being recorded..." into the call
+# announcement_voice = "kokoro"  # or "jessica", an ElevenLabs voice downloaded once
+# announcement_volume = 0.5      # call volume, linear gain: 1.0 full, 0.5 about -6 dB, 0.3 about half as loud

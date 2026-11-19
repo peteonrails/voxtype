@@ -70,6 +70,24 @@ pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml", "hybrid"];
 /// it lives here because `build.rs` includes this module standalone.
 pub(crate) const ANNOUNCEMENT_VOICES: &[&str] = &["kokoro", "jessica"];
 
+/// Parse `meeting start --announcement-volume`: a number from 0.0 to 1.0,
+/// refused with the range otherwise. `crate::meeting::announce::parse_volume`
+/// is this function; it lives here because `build.rs` includes this module
+/// standalone.
+pub(crate) fn parse_announcement_volume(raw: &str) -> Result<f32, String> {
+    let volume: f32 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{:?} is not a number; give a volume from 0.0 to 1.0", raw))?;
+    if !(0.0..=1.0).contains(&volume) {
+        return Err(format!(
+            "{} is out of range; give a volume from 0.0 (silent) to 1.0 (full level)",
+            raw.trim()
+        ));
+    }
+    Ok(volume)
+}
+
 /// Formats `voxtype meeting export --format` accepts, each with its short
 /// alias. Kept here rather than derived from
 /// `crate::meeting::export::ExportFormat` because `build.rs` includes this

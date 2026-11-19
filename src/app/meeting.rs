@@ -47,6 +47,7 @@ pub(crate) async fn run_meeting_command(
             no_announce,
             announcement_file,
             announcement_voice,
+            announcement_volume,
         } => {
             let title_from_window = title.is_none() && window_title.is_some();
             let title = title.or(window_title);
@@ -84,6 +85,7 @@ pub(crate) async fn run_meeting_command(
                 no_announce,
                 announcement_file.as_deref(),
                 announcement_voice.as_deref(),
+                announcement_volume,
             ) {
                 Ok(options) => options,
                 Err(e) => {
@@ -215,11 +217,13 @@ pub(crate) async fn run_meeting_command(
             let cached = jessica::verify(&path).is_ok();
             let configured = config.meeting.announcement_voice.clone();
             let file = config.meeting.announcement_file.clone();
+            let volume = meeting::announce::clamp_volume(config.meeting.announcement_volume);
             if json {
                 let payload = serde_json::json!({
                     "announce_recording": config.meeting.announce_recording,
                     "voice": configured,
                     "announcement_file": file,
+                    "volume": volume.to_string().parse::<f64>().unwrap_or(f64::from(volume)),
                     "jessica": {
                         "downloaded": cached,
                         "path": path,
@@ -248,6 +252,10 @@ pub(crate) async fn run_meeting_command(
                     }
                     _ => println!("Voice: {}", configured),
                 }
+                println!(
+                    "Volume in the call: {} of full level, linear gain (announcement_volume)",
+                    format_args!("{:.0}%", volume * 100.0)
+                );
                 println!(
                     "Jessica voice: {}",
                     if cached {
