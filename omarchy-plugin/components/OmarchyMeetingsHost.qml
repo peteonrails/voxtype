@@ -6,6 +6,8 @@ import "meetings"
 // The meeting view (quickshell/voxtype-meetings, shared with the standalone
 // Quickshell shell) hosted in the Omarchy plugin: the shell's theme mapped
 // onto MeetingTheme, and opening routed through Panel.qml's shell.summon.
+// It owns the view (meeting-view.owner): when the standalone shell runs too,
+// that one stands by and this one opens on meeting starts and requests.
 Item {
   id: root
 
@@ -67,6 +69,9 @@ Item {
     panelOpen: root.panelOpen
     canOpenSettings: true
     host: "omarchy"
+    // The plugin owns the view: voxtype's standalone Quickshell shell, when
+    // it also runs, leaves meetings to it.
+    ownsView: true
     onOpenRequested: root.openRequested()
     onCloseRequested: root.closeRequested()
     onSettingsRequested: root.settingsRequested()

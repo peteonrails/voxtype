@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import "MeetingText.js" as MT
+import "MeetingOwner.js" as MO
 
 // The meeting view, everything but the host: the live feed from meeting.sock,
 // the `voxtype meeting` commands, the assistant (notes, ask, summary), the
@@ -26,6 +27,12 @@ import "MeetingText.js" as MT
 // Every running host reads it, so the CLI needs to know none of them. As
 // `[meeting.assistant] open_command`, plain `voxtype meeting view` picks the
 // meeting and answer up from VOXTYPE_MEETING_ID and VOXTYPE_ASK_ID.
+//
+// Only one host shows the view. A host with `ownsView` (the Omarchy plugin)
+// claims it in meeting-view.owner for as long as it runs; any other host
+// stands by while that claim is live (see MeetingOwner.js): it opens nothing
+// on a meeting start, leaves requests for the owner to read, and hands its
+// own view over if it had one up when the owner appeared.
 Item {
   id: root
 
@@ -43,6 +50,9 @@ Item {
   // "omarchy" or "standalone": named in meeting-view.state, and positions
   // are remembered per host.
   property string host: "standalone"
+  // This host shows the meeting view whenever it runs, and any other host
+  // defers to it. The Omarchy plugin sets it.
+  property bool ownsView: false
 
   // Where the card is, how big, and whether it is the pill. Kept here, not in
   // the window, so it outlives closing the view.
@@ -445,7 +455,7 @@ Item {
     // `[meeting] show_view_on_start`, read at the moment it is needed so a
     // change made with `voxtype config set` applies to the next meeting.
     onShowOnStartRead: function(show) {
-      if (!show) return
+      if (!show || root.standingBy()) return
       // A pill expands; a closed view opens, unless the host has something
       // else open.
       if (root.shown) placement.minimized = false
@@ -467,6 +477,12 @@ Item {
   Connections {
     target: feed
     function onMeetingStarted() {
+      // The owner opens it. Look again once its claim would have gone
+      // stale, in case the owner had just stopped and missed this start.
+      if (root.standingBy()) {
+        ownerRecheck.restart()
+        return
+      }
       if (root.shown ? placement.minimized : !root.panelOpen) meetingCli.readShowOnStart()
     }
   }
@@ -863,13 +879,31 @@ Item {
   property int stateHeartbeatMs: 10000
   // The shell's pid: the parent of a `sh` this process starts.
   property int shellPid: 0
-  property bool stateReady: false
+  property bool pidKnown: false
+  // The state file as it was when this host started has been read.
+  property bool stateRead: false
+  readonly property bool stateReady: root.pidKnown && root.stateRead
+  // This host has said it is visible since it started.
+  property bool wroteVisible: false
+
+  onStateReadyChanged: if (root.stateReady) root.writeViewState()
 
   function writeViewState() {
     if (!root.stateReady) return
+    // A host that has not been on screen leaves another host's visible view
+    // alone: a standing-by shell starting up must not tell the daemon the
+    // owner's view is gone.
+    if (!root.shown && !root.wroteVisible && root.otherHostVisible()) return
     var state = { visible: root.shown, minimized: root.shown && placement.minimized, host: root.host,
                   pid: root.shellPid, updated_at: Math.floor(Date.now() / 1000) }
     stateFile.setText(JSON.stringify(state) + "\n")
+    root.wroteVisible = root.shown
+  }
+
+  function otherHostVisible() {
+    var s = null
+    try { s = JSON.parse(stateFile.text()) } catch (e) {}
+    return !!(s && s.host !== root.host && (s.visible || s.minimized))
   }
 
   Connections {
@@ -889,6 +923,10 @@ Item {
     path: root.runtimeDir + "/meeting-view.state"
     printErrors: false
     atomicWrites: true
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: root.stateRead = true
+    onLoadFailed: root.stateRead = true
   }
 
   Process {
@@ -899,10 +937,96 @@ Item {
       waitForEnd: true
       onStreamFinished: root.shellPid = Number(String(text || "").trim()) || 0
     }
-    onExited: {
-      root.stateReady = true
-      root.writeViewState()
+    onExited: root.pidKnown = true
+  }
+
+  // ------------------------------------------------------------ ownership
+  //
+  // $XDG_RUNTIME_DIR/voxtype/meeting-view.owner names the host that shows the
+  // view: {"host", "pid", "updated_at"}, rewritten every `ownerHeartbeatMs`
+  // by a host with `ownsView` for as long as it runs, whether or not its view
+  // is up. Other hosts read it (MeetingOwner.js has the rule).
+
+  property int ownerHeartbeatMs: MO.HEARTBEAT_MS
+  property var ownerClaim: null
+  // The owner file has been read once, so a request that arrives first can
+  // wait for it rather than open a second view.
+  property bool ownerKnown: root.ownsView
+  property bool requestWaiting: false
+
+  // Another host is showing the view: this one opens nothing.
+  function standingBy() {
+    return MO.standbyFor(root.host, root.ownsView, root.ownerClaim, Date.now() / 1000) !== ""
+  }
+
+  function ownerRead(claim) {
+    root.ownerClaim = claim
+    root.ownerKnown = true
+    if (root.requestWaiting) {
+      root.requestWaiting = false
+      requestFile.reload()
     }
+    if (root.shown && root.standingBy()) root.handOff()
+  }
+
+  // The owner appeared while this host had the view up (it took over while
+  // the owner was restarting, say): the owner opens the same thing and this
+  // one closes, so there is still one view.
+  function handOff() {
+    var v = root.window ? root.window.view : null
+    var req = MO.handoffRequest({ minimized: placement.minimized, meetingId: feed.meetingId,
+                                  active: feed.active, tab: v ? v.currentTab : "" }, Date.now())
+    handoffFile.setText(JSON.stringify(req) + "\n")
+    root.closeRequested()
+  }
+
+  // Ask the owner to open its view, for a host's own way of opening (the
+  // standalone shell's keybinding) while it stands by.
+  function askOwnerToOpen() {
+    var req = MO.handoffRequest({ minimized: false, meetingId: "", active: true, tab: "" }, Date.now())
+    handoffFile.setText(JSON.stringify(req) + "\n")
+  }
+
+  FileView {
+    id: ownerFile
+    path: root.ownsView ? "" : root.runtimeDir + "/meeting-view.owner"
+    watchChanges: !root.ownsView
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.ownerRead(MO.parseClaim(ownerFile.text()))
+    onLoadFailed: root.ownerRead(null)
+  }
+
+  FileView {
+    id: ownerWriter
+    path: root.ownsView ? root.runtimeDir + "/meeting-view.owner" : ""
+    preload: false
+    printErrors: false
+    atomicWrites: true
+  }
+
+  Timer {
+    interval: root.ownerHeartbeatMs
+    repeat: true
+    triggeredOnStart: true
+    running: root.ownsView && root.pidKnown && root.shellPid > 0
+    onTriggered: ownerWriter.setText(MO.claimText(root.host, root.shellPid, Date.now() / 1000))
+  }
+
+  Timer {
+    id: ownerRecheck
+    interval: MO.STALE_SECS * 1000 + 500
+    onTriggered: {
+      if (!root.standingBy() && feed.active && !root.shown && !root.panelOpen) meetingCli.readShowOnStart()
+    }
+  }
+
+  FileView {
+    id: handoffFile
+    path: root.runtimeDir + "/meeting-view.request"
+    preload: false
+    printErrors: false
+    atomicWrites: true
   }
 
   // ------------------------------------------------------------ opacity
@@ -933,6 +1057,12 @@ Item {
     watchChanges: true
     printErrors: false
     onLoaded: {
+      // The owner reads it; leave it there for it.
+      if (!root.ownerKnown) {
+        root.requestWaiting = true
+        return
+      }
+      if (root.standingBy()) return
       var req = null
       try { req = JSON.parse(requestFile.text()) } catch (e) {}
       consumeRequest.running = true
