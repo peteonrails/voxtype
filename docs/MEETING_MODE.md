@@ -295,7 +295,7 @@ The daemon acts on meeting commands between audio chunks, so while it is transcr
 
 ## Live Meeting View
 
-The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
+The meeting view follows a meeting as it happens and stays useful after it. It runs in two places with one implementation: the Voxtype plugin in the Omarchy shell, and voxtype's standalone Quickshell shell (`voxtype setup quickshell`, then `qs -p ~/.local/share/voxtype/quickshell`). When both are running, as on Omarchy with the Quickshell OSD, the plugin shows the view and the standalone shell leaves meetings to it, so you only ever see one. If omarchy-shell stops, the standalone shell takes over within about ten seconds. It opens by itself when a meeting starts, whether from `voxtype meeting start`, the detection prompt's **Record** button, or the tray, and sits at the right edge of the screen without taking keyboard focus from your call.
 
 The header shows the meeting title (click it to rename the meeting: Enter saves with `voxtype meeting title`, Escape cancels; a rename made elsewhere, or a title taken from the calendar after the start, shows up at once; renaming a finished meeting to a two-person title such as "Pete <> Chad" shows the names on its lines right away), how long it has been running, and whether it is recording, paused or finalizing, with **Pause**/**Resume** and **Stop**. While it records, two small meters beside "Listening…" show your microphone (**You**) and, when the meeting records the call, the other side (**Call**), so a muted mic or a silent call shows up before the first chunk is transcribed. They empty while paused. Below it are four tabs:
 
@@ -343,7 +343,7 @@ voxtype meeting view --ask last-5m --no-open   # answer arrives as a notificatio
 `voxtype meeting view` opens the view that `[meeting] view` picks (see [Without Quickshell](#without-quickshell-the-meeting-window) below); on a Quickshell desktop that is this one.
 
 
-In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it.
+In Omarchy, `omarchy-shell io.voxtype.settings meetings` works too. In the standalone shell, the `meeting-controls.flag` keybinding that `voxtype setup quickshell` prints toggles it; while the Omarchy plugin is running, that keybinding opens the plugin's view instead.
 
 An answer that arrives as a notification (a question asked while the view is closed) has an **Open** action that runs `[meeting.assistant] open_command`. `voxtype meeting view` is all it needs: it reads the meeting and the answer from `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID`, which the notification sets, and the view opens on that answer in whichever shell is running.
 

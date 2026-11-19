@@ -725,8 +725,10 @@ pub enum MeetingAction {
     /// the Omarchy shell, or voxtype's standalone Quickshell shell (`voxtype
     /// setup quickshell`). Both read the request this writes to
     /// $XDG_RUNTIME_DIR/voxtype/meeting-view.request, so this command does not
-    /// need to know which one you use. An Ask notification's Open action runs
-    /// it. Nothing opens if neither is running.
+    /// need to know which one you use. When both run, the Omarchy plugin
+    /// opens it and the standalone shell leaves it alone. An Ask
+    /// notification's Open action runs it. Nothing opens if neither is
+    /// running.
     ///
     /// Without Quickshell (GNOME, Plasma, Sway, X11), this opens the meeting
     /// window `voxtype-meetings-gtk4` instead. `[meeting] view` (or
