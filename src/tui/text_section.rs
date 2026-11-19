@@ -1010,6 +1010,36 @@ mod tests {
     }
 
     #[test]
+    fn inline_replacements_are_listed_and_kept_on_save() {
+        // The TUI read `[text.replacements]` only as a standard table, so an
+        // inline one showed as empty and the first save replaced it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let source = "[text]\nreplacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" }\n";
+        std::fs::write(&path, source).unwrap();
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = TextState::from_editor(&ed).unwrap();
+        assert_eq!(
+            state.replacements,
+            vec![
+                ("cone ogres".to_string(), "CODEOWNERS".to_string()),
+                ("vox type".to_string(), "Voxtype".to_string()),
+            ]
+        );
+
+        state
+            .replacements
+            .push(("inovara".to_string(), "Enovara".to_string()));
+        state.replacements.retain(|(k, _)| k != "cone ogres");
+        state.save_with_editor(&mut ed);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            saved,
+            "[text]\nreplacements = { \"vox type\" = \"Voxtype\", inovara = \"Enovara\" }\n"
+        );
+    }
+
+    #[test]
     fn unchanged_save_preserves_omissions_and_file_bytes() {
         for source in ["# absent text\nengine = 'cohere'\n", "# old config\n[text]\nsmart_auto_submit = false # submit\n[text.replacements]\n'vox type' = 'VoxType' # keep spelling\n"] {
             let dir = tempfile::tempdir().unwrap();
