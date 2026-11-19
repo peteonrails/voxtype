@@ -140,6 +140,21 @@ When it reached the call, the line reads `Announcement: played into Zoom's micro
 
 The announcement comes back through the loopback, and maybe the mic, so the meeting keeps it out of the transcript and the summary: lines in the seconds it played that say its words lose them.
 
+#### How loud
+
+By default the others hear the announcement at half the clip's full level. At full level, the only level in earlier releases, the other people on a call found it too loud. Set it with `announcement_volume`, from 0.0 (silent) to 1.0 (full level):
+
+```toml
+[meeting]
+announcement_volume = 0.5   # default
+```
+
+The number is a linear gain on the clip, passed to `pw-play --volume`: 0.5 is about 6 dB down. Hearing is not linear, so 0.5 still sounds a bit more than half as loud; about 0.3 (10 dB down) sounds roughly half as loud. Voxtype sets the level on its own stream into the call, so a volume your mixer remembers for `pw-play` does not change what the call hears.
+
+For one meeting, `voxtype meeting start --announcement-volume 0.3`; `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME` and Settings > Meeting set it too. A value outside 0.0 to 1.0 is refused by the flag, the environment variable and `voxtype config set`, and clamped if it is written into the config file by hand. `voxtype meeting announcement` shows the volume in use.
+
+The copy on your own speakers is not affected. It plays like any other sound, at the volume your mixer gives `pw-play`, so turn that down in your mixer if it is too loud for you.
+
 #### Your own wording or language
 
 Record your own clip (WAV, FLAC or Ogg) and point voxtype at it:
@@ -252,6 +267,7 @@ voxtype meeting start --title "Planning" --url https://meet.example.com/abc-defg
 | `--announce` / `--no-announce` | `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | Play the [recording announcement](#announcing-the-recording) for this meeting, or not. |
 | `--announcement-file` | `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | Your own announcement clip for this meeting. |
 | `--announcement-voice` | `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` | The built-in announcement's voice for this meeting: `kokoro` or `jessica`. |
+| `--announcement-volume` | `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME` | How loud the call hears the announcement in this meeting, a linear gain from 0.0 to 1.0. |
 
 A choice the meeting could not use is refused before anything starts, with the fix: an engine this binary was built without (with how to get a build that has it), a model that is not downloaded (with the download command), a model that belongs to a different engine than `--engine`, or a language the checkpoint does not take.
 
@@ -1245,6 +1261,11 @@ announce_recording = false
 # The built-in announcement's voice: "kokoro" (built in, MIT) or "jessica"
 # (ElevenLabs, downloaded once, not MIT) (default: "kokoro")
 announcement_voice = "kokoro"
+
+# How loud the call hears the announcement, as a linear gain: 1.0 is the
+# clip at full level, 0.5 about 6 dB down, 0.0 silent. About 0.3 sounds
+# roughly half as loud. Your speakers' copy follows your mixer. (default: 0.5)
+announcement_volume = 0.5
 ```
 
 ### Audio Settings

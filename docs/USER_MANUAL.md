@@ -3151,6 +3151,7 @@ auto_label_from_title = true     # Name both sides of "Pete <> Andrew standup" f
 announce_recording = false       # Play "This meeting is being recorded..." into the call at start
 # announcement_file = "~/announce.wav"  # Your own clip instead of the built-in one
 announcement_voice = "kokoro"    # Built in; "jessica" downloads an ElevenLabs voice once
+announcement_volume = 0.5        # Call volume, linear gain: 1.0 full, 0.5 about -6 dB
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)

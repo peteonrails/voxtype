@@ -366,12 +366,136 @@ fn start_options_take_the_voice_flag_over_config() {
             false,
             None,
             voice,
+            None,
         )
         .unwrap()
         .announcement_voice
     };
     assert_eq!(resolved(None).as_deref(), Some("jessica"));
     assert_eq!(resolved(Some("kokoro")).as_deref(), Some("kokoro"));
+}
+
+#[test]
+fn start_options_take_the_volume_flag_over_config() {
+    let config = MeetingConfig {
+        announcement_volume: 0.8,
+        ..Default::default()
+    };
+    let resolved = |volume| {
+        resolve_start_options(
+            &config,
+            MeetingStartOptions::default(),
+            true,
+            false,
+            None,
+            None,
+            volume,
+        )
+        .unwrap()
+        .announcement_volume
+    };
+    assert_eq!(resolved(None), Some(0.8));
+    assert_eq!(resolved(Some(0.2)), Some(0.2));
+    // The default config resolves to the default volume.
+    let options = resolve_start_options(
+        &MeetingConfig::default(),
+        MeetingStartOptions::default(),
+        true,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(options.announcement_volume, Some(DEFAULT_VOLUME));
+    // Not announcing, nothing is resolved and nothing goes on the wire.
+    let options = resolve_start_options(
+        &config,
+        MeetingStartOptions::default(),
+        false,
+        true,
+        None,
+        None,
+        Some(0.2),
+    )
+    .unwrap();
+    assert_eq!(options.announcement_volume, None);
+}
+
+#[test]
+fn a_meeting_announces_at_its_own_volume_else_the_configs_in_range() {
+    let config = MeetingConfig {
+        announcement_volume: 0.3,
+        ..Default::default()
+    };
+    let none = MeetingStartOptions::default();
+    assert_eq!(volume_for_meeting(&config, &none), 0.3);
+    let own = MeetingStartOptions {
+        announcement_volume: Some(0.9),
+        ..Default::default()
+    };
+    assert_eq!(volume_for_meeting(&config, &own), 0.9);
+    // A hand-edited config out of range is clamped, never louder than full.
+    let loud = MeetingConfig {
+        announcement_volume: 4.0,
+        ..Default::default()
+    };
+    assert_eq!(volume_for_meeting(&loud, &none), 1.0);
+    let negative = MeetingConfig {
+        announcement_volume: -1.0,
+        ..Default::default()
+    };
+    assert_eq!(volume_for_meeting(&negative, &none), 0.0);
+    assert_eq!(clamp_volume(f32::NAN), DEFAULT_VOLUME);
+}
+
+#[test]
+fn the_call_player_gets_the_configured_volume_and_ignores_a_remembered_one() {
+    let clip = Path::new("/run/user/1000/voxtype/meeting-announcement.wav");
+    let args: Vec<String> = inject_args("voxtype-announce-42", 0.5, clip)
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let after = |flag: &str| {
+        let i = args.iter().position(|a| a == flag).unwrap();
+        args[i + 1].clone()
+    };
+    // Held until linked into the call.
+    assert_eq!(after("--target"), "0");
+    // The configured volume as pw-play's linear gain, written with a dot
+    // whatever the locale.
+    assert_eq!(after("--volume"), "0.5000");
+    let props = after("-P");
+    assert!(
+        props.contains("node.name = \"voxtype-announce-42\""),
+        "{props}"
+    );
+    assert!(props.contains("state.restore-props = false"), "{props}");
+    assert_eq!(args.last().map(String::as_str), clip.to_str());
+
+    let full = inject_args("n", 1.0, clip);
+    let i = full.iter().position(|a| a == "--volume").unwrap();
+    assert_eq!(full[i + 1], "1.0000");
+    let silent = inject_args("n", 0.0, clip);
+    let i = silent.iter().position(|a| a == "--volume").unwrap();
+    assert_eq!(silent[i + 1], "0.0000");
+    // Out of range never reaches pw-play, whose gain goes up to 10.
+    let loud = inject_args("n", 4.0, clip);
+    let i = loud.iter().position(|a| a == "--volume").unwrap();
+    assert_eq!(loud[i + 1], "1.0000");
+}
+
+#[test]
+fn the_volume_flag_and_environment_refuse_out_of_range_values() {
+    assert_eq!(parse_volume("0.5"), Ok(0.5));
+    assert_eq!(parse_volume(" 1 "), Ok(1.0));
+    assert_eq!(parse_volume("0"), Ok(0.0));
+    for bad in ["1.5", "-0.1", "NaN", "inf"] {
+        let err = parse_volume(bad).unwrap_err();
+        assert!(err.contains("0.0") && err.contains("1.0"), "{bad}: {err}");
+    }
+    let err = parse_volume("loud").unwrap_err();
+    assert!(err.contains("not a number"), "{err}");
 }
 
 #[test]
@@ -382,7 +506,7 @@ fn start_options_resolve_flags_over_config() {
         ..Default::default()
     };
     let resolve = |c: &MeetingConfig, a, n| {
-        resolve_start_options(c, MeetingStartOptions::default(), a, n, None, None)
+        resolve_start_options(c, MeetingStartOptions::default(), a, n, None, None, None)
             .unwrap()
             .announce
     };
@@ -403,6 +527,7 @@ fn start_options_refuse_a_missing_file_only_when_announcing() {
         false,
         Some(&missing),
         None,
+        None,
     )
     .unwrap_err();
     assert!(err.contains("nope.wav"), "{err}");
@@ -413,6 +538,7 @@ fn start_options_refuse_a_missing_file_only_when_announcing() {
         false,
         true,
         Some(&missing),
+        None,
         None,
     )
     .is_ok());
@@ -425,6 +551,7 @@ fn start_options_refuse_a_missing_file_only_when_announcing() {
         true,
         false,
         Some(&present),
+        None,
         None,
     )
     .unwrap();

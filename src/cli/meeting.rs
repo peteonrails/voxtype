@@ -98,6 +98,15 @@ pub enum MeetingAction {
         /// announcement_voice` (VOXTYPE_MEETING_ANNOUNCEMENT_VOICE).
         #[arg(long, value_name = "VOICE", value_parser = PossibleValuesParser::new(super::ANNOUNCEMENT_VOICES))]
         announcement_voice: Option<String>,
+
+        /// How loud the people on the call hear the announcement in this
+        /// meeting, as a linear gain from 0.0 (silent) to 1.0 (the clip at
+        /// full level). 0.5 is about 6 dB down; about 0.3 (10 dB down)
+        /// sounds roughly half as loud. Your own speakers' copy follows your
+        /// mixer. Falls back to `[meeting] announcement_volume`
+        /// (VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME), 0.5 by default.
+        #[arg(long, value_name = "0.0-1.0", value_parser = super::parse_announcement_volume)]
+        announcement_volume: Option<f32>,
     },
     /// Stop the current meeting
     Stop,
@@ -1277,6 +1286,35 @@ mod tests {
             parse(&["--announce", "--announcement-file", "/tmp/de.wav"]),
             (true, false, Some("/tmp/de.wav".into()))
         );
+    }
+
+    #[test]
+    fn meeting_start_announcement_volume_flag() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["voxtype", "meeting", "start"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).map(|cli| match cli.command {
+                Some(Commands::Meeting {
+                    action:
+                        MeetingAction::Start {
+                            announcement_volume,
+                            ..
+                        },
+                }) => announcement_volume,
+                _ => panic!("Expected Meeting Start command"),
+            })
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["--announcement-volume", "0.3"]).unwrap(), Some(0.3));
+        assert_eq!(parse(&["--announcement-volume", "1"]).unwrap(), Some(1.0));
+        assert_eq!(parse(&["--announcement-volume", "0"]).unwrap(), Some(0.0));
+        // Out of range or not a number is refused with the range.
+        for bad in ["1.5", "-0.2", "loud"] {
+            let err = parse(&[&format!("--announcement-volume={bad}")])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("0.0") && err.contains("1.0"), "{bad}: {err}");
+        }
     }
 
     #[test]

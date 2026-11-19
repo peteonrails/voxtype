@@ -6,7 +6,7 @@ use super::default_true;
 
 /// Per-meeting choices given to `voxtype meeting start`. Unset fields keep
 /// the configuration's values. Travels from the CLI to the daemon as JSON.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct MeetingStartOptions {
     /// Engine for this meeting's transcription (`whisper`, `parakeet`, ...)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +35,11 @@ pub struct MeetingStartOptions {
     /// unset keeps `[meeting] announcement_voice`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announcement_voice: Option<String>,
+    /// How loud the call hears the announcement for this meeting
+    /// (`--announcement-volume`); unset keeps `[meeting]
+    /// announcement_volume`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcement_volume: Option<f32>,
 }
 
 /// Meeting transcription configuration
@@ -131,6 +136,14 @@ pub struct MeetingConfig {
     #[serde(default = "default_announcement_voice")]
     pub announcement_voice: String,
 
+    /// How loud the people on the call hear the announcement: a linear
+    /// gain from 0.0 (silent) to 1.0 (the clip at full level, the only level
+    /// before this setting). 0.5 is about 6 dB down; about 0.3 (10 dB down)
+    /// sounds roughly half as loud. Values outside the range are clamped.
+    /// The copy on your own speakers follows your mixer instead.
+    #[serde(default = "default_announcement_volume")]
+    pub announcement_volume: f32,
+
     /// Meeting audio configuration
     #[serde(default)]
     pub audio: MeetingAudioConfig,
@@ -215,6 +228,10 @@ pub struct MeetingAudioConfig {
 
 fn default_announcement_voice() -> String {
     "kokoro".to_string()
+}
+
+fn default_announcement_volume() -> f32 {
+    crate::meeting::announce::DEFAULT_VOLUME
 }
 
 fn default_echo_fuzzy_max_words() -> u32 {
@@ -617,6 +634,7 @@ impl Default for MeetingConfig {
             announce_recording: false,
             announcement_file: None,
             announcement_voice: default_announcement_voice(),
+            announcement_volume: default_announcement_volume(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
             summary: MeetingSummaryConfig::default(),
@@ -692,6 +710,25 @@ mod tests {
         assert_eq!(config.meeting.announcement_voice, "jessica");
         let options: MeetingStartOptions = serde_json::from_str("{}").unwrap();
         assert_eq!(options.announcement_voice, None);
+    }
+
+    #[test]
+    fn test_announcement_volume_defaults_to_half_and_can_be_set() {
+        assert_eq!(MeetingConfig::default().announcement_volume, 0.5);
+        // A config written before the key existed gets the quieter default.
+        let config: Config = toml::from_str("[meeting]\nannounce_recording = true\n").unwrap();
+        assert_eq!(config.meeting.announcement_volume, 0.5);
+        let config: Config = toml::from_str("[meeting]\nannouncement_volume = 0.25\n").unwrap();
+        assert_eq!(config.meeting.announcement_volume, 0.25);
+        // An integer is a valid TOML float for this key too.
+        let config: Config = toml::from_str("[meeting]\nannouncement_volume = 1\n").unwrap();
+        assert_eq!(config.meeting.announcement_volume, 1.0);
+
+        let options: MeetingStartOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(options.announcement_volume, None);
+        let options: MeetingStartOptions =
+            serde_json::from_str(r#"{"announcement_volume":0.3}"#).unwrap();
+        assert_eq!(options.announcement_volume, Some(0.3));
     }
 
     #[test]

@@ -4208,6 +4208,23 @@ voxtype config set meeting.announcement_voice jessica
 voxtype meeting announcement --voice jessica
 ```
 
+### announcement_volume
+
+**Type:** Float (0.0 to 1.0)
+**Default:** `0.5`
+**Required:** No
+
+How loud the other people on the call hear the announcement. 1.0 is the clip at full level, the only level in earlier releases; 0.0 is silent. The number is a linear gain on the clip, passed to `pw-play --volume`: 0.5 is about 6 dB down, and about 0.3 (10 dB down) sounds roughly half as loud. Voxtype sets this level on its own stream into the call and tells WirePlumber not to restore a remembered volume over it. The copy on your own speakers is not affected: it plays at the volume your mixer gives `pw-play`. The flag, the environment variable and `voxtype config set` refuse values outside 0.0 to 1.0; a value written into the file by hand is clamped. See [How loud](MEETING_MODE.md#how-loud).
+
+`meeting start` reads it each time, so a change applies to the next meeting without a restart.
+
+**CLI:** `voxtype meeting start --announcement-volume <0.0-1.0>`, for one meeting
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME`
+
+```bash
+voxtype config set meeting.announcement_volume 0.3
+```
+
 ---
 
 ## [meeting.audio]
@@ -5154,6 +5171,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | bool | `meeting.announce_recording` |
 | `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | path | `meeting.announcement_file` |
 | `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` | string | `meeting.announcement_voice` |
+| `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME` | float | `meeting.announcement_volume` |
 | `VOXTYPE_LARD_MODEL_PATH` | path | `text.lard_model_path` |
 | `VOXTYPE_TEXT_LANGUAGE` | string | `text.language` |
 | `VOXTYPE_PUNCTUATION_CASING` | bool | `text.punctuation_casing` |

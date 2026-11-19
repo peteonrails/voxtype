@@ -2383,6 +2383,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .live(),
     spec(
+        "meeting.announcement_volume",
+        "meeting",
+        "announcement_volume",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "Meeting",
+        "Announcement volume",
+        "How loud the people on the call hear the announcement, as a linear gain: 1.0 is the clip at full level, 0.5 about 6 dB down, about 0.3 (10 dB down) sounds roughly half as loud, 0.0 is silent. The copy on your own speakers follows your mixer.",
+    )
+    .live(),
+    spec(
         "meeting.announcement_file",
         "meeting",
         "announcement_file",
@@ -3522,6 +3532,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.announce_recording" => json!(cfg.meeting.announce_recording),
         "meeting.announcement_file" => opt_str(cfg.meeting.announcement_file.as_ref()),
         "meeting.announcement_voice" => json!(cfg.meeting.announcement_voice),
+        "meeting.announcement_volume" => f32_json(cfg.meeting.announcement_volume),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
         "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),
@@ -4119,6 +4130,41 @@ mod tests {
             validate_value(dur, "1.5"),
             Err(ValueError::NotInt { .. })
         ));
+    }
+
+    #[test]
+    fn announcement_volume_is_a_live_float_from_silent_to_full() {
+        let spec = scalar_keys()
+            .find(|s| s.key == "meeting.announcement_volume")
+            .unwrap();
+        // `meeting start` reads it, so a change applies to the next meeting.
+        assert!(!spec.restart_required);
+        assert!(matches!(
+            validate_value(spec, "0.5"),
+            Ok(TypedValue::Float(v)) if v == 0.5
+        ));
+        assert!(matches!(
+            validate_value(spec, "0"),
+            Ok(TypedValue::Float(_))
+        ));
+        assert!(matches!(
+            validate_value(spec, "1"),
+            Ok(TypedValue::Float(_))
+        ));
+        for bad in ["1.01", "-0.1", "NaN"] {
+            let err = validate_value(spec, bad).unwrap_err();
+            assert!(matches!(err, ValueError::OutOfRange { .. }), "{bad}");
+            assert!(err.to_string().contains("expected 0 to 1"), "{err}");
+        }
+        assert!(matches!(
+            validate_value(spec, "loud"),
+            Err(ValueError::NotFloat { .. })
+        ));
+        // Read back as written, without f32 widening noise.
+        assert_eq!(
+            resolve("meeting.announcement_volume", &Config::default()),
+            Some(serde_json::json!(0.5))
+        );
     }
 
     #[test]
