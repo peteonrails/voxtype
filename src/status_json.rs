@@ -141,28 +141,6 @@ fn model_upgrade_for(config: &config::Config) -> Option<UpgradeStatus> {
     Some(crate::model_upgrade::status_for_config(config)).filter(UpgradeStatus::has_anything)
 }
 
-/// The configured GGUF model and its `gguf_backend` setting, if the active
-/// engine runs one.
-fn active_gguf(config: &config::Config) -> Option<(&str, &str)> {
-    use config::TranscriptionEngine;
-    let model = config.model_name();
-    match config.engine {
-        TranscriptionEngine::Gguf => config
-            .gguf
-            .as_ref()
-            .map(|gguf| (gguf.model.as_str(), gguf.gguf_backend.as_str())),
-        TranscriptionEngine::Parakeet if crate::model_selection::is_gguf(model) => config
-            .parakeet
-            .as_ref()
-            .map(|p| (p.model.as_str(), p.gguf_backend.as_str())),
-        TranscriptionEngine::Cohere if crate::model_selection::is_gguf(model) => config
-            .cohere
-            .as_ref()
-            .map(|c| (c.model.as_str(), c.gguf_backend.as_str())),
-        _ => None,
-    }
-}
-
 /// "GGUF Vulkan (transcribe.cpp)" from a transcribe.cpp backend name.
 fn gguf_label(backend: &str) -> String {
     let lower = backend.to_ascii_lowercase();
@@ -192,7 +170,8 @@ fn gguf_backend_label(
     daemon_running: bool,
     runtime_dir: &std::path::Path,
 ) -> Option<String> {
-    let (model, configured) = active_gguf(config)?;
+    let active = config.active_gguf()?;
+    let (model, configured) = (active.model, active.backend);
     let basename = |path: &str| {
         std::path::Path::new(path)
             .file_name()

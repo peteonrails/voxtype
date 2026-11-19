@@ -228,7 +228,9 @@ After the user approves the plan:
 
 1. Ask the user to dictate one sentence. Acceleration can't be confirmed until
    a model has loaded.
-2. Run `voxtype info accel`. It should report the backend you planned.
+2. Run `voxtype info accel`. It should report the backend you planned. For a
+   GGUF model that is the `<engine>.gguf_backend` the worker bound (for
+   example `vulkan`) and its device, not the binary variant.
 3. Run `voxtype status --format json --extended` to confirm the engine and model.
 4. If anything is off, run `voxtype doctor` again before reading logs. It
    names the problem and the fix. Since 1.3.0 the daemon also shows a desktop

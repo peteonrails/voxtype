@@ -748,6 +748,14 @@ voxtype setup gpu --enable   # Switch to Vulkan GPU backend (requires sudo)
 voxtype setup gpu --disable  # Switch back to CPU backend (requires sudo)
 ```
 
+A GGUF model (Cohere or Parakeet with a `.gguf` file, or `engine = "gguf"`)
+runs in `voxtype-gguf-worker` on `<engine>.gguf_backend` rather than on the
+binary variant. For those, `voxtype setup gpu` says so and suggests
+`voxtype config set <engine>.gguf_backend vulkan` (or `cpu`). The variant
+still decides which worker runs: the Vulkan and ONNX variants ship one that can
+use Vulkan, the CPU variants one that cannot. `voxtype info accel` shows the
+backend and device the worker bound.
+
 ### `voxtype setup dms`
 
 Install a status widget for DankMaterialShell (KDE Plasma alternative shell).

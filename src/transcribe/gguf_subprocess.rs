@@ -166,6 +166,7 @@ impl GgufSubprocessTranscriber {
             ))
         })?;
         if line.trim() == READY_SIGNAL {
+            self.publish_acceleration(child.id());
             return Ok(Worker {
                 child,
                 stdin,
@@ -192,6 +193,21 @@ impl GgufSubprocessTranscriber {
                     path.display()
                 ))
             }))
+    }
+
+    /// Publish what the worker bound for `voxtype info accel`. The worker
+    /// wrote its report before READY; the daemon's journal never sees it,
+    /// because it logs under its own PID.
+    fn publish_acceleration(&self, worker_pid: u32) {
+        let Ok(config) = serde_json::from_str::<serde_json::Value>(&self.config_json) else {
+            return;
+        };
+        let (Some(model), Some(backend)) =
+            (config["model"].as_str(), config["gguf_backend"].as_str())
+        else {
+            return;
+        };
+        crate::setup::accel::publish_gguf_worker(self.engine, model, backend, worker_pid);
     }
 
     /// One request. The error side carries whether the worker is still usable:

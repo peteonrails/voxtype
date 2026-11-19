@@ -9,13 +9,17 @@
 //! redraws the `DrawingArea` while visible, including between audio arrivals.
 //!
 //! When the IPC socket is silent for `idle_timeout_secs` (Idle proxy) the
-//! window is hidden so the binary does no rendering work and consumes
-//! effectively zero CPU. It reappears when frames resume.
+//! window is hidden, and the visibility timer and the frame-clock redraw
+//! stop with it, so the binary does no rendering work and never wakes: it
+//! sleeps in the main loop until the IPC worker sees the next frame and
+//! starts the timer again.
 //!
 //! Run with `RUST_LOG=debug` for verbose logs.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,7 +76,8 @@ fn load_osd_config_from_file(explicit: Option<&std::path::Path>) -> OsdConfig {
 /// Application id for the GTK4 frontend.
 const APP_ID: &str = "io.voxtype.OsdGtk4";
 
-/// Visibility polling period. Drawing follows the GTK frame clock.
+/// Visibility polling period while frames arrive. Drawing follows the GTK
+/// frame clock; hidden, nothing polls at all.
 const RENDER_TICK_MS: u32 = 16;
 
 /// How long we wait without frames before treating the daemon as idle and
@@ -153,6 +158,10 @@ struct SharedState {
     meter: Mutex<(LevelMeter, Option<Instant>)>,
     last_seq: Mutex<u64>,
     last_frame_at: Mutex<Instant>,
+    /// True while the visibility timer is scheduled on the GTK main loop. The
+    /// timer clears it when it stops for an idle surface; the IPC worker sets
+    /// it on the next frame and starts the timer again.
+    polling: AtomicBool,
 }
 
 impl SharedState {
@@ -164,8 +173,58 @@ impl SharedState {
             meter: Mutex::new((LevelMeter::new(decay_db_per_sec), None)),
             last_seq: Mutex::new(0),
             last_frame_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
+            // `build_window` starts the first timer itself.
+            polling: AtomicBool::new(true),
         }
     }
+
+    /// Seconds since the last audio frame arrived.
+    fn since_last_frame(&self) -> f32 {
+        self.last_frame_at
+            .lock()
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(f32::MAX)
+    }
+}
+
+/// What the visibility timer works on. Lives on the GTK main thread.
+struct Surface {
+    window: ApplicationWindow,
+    drawing_area: DrawingArea,
+    state: Arc<SharedState>,
+    /// Tracks GTK visibility.
+    visible: Cell<bool>,
+    /// The frame-clock redraw, present while the surface shows.
+    redraw: RefCell<Option<gtk4::TickCallbackId>>,
+}
+
+impl Surface {
+    /// Redraw on every frame-clock tick, so fractional scrolling continues
+    /// between audio deliveries.
+    fn start_redraw(&self) {
+        let mut redraw = self.redraw.borrow_mut();
+        if redraw.is_none() {
+            *redraw = Some(self.drawing_area.add_tick_callback(|area, _clock| {
+                area.queue_draw();
+                glib::ControlFlow::Continue
+            }));
+        }
+    }
+
+    /// Hiding the window only unmaps it: the widget stays realized, and a
+    /// tick callback left on it kept the frame clock firing 60 times a
+    /// second with nothing on screen. So it goes while the surface is hidden.
+    fn stop_redraw(&self) {
+        if let Some(id) = self.redraw.borrow_mut().take() {
+            id.remove();
+        }
+    }
+}
+
+thread_local! {
+    /// The surface of this process, for the wake-up the IPC worker sends to
+    /// the main loop (a GTK window can't cross threads).
+    static SURFACE: RefCell<Option<Rc<Surface>>> = const { RefCell::new(None) };
 }
 
 fn main() -> anyhow::Result<()> {
@@ -316,6 +375,12 @@ fn spawn_ipc_worker(
                 if let Ok(mut t) = state.last_frame_at.lock() {
                     *t = Instant::now();
                 }
+                // The visibility timer stops while the surface is hidden: the
+                // first frame of a recording starts it again on the main loop.
+                if !state.polling.swap(true, Ordering::AcqRel) {
+                    let state = state.clone();
+                    glib::MainContext::default().invoke(move || resume_visibility_timer(&state));
+                }
 
                 total += 1;
                 if log_every > 0 && total.is_multiple_of(u64::from(log_every)) {
@@ -434,57 +499,105 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         });
     }
 
-    // GTK pauses tick callbacks while the widget is hidden. While visible,
-    // redraw even between audio deliveries so fractional scrolling continues.
-    drawing_area.add_tick_callback(|area, _clock| {
-        area.queue_draw();
-        glib::ControlFlow::Continue
+    // Visibility is polled separately, and only while frames arrive: a hidden
+    // widget has no frame clock ticks with which to notice the next
+    // recording, so the IPC worker restarts this timer when one begins.
+    // Starts visible because `window.present()` below maps the surface; the
+    // first tick's idle check then hides it.
+    let surface = Rc::new(Surface {
+        window: window.clone(),
+        drawing_area: drawing_area.clone(),
+        state: state.clone(),
+        visible: Cell::new(true),
+        redraw: RefCell::new(None),
     });
-
-    // Visibility must be polled separately: a hidden widget has no frame clock
-    // ticks with which to notice the next recording.
-    let redraw_state = state.clone();
-    let redraw_window = window.clone();
-    // Tracks GTK visibility. Starts true because `window.present()` below maps
-    // the surface, the first tick's idle check then hides it.
-    let visible = Cell::new(true);
-
-    glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
-        let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
-        let last_at = redraw_state
-            .last_frame_at
-            .lock()
-            .map(|t| *t)
-            .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
-        let idle = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS || osd_suppressed();
-
-        if idle {
-            if visible.get() {
-                tracing::info!("hiding (idle for {:.2}s)", last_at.elapsed().as_secs_f32());
-                redraw_window.set_visible(false);
-                visible.set(false);
-            }
-            return glib::ControlFlow::Continue;
-        }
-
-        if !visible.get() {
-            tracing::info!(
-                "showing (frame seq={}, last_at={:.3}s ago)",
-                cur_seq,
-                last_at.elapsed().as_secs_f32()
-            );
-            redraw_window.set_visible(true);
-            visible.set(true);
-        }
-
-        glib::ControlFlow::Continue
-    });
+    surface.start_redraw();
+    SURFACE.with(|s| *s.borrow_mut() = Some(surface.clone()));
+    start_visibility_timer(surface);
 
     // Map the layer-shell surface once. The redraw timer will hide it
     // immediately on its first tick (no frames yet → idle), and toggle
     // visibility from there. Mapping once at startup keeps Hyprland's
     // layer-shell state machine happy across hide/show cycles.
     window.present();
+}
+
+/// What a tick of the visibility timer does next.
+#[derive(Debug, PartialEq, Eq)]
+enum Tick {
+    /// Frames are arriving and the OSD may show: keep the surface visible.
+    Show,
+    /// Frames are arriving but the recording is OSD-suppressed: hide, and
+    /// keep watching until the frames stop or the suppression ends.
+    HideAndWatch,
+    /// No frames: hide and stop polling until the IPC worker sees one.
+    HideAndStop,
+}
+
+fn tick_decision(since_last_frame_secs: f32, suppressed: bool) -> Tick {
+    if since_last_frame_secs > IDLE_TIMEOUT_SECS {
+        Tick::HideAndStop
+    } else if suppressed {
+        Tick::HideAndWatch
+    } else {
+        Tick::Show
+    }
+}
+
+/// Run the visibility timer until the surface goes idle.
+///
+/// It used to run for the life of the process: 62 wake-ups a second, each
+/// with a `stat` of the suppression marker, whether or not anything was
+/// being recorded. Now it stops with the last frame, takes the frame-clock
+/// redraw with it, and the hidden OSD sleeps in the main loop.
+fn start_visibility_timer(surface: Rc<Surface>) {
+    glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
+        let state = &surface.state;
+        let since = state.since_last_frame();
+        let decision = tick_decision(since, osd_suppressed());
+
+        if decision != Tick::Show {
+            if surface.visible.get() {
+                tracing::info!("hiding (idle for {:.2}s)", since);
+                surface.stop_redraw();
+                surface.window.set_visible(false);
+                surface.visible.set(false);
+            }
+            if decision == Tick::HideAndWatch {
+                return glib::ControlFlow::Continue;
+            }
+            state.polling.store(false, Ordering::Release);
+            // A frame that landed between the check above and the store
+            // found the timer still marked as running and woke nothing:
+            // keep going for it, unless its own wake-up got there first.
+            if state.since_last_frame() <= IDLE_TIMEOUT_SECS
+                && !state.polling.swap(true, Ordering::AcqRel)
+            {
+                return glib::ControlFlow::Continue;
+            }
+            return glib::ControlFlow::Break;
+        }
+
+        if !surface.visible.get() {
+            let cur_seq = state.last_seq.lock().map(|s| *s).unwrap_or(0);
+            tracing::info!("showing (frame seq={}, last_at={:.3}s ago)", cur_seq, since);
+            surface.window.set_visible(true);
+            surface.visible.set(true);
+            surface.start_redraw();
+        }
+
+        glib::ControlFlow::Continue
+    });
+}
+
+/// On the main loop, from the IPC worker: a frame arrived while the
+/// visibility timer was stopped.
+fn resume_visibility_timer(state: &SharedState) {
+    match SURFACE.with(|s| s.borrow().clone()) {
+        Some(surface) => start_visibility_timer(surface),
+        // No window (it never got built): let the next frame ask again.
+        None => state.polling.store(false, Ordering::Release),
+    }
 }
 
 /// Make everything outside the card transparent: the window spans the full
@@ -746,5 +859,37 @@ fn draw_peak_meter(
         cr.move_to(x, py);
         cr.line_to(x + w, py);
         cr.stroke().ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_arriving_show_the_osd() {
+        assert_eq!(tick_decision(0.0, false), Tick::Show);
+        assert_eq!(tick_decision(IDLE_TIMEOUT_SECS, false), Tick::Show);
+    }
+
+    #[test]
+    fn a_suppressed_recording_hides_but_keeps_watching() {
+        assert_eq!(tick_decision(0.01, true), Tick::HideAndWatch);
+    }
+
+    #[test]
+    fn no_frames_stops_the_timer_suppressed_or_not() {
+        assert_eq!(
+            tick_decision(IDLE_TIMEOUT_SECS + 0.01, false),
+            Tick::HideAndStop
+        );
+        assert_eq!(tick_decision(3600.0, true), Tick::HideAndStop);
+    }
+
+    #[test]
+    fn a_new_state_reports_no_recent_frame_and_a_scheduled_timer() {
+        let state = SharedState::new(20.0, 1.0);
+        assert!(state.since_last_frame() > IDLE_TIMEOUT_SECS);
+        assert!(state.polling.load(Ordering::Acquire));
     }
 }
