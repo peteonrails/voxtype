@@ -1323,6 +1323,21 @@ GGML_VK_VISIBLE_DEVICES=1 voxtype
 
 **How to find the right GPU:** Run `voxtype setup gpu` to see detected GPUs, or `vulkaninfo --summary` to see the Vulkan device list and their indices.
 
+### Transcription suddenly takes minutes (GPU build running on the CPU)
+
+**Cause:** the GPU backend found no device, so whisper.cpp loaded the model on the CPU. The log shows `devices = 1` and `CPU total size = ...` where a working start shows `devices = 2` and `Vulkan0 total size = ...` (or `CUDA0`). Common triggers are a driver that failed to initialize, an external GPU that disconnected, and a Vulkan loader pointed at the wrong ICD.
+
+**Solutions:**
+
+1. Fix the driver, then restart the daemon: `systemctl --user restart voxtype`. `vulkaninfo --summary` should list the GPU.
+
+2. To stop Voxtype from running on the CPU at all, set:
+```toml
+[whisper]
+gpu_required = true
+```
+Voxtype then refuses to load the model without a GPU. When you start a dictation it shows a notification and exits, and systemd restarts it to look for the GPU again. See [gpu_required](CONFIGURATION.md#gpu_required).
+
 ### High CPU usage
 
 **Cause:** Whisper inference is CPU-intensive.

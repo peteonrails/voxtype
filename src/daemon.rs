@@ -1116,6 +1116,10 @@ pub struct Daemon {
     // instance (#643) — get_transcriber_for_recording re-creates it on the
     // next recording when it finds this empty.
     transcriber_preloaded: Option<Arc<dyn Transcriber>>,
+    // Set at startup when `[whisper] gpu_required` found no GPU. The daemon
+    // stays up until someone tries to dictate, then exits so the service
+    // manager starts a process that lists the devices again.
+    gpu_unavailable: Option<crate::error::TranscribeError>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -1300,6 +1304,7 @@ impl Daemon {
             transcription_task: None,
             active_transcriber: None,
             transcriber_preloaded: None,
+            gpu_unavailable: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -2536,6 +2541,39 @@ impl Daemon {
         }
     }
 
+    /// Tell the user `[whisper] gpu_required` kept Whisper off the CPU.
+    /// Other errors are left to the caller's logging.
+    async fn notify_if_gpu_unavailable(&self, error: &crate::error::TranscribeError) {
+        self.notify_gpu_unavailable(error, "").await;
+    }
+
+    async fn notify_gpu_unavailable(&self, error: &crate::error::TranscribeError, then: &str) {
+        if let crate::error::TranscribeError::GpuUnavailable(reason) = error {
+            send_notification(
+                "Voxtype: No GPU",
+                &format!("{reason}. gpu_required is set, so Whisper won't run on the CPU.{then}"),
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                "critical",
+            )
+            .await;
+        }
+    }
+
+    /// Exit instead of recording when startup found no GPU. ggml lists its
+    /// devices once per process (#611), so only a new process can find the
+    /// GPU again; the service manager restarts the daemon.
+    async fn exit_if_gpu_unavailable(&mut self) -> Result<()> {
+        let Some(error) = self.gpu_unavailable.take() else {
+            return Ok(());
+        };
+        tracing::error!("{}. Exiting so the daemon restarts and looks again.", error);
+        self.play_feedback(SoundEvent::Error);
+        self.notify_gpu_unavailable(&error, " Voxtype is restarting to look for it again.")
+            .await;
+        Err(error.into())
+    }
+
     /// Tell the user a recording was discarded because VAD heard no speech.
     /// Logged at info and notified (unless `on_no_speech` is off): at debug
     /// it read as a hang, since nothing else happens after the stop.
@@ -2745,6 +2783,7 @@ impl Daemon {
                     Ok(Err(e)) => {
                         tracing::error!("Model loading failed: {}", e);
                         self.play_feedback(SoundEvent::Error);
+                        self.notify_if_gpu_unavailable(&e).await;
                         Err(())
                     }
                     Err(e) => {
@@ -2824,6 +2863,7 @@ impl Daemon {
                             Err(e) => {
                                 tracing::error!("Failed to get transcriber: {}", e);
                                 self.play_feedback(SoundEvent::Error);
+                                self.notify_if_gpu_unavailable(&e).await;
                                 Err(())
                             }
                         }
@@ -4069,6 +4109,7 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.notify_if_gpu_unavailable(&e).await;
                 self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                 self.reset_to_idle(state).await;
             }
@@ -4370,8 +4411,16 @@ impl Daemon {
         // Initialize model manager for multi-model support (Whisper only)
         let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
 
+        if let Err(e) = crate::transcribe::check_whisper_gpu_at_startup(&self.config) {
+            tracing::warn!(
+                "{}. Not loading the model; the daemon will exit when a recording starts.",
+                e
+            );
+            self.gpu_unavailable = Some(e);
+        }
+
         // Pre-load transcription model if on_demand_loading is disabled
-        if !self.config.on_demand_loading() {
+        if self.gpu_unavailable.is_none() && !self.config.on_demand_loading() {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
             match self.config.engine {
                 crate::config::TranscriptionEngine::Whisper => {
@@ -4414,7 +4463,7 @@ impl Daemon {
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
-        } else {
+        } else if self.gpu_unavailable.is_none() {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
         }
 
@@ -4538,6 +4587,7 @@ impl Daemon {
                                 if !self.accept_model_override(model_override.as_deref()).await {
                                     continue;
                                 }
+                                self.exit_if_gpu_unavailable().await?;
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
@@ -4694,6 +4744,7 @@ impl Daemon {
                                 if !self.accept_model_override(model_override.as_deref()).await {
                                     continue;
                                 }
+                                self.exit_if_gpu_unavailable().await?;
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
@@ -5146,6 +5197,7 @@ impl Daemon {
                         if !self.accept_model_override(model_override.as_deref()).await {
                             continue;
                         }
+                        self.exit_if_gpu_unavailable().await?;
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {

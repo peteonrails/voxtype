@@ -164,6 +164,10 @@ pub struct Cli {
     )]
     pub gpu_device: Option<i32>,
 
+    /// Fail instead of transcribing on the CPU when a GPU build finds no GPU
+    #[arg(long, help_heading = "Transcription", hide_short_help = true)]
+    pub gpu_required: bool,
+
     /// Load model on-demand when recording starts instead of keeping it loaded
     #[arg(long, help_heading = "Transcription", hide_short_help = true)]
     pub on_demand_loading: bool,

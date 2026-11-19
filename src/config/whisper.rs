@@ -83,6 +83,21 @@ pub struct WhisperConfig {
     #[serde(default = "default_gpu_wait_secs")]
     pub gpu_wait_secs: u64,
 
+    /// Refuse to load the model when a GPU build finds no GPU (default: false).
+    ///
+    /// whisper.cpp falls back to the CPU without an error when its GPU
+    /// backend enumerates no device, for example after a driver failed to
+    /// initialize or an external GPU dropped off the bus. A large model that
+    /// transcribes in under a second on the GPU then takes minutes per
+    /// dictation. With this set, loading the model fails instead, and the
+    /// daemon says why.
+    ///
+    /// Only applies to local Whisper in a build with a GPU feature
+    /// (gpu-vulkan, gpu-cuda, gpu-hipblas, gpu-metal). A CPU-only build can
+    /// never meet it, so it always fails the check.
+    #[serde(default)]
+    pub gpu_required: bool,
+
     /// Enable flash attention for GPU inference (default: false)
     /// Reduces memory bandwidth pressure in the attention layers.
     /// Requires a compatible GPU backend (CUDA or Vulkan).
@@ -282,6 +297,7 @@ impl Default for WhisperConfig {
             gpu_isolation: false,
             gpu_device: None,
             gpu_wait_secs: default_gpu_wait_secs(),
+            gpu_required: false,
             flash_attention: false,
             context_window_optimization: default_context_window_optimization(),
             eager_processing: false,
@@ -369,6 +385,15 @@ fn default_whisper_model() -> String {
 mod tests {
     use super::*;
     use crate::config::{Config, TranscriptionEngine};
+
+    #[test]
+    fn gpu_required_is_off_unless_set() {
+        assert!(!Config::default().whisper.gpu_required);
+        let config: Config = toml::from_str("[whisper]\nmodel = \"base.en\"\n").unwrap();
+        assert!(!config.whisper.gpu_required);
+        let config: Config = toml::from_str("[whisper]\ngpu_required = true\n").unwrap();
+        assert!(config.whisper.gpu_required);
+    }
 
     #[test]
     fn test_context_window_optimization_default_false() {

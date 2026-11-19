@@ -86,6 +86,9 @@ pub enum TranscribeError {
     #[error("Transcriber initialization failed: {0}")]
     InitFailed(String),
 
+    #[error("{0}\n  [whisper] gpu_required is set, so Voxtype will not transcribe on the CPU. Check that the GPU driver works with vulkaninfo --summary or nvidia-smi.")]
+    GpuUnavailable(String),
+
     #[error("Transcription failed: {0}")]
     InferenceFailed(String),
 
