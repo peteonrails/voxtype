@@ -350,6 +350,9 @@ pub struct SetOutcome {
     /// cannot run, with the fix. The value is still written: refusing it
     /// would break scripts that set the key before installing the model.
     pub warning: Option<String>,
+    /// False when there was nothing to do: an unset of a key the file
+    /// doesn't contain. The file is left untouched in that case.
+    pub changed: bool,
 }
 
 /// The LARD problem a write should be warned about, if any.
@@ -415,6 +418,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
             path: written,
             restart_required: true,
             warning: None,
+            changed: true,
         });
     }
 
@@ -479,11 +483,16 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
         path: editor.path().to_path_buf(),
         restart_required: spec.restart_required,
         warning: lard_warning(spec.key, lard_before, &editor),
+        changed: true,
     })
 }
 
 /// Remove an allowlisted key from the config file, falling back to its
-/// built-in default. Removing a key that isn't present succeeds.
+/// built-in default.
+///
+/// Removing a key that isn't present succeeds without writing the file, and
+/// reports `changed: false` so the caller can say so instead of claiming it
+/// removed something.
 pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError> {
     let found = lookup(key)?;
     let spec = found.spec();
@@ -491,15 +500,22 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
 
     let mut editor = ConfigEditor::load_from_path(path)?;
     let lard_before = lard_problem(&editor);
-    editor.unset(table, field);
-    editor.save()?;
+    let changed = editor.remove_key(table, field);
+    if changed {
+        editor.save()?;
+    }
 
     Ok(SetOutcome {
         key: found.dotted_key(),
         value: TypedValue::Str(String::new()),
         path: editor.path().to_path_buf(),
-        restart_required: spec.restart_required,
-        warning: lard_warning(spec.key, lard_before, &editor),
+        restart_required: changed && spec.restart_required,
+        warning: if changed {
+            lard_warning(spec.key, lard_before, &editor)
+        } else {
+            None
+        },
+        changed,
     })
 }
 
@@ -1197,6 +1213,62 @@ gguf_backend = "cpu"
         unset_key(path.clone(), "whisper.initial_prompt").unwrap();
         unset_key(path.clone(), "whisper.initial_prompt").unwrap();
         assert!(reload(&path).whisper.initial_prompt.is_none());
+    }
+
+    #[test]
+    fn unsetting_an_absent_key_reports_it_and_leaves_the_file_alone() {
+        let source = "[text]\nreplacements = { \"vox type\" = \"Voxtype\" }\n";
+        let (dir, path) = temp_config(source);
+        for key in ["text.replacements.nope", "osd.opacity"] {
+            let out = unset_key(path.clone(), key).unwrap();
+            assert!(!out.changed, "{key}");
+            assert!(!out.restart_required, "{key}");
+            assert_eq!(out.key, key);
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        assert!(
+            !dir.path().join("config.toml.bak").exists(),
+            "a no-op unset must not write anything"
+        );
+
+        let out = unset_key(path.clone(), "text.replacements.vox type").unwrap();
+        assert!(out.changed);
+        assert!(replacements(&path).is_empty());
+    }
+
+    #[test]
+    fn quoted_key_segments_address_the_existing_entry() {
+        // Quoting used to become part of the name: set created a second
+        // entry '"cone ogres"' and unset reported success but removed nothing.
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        let out = set_key(path.clone(), "text.replacements.\"cone ogres\"", "Owners").unwrap();
+        assert_eq!(out.key, "text.replacements.cone ogres");
+        set_key(path.clone(), "text.replacements.'vox type'", "VoxType").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("cone ogres", "Owners"), ("vox type", "VoxType")])
+        );
+        assert!(!fs::read_to_string(&path).unwrap().contains("'\"cone"));
+
+        let out = unset_key(path.clone(), "text.replacements.\"cone ogres\"").unwrap();
+        assert!(out.changed);
+        assert_eq!(replacements(&path), pairs(&[("vox type", "VoxType")]));
+
+        set_key(path.clone(), "text.replacements.\"e.g.\"", "for example").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("vox type", "VoxType"), ("e.g.", "for example")])
+        );
+        let out = unset_key(path.clone(), "text.replacements.'e.g.'").unwrap();
+        assert!(out.changed);
+        assert_eq!(out.key, "text.replacements.\"e.g.\"");
+
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(matches!(
+            set_key(path.clone(), "text.replacements.\"cone ogres", "X"),
+            Err(ConfigSetError::UnknownKey(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

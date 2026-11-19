@@ -263,12 +263,22 @@ Item {
     enqueueWrite({ key: String(key), args: [root.bin, "config", "unset", String(key)] })
   }
 
+  // The key path for one replacement. A spoken form with a dot ("e.g.") is
+  // TOML-quoted, or the dot would split it into nested tables. Others stay
+  // bare: binaries before quoted keys were parsed would keep the quotes as
+  // part of the name, and they rejected dotted entries anyway.
+  function replacementKey(from) {
+    var spoken = String(from)
+    if (spoken.indexOf(".") === -1) return "text.replacements." + spoken
+    return "text.replacements.\"" + spoken.replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\""
+  }
+
   function setReplacement(from, to) {
-    setKey("text.replacements." + from, to)
+    setKey(replacementKey(from), to)
   }
 
   function unsetReplacement(from) {
-    unsetKey("text.replacements." + from)
+    unsetKey(replacementKey(from))
   }
 
   CliProcess {

@@ -266,13 +266,20 @@ impl ConfigEditor {
 
     /// Remove a key from a table (no-op if absent).
     pub fn unset(&mut self, table: &str, key: &str) {
-        if apply_unset(&mut self.document, table, key) {
+        self.remove_key(table, key);
+    }
+
+    /// Remove a key from a table; whether it was there.
+    pub fn remove_key(&mut self, table: &str, key: &str) -> bool {
+        let removed = apply_unset(&mut self.document, table, key);
+        if removed {
             self.changes.push(Change::Unset {
                 table: table.to_string(),
                 key: key.to_string(),
             });
             self.dirty = true;
         }
+        removed
     }
 
     /// Merge `overlay` into the table at `dotted`, creating it if missing.

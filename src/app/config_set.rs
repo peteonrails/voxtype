@@ -79,6 +79,12 @@ pub(crate) fn run_config_set(
 pub(crate) fn run_config_unset(cli_override: Option<PathBuf>, key: &str) -> anyhow::Result<()> {
     let path = resolve_config_path_for_write(cli_override)?;
     match config_set::unset_key(path, key) {
+        Ok(out) if !out.changed => {
+            // Not an error: the key already has its default, which is what
+            // `config get` reports for it too (exit 0).
+            println!("{} is not set in {}", out.key, out.path.display());
+            Ok(())
+        }
         Ok(out) => {
             println!("Unset {} in {}", out.key, out.path.display());
             restart_hint(out.restart_required);
