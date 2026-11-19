@@ -2848,7 +2848,7 @@ impl Found {
     pub fn dotted_key(&self) -> String {
         match self {
             Found::Key(s) => s.key.to_string(),
-            Found::MapEntry { spec, entry } => format!("{}.{}", spec.table, entry),
+            Found::MapEntry { spec, entry } => format!("{}.{}", spec.table, path_segment(entry)),
         }
     }
 }
@@ -2857,10 +2857,16 @@ impl Found {
 ///
 /// Exact matches win. Failing that, a key under a [`KeyType::MapString`]
 /// family's table (`text.replacements.btw`) resolves to that family with the
-/// remaining segment as the entry name. Map entry names cannot themselves be
-/// dotted, since the tail would be ambiguous with a nested table.
+/// remaining segment as the entry name.
+///
+/// Segments may be quoted the way TOML quotes keys, so
+/// `text.replacements."vox type"`, `text.replacements.'vox type'` and
+/// `text.replacements.vox type` all name the same entry, and a quoted entry
+/// may contain dots (`text.replacements."e.g."`). See [`split_key_path`].
 pub fn find_key(dotted: &str) -> Option<Found> {
-    if let Some(s) = CONFIG_KEYS.iter().find(|s| s.key == dotted) {
+    let segments = split_key_path(dotted)?;
+    let matches = |path: &str| path.split('.').eq(segments.iter().map(String::as_str));
+    if let Some(s) = CONFIG_KEYS.iter().find(|s| matches(s.key)) {
         // The literal placeholder form ("text.replacements.<from>") is a
         // documentation artifact, not a settable key.
         if matches!(s.ty, KeyType::MapString) {
@@ -2868,18 +2874,55 @@ pub fn find_key(dotted: &str) -> Option<Found> {
         }
         return Some(Found::Key(s));
     }
-    for s in CONFIG_KEYS.iter().filter(|s| s.ty == KeyType::MapString) {
-        let prefix = format!("{}.", s.table);
-        if let Some(entry) = dotted.strip_prefix(&prefix) {
-            if !entry.is_empty() && !entry.contains('.') {
-                return Some(Found::MapEntry {
-                    spec: s,
-                    entry: entry.to_string(),
-                });
-            }
-        }
+    let (entry, table) = segments.split_last()?;
+    if entry.is_empty() {
+        return None;
     }
-    None
+    CONFIG_KEYS
+        .iter()
+        .filter(|s| s.ty == KeyType::MapString)
+        .find(|s| s.table.split('.').eq(table.iter().map(String::as_str)))
+        .map(|s| Found::MapEntry {
+            spec: s,
+            entry: entry.clone(),
+        })
+}
+
+/// Split a user-supplied key path into its segments, unquoting TOML-quoted
+/// ones (`"..."` with escapes, or literal `'...'`).
+///
+/// Anything TOML itself parses as a dotted key is read that way. A path it
+/// rejects, typically a bare entry with a space like
+/// `text.replacements.vox type`, is split on dots as written, which is how
+/// every key was read before quoting was supported. A segment there that
+/// starts with a quote is a malformed quoted key, not a name, so the path is
+/// refused rather than written with literal quote characters.
+pub fn split_key_path(dotted: &str) -> Option<Vec<String>> {
+    if let Ok(keys) = toml_edit::Key::parse(dotted) {
+        return Some(keys.iter().map(|k| k.get().to_string()).collect());
+    }
+    let segments: Vec<String> = dotted.split('.').map(str::to_string).collect();
+    if segments
+        .iter()
+        .any(|s| s.trim_start().starts_with(['"', '\'']))
+    {
+        return None;
+    }
+    Some(segments)
+}
+
+/// A key segment as the user can type it back: bare when splitting on dots
+/// would recover it, TOML-quoted otherwise.
+fn path_segment(segment: &str) -> String {
+    if segment.is_empty()
+        || segment.contains('.')
+        || segment.trim() != segment
+        || segment.starts_with(['"', '\''])
+    {
+        toml_edit::Key::new(segment).display_repr().into_owned()
+    } else {
+        segment.to_string()
+    }
 }
 
 /// Where a top-level `[name]` table belongs when voxtype only reads a section
@@ -3921,9 +3964,81 @@ mod tests {
         }
         // The placeholder form is documentation, not a settable key.
         assert!(find_key("text.replacements.<from>").is_none());
-        // A dotted tail would be ambiguous with a nested table.
+        // A bare dotted tail would be ambiguous with a nested table; quote it.
         assert!(find_key("text.replacements.a.b").is_none());
         assert!(find_key("text.replacements.").is_none());
+    }
+
+    fn entry_of(key: &str) -> Option<String> {
+        match find_key(key)? {
+            Found::MapEntry { entry, .. } => Some(entry),
+            Found::Key(s) => panic!("{key} resolved to scalar {}", s.key),
+        }
+    }
+
+    #[test]
+    fn quoted_and_bare_segments_name_the_same_key() {
+        for key in [
+            "text.replacements.vox type",
+            "text.replacements.\"vox type\"",
+            "text.replacements.'vox type'",
+            "\"text\".'replacements'.\"vox type\"",
+            "text . replacements . \"vox type\"",
+        ] {
+            assert_eq!(entry_of(key).as_deref(), Some("vox type"), "{key}");
+        }
+        for key in ["osd.position", "\"osd\".\"position\"", "'osd'.position"] {
+            match find_key(key) {
+                Some(Found::Key(s)) => assert_eq!(s.key, "osd.position", "{key}"),
+                other => panic!("{key}: {other:?}"),
+            }
+        }
+        // Escapes in basic strings are decoded; literal strings keep them.
+        assert_eq!(
+            entry_of("text.replacements.\"say \\\"hi\\\"\"").as_deref(),
+            Some("say \"hi\"")
+        );
+        assert_eq!(
+            entry_of("text.replacements.'C:\\path'").as_deref(),
+            Some("C:\\path")
+        );
+    }
+
+    #[test]
+    fn quoted_entries_may_contain_dots() {
+        assert_eq!(
+            entry_of("text.replacements.\"e.g.\"").as_deref(),
+            Some("e.g.")
+        );
+        assert!(find_key("text.replacements.e.g.").is_none());
+        // Echoed keys can be pasted back to name the same entry.
+        for entry in ["e.g.", "btw", "vox type", " padded", "\"quoted\""] {
+            let found = Found::MapEntry {
+                spec: CONFIG_KEYS
+                    .iter()
+                    .find(|s| s.ty == KeyType::MapString)
+                    .unwrap(),
+                entry: entry.to_string(),
+            };
+            assert_eq!(
+                entry_of(&found.dotted_key()).as_deref(),
+                Some(entry),
+                "{}",
+                found.dotted_key()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_quotes_never_become_part_of_a_name() {
+        for key in [
+            "text.replacements.\"cone ogres",
+            "text.replacements.'cone ogres",
+            "text.replacements.\"cone\" ogres",
+            "text.replacements.\"\"",
+        ] {
+            assert!(find_key(key).is_none(), "{key} should be refused");
+        }
     }
 
     #[test]

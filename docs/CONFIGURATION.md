@@ -3703,6 +3703,20 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 "omar key" = "Omarchy"
 ```
 
+**From the command line:** add, change or remove one entry without editing the
+file. Either form above is kept as it is. Quote the spoken form as in TOML when
+it contains a dot; quoted and unquoted forms name the same entry.
+
+```bash
+voxtype config set text.replacements.btw 'by the way'
+voxtype config set 'text.replacements.vox type' voxtype
+voxtype config set 'text.replacements."e.g."' 'for example'
+voxtype config unset 'text.replacements."vox type"'
+```
+
+`config unset` on an entry that isn't there prints that it is not set and
+leaves the file alone.
+
 ### smart_auto_submit
 
 **Type:** Boolean

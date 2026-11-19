@@ -266,13 +266,20 @@ impl ConfigEditor {
 
     /// Remove a key from a table (no-op if absent).
     pub fn unset(&mut self, table: &str, key: &str) {
-        if apply_unset(&mut self.document, table, key) {
+        self.remove_key(table, key);
+    }
+
+    /// Remove a key from a table; whether it was there.
+    pub fn remove_key(&mut self, table: &str, key: &str) -> bool {
+        let removed = apply_unset(&mut self.document, table, key);
+        if removed {
             self.changes.push(Change::Unset {
                 table: table.to_string(),
                 key: key.to_string(),
             });
             self.dirty = true;
         }
+        removed
     }
 
     /// Merge `overlay` into the table at `dotted`, creating it if missing.
@@ -298,15 +305,23 @@ impl ConfigEditor {
         changes
     }
 
-    fn table(&self, dotted: &str) -> Option<&toml_edit::Table> {
+    fn table(&self, dotted: &str) -> Option<&dyn toml_edit::TableLike> {
         table_in(&self.document, dotted)
     }
 
     /// Public read-only access to a table, for callers that need to iterate
     /// arbitrary keys (e.g. the replacement-list editor walking
     /// `[text.replacements]`).
-    pub fn raw_table(&self, dotted: &str) -> Option<&toml_edit::Table> {
-        self.table(dotted)
+    ///
+    /// Returned as a standard table whatever its form in the file, so an
+    /// inline `replacements = { .. }` reads the same as `[text.replacements]`.
+    pub fn raw_table(&self, dotted: &str) -> Option<toml_edit::Table> {
+        let item = match dotted.rsplit_once('.') {
+            Some((parent, last)) => self.table(parent)?.get(last)?,
+            None if dotted.is_empty() => return Some(self.document.as_table().clone()),
+            None => self.document.as_table().get(dotted)?,
+        };
+        item.clone().into_table().ok()
     }
 
     pub fn get_string(&self, table: &str, key: &str) -> Option<String> {
@@ -592,16 +607,66 @@ fn apply_set(
             *value.decor_mut() = previous.decor().clone();
         }
     }
-    if table.is_empty() {
-        document.as_table_mut()[key] = Item::Value(value);
-    } else {
-        ensure_table(document, table)[key] = Item::Value(value);
+    match ensure_table_like(document, table) {
+        Item::Value(Value::InlineTable(inline)) => set_inline_entry(inline, key, value),
+        parent => {
+            let parent = parent
+                .as_table_like_mut()
+                .expect("ensure_table_like returns a table");
+            // Assign through the existing slot rather than re-inserting, so
+            // the key keeps its place and the comments above it.
+            match parent.get_mut(key) {
+                Some(slot) => *slot = Item::Value(value),
+                None => {
+                    parent.insert(key, Item::Value(value));
+                }
+            }
+        }
+    }
+}
+
+/// Set `key` in an inline table, keeping the table inline.
+///
+/// The space before the closing `}` is stored as the last value's suffix, so a
+/// new last entry takes it over: `{ a = 1, b = 2 }` gains `c` as
+/// `{ a = 1, b = 2, c = 3 }`, not `{ a = 1, b = 2 , c = 3 }`.
+fn set_inline_entry(inline: &mut toml_edit::InlineTable, key: &str, value: Value) {
+    if let Some(slot) = inline.get_mut(key) {
+        *slot = value;
+        return;
+    }
+    let trailing = inline.iter_mut().last().and_then(|(_, last)| {
+        let suffix = last.decor().suffix().cloned();
+        last.decor_mut().set_suffix("");
+        suffix
+    });
+    inline.insert(key, value);
+    if let (Some(trailing), Some((_, last))) = (trailing, inline.iter_mut().last()) {
+        last.decor_mut().set_suffix(trailing);
     }
 }
 
 /// Remove a key; whether it was there.
 fn apply_unset(document: &mut DocumentMut, table: &str, key: &str) -> bool {
-    table_mut_in(document, table).is_some_and(|t| t.remove(key).is_some())
+    match item_mut_in(document, table) {
+        Some(Item::Value(Value::InlineTable(inline))) => {
+            let was_last = inline.iter().last().is_some_and(|(k, _)| k == key);
+            let Some(removed) = inline.remove(key) else {
+                return false;
+            };
+            if was_last {
+                let trailing = removed.decor().suffix().cloned();
+                if let (Some(trailing), Some((_, last))) = (trailing, inline.iter_mut().last()) {
+                    last.decor_mut().set_suffix(trailing);
+                }
+            }
+            true
+        }
+        Some(item) => item
+            .as_table_like_mut()
+            .is_some_and(|t| t.remove(key).is_some()),
+        None => false,
+    }
 }
 
 fn apply_overlay(
@@ -617,53 +682,89 @@ fn apply_overlay(
     changes
 }
 
-fn table_in<'a>(document: &'a DocumentMut, dotted: &str) -> Option<&'a toml_edit::Table> {
-    let mut current = document.as_table();
+/// The table at `dotted`, whether written as a `[table]`, with dotted keys or
+/// inline (`replacements = { .. }`). A path through anything that is not a
+/// table is absent.
+fn table_in<'a>(document: &'a DocumentMut, dotted: &str) -> Option<&'a dyn toml_edit::TableLike> {
+    let mut current: &dyn toml_edit::TableLike = document.as_table();
     if dotted.is_empty() {
         return Some(current);
     }
     for segment in dotted.split('.') {
-        current = current.get(segment).and_then(|i| i.as_table())?;
+        current = current.get(segment)?.as_table_like()?;
     }
     Some(current)
 }
 
-fn table_mut_in<'a>(
-    document: &'a mut DocumentMut,
-    dotted: &str,
-) -> Option<&'a mut toml_edit::Table> {
-    let mut current = document.as_table_mut();
+/// The item holding the table at `dotted`: an `Item::Table`, or an
+/// `Item::Value` holding an inline table.
+fn item_mut_in<'a>(document: &'a mut DocumentMut, dotted: &str) -> Option<&'a mut Item> {
+    let mut current = document.as_item_mut();
     if dotted.is_empty() {
         return Some(current);
     }
     for segment in dotted.split('.') {
-        current = current.get_mut(segment).and_then(|i| i.as_table_mut())?;
+        current = current.as_table_like_mut()?.get_mut(segment)?;
+        if !current.is_table_like() {
+            return None;
+        }
     }
     Some(current)
+}
+
+/// Walk to the table at `dotted`, creating a `[table]` for each missing
+/// segment, and return the item that holds it.
+///
+/// A table that already exists is used in whatever form it was written in.
+/// Only a missing segment, or one holding a non-table value, is replaced: an
+/// inline `replacements = { .. }` must never be swapped for an empty table,
+/// which is how adding one replacement used to drop all the others.
+fn ensure_table_like<'a>(document: &'a mut DocumentMut, dotted: &str) -> &'a mut Item {
+    let mut current = document.as_item_mut();
+    if dotted.is_empty() {
+        return current;
+    }
+    for segment in dotted.split('.') {
+        let parent = current
+            .as_table_like_mut()
+            .expect("only tables are walked into");
+        if !parent.get(segment).is_some_and(Item::is_table_like) {
+            // Inside an inline table this becomes an inline `{}`.
+            parent.insert(segment, Item::Table(toml_edit::Table::new()));
+        }
+        current = parent.get_mut(segment).expect("just ensured");
+    }
+    current
 }
 
 /// Ensure a (possibly dotted) `[table]` path exists in `document` and return
-/// it as a mutable Item, creating intermediate tables as needed.
+/// it as a mutable Item holding a standard table, creating intermediate
+/// tables as needed.
+///
+/// Inline tables on the path are converted to standard tables with every
+/// entry kept, since a standard table can't live inside an inline one.
 fn ensure_table<'a>(document: &'a mut DocumentMut, dotted: &str) -> &'a mut Item {
-    let segments: Vec<&str> = dotted.split('.').collect();
-    let (last, rest) = segments
-        .split_last()
-        .expect("ensure_table called with empty path");
-
-    let mut current: &mut toml_edit::Table = document.as_table_mut();
-    for segment in rest {
-        if !current.get(segment).map(|i| i.is_table()).unwrap_or(false) {
-            current.insert(segment, Item::Table(toml_edit::Table::new()));
+    assert!(!dotted.is_empty(), "ensure_table called with empty path");
+    let mut current = document.as_item_mut();
+    for segment in dotted.split('.') {
+        let parent = current.as_table_mut().expect("only tables are walked into");
+        match parent.get_mut(segment) {
+            Some(item) if item.is_inline_table() => {
+                let inline = std::mem::take(item);
+                *item = Item::Table(
+                    inline
+                        .into_table()
+                        .expect("an inline table converts to a table"),
+                );
+            }
+            Some(item) if item.is_table() => {}
+            _ => {
+                parent.insert(segment, Item::Table(toml_edit::Table::new()));
+            }
         }
-        current = current[segment]
-            .as_table_mut()
-            .expect("just inserted a table");
+        current = parent.get_mut(segment).expect("just ensured");
     }
-
-    if !current.get(last).map(|i| i.is_table()).unwrap_or(false) {
-        current.insert(last, Item::Table(toml_edit::Table::new()));
-    }
-    &mut current[last]
+    current
 }
 
 /// One leaf [`ConfigEditor::overlay_table`] changed: its full dotted key and
@@ -994,6 +1095,45 @@ mod tests {
         let s = ed.document.to_string();
         assert!(s.contains("[notification]"));
         assert!(s.contains("on_start = true"));
+    }
+
+    #[test]
+    fn inline_tables_read_and_write_in_place() {
+        let (_dir, path) = temp_config(
+            "[text]\nreplacements = { \"vox type\" = \"Voxtype\" }\nosd = { position = \"top\" }\n",
+        );
+        let mut ed = ConfigEditor::load_from(path).unwrap();
+        assert_eq!(
+            ed.get_string("text.replacements", "vox type").as_deref(),
+            Some("Voxtype")
+        );
+        let table = ed
+            .raw_table("text.replacements")
+            .expect("inline table reads");
+        assert_eq!(table.len(), 1);
+
+        ed.set_string("text.replacements", "btw", "by the way");
+        assert!(ed
+            .document
+            .to_string()
+            .contains("replacements = { \"vox type\" = \"Voxtype\", btw = \"by the way\" }"));
+        ed.unset("text.replacements", "vox type");
+        assert!(ed
+            .document
+            .to_string()
+            .contains("replacements = { btw = \"by the way\" }"));
+    }
+
+    #[test]
+    fn overlay_onto_an_inline_table_keeps_its_entries() {
+        let (_dir, path) = temp_config("osd = { position = \"top-right\", opacity = 0.5 }\n");
+        let mut ed = ConfigEditor::load_from(path).unwrap();
+        let mut overlay = toml_edit::Table::new();
+        overlay.insert("opacity", toml_edit::value(0.8));
+        ed.overlay_table("osd", &overlay);
+        let doc: toml::Table = ed.document.to_string().parse().unwrap();
+        assert_eq!(doc["osd"]["position"].as_str(), Some("top-right"));
+        assert_eq!(doc["osd"]["opacity"].as_float(), Some(0.8));
     }
 
     #[test]

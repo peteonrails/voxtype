@@ -350,6 +350,9 @@ pub struct SetOutcome {
     /// cannot run, with the fix. The value is still written: refusing it
     /// would break scripts that set the key before installing the model.
     pub warning: Option<String>,
+    /// False when there was nothing to do: an unset of a key the file
+    /// doesn't contain. The file is left untouched in that case.
+    pub changed: bool,
 }
 
 /// The LARD problem a write should be warned about, if any.
@@ -415,6 +418,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
             path: written,
             restart_required: true,
             warning: None,
+            changed: true,
         });
     }
 
@@ -479,11 +483,16 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
         path: editor.path().to_path_buf(),
         restart_required: spec.restart_required,
         warning: lard_warning(spec.key, lard_before, &editor),
+        changed: true,
     })
 }
 
 /// Remove an allowlisted key from the config file, falling back to its
-/// built-in default. Removing a key that isn't present succeeds.
+/// built-in default.
+///
+/// Removing a key that isn't present succeeds without writing the file, and
+/// reports `changed: false` so the caller can say so instead of claiming it
+/// removed something.
 pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError> {
     let found = lookup(key)?;
     let spec = found.spec();
@@ -491,15 +500,22 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
 
     let mut editor = ConfigEditor::load_from_path(path)?;
     let lard_before = lard_problem(&editor);
-    editor.unset(table, field);
-    editor.save()?;
+    let changed = editor.remove_key(table, field);
+    if changed {
+        editor.save()?;
+    }
 
     Ok(SetOutcome {
         key: found.dotted_key(),
         value: TypedValue::Str(String::new()),
         path: editor.path().to_path_buf(),
-        restart_required: spec.restart_required,
-        warning: lard_warning(spec.key, lard_before, &editor),
+        restart_required: changed && spec.restart_required,
+        warning: if changed {
+            lard_warning(spec.key, lard_before, &editor)
+        } else {
+            None
+        },
+        changed,
     })
 }
 
@@ -1200,6 +1216,62 @@ gguf_backend = "cpu"
     }
 
     #[test]
+    fn unsetting_an_absent_key_reports_it_and_leaves_the_file_alone() {
+        let source = "[text]\nreplacements = { \"vox type\" = \"Voxtype\" }\n";
+        let (dir, path) = temp_config(source);
+        for key in ["text.replacements.nope", "osd.opacity"] {
+            let out = unset_key(path.clone(), key).unwrap();
+            assert!(!out.changed, "{key}");
+            assert!(!out.restart_required, "{key}");
+            assert_eq!(out.key, key);
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        assert!(
+            !dir.path().join("config.toml.bak").exists(),
+            "a no-op unset must not write anything"
+        );
+
+        let out = unset_key(path.clone(), "text.replacements.vox type").unwrap();
+        assert!(out.changed);
+        assert!(replacements(&path).is_empty());
+    }
+
+    #[test]
+    fn quoted_key_segments_address_the_existing_entry() {
+        // Quoting used to become part of the name: set created a second
+        // entry '"cone ogres"' and unset reported success but removed nothing.
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        let out = set_key(path.clone(), "text.replacements.\"cone ogres\"", "Owners").unwrap();
+        assert_eq!(out.key, "text.replacements.cone ogres");
+        set_key(path.clone(), "text.replacements.'vox type'", "VoxType").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("cone ogres", "Owners"), ("vox type", "VoxType")])
+        );
+        assert!(!fs::read_to_string(&path).unwrap().contains("'\"cone"));
+
+        let out = unset_key(path.clone(), "text.replacements.\"cone ogres\"").unwrap();
+        assert!(out.changed);
+        assert_eq!(replacements(&path), pairs(&[("vox type", "VoxType")]));
+
+        set_key(path.clone(), "text.replacements.\"e.g.\"", "for example").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("vox type", "VoxType"), ("e.g.", "for example")])
+        );
+        let out = unset_key(path.clone(), "text.replacements.'e.g.'").unwrap();
+        assert!(out.changed);
+        assert_eq!(out.key, "text.replacements.\"e.g.\"");
+
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(matches!(
+            set_key(path.clone(), "text.replacements.\"cone ogres", "X"),
+            Err(ConfigSetError::UnknownKey(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
     fn unset_key_rejects_unknown_keys() {
         let (_dir, path) = full_config();
         let err = unset_key(path, "nope.nope").unwrap_err();
@@ -1229,6 +1301,226 @@ gguf_backend = "cpu"
             cfg.text.replacements.contains_key("omw"),
             "unsetting one entry must not disturb the others"
         );
+    }
+
+    /// The inline form our own default config, README and CONFIGURATION.md
+    /// show. Adding one entry used to replace the whole inline table with a
+    /// fresh `[text.replacements]`, dropping every existing entry.
+    const INLINE_REPLACEMENTS: &str = "# keep this comment\n[text]\nspoken_punctuation = true # keep me too\nreplacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" }\n";
+
+    fn replacements(path: &std::path::Path) -> Vec<(String, String)> {
+        let mut out: Vec<_> = reload(path).text.replacements.into_iter().collect();
+        out.sort();
+        out
+    }
+
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut out: Vec<_> = entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn adding_to_inline_replacements_keeps_every_entry_inline() {
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        set_key(path.clone(), "text.replacements.inovara", "Enovara").unwrap();
+
+        assert_eq!(
+            replacements(&path),
+            pairs(&[
+                ("cone ogres", "CODEOWNERS"),
+                ("vox type", "Voxtype"),
+                ("inovara", "Enovara"),
+            ])
+        );
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(
+                "replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\", inovara = \"Enovara\" }"
+            ),
+            "the table stays inline and tidy:\n{after}"
+        );
+        assert!(!after.contains("[text.replacements]"));
+        assert!(after.contains("# keep this comment"));
+        assert!(after.contains("spoken_punctuation = true # keep me too"));
+    }
+
+    #[test]
+    fn overwriting_an_inline_replacement_keeps_the_others() {
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        set_key(path.clone(), "text.replacements.vox type", "VoxType").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("cone ogres", "CODEOWNERS"), ("vox type", "VoxType")])
+        );
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains(
+            "replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"VoxType\" }"
+        ));
+    }
+
+    #[test]
+    fn unsetting_an_inline_replacement_removes_only_that_entry() {
+        // Unset used to report success and leave an inline entry in place.
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        unset_key(path.clone(), "text.replacements.vox type").unwrap();
+        assert_eq!(replacements(&path), pairs(&[("cone ogres", "CODEOWNERS")]));
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("replacements = { \"cone ogres\" = \"CODEOWNERS\" }"));
+
+        unset_key(path.clone(), "text.replacements.cone ogres").unwrap();
+        assert!(replacements(&path).is_empty());
+        unset_key(path.clone(), "text.replacements.cone ogres").unwrap();
+    }
+
+    #[test]
+    fn quoted_keys_with_spaces_round_trip_in_every_form() {
+        for source in [
+            INLINE_REPLACEMENTS,
+            "[text.replacements]\n\"cone ogres\" = \"CODEOWNERS\"\n\"vox type\" = \"Voxtype\"\n",
+        ] {
+            let (_dir, path) = temp_config(source);
+            set_key(path.clone(), "text.replacements.oh marky", "Omarchy").unwrap();
+            assert_eq!(
+                replacements(&path),
+                pairs(&[
+                    ("cone ogres", "CODEOWNERS"),
+                    ("vox type", "Voxtype"),
+                    ("oh marky", "Omarchy"),
+                ]),
+                "source:\n{source}"
+            );
+            let after = fs::read_to_string(&path).unwrap();
+            assert!(after.contains("\"oh marky\" = \"Omarchy\""), "{after}");
+        }
+    }
+
+    #[test]
+    fn standard_replacements_table_is_unchanged_in_form() {
+        let source = "[text.replacements]\n# my fixes\n\"vox type\" = \"Voxtype\" # spelling\n";
+        let (_dir, path) = temp_config(source);
+        set_key(path.clone(), "text.replacements.btw", "by the way").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[text.replacements]\n# my fixes\n\"vox type\" = \"Voxtype\" # spelling\nbtw = \"by the way\"\n"
+        );
+        unset_key(path.clone(), "text.replacements.btw").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn dotted_key_replacements_keep_every_entry() {
+        for (source, expect) in [
+            (
+                "text.replacements = { \"vox type\" = \"Voxtype\" } # mine\n[hotkey]\nkey = \"HOME\"\n",
+                "text.replacements = { \"vox type\" = \"Voxtype\", btw = \"by the way\" } # mine\n",
+            ),
+            (
+                "[text]\nreplacements.\"vox type\" = \"Voxtype\"\n",
+                "replacements.btw = \"by the way\"",
+            ),
+            (
+                "text.replacements.\"vox type\" = \"Voxtype\"\n",
+                "text.replacements.btw = \"by the way\"",
+            ),
+        ] {
+            let (_dir, path) = temp_config(source);
+            set_key(path.clone(), "text.replacements.btw", "by the way").unwrap();
+            assert_eq!(
+                replacements(&path),
+                pairs(&[("vox type", "Voxtype"), ("btw", "by the way")]),
+                "source:\n{source}"
+            );
+            let after = fs::read_to_string(&path).unwrap();
+            assert!(after.contains(expect), "source:\n{source}\nafter:\n{after}");
+
+            unset_key(path.clone(), "text.replacements.vox type").unwrap();
+            assert_eq!(
+                replacements(&path),
+                pairs(&[("btw", "by the way")]),
+                "source:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_in_an_inline_section_keep_their_siblings() {
+        // Not only replacements: any section written inline used to lose
+        // every other setting in it when one key was set.
+        let source = "text = { spoken_punctuation = true, replacements = { \"vox type\" = \"Voxtype\" } }\nosd = { position = \"top-right\" }\n";
+        let (_dir, path) = temp_config(source);
+        set_key(path.clone(), "text.format_numbers", "true").unwrap();
+        set_key(path.clone(), "text.replacements.btw", "by the way").unwrap();
+        set_key(path.clone(), "osd.opacity", "0.5").unwrap();
+
+        let cfg = reload(&path);
+        assert!(cfg.text.spoken_punctuation);
+        assert!(cfg.text.format_numbers);
+        assert_eq!(cfg.osd.position, crate::osd::config::OsdPosition::TopRight);
+        assert_eq!(cfg.osd.opacity, 0.5);
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("vox type", "Voxtype"), ("btw", "by the way")])
+        );
+
+        unset_key(path.clone(), "osd.position").unwrap();
+        let cfg = reload(&path);
+        assert_eq!(
+            cfg.osd.position,
+            crate::config::Config::default().osd.position
+        );
+        assert_eq!(cfg.osd.opacity, 0.5);
+    }
+
+    #[test]
+    fn no_replacement_is_lost_across_a_round_trip() {
+        // Add, overwrite and remove entries in every form a user can write
+        // the table in, and check the final map against a model of it.
+        for source in [
+            INLINE_REPLACEMENTS,
+            "[text.replacements]\n\"cone ogres\" = \"CODEOWNERS\"\n\"vox type\" = \"Voxtype\"\n",
+            "text.replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" }\n",
+            "text = { replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" } }\n",
+            "[text]\nreplacements.\"cone ogres\" = \"CODEOWNERS\"\nreplacements.\"vox type\" = \"Voxtype\"\n",
+        ] {
+            let (_dir, path) = temp_config(source);
+            let mut model: std::collections::BTreeMap<String, String> = [
+                ("cone ogres", "CODEOWNERS"),
+                ("vox type", "Voxtype"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+            let steps: &[(&str, Option<&str>)] = &[
+                ("inovara", Some("Enovara")),
+                ("oh marky", Some("Omarchy")),
+                ("vox type", Some("VoxType")),
+                ("cone ogres", None),
+                ("btw", Some("by the way")),
+                ("inovara", None),
+                ("cone ogres", Some("CODEOWNERS")),
+            ];
+            for (key, value) in steps {
+                let dotted = format!("text.replacements.{key}");
+                match value {
+                    Some(v) => {
+                        set_key(path.clone(), &dotted, v).unwrap();
+                        model.insert(key.to_string(), v.to_string());
+                    }
+                    None => {
+                        unset_key(path.clone(), &dotted).unwrap();
+                        model.remove(*key);
+                    }
+                }
+                let got: std::collections::BTreeMap<_, _> =
+                    reload(&path).text.replacements.into_iter().collect();
+                assert_eq!(got, model, "source:\n{source}\nafter step {key:?}");
+            }
+        }
     }
 
     #[test]
