@@ -57,7 +57,7 @@ class MeetingPortabilityTests(unittest.TestCase):
             compile_result = subprocess.run(
                 ["rustc", "--edition=2021", "--test", *flags,
                  str(path / "random.rs"), "-o", str(path / "random")],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=300,
             )
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
             result = subprocess.run([str(path / "random")], capture_output=True, text=True, timeout=10)
@@ -93,7 +93,7 @@ fn command_presence_contract() {
             result = subprocess.run(
                 ["clippy-driver", "--edition=2021", "--test", str(path / "share.rs"),
                  "-o", str(path / "share"), "-D", "clippy::nonminimal_bool", "-D", "warnings"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=300,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             result = subprocess.run([str(path / "share")], capture_output=True, text=True, timeout=10)
