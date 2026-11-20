@@ -92,10 +92,7 @@ fn main() -> anyhow::Result<()> {
     // Tracing goes to stderr only; stdout is reserved for NDJSON output.
     tracing_subscriber::fmt()
         .with_writer(io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(voxtype::logging::env_filter("info"))
         .init();
 
     let args = Args::parse();

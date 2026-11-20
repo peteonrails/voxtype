@@ -152,21 +152,33 @@ fn dictation_language_has_file_env_and_cli_layers() {
     );
     // A value that is not a language code: ignored from the environment
     // with a warning, refused on the command line. The warning goes to
-    // stderr, so stdout is still only the value.
-    let ignored = Command::new(env!("CARGO_BIN_EXE_voxtype"))
-        .env("VOXTYPE_TEXT_LANGUAGE", "english")
-        .arg("--config")
-        .arg(&path)
-        .args(["config", "get", "text.language"])
-        .output()
-        .unwrap();
-    assert!(ignored.status.success());
-    assert_eq!(String::from_utf8_lossy(&ignored.stdout), "fr\n");
-    assert!(
-        String::from_utf8_lossy(&ignored.stderr).contains("VOXTYPE_TEXT_LANGUAGE is ignored"),
-        "{}",
-        String::from_utf8_lossy(&ignored.stderr)
-    );
+    // stderr, so stdout is still only the value. An empty RUST_LOG must not
+    // hide it: Nix's buildRustPackage runs these tests with RUST_LOG="".
+    for rust_log in [None, Some("")] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_voxtype"));
+        match rust_log {
+            Some(value) => cmd.env("RUST_LOG", value),
+            None => cmd.env_remove("RUST_LOG"),
+        };
+        let ignored = cmd
+            .env("VOXTYPE_TEXT_LANGUAGE", "english")
+            .arg("--config")
+            .arg(&path)
+            .args(["config", "get", "text.language"])
+            .output()
+            .unwrap();
+        assert!(ignored.status.success(), "RUST_LOG={rust_log:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&ignored.stdout),
+            "fr\n",
+            "RUST_LOG={rust_log:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&ignored.stderr).contains("VOXTYPE_TEXT_LANGUAGE is ignored"),
+            "RUST_LOG={rust_log:?}: {}",
+            String::from_utf8_lossy(&ignored.stderr)
+        );
+    }
     let refused = Command::new(env!("CARGO_BIN_EXE_voxtype"))
         .env_remove("VOXTYPE_TEXT_LANGUAGE")
         .arg("--config")
