@@ -240,7 +240,9 @@
             # The meeting assistant tests resolve codex only when bwrap is on
             # PATH, as it is at runtime through meetingRuntimeDeps.
             # curl: the announcement fetch tests run it against file:// URLs.
-            nativeCheckInputs = with pkgs; [ dbus python3 bubblewrap curl ];
+            # which: the history focus test puts it on its child's PATH for
+            # the output driver probes.
+            nativeCheckInputs = with pkgs; [ dbus python3 bubblewrap curl which ];
 
             # This test runs codex inside the real bwrap jail, which bind-mounts
             # the host's /usr. The Nix build sandbox has no /usr.

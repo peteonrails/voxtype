@@ -711,6 +711,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nothing_is_recorded_when_the_privacy_state_is_unavailable() {
+        let t = tempfile::tempdir().unwrap();
+        let cfg_path = t.path().join("config.toml");
+        std::fs::write(&cfg_path, "[history]\nenabled = true\n").unwrap();
+        // The data dir that holds the privacy lock cannot be created, so a
+        // pause saved meanwhile could not be seen: fail closed.
+        let blocker = t.path().join("not-a-directory");
+        std::fs::write(&blocker, "").unwrap();
+        super::super::store::use_data_dir_for(&cfg_path, &blocker.join("data"));
+        let config = crate::config::load_config(Some(&cfg_path)).unwrap();
+        let mut r = Recorder::new(&config, Some(cfg_path.clone()));
+        r.store_dir = t.path().join("history");
+        r.index_db = t.path().join("index.db");
+        assert!(r.settings().recording());
+        assert!(r.begin().is_none());
+        assert!(!r.store_dir.exists());
+    }
+
+    #[tokio::test]
     async fn pausing_mid_dictation_drops_it() {
         let t = tempfile::tempdir().unwrap();
         let cfg_path = t.path().join("config.toml");

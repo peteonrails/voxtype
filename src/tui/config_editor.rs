@@ -370,8 +370,9 @@ impl ConfigEditor {
     /// another process wrote in between: a `voxtype history pause` could be
     /// reverted by a settings window that was already open.
     ///
-    /// Call only while holding the file's privacy lock, which every save
-    /// takes, so the read and the write cannot be interleaved again.
+    /// Call while holding the file's privacy lock, which every save takes
+    /// when the data dir allows it, so the read and the write cannot be
+    /// interleaved again.
     fn rebase_onto_disk(&mut self) -> Result<(), EditorError> {
         let on_disk = match fs::read_to_string(&self.path) {
             Ok(text) => text,
@@ -436,13 +437,23 @@ impl ConfigEditor {
         // Held from here to the rename. Reading the file, applying this
         // editor's changes to it and writing it back are one step as far as
         // any other save is concerned.
-        let _history_privacy =
-            crate::history::store::privacy_lock(&self.path).map_err(|source| {
-                EditorError::Write {
-                    path: self.path.clone(),
-                    source,
-                }
-            })?;
+        //
+        // The lock lives in the data dir, which can be unwritable (a
+        // read-only home, a build sandbox) while the config is not. Saving
+        // still works then. History stays safe because the recorder needs
+        // this same lock to start or write a dictation, and records nothing
+        // without it.
+        let history_privacy = match crate::history::store::privacy_lock(&self.path) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                tracing::warn!(
+                    "History privacy lock unavailable; saving {} without it: {}",
+                    self.path.display(),
+                    error
+                );
+                None
+            }
+        };
         self.rebase_onto_disk()?;
         let serialized = self.document.to_string();
 
@@ -478,7 +489,7 @@ impl ConfigEditor {
             .map_or(next.history.paused || !next.history.enabled, |old| {
                 (!old.paused && next.history.paused) || (old.enabled && !next.history.enabled)
             });
-        if invalidates_history {
+        if invalidates_history && history_privacy.is_some() {
             crate::history::store::advance_privacy_generation(&self.path).map_err(|source| {
                 EditorError::Write {
                     path: self.path.clone(),
@@ -961,6 +972,29 @@ mod tests {
         let mut other = ConfigEditor::load_from_path(path.to_path_buf()).unwrap();
         other.set_bool(table, key, value);
         other.save().unwrap();
+    }
+
+    /// A data dir that cannot be created, as in the Nix build sandbox, where
+    /// HOME is /homeless-shelter.
+    fn unwritable_data_dir(path: &Path) {
+        let blocker = path.parent().unwrap().join("not-a-directory");
+        fs::write(&blocker, "").unwrap();
+        crate::history::store::use_data_dir_for(path, &blocker.join("data"));
+    }
+
+    #[test]
+    fn saves_when_the_data_dir_is_unwritable() {
+        let (_dir, path) = temp_config(SHARED);
+        unwritable_data_dir(&path);
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        ed.set_int("audio", "max_duration_secs", 90);
+        ed.set_bool("history", "paused", true);
+        ed.save().unwrap();
+
+        let (config, text) = saved(&path);
+        assert_eq!(config.audio.max_duration_secs, 90);
+        assert!(config.history.paused, "the pause was not saved");
+        assert!(text.contains("# keep this comment"));
     }
 
     #[test]

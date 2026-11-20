@@ -158,9 +158,43 @@ fn privacy_dir(config_path: &Path) -> io::Result<PathBuf> {
         Sha256::digest(identity.as_os_str().as_encoded_bytes())
     );
     // Keep locks writable even when the selected config is system-owned.
-    Ok(crate::config::Config::data_dir()
-        .join("history-control")
-        .join(key))
+    Ok(control_root(&identity).join("history-control").join(key))
+}
+
+/// Where the privacy control files live: the data dir, which the daemon and
+/// the CLI both resolve the same way.
+#[cfg(not(test))]
+fn control_root(_config: &Path) -> PathBuf {
+    crate::config::Config::data_dir()
+}
+
+/// Tests never use the real data dir, which may be unwritable (the Nix build
+/// sandbox) or belong to the developer. A test's config lives in its own
+/// temporary directory, and that directory stands in for the data dir unless
+/// the test chose one with [`use_data_dir_for`].
+#[cfg(test)]
+fn control_root(config: &Path) -> PathBuf {
+    TEST_DATA_DIRS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(identity, _)| identity == config)
+        .map(|(_, dir)| dir.clone())
+        .unwrap_or_else(|| config.parent().unwrap_or(Path::new(".")).to_path_buf())
+}
+
+#[cfg(test)]
+static TEST_DATA_DIRS: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Tests: keep the privacy control files for `config_path` under `data_dir`.
+#[cfg(test)]
+pub(crate) fn use_data_dir_for(config_path: &Path, data_dir: &Path) {
+    let parent = config_path.parent().unwrap().canonicalize().unwrap();
+    let identity = parent.join(config_path.file_name().unwrap());
+    let mut dirs = TEST_DATA_DIRS.lock().unwrap();
+    dirs.retain(|(known, _)| known != &identity);
+    dirs.push((identity, data_dir.to_path_buf()));
 }
 
 /// Call only while holding this config's privacy lock.
