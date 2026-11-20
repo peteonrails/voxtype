@@ -84,6 +84,11 @@ Scenarios:
               compact height
   move        dragging the header: margin math, clamping, edge snapping, and
               the position surviving into a new instance from the state file
+  placement-screens  two outputs, a landscape DP-2 with a saved place and a
+              portrait HDMI-A-1 without one: the view opens on the focused
+              output, HDMI-A-1 starts from the default instead of DP-2's x,
+              a saved place too big for its screen or a screen that shrinks
+              under it is fitted back on, and places that fit restore exactly
   opacity     [meeting] view_opacity, opaque on hover and while typing, back
               after the linger; the keyboard is asked for only while typing
   view-state  meeting-view.state: visible, minimized, heartbeat, and the
@@ -262,7 +267,7 @@ SCENARIOS = ("live", "live-labels", "autoopen", "autoopen-off", "autoopen-oldcli
              "list", "past-view", "past-summary", "past-summarize", "past-reassign", "start-while-browsing",
              "ask-error", "summary-error", "summary-local-error", "summary-error-cli", "summary-stale", "list-old", "cli-missing", "daemon-old", "agent-missing",
              "old-voxtype", "copy", "line-edit", "line-delete", "line-delete-flag", "export", "export-past",
-             "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "opacity", "view-state", "play", "play-no-audio",
+             "minimize", "pill-states", "pill-idle", "minimize-autoopen", "resize", "move", "placement-screens", "opacity", "view-state", "play", "play-no-audio",
              "play-errors", "notice", "notice-acked", "notice-announce", "announcement", "rename-owner", "soundcheck", "soundcheck-no-loopback", "soundcheck-error",
              "levels", "search", "search-old", "recovery", "recovery-socket", "recovery-old",
              "recovery-real", "share", "share-unavailable", "share-old",
@@ -798,6 +803,20 @@ def run(scenario, host, shell, evidence):
             Path(shots).mkdir(parents=True, exist_ok=True)
 
         real_env = {}
+        if scenario == "placement-screens":
+            # Two offscreen outputs, shaped like a landscape monitor and a
+            # rotated one, and a place saved on the landscape one only. Both
+            # at the origin: the offscreen platform moves a window to the
+            # output under its (0,0) position, where layer-shell keeps it on
+            # the output it was given.
+            screens = r.root / "screens.json"
+            screens.write_text(json.dumps({"screens": [
+                {"name": "DP-2", "x": 0, "y": 0, "width": 3760, "height": 2115, "logicalDpi": 96},
+                {"name": "HDMI-A-1", "x": 0, "y": 0, "width": 1350, "height": 2400, "logicalDpi": 96}]}))
+            real_env["QT_QPA_PLATFORM"] = "offscreen:configfile=" + str(screens)
+            (r.root / "state" / "voxtype").mkdir(parents=True)
+            (r.root / "state" / "voxtype" / "meeting-view.json").write_text(json.dumps(
+                {host + ":DP-2": {"x": 3290, "y": 1259, "width": 460, "compact": True}}))
         if scenario.startswith("share-real"):
             real = os.environ["REAL_VOXTYPE"]
             tools = r.root / "real-tools"
@@ -1110,7 +1129,7 @@ def check_calls(scenario, calls, runtime_notes=""):
     elif scenario == "notice-announce":
         expect(meeting, [["meeting", "notice", "--ack"]], "meeting commands")
     elif scenario in ("cli-missing", "daemon-old", "old-voxtype", "minimize", "minimize-autoopen", "resize", "move",
-                      "opacity", "view-state"):
+                      "placement-screens", "opacity", "view-state"):
         pass
     elif scenario == "line-edit":
         expect(meeting, [["meeting", "edit", MEETING_ID, "2", "Yes, very loud and clear.", "--json"],

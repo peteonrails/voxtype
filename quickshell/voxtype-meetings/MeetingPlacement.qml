@@ -60,10 +60,10 @@ QtObject {
   // Full height is the anchors' business; this is only the estimate the
   // math needs (snapping, the pill's place).
   readonly property real cardHeight: root.compact ? root.compactHeight : root.screenHeight - 2 * root.gap
-  readonly property real cardLeft: root.x < 0 ? root.screenWidth - root.cardWidth - root.gap : root.x
+  readonly property real cardLeft: root.x < 0 ? root.screenWidth - root.cardWidth - root.gap : root.fit(root.x, root.cardWidth, root.screenWidth)
   readonly property real pillLeft: root.cardLeft + (root.pillRight ? root.cardWidth - root.pillWidth : 0)
-  readonly property real left: root.minimized ? root.pillLeft : root.cardLeft
-  readonly property real top: root.compact || root.minimized ? (root.y < 0 ? root.gap : root.y) : root.gap
+  readonly property real left: root.minimized ? root.fit(root.pillLeft, root.pillWidth, root.screenWidth) : root.cardLeft
+  readonly property real top: root.compact || root.minimized ? (root.y < 0 ? root.gap : root.fit(root.y, root.windowHeight, root.screenHeight)) : root.gap
   // Full height anchors the bottom too; compact and the pill do not.
   readonly property bool fullHeight: !root.compact && !root.minimized
   readonly property real windowWidth: root.minimized ? root.pillWidth : root.cardWidth
@@ -73,6 +73,14 @@ QtObject {
   readonly property bool handleOnLeft: root.cardLeft + root.cardWidth / 2 > root.screenWidth / 2
 
   function clampWidth(w) { return Math.max(root.minWidth, Math.min(root.maxWidth, Math.round(w))) }
+
+  // On screen whatever was saved: a place kept from a bigger screen, or from
+  // this one before it rotated or changed resolution, lands a gap in from the
+  // edge it ran past. A drag never leaves the screen, so it is untouched.
+  function fit(pos, size, extent) {
+    if (pos + size > extent) return Math.max(0, extent - size - root.gap)
+    return Math.max(0, pos)
+  }
 
   // Within `snap` of an edge, onto it (a `gap` in).
   function snapX(x, w) {
@@ -149,13 +157,19 @@ QtObject {
   property var saved: ({})
   property bool loaded: false
 
+  // This output's saved place, or the default where it has none: never the
+  // last output's, which can be off this one entirely.
   function apply() {
-    var p = root.saved[root.key]
-    if (!p) return
-    if (p.x !== undefined) root.x = Number(p.x)
-    if (p.y !== undefined) root.y = Number(p.y)
-    if (p.width !== undefined) root.width = Number(p.width)
-    if (p.compact !== undefined) root.compact = p.compact === true
+    var p = root.saved[root.key] || {}
+    root.x = root.savedNumber(p.x, -1)
+    root.y = root.savedNumber(p.y, -1)
+    root.width = root.savedNumber(p.width, root.defaultWidth)
+    root.compact = p.compact === true
+  }
+
+  function savedNumber(v, fallback) {
+    var n = Number(v)
+    return v === undefined || v === null || !isFinite(n) ? fallback : n
   }
 
   function save() {

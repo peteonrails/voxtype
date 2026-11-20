@@ -1,4 +1,6 @@
 import QtQuick
+import Quickshell
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Commons as ShellTheme
 import "meetings"
@@ -29,6 +31,16 @@ Item {
   property alias stateHeartbeatMs: meetings.stateHeartbeatMs
   // wl-copy, for Copy; a test points it elsewhere.
   property alias copyCommand: meetings.copyCommand
+
+  // The output Hyprland has focused, "" when it says none (a test sets it).
+  property string focusedOutputName: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
+  readonly property var focusedScreen: {
+    var screens = Quickshell.screens
+    for (var i = 0; i < screens.length; i++) {
+      if (screens[i].name === root.focusedOutputName) return screens[i]
+    }
+    return null
+  }
 
   function select(payload) { meetings.select(payload) }
 
@@ -75,5 +87,17 @@ Item {
     onOpenRequested: root.openRequested()
     onCloseRequested: root.closeRequested()
     onSettingsRequested: root.settingsRequested()
+  }
+
+  // Open on the focused output, as the shell's own overlays do, rather than
+  // wherever the compositor maps an output-less surface. Updated only while
+  // closed so the view never jumps monitors under the user, and RestoreNone
+  // keeps the last output when focus is unknown.
+  Binding {
+    target: meetings
+    property: "screen"
+    value: root.focusedScreen
+    when: root.focusedScreen !== null && !root.shown
+    restoreMode: Binding.RestoreNone
   }
 }

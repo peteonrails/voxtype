@@ -155,6 +155,7 @@ Item {
           else if (s === "minimize-autoopen") tc.driveMinimizeAutoOpen()
           else if (s === "resize") tc.driveResize()
           else if (s === "move") tc.driveMove()
+          else if (s === "placement-screens") tc.drivePlacementScreens()
           else if (s === "opacity") tc.driveOpacity()
           else if (s === "view-state") tc.driveViewState()
           else if (s === "play") tc.drivePlay()
@@ -1875,9 +1876,130 @@ Item {
       // Per output: another output starts from the default.
       fresh.screenName = "HDMI-A-1"
       wait(100)
-      check(fresh.x === want.x || fresh.saved["standalone:HDMI-A-1"] === undefined, "")
+      check(fresh.x === -1 && fresh.y === -1 && !fresh.compact, "another output starts from the default: " + fresh.x + "," + fresh.y)
       check(fresh.saved[p.host + ":HDMI-A-1"] === undefined, "nothing saved for another output")
 
+    }
+
+    // Two outputs (the offscreen config test-meeting-view.py writes): DP-2
+    // landscape 3760x2115, HDMI-A-1 portrait 1350x2400. The state file has a
+    // compact card at 3290,1259 for DP-2 and nothing for HDMI-A-1.
+    function screenNamed(name) {
+      for (var i = 0; i < Quickshell.screens.length; i++)
+        if (Quickshell.screens[i].name === name) return Quickshell.screens[i]
+      return null
+    }
+    // The host's idea of the focused output: Hyprland's focused monitor for
+    // the plugin, shell.qml's focused screen for the standalone shell.
+    function focusOutput(name) {
+      if (host.omarchy) host.ctrl().focusedOutputName = name
+      else host.hostItem.screen = screenNamed(name)
+    }
+    function closeHost() {
+      if (host.omarchy) host.hostItem.close()
+      else host.hostItem.open = false
+      waitFor(function() { return !host.viewOpen() && host.ctrl().window === null }, "view closed")
+    }
+    function onOutput(p, name) {
+      var w = host.ctrl().window
+      return w && w.screen && String(w.screen.name) === name && p.screenName === name
+    }
+    function fresh() {
+      var f = Qt.createQmlObject('import "standalone/voxtype-meetings"; MeetingPlacement {}', host)
+      f.host = __HOST__
+      waitFor(function() { return f.loaded }, "state file read")
+      return f
+    }
+    function at(p) { return JSON.stringify({ left: p.left, top: p.top, w: p.cardWidth, compact: p.compact }) }
+
+    function drivePlacementScreens() {
+      check(screenNamed("DP-2") && screenNamed("HDMI-A-1"), "two offscreen outputs: " + Quickshell.screens.length)
+      var p = placement()
+      waitFor(function() { return p.loaded }, "state file read")
+
+      // Opened on the focused DP-2: its saved place, exactly.
+      focusOutput("DP-2")
+      openView()
+      waitFor(function() { return onOutput(p, "DP-2") }, "on DP-2: " + p.screenName)
+      check(p.screenWidth === 3760 && p.left === 3290 && p.top === 1259 && p.compact && p.cardWidth === 460,
+            "DP-2's saved place: " + at(p))
+      closeHost()
+
+      // Focus moves to HDMI-A-1, which has nothing saved: the view opens
+      // there, against its right edge, not at DP-2's x (off this screen).
+      focusOutput("HDMI-A-1")
+      openView()
+      waitFor(function() { return onOutput(p, "HDMI-A-1") }, "on the focused HDMI-A-1: " + p.screenName)
+      check(p.screenWidth === 1350 && p.screenHeight === 2400, "HDMI-A-1's size: " + p.screenWidth + "x" + p.screenHeight)
+      check(p.x === -1 && !p.compact && p.cardWidth === 460 && p.left === 1350 - 460 - p.gap && p.top === p.gap,
+            "HDMI-A-1 starts from the default: " + at(p))
+      check(p.left >= 0 && p.left + p.windowWidth <= p.screenWidth, "fully on screen: " + at(p))
+      // Focus moving while it is up does not move it. (The standalone
+      // shell's guard is in shell.qml, which this test does not load.)
+      if (host.omarchy) {
+        focusOutput("DP-2")
+        wait(200)
+        check(onOutput(p, "HDMI-A-1"), "stays on HDMI-A-1 while open: " + p.screenName)
+      }
+      closeHost()
+
+      // The same rules on the placement alone, independent of a window.
+      // A key change to an output with nothing saved resets to the default.
+      var f = fresh()
+      f.screenWidth = 3760
+      f.screenHeight = 2115
+      f.screenName = "DP-2"
+      check(f.left === 3290 && f.top === 1259 && f.compact, "restored on DP-2: " + at(f))
+      f.screenWidth = 1350
+      f.screenHeight = 2400
+      f.screenName = "HDMI-A-1"
+      check(f.x === -1 && f.y === -1 && !f.compact && f.cardWidth === 460 && f.left === 1350 - 460 - f.gap,
+            "no entry: the default, against the right edge: " + at(f))
+
+      // A saved place bigger than the screen is fitted onto it, a gap in.
+      var all = {}
+      for (var k in f.saved) all[k] = f.saved[k]
+      all[__HOST__ + ":HDMI-A-1"] = { x: 3290, y: 2200, width: 900, compact: true }
+      f.saved = all
+      f.screenName = "DP-2"
+      f.screenName = "HDMI-A-1"
+      check(f.cardWidth === 675 && f.left === 1350 - 675 - f.gap && f.top === 2400 - f.compactHeight - f.gap,
+            "clamped onto HDMI-A-1: " + at(f))
+      // Minimized there, the pill is on screen too.
+      f.pillContentWidth = 300
+      f.minimized = true
+      check(f.left >= 0 && f.left + f.pillWidth <= 1350 && f.top >= 0 && f.top + f.pillHeight <= 2400,
+            "the pill on screen: " + f.left + "," + f.top)
+      f.minimized = false
+
+      // A screen that changes size under a placed card (rotation, a new
+      // resolution) fits it again, and gets the saved place back after.
+      f.screenWidth = 3760
+      f.screenHeight = 2115
+      f.screenName = "DP-2"
+      check(f.left === 3290 && f.top === 1259, "DP-2 again: " + at(f))
+      f.screenWidth = 2560
+      f.screenHeight = 1440
+      check(f.left === 2560 - 460 - f.gap && f.top === 1440 - f.compactHeight - f.gap,
+            "refitted to 2560x1440: " + at(f))
+      f.screenWidth = 3760
+      f.screenHeight = 2115
+      check(f.left === 3290 && f.top === 1259, "back at 3760x2115, back in place: " + at(f))
+
+      // Entries that fit restore exactly, per output, either way round.
+      all = {}
+      for (k in f.saved) all[k] = f.saved[k]
+      all[__HOST__ + ":HDMI-A-1"] = { x: 120, y: 700, width: 500, compact: true }
+      f.saved = all
+      f.screenWidth = 1350
+      f.screenHeight = 2400
+      f.screenName = "HDMI-A-1"
+      check(f.left === 120 && f.top === 700 && f.cardWidth === 500 && f.compact, "HDMI-A-1's own place: " + at(f))
+      f.screenWidth = 3760
+      f.screenHeight = 2115
+      f.screenName = "DP-2"
+      check(f.left === 3290 && f.top === 1259 && f.cardWidth === 460 && f.compact, "DP-2's own place: " + at(f))
+      f.destroy()
     }
 
     function driveOpacity() {
