@@ -85,6 +85,15 @@ QtObject {
     property var session: null
     property var outcome: null
 
+    // Raw text last seen in recording.json / outcome.json. The polling timer
+    // below rereads every watched file, and a binding on `session` or
+    // `outcome` would otherwise see a fresh object (and therefore a change)
+    // on every tick even when the file did not change. The text comparison
+    // keeps those properties still while the contents are identical, so a
+    // poll that finds nothing new costs no property updates and no redraws.
+    property string _sessionText: ""
+    property string _outcomeText: ""
+
     function _parse(view) {
         try {
             const value = JSON.parse(view.text() || "null");
@@ -150,8 +159,21 @@ QtObject {
         path: root._runtimeDir + "/recording.json"
         watchChanges: true
         printErrors: false
-        onLoaded: root.session = root._parse(this)
-        onLoadFailed: root.session = null
+
+        onLoaded: {
+            const raw = text() || "";
+            if (raw === root._sessionText) {
+                return;
+            }
+            root._sessionText = raw;
+            root.session = root._parse(this);
+        }
+
+        onLoadFailed: {
+            root._sessionText = "";
+            root.session = null;
+        }
+
         onFileChanged: reload()
     }
 
@@ -159,8 +181,52 @@ QtObject {
         path: root._runtimeDir + "/outcome.json"
         watchChanges: true
         printErrors: false
-        onLoaded: root.outcome = root._parse(this)
-        onLoadFailed: root.outcome = null
+
+        onLoaded: {
+            const raw = text() || "";
+            if (raw === root._outcomeText) {
+                return;
+            }
+            root._outcomeText = raw;
+            root.outcome = root._parse(this);
+        }
+
+        onLoadFailed: {
+            root._outcomeText = "";
+            root.outcome = null;
+        }
+
         onFileChanged: reload()
+    }
+
+    // Polling fallback for when inotify watches fail.
+    //
+    // On busy desktops (KDE + VS Code + wireplumber + xdg-desktop-portal etc.)
+    // the per-user inotify instance limit is easily exhausted. When that
+    // happens, FileView silently loses its watch after voxtype atomically
+    // rewrites a state file (old inode removed, new inode, and the re-watch
+    // fails with ENOSPC). The OSD then freezes on the last seen state, most
+    // visibly stuck on "Listening" after a recording finishes.
+    //
+    // This Timer re-reads all four watched files every 500 ms as a cheap
+    // safety net; they all live in tmpfs. inotify-driven updates still arrive
+    // instantly while the watch is healthy, and the timer only matters after
+    // the watch has silently died.
+    //
+    // A tick that finds identical contents changes nothing: `state`,
+    // `osdSuppressed`, `session` and `outcome` all compare the freshly read
+    // value with the one already held and keep it when they match, so polling
+    // costs no property updates and no OSD redraws when nothing changed.
+    property Timer _pollTimer: Timer {
+        interval: 500
+        running: true
+        repeat: true
+
+        onTriggered: {
+            root._fileView.reload();
+            root._osdSuppressedView.reload();
+            root._sessionView.reload();
+            root._outcomeView.reload();
+        }
     }
 }
