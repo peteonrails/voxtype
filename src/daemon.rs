@@ -551,14 +551,6 @@ fn apply_output_override(
     config
 }
 
-/// Remove every per-recording override (`voxtype record start --file`,
-/// `--model`, `--profile`, `--auto-submit`, ...) when a recording is
-/// discarded. A normal stop, including a max-duration timeout, must leave
-/// them for the result handler, which reads them when it delivers the text.
-fn discard_recording_overrides() {
-    discard_recording_overrides_in(&Config::runtime_dir());
-}
-
 /// Every override file a single recording can carry, in the runtime dir.
 const RECORDING_OVERRIDE_FILES: [&str; 6] = [
     "output_mode_override",
@@ -576,7 +568,10 @@ fn discard_recording_overrides_in(runtime_dir: &std::path::Path) {
 }
 
 /// Read and consume the profile override file
-/// Returns the profile name if the file exists and is valid, None otherwise
+/// Returns the profile name if the file exists and is valid, None otherwise.
+/// Only `Daemon::recording_profile` and `prepare_for_recording` call this:
+/// the daemon keeps the name for the rest of the recording, because the
+/// file is gone after the first read (#1097).
 fn read_profile_override() -> Option<String> {
     let profile_file = Config::runtime_dir().join("profile_override");
     if !profile_file.exists() {
@@ -1214,6 +1209,9 @@ pub struct Daemon {
     session_text_is_english: bool,
     /// Vocabulary matchers prepared once at startup, keyed by profile name.
     profile_vocabularies: HashMap<String, Vocabulary>,
+    /// The `--profile` of the current recording, kept from its override
+    /// file for every stage of the dictation. See `recording_profile`.
+    recording_profile: Option<String>,
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
@@ -1543,6 +1541,7 @@ impl Daemon {
             text_processor,
             session_text_is_english: true,
             profile_vocabularies,
+            recording_profile: None,
             post_processor,
             last_dictation: None,
             level_hub: None,
@@ -2636,7 +2635,8 @@ impl Daemon {
             // processing), so this is where the transcript becomes final:
             // apply replacements and spoken punctuation over the whole
             // text, same as the batch path does before writing (#669).
-            let vocabulary = read_profile_override()
+            let profile = self.recording_profile();
+            let vocabulary = profile
                 .as_ref()
                 .and_then(|name| self.profile_vocabularies.get(name));
             let raw_text = final_text;
@@ -2691,7 +2691,7 @@ impl Daemon {
 
             *state = State::Idle;
             self.update_state("idle");
-            discard_recording_overrides();
+            self.discard_recording_overrides();
             return;
         }
 
@@ -2749,7 +2749,7 @@ impl Daemon {
 
         *state = State::Idle;
         self.update_state("idle");
-        discard_recording_overrides();
+        self.discard_recording_overrides();
     }
 
     /// Carry out a `voxtype record cancel` trigger against whatever session is
@@ -2831,7 +2831,7 @@ impl Daemon {
                 *tasks_in_flight = 0;
             }
 
-            discard_recording_overrides();
+            self.discard_recording_overrides();
             // A cancelled external-trigger session is still an ended
             // session — tell the caller and disarm tracking.
             self.end_external_session(true).await;
@@ -2873,7 +2873,7 @@ impl Daemon {
             self.history_note(|pending| pending.transcribed());
             self.active_transcriber = None;
 
-            discard_recording_overrides();
+            self.discard_recording_overrides();
             *state = State::Idle;
             self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
             self.update_state("idle");
@@ -2935,7 +2935,7 @@ impl Daemon {
         }
         self.history_note(|pending| pending.transcribed());
 
-        discard_recording_overrides();
+        self.discard_recording_overrides();
         *state = State::Idle;
         self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
         self.update_state("idle");
@@ -3043,18 +3043,48 @@ impl Daemon {
         }
     }
 
-    /// Get the model ready while the user speaks: start an on-demand load,
-    /// or warm the preloaded transcriber (spawning the gpu_isolation worker).
-    /// An override the active transcriber can't serve loads its own instead.
-    fn active_profile_vocabulary_terms(&self) -> Vec<String> {
-        read_profile_override()
+    /// The profile of the current recording. Recording start, transcriber
+    /// prep, post-processing, output and each streamed segment all ask, and
+    /// the override file only survives the first read, so the name is kept
+    /// here (#1097). A file written since (`record stop --profile`) replaces
+    /// it, so a profile named only at stop still applies.
+    fn recording_profile(&mut self) -> Option<String> {
+        if let Some(name) = read_profile_override() {
+            self.recording_profile = Some(name);
+        }
+        self.recording_profile.clone()
+    }
+
+    /// Remove every per-recording override (`voxtype record start --file`,
+    /// `--model`, `--profile`, `--auto-submit`, ...) when a recording is
+    /// discarded or finished, and forget the profile kept from them. A normal
+    /// stop, including a max-duration timeout, must leave them for the result
+    /// handler, which reads them when it delivers the text.
+    fn discard_recording_overrides(&mut self) {
+        discard_recording_overrides_in(&Config::runtime_dir());
+        self.recording_profile = None;
+    }
+
+    /// Forget the profile of a recording whose capture failed to start.
+    fn discard_recording_profile(&mut self) {
+        cleanup_profile_override();
+        self.recording_profile = None;
+    }
+
+    fn active_profile_vocabulary_terms(&mut self) -> Vec<String> {
+        self.recording_profile()
             .as_ref()
             .and_then(|name| self.profile_vocabularies.get(name))
             .map(|vocabulary| vocabulary.terms().map(str::to_string).collect())
             .unwrap_or_default()
     }
 
+    /// Get the model ready while the user speaks: start an on-demand load,
+    /// or warm the preloaded transcriber (spawning the gpu_isolation worker).
+    /// An override the active transcriber can't serve loads its own instead.
     fn prepare_for_recording(&mut self, model_override: Option<&str>) {
+        // A new recording carries only the profile its own override names.
+        self.recording_profile = read_profile_override();
         let vocabulary = self.active_profile_vocabulary_terms();
         if let Some(name) = model_override {
             if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
@@ -4993,7 +5023,7 @@ impl Daemon {
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&mut self, state: &mut State) {
-        discard_recording_overrides();
+        self.discard_recording_overrides();
         self.restore_recording_media();
         *state = State::Idle;
         self.update_state("idle");
@@ -5463,6 +5493,8 @@ impl Daemon {
             _ => false,
         };
         self.handle_transcription_result_inner(state, result).await;
+        // The dictation is over whichever way it ended.
+        self.recording_profile = None;
         if failed {
             self.show_tray_error();
         }
@@ -5509,7 +5541,7 @@ impl Daemon {
 
                     // Resolve the profile before cleanup because vocabulary is
                     // the first profile-aware stage in the cleanup pipeline.
-                    let profile_override = read_profile_override();
+                    let profile_override = self.recording_profile();
                     let active_profile = profile_override
                         .as_ref()
                         .and_then(|name| self.config.get_profile(name));
@@ -6655,7 +6687,7 @@ impl Daemon {
                                         Err(()) => {
                                             // Helper already logged and played the error sound.
                                             self.restore_recording_media();
-                                            cleanup_profile_override();
+                                            self.discard_recording_profile();
                                         }
                                     }
                                 }
@@ -6806,7 +6838,7 @@ impl Daemon {
                                         Err(()) => {
                                             // Helper already logged and played the error sound.
                                             self.restore_recording_media();
-                                            cleanup_profile_override();
+                                            self.discard_recording_profile();
                                         }
                                     }
                                 }
@@ -7310,7 +7342,8 @@ impl Daemon {
                                     // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
-                                    let vocabulary = read_profile_override()
+                                    let profile = self.recording_profile();
+                                    let vocabulary = profile
                                         .as_ref()
                                         .and_then(|name| self.profile_vocabularies.get(name));
                                     if let Err(e) = s.commit_segment(
@@ -7337,7 +7370,8 @@ impl Daemon {
                                     // Raw on purpose — see the Final arm.
                                     s.replace_and_commit_silent(backspace, &text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
-                                    let vocabulary = read_profile_override()
+                                    let profile = self.recording_profile();
+                                    let vocabulary = profile
                                         .as_ref()
                                         .and_then(|name| self.profile_vocabularies.get(name));
                                     if let Err(e) = s.replace_and_commit(
@@ -7912,6 +7946,326 @@ while True:
                     assert!(logged.contains(words), "{words:?} not at debug: {logged}");
                 }
             }
+        }
+    }
+
+    /// A recording's `--profile` reaches every stage of the dictation, not
+    /// only the first one that reads its override file (#1097). Each test
+    /// runs in a process of its own, since the profile travels through the
+    /// runtime directory, which must be a scratch one.
+    mod recording_profile {
+        use super::*;
+        use crate::config::{PostProcessConfig, Profile, VocabularyConfig};
+
+        fn in_scratch_runtime(test: &str) -> bool {
+            let scratch = TempDir::new().unwrap();
+            crate::test_support::own_process(
+                &format!("daemon::tests::recording_profile::{test}"),
+                |child| {
+                    child
+                        .env("HOME", scratch.path())
+                        .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
+                        .env("XDG_STATE_HOME", scratch.path().join("state"))
+                        .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+                        .env("XDG_DATA_HOME", scratch.path().join("data"))
+                        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                        .env_remove("WAYLAND_DISPLAY")
+                        .env_remove("DISPLAY");
+                },
+            )
+        }
+
+        /// Default post-processing tags text DEFAULT:, the `notes` profile
+        /// tags it NOTES:, and `calendar` adds a vocabulary to its command.
+        fn config(target: &Path) -> Config {
+            let mut config = Config::default();
+            config.audio.feedback.enabled = false;
+            config.whisper.on_demand_loading = false;
+            config.output.mode = OutputMode::File;
+            config.output.file_path = Some(target.to_path_buf());
+            config.output.fallback_to_clipboard = false;
+            config.output.post_process = Some(PostProcessConfig {
+                command: "sed 's/^/DEFAULT:/'".to_string(),
+                timeout_ms: 5000,
+                trim: true,
+                fallback_on_empty: true,
+                edit_list: false,
+            });
+            config.profiles.insert(
+                "notes".to_string(),
+                Profile {
+                    post_process_command: Some("sed 's/^/NOTES:/'".to_string()),
+                    post_process_timeout_ms: Some(5000),
+                    ..Profile::default()
+                },
+            );
+            config.profiles.insert(
+                "calendar".to_string(),
+                Profile {
+                    vocabulary: VocabularyConfig {
+                        terms: vec!["PipeWire".to_string()],
+                        terms_file: None,
+                    },
+                    post_process_command: Some("sed 's/^/CALENDAR:/'".to_string()),
+                    post_process_timeout_ms: Some(5000),
+                    ..Profile::default()
+                },
+            );
+            config
+        }
+
+        /// What `voxtype record start|stop --profile <name>` does before it
+        /// signals the daemon.
+        fn cli_names_profile(name: &str) {
+            let dir = Config::runtime_dir();
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("profile_override"), name).unwrap();
+        }
+
+        /// Transcriber prep, which reads the profile's vocabulary again
+        /// once the recording stops.
+        fn prepare_transcriber(daemon: &mut Daemon) -> Vec<String> {
+            daemon.active_profile_vocabulary_terms()
+        }
+
+        async fn deliver(daemon: &mut Daemon, spoken: &str) {
+            let mut state = State::Transcribing { audio: Vec::new() };
+            daemon
+                .handle_transcription_result(&mut state, Ok(Ok(spoken.to_string())))
+                .await;
+            assert!(state.is_idle());
+        }
+
+        fn streaming_state(file_output_path: Option<PathBuf>) -> State {
+            State::Streaming {
+                started_at: std::time::Instant::now(),
+                model_override: None,
+                partial_buffer: String::new(),
+                finalized_text: String::new(),
+                typed_chars: 0,
+                file_output_path,
+            }
+        }
+
+        #[tokio::test]
+        async fn batch_post_processing_runs_the_profile_command() {
+            if !in_scratch_runtime("batch_post_processing_runs_the_profile_command") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut daemon = Daemon::new(config(&target), None);
+
+            cli_names_profile("notes");
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+
+            assert_eq!(fs::read_to_string(&target).unwrap(), "NOTES:hello there\n");
+        }
+
+        #[tokio::test]
+        async fn profile_vocabulary_and_command_both_apply() {
+            if !in_scratch_runtime("profile_vocabulary_and_command_both_apply") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut daemon = Daemon::new(config(&target), None);
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            assert_eq!(prepare_transcriber(&mut daemon), vec!["PipeWire"]);
+            deliver(&mut daemon, "pipe wire works").await;
+
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "CALENDAR:PipeWire works\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn profile_output_mode_reaches_output() {
+            if !in_scratch_runtime("profile_output_mode_reaches_output") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut config = config(&target);
+            config.output.mode = OutputMode::Clipboard;
+            config.profiles.insert(
+                "to-file".to_string(),
+                Profile {
+                    output_mode: Some(OutputMode::File),
+                    ..Profile::default()
+                },
+            );
+            let mut daemon = Daemon::new(config, None);
+            let typed = Arc::new(std::sync::Mutex::new(None));
+            daemon.history_test_output_chain = Some(vec![Box::new(RecordingOutput {
+                got: typed.clone(),
+                succeed: true,
+            })]);
+
+            cli_names_profile("to-file");
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "DEFAULT:hello there\n"
+            );
+            assert_eq!(*typed.lock().unwrap(), None, "the default output ran");
+        }
+
+        #[tokio::test]
+        async fn profile_named_only_at_stop_still_applies() {
+            if !in_scratch_runtime("profile_named_only_at_stop_still_applies") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut daemon = Daemon::new(config(&target), None);
+
+            daemon.prepare_for_recording(None);
+            cli_names_profile("notes");
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+
+            assert_eq!(fs::read_to_string(&target).unwrap(), "NOTES:hello there\n");
+        }
+
+        #[tokio::test]
+        async fn streamed_segments_keep_the_profile() {
+            if !in_scratch_runtime("streamed_segments_keep_the_profile") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let mut daemon = Daemon::new(config(&dir.path().join("unused.txt")), None);
+            let typed = Arc::new(std::sync::Mutex::new(None));
+            let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+                got: typed.clone(),
+                succeed: true,
+            })];
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            let mut state = streaming_state(None);
+            let mut session = StreamingSession::new();
+            // The event pump looks the vocabulary up for each final segment.
+            for segment in ["pipe wire starts", "pipe wire stops"] {
+                let profile = daemon.recording_profile();
+                let vocabulary = profile
+                    .as_ref()
+                    .and_then(|name| daemon.profile_vocabularies.get(name));
+                session
+                    .commit_segment(
+                        &chain,
+                        segment,
+                        Some((&daemon.text_processor, vocabulary)),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let delivered = typed.lock().unwrap().clone().unwrap();
+                assert!(
+                    delivered.contains("PipeWire"),
+                    "{segment:?} -> {delivered:?}"
+                );
+            }
+
+            daemon
+                .end_streaming(
+                    &mut state,
+                    &mut None,
+                    &mut None,
+                    &mut Some(session),
+                    &mut Some(chain),
+                )
+                .await;
+            assert!(state.is_idle());
+            assert_eq!(daemon.recording_profile(), None, "outlived its dictation");
+        }
+
+        #[tokio::test]
+        async fn streamed_file_output_keeps_the_profile_through_end_streaming() {
+            if !in_scratch_runtime("streamed_file_output_keeps_the_profile_through_end_streaming") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut daemon = Daemon::new(config(&target), None);
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            let mut state = streaming_state(Some(target.clone()));
+            let mut session = StreamingSession::new();
+            session.commit_segment_silent("pipe wire works");
+            daemon
+                .end_streaming(
+                    &mut state,
+                    &mut None,
+                    &mut None,
+                    &mut Some(session),
+                    &mut None,
+                )
+                .await;
+
+            assert!(state.is_idle());
+            assert_eq!(fs::read_to_string(&target).unwrap(), "PipeWire works\n");
+            assert_eq!(daemon.recording_profile(), None, "outlived its dictation");
+        }
+
+        #[tokio::test]
+        async fn a_failed_or_cancelled_dictation_leaves_no_profile_behind() {
+            if !in_scratch_runtime("a_failed_or_cancelled_dictation_leaves_no_profile_behind") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut daemon = Daemon::new(config(&target), None);
+
+            // Transcription fails.
+            cli_names_profile("notes");
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            let mut state = State::Transcribing { audio: Vec::new() };
+            daemon
+                .handle_transcription_result(
+                    &mut state,
+                    Ok(Err(crate::error::TranscribeError::InferenceFailed(
+                        "synthetic".to_string(),
+                    ))),
+                )
+                .await;
+            assert!(state.is_idle());
+            assert_eq!(daemon.recording_profile, None, "survived a failure");
+
+            // The recording is cancelled.
+            cli_names_profile("notes");
+            daemon.prepare_for_recording(None);
+            let mut state = State::Recording {
+                started_at: std::time::Instant::now(),
+                model_override: None,
+            };
+            daemon
+                .cancel_requested_session(
+                    &mut state, &mut None, &mut None, &mut None, &mut None, &mut None,
+                )
+                .await;
+            assert!(state.is_idle());
+            assert_eq!(daemon.recording_profile, None, "survived a cancel");
+
+            // The next dictation names no profile and gets the defaults.
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "DEFAULT:hello there\n"
+            );
         }
     }
 
