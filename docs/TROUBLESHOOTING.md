@@ -2380,7 +2380,7 @@ journalctl --user -u voxtype -f
 # If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
 
-`RUST_LOG` takes precedence over `-v` and `-q` on the command line. Remove the line and restart the service when you are done.
+`RUST_LOG` takes precedence over `-v` and `-q` on the command line. An empty `RUST_LOG` counts as unset. Remove the line and restart the service when you are done.
 
 ### The user journal has no voxtype entries
 

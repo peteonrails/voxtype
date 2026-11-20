@@ -13,7 +13,6 @@ mod app;
 
 use app::sigpipe;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 use voxtype::{config, cpu, Cli, Commands};
 
 #[tokio::main]
@@ -56,8 +55,7 @@ async fn main() -> anyhow::Result<()> {
     // ureq logs each request's full URL at debug, and a calendar's iCal
     // link is a secret: its debug lines stay off whatever RUST_LOG asks.
     let log_filter = |level: &str| {
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", level)))
+        voxtype::logging::env_filter(&format!("voxtype={},warn", level))
             .add_directive("ureq=info".parse().expect("a valid directive"))
     };
 
