@@ -2673,7 +2673,14 @@ impl Daemon {
                     .await;
                 return;
             }
-            if file_output_path.is_none() && !buffered.trim().is_empty() {
+            // Only text the session held silently because the stop
+            // disowned the typing surface. With the chain still attached,
+            // the text already went through it, delivered or failed, and
+            // must not be sent again.
+            if file_output_path.is_none()
+                && streaming_chain.is_none()
+                && !buffered.trim().is_empty()
+            {
                 *streaming_session = None;
                 *streaming_chain = None;
                 self.deliver_buffered_streaming_text(state, buffered);
@@ -2834,6 +2841,12 @@ impl Daemon {
     /// Recover a streaming dictation that failed before it typed anything:
     /// run the capture's retained audio through batch transcription and
     /// the ordinary batch result path.
+    ///
+    /// A cloud engine (Soniox) that just lost its connection is the least
+    /// likely thing to transcribe this audio, so it recovers with the
+    /// configured `[whisper]` backend first. A local engine recovers with
+    /// its own batch path, which is already loaded. Either way the other
+    /// one is the fallback, because any transcript beats losing it.
     async fn recover_streaming_audio(
         &mut self,
         state: &mut State,
@@ -2876,16 +2889,12 @@ impl Daemon {
             }
         }
 
-        // Never recover with the engine that just failed by preference: a
-        // streaming backend that lost its socket is the least likely thing
-        // to transcribe this audio. The configured [whisper] backend, local
-        // or remote, does not depend on that session. If it cannot be built
-        // at all, the running engine's own batch path is still better than
-        // dropping the dictation.
-        let prefer_whisper = true;
+        let prefer_whisper = self.config.engine == crate::config::TranscriptionEngine::Soniox;
+        let fallback = if prefer_whisper { "Whisper" } else { "batch" };
         tracing::warn!(
-            "Streaming session ended without text; recovering {:.1}s with batch transcription",
-            audio_duration
+            "Streaming session ended without text; recovering {:.1}s with {} transcription",
+            audio_duration,
+            fallback
         );
         *state = State::Transcribing {
             audio: samples.clone(),
@@ -2924,7 +2933,10 @@ impl Daemon {
         }));
         send_notification(
             "Dictation Recovered",
-            "Streaming failed before it delivered text. Recovering with the whisper backend.",
+            &format!(
+                "Streaming ended before it typed anything. Transcribing the recording with {} instead.",
+                if prefer_whisper { "Whisper" } else { "batch transcription" }
+            ),
             self.config.output.notification.show_engine_icon,
             self.config.engine,
             "normal",
@@ -10360,5 +10372,90 @@ while True:
         assert_eq!(fs::read_to_string(&output).unwrap(), "buffered dictation\n");
         assert!(!output.with_file_name("configured-output.txt").exists());
         assert_eq!(batch_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn non_file_streaming_state() -> State {
+        State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: None,
+        }
+    }
+
+    /// Finals that arrive after a stop disowned the typing surface are held
+    /// silently. When nothing was typed, they are the whole dictation and
+    /// go through the batch result path instead of being dropped.
+    #[tokio::test]
+    async fn disowned_late_text_is_delivered_through_the_batch_path() {
+        let dir = TempDir::new().unwrap();
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "unused",
+            batch_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let mut daemon = recovery_test_daemon(fake, &dir.path().join("out.txt"));
+        let mut state = non_file_streaming_state();
+        let mut session = Some(StreamingSession::new());
+        session
+            .as_mut()
+            .unwrap()
+            .commit_segment_silent("late words");
+        let mut chain: Option<Vec<Box<dyn TextOutput>>> = None;
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut None,
+                &mut None,
+                &mut session,
+                &mut chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+
+        assert!(matches!(state, State::Transcribing { .. }));
+        let task = daemon
+            .transcription_task
+            .take()
+            .expect("late text must reach the batch result path");
+        assert_eq!(task.await.unwrap().unwrap(), "late words");
+    }
+
+    /// With the typing surface still attached, the session's text already
+    /// went through the output chain, so a failed delivery leaves
+    /// typed_chars at zero. That text must not be sent a second time.
+    #[tokio::test]
+    async fn text_that_went_through_the_chain_is_not_redelivered() {
+        let dir = TempDir::new().unwrap();
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "unused",
+            batch_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let mut daemon = recovery_test_daemon(fake, &dir.path().join("out.txt"));
+        let mut state = non_file_streaming_state();
+        let mut session = Some(StreamingSession::new());
+        session
+            .as_mut()
+            .unwrap()
+            .commit_segment_silent("already attempted");
+        let mut chain: Option<Vec<Box<dyn TextOutput>>> = Some(Vec::new());
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut None,
+                &mut None,
+                &mut session,
+                &mut chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+
+        assert!(daemon.transcription_task.is_none());
+        assert!(state.is_idle());
     }
 }

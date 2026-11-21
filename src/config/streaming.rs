@@ -97,8 +97,15 @@ impl Default for StreamingRecoveryConfig {
 impl StreamingConfig {
     /// Resolve the effective sliding-window tuning knobs for one engine.
     ///
-    /// The shared `[streaming]` section wins when present; otherwise use the
-    /// engine's legacy tuning fields.
+    /// The shared `[streaming]` section (`shared`) wins outright when
+    /// present in config.toml. Otherwise, fall back to `legacy` — that
+    /// engine's own deprecated per-field copies (`[whisper]
+    /// streaming_interval_secs`, etc.), which used to be the only place
+    /// these settings lived. A one-time warning is logged the first time
+    /// the fallback is actually carrying a customization (i.e. `legacy`
+    /// isn't just the defaults again), so a user who genuinely relies on
+    /// the old fields is told to migrate; a user who never touched them
+    /// gets identical behavior either way and no noise.
     pub fn resolve(
         shared: Option<&StreamingConfig>,
         legacy: StreamingConfig,
