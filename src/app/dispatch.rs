@@ -106,8 +106,9 @@ pub(crate) async fn dispatch(
             let _ = std::process::Command::new("pkill")
                 .args(["-9", "-f", "voxtype-bin menubar"])
                 .status();
-            let _ = std::fs::remove_file("/tmp/voxtype/voxtype.lock");
-            let _ = std::fs::remove_file("/tmp/voxtype/menubar.lock");
+            let runtime_dir = config::Config::runtime_dir();
+            let _ = std::fs::remove_file(runtime_dir.join("voxtype.lock"));
+            let _ = std::fs::remove_file(runtime_dir.join("menubar.lock"));
 
             // Start daemon as a child process with logging
             let exe = std::env::current_exe()?;

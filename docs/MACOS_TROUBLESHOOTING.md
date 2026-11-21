@@ -12,7 +12,7 @@ ps aux | grep "[v]oxtype daemon"
 /Applications/Voxtype.app/Contents/MacOS/voxtype status
 
 # Check state file
-cat /tmp/voxtype/state
+cat "$TMPDIR/voxtype/state"
 
 # Check config
 cat "$HOME/Library/Application Support/voxtype/config.toml" | head -50
@@ -34,7 +34,7 @@ launchctl unload ~/Library/LaunchAgents/io.voxtype.daemon.plist
 pkill -9 voxtype
 
 # Clean up lock files
-rm -rf /tmp/voxtype
+rm -rf "$TMPDIR/voxtype"
 
 # Start fresh
 /Applications/Voxtype.app/Contents/MacOS/voxtype daemon &
@@ -54,7 +54,7 @@ grep "^key" "$HOME/Library/Application Support/voxtype/config.toml"
 
 # Run daemon with verbose output
 pkill voxtype
-rm -rf /tmp/voxtype
+rm -rf "$TMPDIR/voxtype"
 /Applications/Voxtype.app/Contents/MacOS/voxtype -vv daemon
 ```
 
@@ -81,7 +81,7 @@ fn send_macos_native(title: &str, body: &str) {
 **Fix:**
 ```bash
 pkill voxtype
-rm -rf /tmp/voxtype
+rm -rf "$TMPDIR/voxtype"
 /Applications/Voxtype.app/Contents/MacOS/voxtype daemon &
 ```
 
@@ -116,7 +116,7 @@ enabled = false
 ```bash
 # Clean slate
 pkill -9 voxtype
-rm -rf /tmp/voxtype
+rm -rf "$TMPDIR/voxtype"
 sleep 2
 /Applications/Voxtype.app/Contents/MacOS/voxtype daemon &
 sleep 3
@@ -150,7 +150,7 @@ cp -r .build/VoxtypeSetup.app /Applications/
 pkill -x VoxtypeMenubar
 pkill -x VoxtypeSetup
 pkill -x voxtype
-rm -rf /tmp/voxtype
+rm -rf "$TMPDIR/voxtype"
 open /Applications/VoxtypeMenubar.app
 /Applications/Voxtype.app/Contents/MacOS/voxtype daemon &
 ```
@@ -169,9 +169,9 @@ open /Applications/VoxtypeMenubar.app
 |------|------|
 | Config | `~/Library/Application Support/voxtype/config.toml` |
 | Models | `~/Library/Application Support/voxtype/models/` |
-| State | `/tmp/voxtype/state` |
-| Lock | `/tmp/voxtype/voxtype.lock` |
-| PID | `/tmp/voxtype/pid` |
+| State | `$TMPDIR/voxtype/state` |
+| Lock | `$TMPDIR/voxtype/voxtype.lock` |
+| PID | `$TMPDIR/voxtype/pid` |
 
 ## Verification Steps
 
