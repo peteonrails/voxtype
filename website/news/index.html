@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype v1.3.0: Meetings, Failure Notifications and voxtype doctor">
-    <meta property="og:description" content="A live meeting transcript with echo cancellation, speaker names, search, summaries and action items. Notifications that name the fix when dictation fails, and voxtype doctor.">
+    <meta property="og:title" content="Voxtype v1.3.1: Dictation History, Paste Last, and Fixes">
+    <meta property="og:description" content="A private, searchable record of every dictation, including failed ones, with copy, paste again and corrections. A paste-last key, text.language for cleanup, meeting playback that follows the audio, and contributor fixes.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype v1.3.0: Meetings, Failure Notifications and voxtype doctor">
-    <meta name="twitter:description" content="A live meeting transcript with echo cancellation, speaker names, search, summaries and action items. Notifications that name the fix when dictation fails, and voxtype doctor.">
+    <meta name="twitter:title" content="Voxtype v1.3.1: Dictation History, Paste Last, and Fixes">
+    <meta name="twitter:description" content="A private, searchable record of every dictation, including failed ones, with copy, paste again and corrections. A paste-last key, text.language for cleanup, meeting playback that follows the audio, and contributor fixes.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -74,6 +74,117 @@
     <!-- News Articles -->
     <main class="news-content">
         <div class="container">
+
+            <article class="news-article" id="v131">
+                <div class="article-meta">
+                    <time datetime="2026-11-21">November 21, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.3.1: Dictation History, Paste Last, and Fixes</h2>
+                <div class="article-body">
+                    <p>Voxtype 1.3.1 adds dictation history: every dictation is kept on your machine, where you can search it, copy it, send it again or correct it. It also brings ten fixes and two docs changes from contributors, a quieter meeting announcement, speaker colours in meeting playback, and a fix for <code>voxtype config set</code> that dropped entries from inline tables in every release since 1.0.0.</p>
+                    <p>History stays off on existing installs until you turn it on.</p>
+
+                    <h3>Dictation history</h3>
+                    <p>Voxtype now keeps a record of what you dictated: the engine's original text, the text after cleanup, what was actually delivered, and whether delivery worked. Failed, empty, too-short, timed-out and cancelled dictations are kept too, so a dictation that never reached the window is no longer lost. Audio is not kept.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype history enable
+voxtype history                  # recent dictations, newest first
+voxtype history --failed         # failed, cancelled and empty ones
+voxtype history copy             # copy the most recent transcript
+voxtype history paste last --delay-ms 2000
+voxtype history search invoice   # searches dictations and meetings together
+voxtype history view --tui</code></pre>
+                    </div>
+                    <p>Every history command takes <code>--json</code>.</p>
+                    <p>History is a private JSONL file per day in <code>~/.local/share/voxtype/history</code>, readable only by you. Days older than a week are gzipped and still readable with <code>zgrep</code>, and days older than 30 days are removed. <code>voxtype history retention 90</code> keeps 90 days, and <code>0</code> keeps everything.</p>
+                    <p><code>voxtype history pause</code> stops recording before something private, and <code>resume</code> starts it again. The tray has the same switch, plus Enable History, History and Copy last transcript.</p>
+                    <p>Password managers (KeePassXC, Bitwarden, 1Password, Proton Pass) are excluded by default. An exclusion needs to know the focused app, which Voxtype asks Hyprland, Sway or niri for. On other desktops, or when the compositor doesn't answer, the app is unknown and the dictation is recorded, so pause history before dictating something private there.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[history]
+enabled = true
+retention_days = 30          # 0 keeps everything
+exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
+record_window_title = false</code></pre>
+                    </div>
+                    <p>The history window in the Omarchy shell, in Voxtype's own Quickshell shell and in GTK 4, and the terminal reader from <code>voxtype history view --tui</code>, show the same entries grouped by day, with search, copy, paste again, correct and delete. Expanding an entry shows what Voxtype changed between the engine's text and the text it typed.</p>
+                    <p><code>voxtype setup check</code> shows whether history is on and prints the command to turn it on.</p>
+                    <p><strong>Why use it:</strong> a dictation that went to the wrong window, or never arrived, is one command away instead of gone.</p>
+
+                    <h3>Paste last</h3>
+                    <p><code>voxtype paste-last</code> sends your most recent dictation again. Bind it in your compositor, or set a key for the built-in hotkey:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>hyprland.conf</span></div>
+                        <pre><code>bind = CTRL ALT, V, exec, voxtype paste-last</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[hotkey]
+paste_last_key = "CTRL+ALT+V"</code></pre>
+                    </div>
+                    <p><strong>Why use it:</strong> the focus moved while you were talking, and the text landed somewhere else. Click where it belongs and press the key.</p>
+
+                    <h3>Corrections become replacements</h3>
+                    <p>When you correct a dictation in history and the change is one contained phrase, Voxtype offers to add it to <code>[text.replacements]</code>, so "cone ogres" becomes "CODEOWNERS" the next time too. The history window shows the offer under the corrected entry, and <code>voxtype history rule FROM TO</code> does the same from a script. Replacements apply after a daemon restart.</p>
+
+                    <h3>Text cleanup knows the language of the text</h3>
+                    <p><code>text.language</code> declares the language you dictate in. Voxtype also works it out from the engine's language setting or an English-only model.</p>
+                    <div class="code-block">
+                        <pre><code>voxtype config set text.language en</code></pre>
+                    </div>
+                    <p>LARD now runs on Parakeet and other engines with no language setting, once the text is known to be English. When it can't run, the notice names what in your config makes the text not English and the change that fixes it. The language rules that were already there, such as German and Portuguese keeping <code>um</code> and French keeping its space before <code>? ! : ;</code>, now apply on those engines too.</p>
+                    <p>LARD cleanup also stays inside one sentence. "Send it to Bob. Bob will know." keeps both Bobs, and "between 10 and 20 people" keeps the 10.</p>
+
+                    <h3>Meetings</h3>
+                    <ul>
+                        <li>In playback, each speaker has one colour, on the waveform and in the transcript, and the colour stays when you rename a speaker.</li>
+                        <li>Clicking the waveform scrolls the transcript to that line, and the transcript follows the audio while it plays. Scrolling by hand, a citation or a search result stops the following until your next seek.</li>
+                        <li>The "this meeting is being recorded" announcement plays at half its old level. <code>[meeting] announcement_volume</code> sets it, from 0.0 to 1.0.</li>
+                        <li>With both the Omarchy plugin and Voxtype's own Quickshell shell running, a meeting opens one view, not two.</li>
+                        <li>The meeting view opens on the focused monitor and always on screen. A position saved on a large monitor no longer puts the view off the edge of a smaller or rotated one.</li>
+                        <li>Zoom's web client in an app window is recognised as a call.</li>
+                        <li>A meeting track that records nothing shows a notice instead of a silent half-transcript.</li>
+                    </ul>
+
+                    <h3>Bug fixes</h3>
+                    <ul>
+                        <li><code>voxtype config set</code> and <code>unset</code> keep every entry of an inline table such as <code>replacements = { ... }</code>. Every release since 1.0.0 dropped the others. Quoted keys with dots now work too.</li>
+                        <li>A profile's <code>post_process_command</code> and <code>output_mode</code> are used again. Since 1.2.0 the profile was forgotten before post-processing ran (<a href="https://github.com/peteonrails/voxtype/issues/1097">#1097</a>, reported and diagnosed by <a href="https://github.com/mdsilvers">@mdsilvers</a>).</li>
+                        <li>Saving settings through a symlinked <code>config.toml</code>, as GNU Stow sets up, writes to the file the link points at and keeps the link. Relative links, chains of links and a link to a missing file all work, and <code>setup migrate</code> rollbacks keep the link too (<a href="https://github.com/peteonrails/voxtype/issues/1102">#1102</a>, <a href="https://github.com/peteonrails/voxtype/pull/1103">#1103</a>, <a href="https://github.com/angelcervera">@angelcervera</a>).</li>
+                        <li><code>$</code> in a replacement value is kept as written (<a href="https://github.com/peteonrails/voxtype/pull/1059">#1059</a>, <a href="https://github.com/sndsh404">@sndsh404</a>).</li>
+                        <li>The hidden GTK 4 OSD stopped waking 120 times a second (<a href="https://github.com/peteonrails/voxtype/pull/1095">#1095</a>, <a href="https://github.com/W4HO-ham">@W4HO-ham</a>, with <a href="https://github.com/strafedog">@strafedog</a>'s <a href="https://github.com/peteonrails/voxtype/pull/1091">#1091</a>, fixing <a href="https://github.com/peteonrails/voxtype/issues/1094">#1094</a> and <a href="https://github.com/peteonrails/voxtype/issues/1090">#1090</a>).</li>
+                        <li>Streaming no longer drops audio while inference runs, and the silence auto-stop clock starts at the first frame (<a href="https://github.com/peteonrails/voxtype/pull/957">#957</a>, <a href="https://github.com/peteonrails/voxtype/pull/958">#958</a>, <a href="https://github.com/matleniz">@matleniz</a>).</li>
+                        <li>Streaming honours output overrides (<a href="https://github.com/peteonrails/voxtype/pull/1064">#1064</a>, <a href="https://github.com/sjawhar">@sjawhar</a>).</li>
+                        <li>Parakeet prefers CUDA over MIGraphX on NVIDIA hosts with an AMD iGPU (<a href="https://github.com/peteonrails/voxtype/pull/918">#918</a>, <a href="https://github.com/sarankumar1325">@sarankumar1325</a>).</li>
+                        <li>Paste keystrokes map super, meta and win to wtype's <code>logo</code> (<a href="https://github.com/peteonrails/voxtype/pull/950">#950</a>, <a href="https://github.com/ninyawee">@ninyawee</a>).</li>
+                        <li>macOS stops the input stream before dropping it (<a href="https://github.com/peteonrails/voxtype/pull/932">#932</a>, <a href="https://github.com/newblacc">@newblacc</a>).</li>
+                        <li>Soniox defaults to <code>stt-rt-v6</code> and <code>stt-async-v6</code> (<a href="https://github.com/peteonrails/voxtype/pull/967">#967</a>, <a href="https://github.com/materemias">@materemias</a>).</li>
+                        <li><code>voxtype info accel</code> reports the backend for GGUF engines after a dictation, and <code>setup gpu --status</code> points GGUF engines at their <code>gguf_backend</code> setting (<a href="https://github.com/peteonrails/voxtype/issues/1085">#1085</a>).</li>
+                        <li>With cue sounds and <code>duck_media</code> both on, Voxtype no longer ducks its own stop and completion cues.</li>
+                        <li>Commands other than the daemon log to stderr, so <code>voxtype config get</code> and the <code>--json</code> outputs print only their data on stdout. An empty <code>RUST_LOG</code> no longer silences every log line, warnings and errors included.</li>
+                        <li>A config save no longer undoes changes another command made since it loaded. A settings window left open can't undo a history pause made from the tray.</li>
+                        <li>The configure TUI saves <code>volume = 0.7</code>, not <code>volume = 0.7000000476837158</code>.</li>
+                    </ul>
+
+                    <h3>Docs</h3>
+                    <ul>
+                        <li>A troubleshooting entry for <a href="https://github.com/rvaiya/keyd">keyd</a>, which reports Right Ctrl, Right Shift and Right Meta as the left-hand key, so a hotkey set to one of them never fires (<a href="https://github.com/peteonrails/voxtype/pull/1020">#1020</a>, <a href="https://github.com/Raptor-zip">@Raptor-zip</a>).</li>
+                        <li>INSTALL.md no longer tells you to run <code>voxtype daemon -v</code>, which fails. <code>-v</code> goes before the subcommand: <code>voxtype -v daemon</code> (<a href="https://github.com/peteonrails/voxtype/pull/939">#939</a>, <a href="https://github.com/qrilka">@qrilka</a>).</li>
+                        <li>INSTALL.md describes dictation history for upgrading users.</li>
+                    </ul>
+
+                    <h3>Upgrading</h3>
+                    <ul>
+                        <li>History stays off for an existing config, and for the system-wide <code>/etc/voxtype/config.toml</code>. A config written by <code>voxtype setup</code> turns it on with 30-day retention. Run <code>voxtype history enable</code> to turn it on.</li>
+                        <li>On Omarchy, restart the shell after upgrading (<code>omarchy-restart-shell</code>) so the panel and meeting view load the new version.</li>
+                    </ul>
+
+                    <h3>Thanks</h3>
+                    <p>Thank you to <a href="https://github.com/sndsh404">@sndsh404</a>, <a href="https://github.com/W4HO-ham">@W4HO-ham</a>, <a href="https://github.com/strafedog">@strafedog</a>, <a href="https://github.com/matleniz">@matleniz</a>, <a href="https://github.com/sjawhar">@sjawhar</a>, <a href="https://github.com/sarankumar1325">@sarankumar1325</a>, <a href="https://github.com/ninyawee">@ninyawee</a>, <a href="https://github.com/newblacc">@newblacc</a>, <a href="https://github.com/materemias">@materemias</a>, <a href="https://github.com/mdsilvers">@mdsilvers</a>, <a href="https://github.com/angelcervera">@angelcervera</a>, <a href="https://github.com/Raptor-zip">@Raptor-zip</a> and <a href="https://github.com/qrilka">@qrilka</a>.</p>
+                    <p>Downloads, checksums and signatures are on the <a href="https://github.com/peteonrails/voxtype/releases/tag/v1.3.1">v1.3.1 release page</a>.</p>
+                </div>
+            </article>
 
             <article class="news-article" id="v130">
                 <div class="article-meta">
