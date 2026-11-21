@@ -232,26 +232,34 @@ fn effective_window_ms(config: &DeadInputConfig) -> u32 {
     config.window_ms.max(MIN_WINDOW_MS)
 }
 
+/// How long the alert waits for `pactl` to name the default source. A dead
+/// input can be a wedged sound server, and then pactl never answers; the
+/// alert must not hold the daemon's event loop while it waits.
+const SOURCE_LABEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What the alert calls the source when it cannot learn its name.
+const DEFAULT_SOURCE_LABEL: &str = "the default microphone";
+
 /// Resolve the source name to show in a dead-input alert.
 pub async fn source_label(configured_device: &str) -> String {
     if configured_device != "default" {
         return configured_device.to_owned();
     }
 
-    match tokio::process::Command::new("pactl")
+    let query = tokio::process::Command::new("pactl")
         .arg("get-default-source")
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(SOURCE_LABEL_TIMEOUT, query).await {
+        Ok(Ok(output)) if output.status.success() => {
             let source = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             if source.is_empty() {
-                "default".to_owned()
+                DEFAULT_SOURCE_LABEL.to_owned()
             } else {
                 source
             }
         }
-        _ => "default".to_owned(),
+        _ => DEFAULT_SOURCE_LABEL.to_owned(),
     }
 }
 

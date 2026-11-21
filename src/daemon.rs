@@ -3090,8 +3090,9 @@ impl Daemon {
         notification::send_alert(
             "Microphone silent",
             &format!(
-                "No sound after the microphone settled in the next {:.1} seconds. \
+                "No sound from {} in the first {:.1} seconds. \
                  Check that the microphone is powered on and unmuted.",
+                source,
                 report.window_ms as f32 / 1_000.0,
             ),
         )
