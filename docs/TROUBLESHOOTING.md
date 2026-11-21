@@ -1326,7 +1326,7 @@ positions.
 Verify:
 
 ```bash
-voxtype daemon -vv  # debug logs
+voxtype -v daemon  # debug logs
 # After a Russian transcription you should see:
 # DEBUG Auto layout for eitype: language='ru' -> layout='ru'
 # DEBUG Auto variant for eitype: language='ru' -> variant='phonetic'
