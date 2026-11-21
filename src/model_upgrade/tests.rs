@@ -715,6 +715,39 @@ fn failed_activation_is_rolled_back() {
     assert_config(&paths, None);
 }
 
+/// A rollback through a symlinked config (GNU Stow) restores the file the
+/// link names and leaves the link alone.
+#[test]
+fn rollback_restores_through_a_config_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths(dir.path());
+    let stowed = dir.path().join("dotfiles");
+    std::fs::create_dir(&stowed).unwrap();
+    let target = stowed.join("config.toml");
+    std::fs::write(&target, OLD_CONFIG).unwrap();
+    let link = Path::new("dotfiles/config.toml");
+    std::os::unix::fs::symlink(link, &paths.config).unwrap();
+    let status = status_at(&paths, "parakeet", "parakeet-tdt-0.6b-v3");
+    let mut env = FakeEnv {
+        fail_activate: true,
+        ..Default::default()
+    };
+    assert!(migrate::accept(&mut env, &paths, &status, OFFER_ULTRA).is_err());
+    assert_eq!(std::fs::read_link(&paths.config).unwrap(), link);
+    assert_eq!(std::fs::read(&target).unwrap(), OLD_CONFIG.as_bytes());
+
+    // Through a dangling link the config did not exist, so the file the
+    // failed activation created is removed and the link is left as found.
+    std::fs::remove_file(&target).unwrap();
+    let mut env = FakeEnv {
+        fail_activate: true,
+        ..Default::default()
+    };
+    assert!(migrate::accept(&mut env, &paths, &status, OFFER_ULTRA).is_err());
+    assert_eq!(std::fs::read_link(&paths.config).unwrap(), link);
+    assert!(!target.exists());
+}
+
 #[test]
 fn failed_restart_check_is_rolled_back() {
     let mut env = FakeEnv {

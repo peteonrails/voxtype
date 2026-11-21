@@ -40,7 +40,7 @@ pub use history::{
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::{LanguageConfig, COHERE_LANGUAGES};
-pub use load::{load_config, save_config};
+pub use load::{load_config, resolve_config_file, save_config};
 pub use meeting::{
     MeetingActionsConfig, MeetingAudioConfig, MeetingCalendarConfig, MeetingConfig,
     MeetingDiarizationConfig, MeetingShareConfig, MeetingStartOptions, MeetingSummaryConfig,

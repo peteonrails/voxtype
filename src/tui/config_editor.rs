@@ -421,13 +421,19 @@ impl ConfigEditor {
     /// regular `load_config` path. On validation failure the file is left
     /// untouched on disk (atomic rename hasn't happened yet).
     pub fn save(&mut self) -> Result<(), EditorError> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| EditorError::Write {
+        // A config that is a symlink (GNU Stow, a dotfiles repo) is saved
+        // through to the file it names. The replacement is staged in that
+        // file's directory so the rename stays on one filesystem, and the
+        // link itself is never touched.
+        let target =
+            config::resolve_config_file(&self.path).map_err(|source| EditorError::Write {
                 path: self.path.clone(),
-                source: std::io::Error::other("config path has no parent directory"),
-            })?
+                source,
+            })?;
+        let parent = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
             .to_path_buf();
         let parent = parent.as_path();
         fs::create_dir_all(parent).map_err(|e| EditorError::Write {
@@ -498,12 +504,12 @@ impl ConfigEditor {
             })?;
         }
 
-        let permissions = match fs::metadata(&self.path) {
+        let permissions = match fs::metadata(&target) {
             Ok(metadata) => Some(metadata.permissions()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => {
                 return Err(EditorError::Write {
-                    path: self.path.clone(),
+                    path: target.clone(),
                     source,
                 })
             }
@@ -516,8 +522,8 @@ impl ConfigEditor {
         // they ran the TUI on a hand-rolled config they liked the shape
         // of. One-shot: existing .bak survives and is never overwritten,
         // so we capture the user's actual original, not the prior TUI run.
-        if self.path.exists() {
-            let mut bak = self.path.clone();
+        if target.exists() {
+            let mut bak = target.clone();
             let mut name = bak
                 .file_name()
                 .map(|n| n.to_os_string())
@@ -529,7 +535,7 @@ impl ConfigEditor {
                 // a dangling .bak symlink or exposing a newly created backup.
                 let _ = (|| -> std::io::Result<()> {
                     let mut backup = tempfile::NamedTempFile::new_in(parent)?;
-                    std::io::copy(&mut fs::File::open(&self.path)?, backup.as_file_mut())?;
+                    std::io::copy(&mut fs::File::open(&target)?, backup.as_file_mut())?;
                     backup.as_file().sync_all()?;
                     backup
                         .persist_noclobber(&bak)
@@ -579,11 +585,10 @@ impl ConfigEditor {
                 path: tmp.path().to_path_buf(),
                 source,
             })?;
-        tmp.persist(&self.path)
-            .map_err(|error| EditorError::Write {
-                path: self.path.clone(),
-                source: error.error,
-            })?;
+        tmp.persist(&target).map_err(|error| EditorError::Write {
+            path: target,
+            source: error.error,
+        })?;
 
         self.dirty = false;
         self.loaded_text = serialized;
@@ -945,6 +950,166 @@ mod tests {
             written.contains("large-v3"),
             "the file that was loaded must be the file that is written"
         );
+    }
+
+    /// A GNU Stow layout: `config.toml` in the config dir is a link into a
+    /// dotfiles tree. Returns (tempdir, link, the file it names).
+    fn stowed_config(contents: &str, link_text: &Path) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = dir.path().join("dotfiles/voxtype");
+        let config_dir = dir.path().join("config/voxtype");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        let target = dotfiles.join("config.toml");
+        fs::write(&target, contents).unwrap();
+        let link = config_dir.join("config.toml");
+        std::os::unix::fs::symlink(link_text, &link).unwrap();
+        (dir, link, target)
+    }
+
+    fn save_model(path: &Path, model: &str) -> Result<(), EditorError> {
+        let mut editor = ConfigEditor::load_from_path(path.to_path_buf())?;
+        editor.set_string("whisper", "model", model);
+        editor.save()
+    }
+
+    /// #1102: saving through a relative link writes the file it names and
+    /// keeps the link, so a Stow-managed dotfiles tree stays the source.
+    #[test]
+    fn save_preserves_relative_config_symlink() {
+        let relative = Path::new("../../dotfiles/voxtype/config.toml");
+        let (_dir, link, target) = stowed_config("engine = \"whisper\"\n", relative);
+
+        save_model(&link, "large-v3").unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), relative);
+        assert!(fs::read_to_string(&target).unwrap().contains("large-v3"));
+
+        // The editor sees its own write, and a second save still goes through.
+        save_model(&link, "small").unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), relative);
+        assert!(fs::read_to_string(&target).unwrap().contains("small"));
+    }
+
+    #[test]
+    fn save_preserves_absolute_config_symlink() {
+        let (_dir, link, target) = stowed_config("engine = \"whisper\"\n", Path::new("unset"));
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        save_model(&link, "large-v3").unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+        assert!(fs::read_to_string(&target).unwrap().contains("large-v3"));
+    }
+
+    /// Each hop of a chain is relative to the link that holds it, and only
+    /// the last file is rewritten.
+    #[test]
+    fn save_follows_a_chain_of_links_to_the_last_file() {
+        let relative = Path::new("../../dotfiles/voxtype/config.toml");
+        let (dir, link, middle) = stowed_config("", relative);
+        let store = dir.path().join("store");
+        fs::create_dir(&store).unwrap();
+        let file = store.join("real.toml");
+        fs::write(&file, "engine = \"whisper\"\n").unwrap();
+        fs::remove_file(&middle).unwrap();
+        std::os::unix::fs::symlink("../../store/real.toml", &middle).unwrap();
+
+        save_model(&link, "large-v3").unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), relative);
+        assert_eq!(
+            fs::read_link(&middle).unwrap(),
+            Path::new("../../store/real.toml")
+        );
+        assert!(fs::read_to_string(&file).unwrap().contains("large-v3"));
+    }
+
+    /// A dangling link (the dotfiles file was removed) is saved by creating
+    /// the file it names, as a missing config is created. The link then
+    /// works again instead of being replaced by a stray copy.
+    #[test]
+    fn save_through_a_dangling_link_creates_its_target() {
+        let relative = Path::new("../../dotfiles/voxtype/config.toml");
+        let (dir, link, target) = stowed_config("", relative);
+        fs::remove_dir_all(dir.path().join("dotfiles")).unwrap();
+
+        save_model(&link, "large-v3").unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), relative);
+        assert!(fs::read_to_string(&target).unwrap().contains("large-v3"));
+        // There was nothing to back up, and a new config stays private.
+        assert!(!target.with_file_name("config.toml.bak").exists());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn save_through_a_link_loop_fails_and_leaves_the_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.toml");
+        let b = dir.path().join("b.toml");
+        std::os::unix::fs::symlink("b.toml", &a).unwrap();
+        std::os::unix::fs::symlink("a.toml", &b).unwrap();
+        assert!(save_model(&a, "large-v3").is_err());
+        assert_eq!(fs::read_link(&a).unwrap(), Path::new("b.toml"));
+        assert_eq!(fs::read_link(&b).unwrap(), Path::new("a.toml"));
+    }
+
+    /// The target's mode is what a save keeps: the link's own mode is
+    /// meaningless on Linux and must not leak onto the file.
+    #[test]
+    fn save_through_a_link_keeps_the_target_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let relative = Path::new("../../dotfiles/voxtype/config.toml");
+        let (_dir, link, target) = stowed_config("engine = \"whisper\"\n", relative);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+
+        save_model(&link, "large-v3").unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    /// The one-shot backup copies the file the link names and sits beside
+    /// it, not beside the link.
+    #[test]
+    fn save_through_a_link_backs_up_the_target() {
+        let relative = Path::new("../../dotfiles/voxtype/config.toml");
+        let original = "# hand-rolled\nengine = \"whisper\"\n";
+        let (_dir, link, target) = stowed_config(original, relative);
+
+        save_model(&link, "large-v3").unwrap();
+        let bak = target.with_file_name("config.toml.bak");
+        assert_eq!(fs::read_to_string(&bak).unwrap(), original);
+        assert!(!link.with_file_name("config.toml.bak").exists());
+    }
+
+    /// The daemon may know the config by its link and a CLI by the file it
+    /// names. A pause saved through either must invalidate dictations the
+    /// other started, so both key the privacy generation on the same file.
+    #[test]
+    fn a_pause_through_a_link_advances_the_target_generation() {
+        let relative = Path::new("../../dotfiles/voxtype/config.toml");
+        let (_dir, link, target) =
+            stowed_config("[history]\nenabled = true\npaused = false\n", relative);
+        assert_eq!(
+            crate::history::store::privacy_generation(&target).unwrap(),
+            0
+        );
+        let mut editor = ConfigEditor::load_from_path(link.clone()).unwrap();
+        editor.set_bool("history", "paused", true);
+        editor.save().unwrap();
+        assert_eq!(
+            crate::history::store::privacy_generation(&target).unwrap(),
+            1
+        );
+        assert_eq!(crate::history::store::privacy_generation(&link).unwrap(), 1);
     }
 
     #[test]

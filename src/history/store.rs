@@ -143,16 +143,27 @@ pub(crate) fn privacy_lock(config_path: &Path) -> io::Result<DirLock> {
     DirLock::take(&dir)
 }
 
-fn privacy_dir(config_path: &Path) -> io::Result<PathBuf> {
-    use sha2::{Digest, Sha256};
-    let parent = config_path
+/// The one name a config file goes by for its privacy lock and generation,
+/// whichever path a process was handed. Symlinks are followed to the file
+/// they name, so the daemon reading `~/.config/voxtype/config.toml` and a
+/// CLI given `-c` with the dotfiles file it links to share one lock: they
+/// write the same bytes. The file itself may not exist yet, so its directory
+/// is canonicalized and its name joined on.
+fn config_identity(config_path: &Path) -> io::Result<PathBuf> {
+    let file = crate::config::resolve_config_file(config_path)?;
+    let parent = file
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let name = config_path
+    let name = file
         .file_name()
         .ok_or_else(|| io::Error::other("config path has no filename"))?;
-    let identity = parent.canonicalize()?.join(name);
+    Ok(parent.canonicalize()?.join(name))
+}
+
+fn privacy_dir(config_path: &Path) -> io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let identity = config_identity(config_path)?;
     let key = format!(
         "{:x}",
         Sha256::digest(identity.as_os_str().as_encoded_bytes())
@@ -190,8 +201,7 @@ static TEST_DATA_DIRS: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> =
 /// Tests: keep the privacy control files for `config_path` under `data_dir`.
 #[cfg(test)]
 pub(crate) fn use_data_dir_for(config_path: &Path, data_dir: &Path) {
-    let parent = config_path.parent().unwrap().canonicalize().unwrap();
-    let identity = parent.join(config_path.file_name().unwrap());
+    let identity = config_identity(config_path).unwrap();
     let mut dirs = TEST_DATA_DIRS.lock().unwrap();
     dirs.retain(|(known, _)| known != &identity);
     dirs.push((identity, data_dir.to_path_buf()));
