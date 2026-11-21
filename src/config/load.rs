@@ -100,6 +100,24 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             // such as voxtype-osd-quickshell load this config without the
             // engine features, so their build says nothing about the
             // engine's. TextProcessor warns from the transcribing binary.
+        } else if is_symlink(path) {
+            // A dangling link is still the user's config: never fall back to
+            // the system file, which a later save would then try to write.
+            match resolve_config_file(path) {
+                Ok(target) => tracing::warn!(
+                    "Config file {} is a symlink to {}, which does not exist. \
+                     Using built-in defaults; saving a setting creates {}.",
+                    path.display(),
+                    target.display(),
+                    target.display()
+                ),
+                Err(error) => tracing::warn!(
+                    "Config file {} is a symlink that cannot be followed ({}). \
+                     Using built-in defaults.",
+                    path.display(),
+                    error
+                ),
+            }
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
@@ -392,6 +410,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     Ok(config)
+}
+
+/// Whether `path` itself is a symlink, whether or not its target exists.
+pub(crate) fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// The file a config path names once symlinks are followed: the target of

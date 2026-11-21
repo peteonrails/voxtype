@@ -296,7 +296,9 @@ impl Enabler {
             .user_config
             .clone()
             .ok_or_else(|| anyhow::anyhow!("cannot find the user config directory"))?;
-        if !user.exists() && self.system_config.is_file() {
+        // symlink_metadata, not exists(): a dangling link is the user's
+        // config, and the save it is about to get creates its target.
+        if std::fs::symlink_metadata(&user).is_err() && self.system_config.is_file() {
             if let Some(dir) = user.parent() {
                 std::fs::create_dir_all(dir)?;
             }
@@ -646,6 +648,30 @@ mod tests {
             std::fs::read_to_string(dir.path().join("xc/voxtype/config.toml")).unwrap(),
             "[vad]\nenabled = true\n"
         );
+    }
+
+    #[tokio::test]
+    async fn a_dangling_user_config_link_is_not_replaced_by_the_system_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (e, log) = enabler(dir.path(), false);
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        std::fs::write(
+            dir.path().join("etc/config.toml"),
+            "[vad]\nenabled = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("xc/voxtype")).unwrap();
+        let user = dir.path().join("xc/voxtype/config.toml");
+        let missing = dir.path().join("dotfiles/config.toml");
+        std::os::unix::fs::symlink(&missing, &user).unwrap();
+        e.enable().await.unwrap();
+        // The save that `config set` makes creates the link's target; the
+        // offer itself must not copy the system config through the link.
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read_link(&user).unwrap(), missing);
+        assert!(std::fs::read_to_string(log)
+            .unwrap()
+            .starts_with(&format!("voxtype --config {} config set", user.display())));
     }
 
     #[tokio::test]

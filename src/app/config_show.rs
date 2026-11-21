@@ -301,6 +301,10 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
 
     println!("\n---");
     match config::Config::resolve_existing_path() {
+        Some(path) if !path.exists() => println!(
+            "Config file: {:?} (symlink to a missing file, using defaults)",
+            path
+        ),
         Some(path) => println!("Config file: {:?} (loaded)", path),
         None => println!(
             "Config file: {:?} (not found, using defaults; system fallback {:?} also missing)",

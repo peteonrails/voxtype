@@ -115,7 +115,10 @@ A macOS install that predates this and stored files under
 managed with GNU Stow. `voxtype configure`, `voxtype config set`, and the
 other commands that save settings write to the file the link points at and
 leave the link in place. The one-time `config.toml.bak` backup is made beside
-that file. If the link is dangling, saving creates the file it points at.
+that file. A dangling link, such as one into a Stow tree that is not mounted,
+is still your config: voxtype does not fall back to `/etc/voxtype/config.toml`.
+It loads the built-in defaults, logs a warning that names the link and the
+missing file, and saving a setting creates the file the link points at.
 
 ## What Happens When the Config Has an Error
 
