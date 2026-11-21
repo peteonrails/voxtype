@@ -539,11 +539,22 @@ impl ConfigEditor {
             }
         }
 
+        // rename replaces a symlink itself, so stage and commit beside its target.
+        let destination = if self.path.is_symlink() {
+            fs::canonicalize(&self.path).map_err(|source| EditorError::Write {
+                path: self.path.clone(),
+                source,
+            })?
+        } else {
+            self.path.clone()
+        };
+        let stage_dir = destination.parent().unwrap_or(parent);
+
         // NamedTempFile creates a unique 0600 replacement before any config
         // bytes are written, independent of umask and preexisting .tmp paths.
         let mut tmp =
-            tempfile::NamedTempFile::new_in(parent).map_err(|source| EditorError::Write {
-                path: parent.to_path_buf(),
+            tempfile::NamedTempFile::new_in(stage_dir).map_err(|source| EditorError::Write {
+                path: stage_dir.to_path_buf(),
                 source,
             })?;
         tmp.write_all(serialized.as_bytes())
@@ -579,9 +590,9 @@ impl ConfigEditor {
                 path: tmp.path().to_path_buf(),
                 source,
             })?;
-        tmp.persist(&self.path)
+        tmp.persist(&destination)
             .map_err(|error| EditorError::Write {
-                path: self.path.clone(),
+                path: destination,
                 source: error.error,
             })?;
 
@@ -945,6 +956,27 @@ mod tests {
             written.contains("large-v3"),
             "the file that was loaded must be the file that is written"
         );
+    }
+
+    #[test]
+    fn save_preserves_relative_config_symlink() {
+        let (dir, target) = temp_config("engine = \"whisper\"\n");
+        let config_dir = dir.path().join("stowed");
+        fs::create_dir(&config_dir).unwrap();
+        let link = config_dir.join("config.toml");
+        let relative = Path::new("../config.toml");
+        std::os::unix::fs::symlink(relative, &link).unwrap();
+
+        let mut editor = ConfigEditor::load_from_path(link.clone()).unwrap();
+        editor.set_string("whisper", "model", "large-v3");
+        editor.save().unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), relative);
+        assert!(fs::read_to_string(&target).unwrap().contains("large-v3"));
+
+        fs::remove_file(target).unwrap();
+        editor.set_string("whisper", "model", "small");
+        assert!(editor.save().is_err());
+        assert_eq!(fs::read_link(link).unwrap(), relative);
     }
 
     #[test]
