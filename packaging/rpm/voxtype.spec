@@ -344,15 +344,40 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
-* Wed Nov 18 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
-- Dictation history: a private, local record of what you dictated, with the
-  history command, pause and resume, app exclusions and a history window
-- Meeting playback: the transcript follows the waveform, and speakers have
-  their own colours
+* Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
+- Dictation history: a private, local record of each dictation, including
+  failed and cancelled ones, with the history command, search alongside
+  meetings, pause and resume, app exclusions, a history window, a terminal
+  reader and tray items
+- voxtype paste-last and [hotkey] paste_last_key send the last dictation
+  again
+- A correction in history can become a text replacement
+- text.language sets the language of dictated text; LARD and other
+  English-only cleanup run only on English text and stay inside one
+  sentence
+- Meeting playback: the transcript follows the waveform, and each speaker
+  has one colour
 - A notice when one side of a meeting records nothing
 - Zoom's web client window counts as a call for meeting detection
-- text.language tells LARD cleanup the language for engines that do not
-  report one
+- The meeting announcement plays at half its old level, set by
+  meeting.announcement_volume
+- One meeting view when the Omarchy plugin and the standalone shell both
+  run, opened on the focused monitor
+- config set and unset keep every entry of an inline table
+- A profile's post_process_command and output_mode apply again (#1097)
+- Configs saved through a symlink keep the link (#1102)
+- Keep $ in replacement values (#1059)
+- The hidden GTK4 OSD no longer wakes 120 times a second (#1090)
+- Streaming keeps audio while inference runs and honours output overrides
+- The silence auto-stop clock starts at the first frame
+- Parakeet prefers CUDA over MIGraphX on NVIDIA hosts with an AMD iGPU
+- Paste keystrokes map super, meta and win to wtype's logo
+- Soniox defaults to stt-rt-v6 and stt-async-v6
+- voxtype info accel reports the backend for GGUF engines (#1085)
+- Media ducking leaves voxtype's own cue sounds alone
+- Commands other than the daemon log to stderr, and an empty RUST_LOG is
+  treated as unset
+- A config save no longer undoes changes made since it loaded
 
 * Wed Nov 18 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
 - Meetings: live transcript view, echo cancellation and echo guard, hybrid
