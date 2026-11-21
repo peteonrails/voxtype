@@ -133,6 +133,14 @@ impl HotkeyListener for RdevHotkeyListener {
                 }
 
                 match event.event_type {
+                    // Only presses are gated: a release must still be able to
+                    // stop a recording that started while this session was active.
+                    EventType::KeyPress(key)
+                        if (key == target_key || Some(key) == cancel_key)
+                            && !hotkey_allowed(session_on_console()) =>
+                    {
+                        tracing::debug!("Ignoring hotkey: this session is not on the console");
+                    }
                     EventType::KeyPress(key) => {
                         if key == target_key {
                             let mut last = last_press_clone.lock().unwrap();
@@ -308,6 +316,41 @@ fn is_accessibility_granted() -> bool {
     tap.is_ok()
 }
 
+/// Whether this process's login session currently owns the console, or None
+/// when there is no session info (e.g. a daemon started over SSH).
+///
+/// rdev taps keyboard events at the HID level, which sees every key press on
+/// the Mac regardless of which user is active. With fast user switching, a
+/// daemon left running in a background session would otherwise record on the
+/// active user's hotkey and type its transcription into their session.
+fn session_on_console() -> Option<bool> {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGSessionCopyCurrentDictionary() -> core_foundation::dictionary::CFDictionaryRef;
+    }
+
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    let dict = unsafe { CGSessionCopyCurrentDictionary() };
+    if dict.is_null() {
+        return None;
+    }
+    let dict: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_create_rule(dict) };
+    let key = CFString::from_static_string("kCGSSessionOnConsoleKey");
+    dict.find(&key)
+        .and_then(|value| value.downcast::<CFBoolean>())
+        .map(bool::from)
+}
+
+/// Act on a hotkey press unless this session is known to be in the background.
+fn hotkey_allowed(on_console: Option<bool>) -> bool {
+    on_console.unwrap_or(true)
+}
+
 /// Check if Accessibility permission is granted, prompting the user if not.
 ///
 /// Calls AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt=true,
@@ -334,6 +377,22 @@ pub fn check_accessibility_permission() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotkey_is_ignored_only_when_session_is_known_to_be_inactive() {
+        // Fast user switching: another user's session owns the console.
+        assert!(!hotkey_allowed(Some(false)));
+        assert!(hotkey_allowed(Some(true)));
+        // No session info (e.g. started over SSH): keep the old behaviour.
+        assert!(hotkey_allowed(None));
+    }
+
+    #[test]
+    fn session_on_console_does_not_panic() {
+        // The value depends on the machine (CI runners may have no GUI
+        // session); this only exercises the CoreGraphics call itself.
+        let _ = session_on_console();
+    }
 
     #[test]
     fn test_parse_key_name() {
