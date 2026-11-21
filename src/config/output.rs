@@ -296,12 +296,11 @@ pub fn default_language_to_layout() -> std::collections::HashMap<String, String>
 }
 
 impl OutputConfig {
-    /// The post-process table, when it names a command to run. A table with
-    /// an empty command is only holding options, and post-processing is off.
+    /// The post-process table, when it names a command to run or a model
+    /// backend. A table with an empty command and the default backend is
+    /// only holding options, and post-processing is off.
     pub fn active_post_process(&self) -> Option<&PostProcessConfig> {
-        self.post_process
-            .as_ref()
-            .filter(|p| !p.command.trim().is_empty())
+        self.post_process.as_ref().filter(|p| p.is_active())
     }
 
     /// Apply per-language XKB layout/variant hints to eitype and dotool.
