@@ -227,6 +227,10 @@ fallback_to_clipboard = true
 #   driver_order = ["wtype", "ydotool", "dotool", "clipboard"]
 # Example: use only ydotool, no fallback:
 #   driver_order = ["ydotool"]
+# Paste mode on Hyprland can send its paste keystroke through Hyprland
+# itself ("hyprland", paste mode only, skipped elsewhere), which fixes
+# Shift+Insert arriving as Shift+Escape in XWayland apps:
+#   driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
 # driver_order = ["wtype", "dotool", "ydotool", "clipboard"]
 
 # Per-language XKB layout variants for multilingual dictation.

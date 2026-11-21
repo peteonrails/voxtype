@@ -1547,6 +1547,37 @@ On desktops without detection (GNOME, KDE, X11), pick one keystroke that
 works in both places, such as `paste_keys = "shift+insert"` if your
 terminals map it to the clipboard, or switch to type mode.
 
+### Paste arrives as Escape, digits or an app shortcut (XWayland and Electron apps)
+
+**Symptom:** In paste mode, an XWayland or Electron app (Codex, Slack, some
+Chromium builds) does something other than paste: a confirmation dialog
+opens, the field loses focus, or digits appear. With
+`paste_keys = "shift+insert"`, Codex opens its "Mark all as read" dialog,
+which is bound to Shift+Escape.
+
+**Cause:** wtype sends keys through its own temporary keymap and puts the
+first one on keycode 1. Apps that read raw keycodes, as XWayland apps do,
+see keycode 1 as Escape, so Shift+Insert arrives as Shift+Escape (#938).
+
+**Solution on Hyprland:** send the paste keystroke through Hyprland's
+dispatcher, which uses the real keymap:
+
+```toml
+[output]
+mode = "paste"
+driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
+```
+
+Run `voxtype -vv` and look for `Paste keystroke sent via hyprland`. If it
+says `hyprctl dispatch failed`, check that `hyprctl version` works in the
+same session voxtype runs in (the systemd user service needs
+`HYPRLAND_INSTANCE_SIGNATURE` in its environment, which Hyprland and UWSM
+sessions import).
+
+**Elsewhere:** put `ydotool` first (`driver_order = ["ydotool", "wtype"]`).
+It sends real evdev keycodes, but needs the `ydotoold` daemon and uinput
+access.
+
 ### Clipboard not restored after paste
 
 **Cause:** The restore delay may be too short for your application, or `wl-paste` is not installed.

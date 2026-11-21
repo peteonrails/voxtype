@@ -5,6 +5,23 @@ use super::{
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
 
+/// `VOXTYPE_DRIVER_ORDER`, comma-separated like `--driver`.
+fn parse_driver_order_env(value: &str) -> Result<Vec<super::OutputDriver>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|order| {
+            if order.is_empty() {
+                Err("no drivers named".to_string())
+            } else {
+                Ok(order)
+            }
+        })
+}
+
 /// Parse a boolean from an environment variable value.
 /// Only "1" and "true" (case-insensitive) are truthy; everything else is falsy.
 fn parse_bool_env(val: &str) -> bool {
@@ -333,6 +350,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_PUNCTUATION_CASING") {
         config.text.punctuation_casing = parse_bool_env(&val);
     }
+    if let Ok(value) = std::env::var("VOXTYPE_DRIVER_ORDER") {
+        match parse_driver_order_env(&value) {
+            Ok(order) => config.output.driver_order = Some(order),
+            Err(e) => tracing::warn!("VOXTYPE_DRIVER_ORDER is ignored: {}", e),
+        }
+    }
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
     }
@@ -447,6 +470,17 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_order_env_parses_like_the_cli_flag() {
+        use super::super::OutputDriver;
+        assert_eq!(
+            parse_driver_order_env("hyprland, wtype").unwrap(),
+            vec![OutputDriver::Hyprland, OutputDriver::Wtype]
+        );
+        assert!(parse_driver_order_env("hyprland,bogus").is_err());
+        assert!(parse_driver_order_env(" , ").is_err());
+    }
 
     #[test]
     fn top_level_post_process_is_flagged_with_its_real_home() {

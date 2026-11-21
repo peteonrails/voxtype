@@ -2452,6 +2452,7 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
+- `hyprland` - Hyprland's own shortcut dispatcher, through `hyprctl`. **Paste mode only, opt-in.** See [Hyprland-native paste](#hyprland-native-paste) below.
 
 **Default behavior (no driver_order set):**
 The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
@@ -2481,6 +2482,31 @@ voxtype --driver=ydotool,clipboard daemon
 ```
 
 **Note:** When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried.
+
+**Environment variable:** `VOXTYPE_DRIVER_ORDER`, comma-separated like `--driver` (for example `VOXTYPE_DRIVER_ORDER=hyprland,wtype`).
+
+#### Hyprland-native paste
+
+With `hyprland` in `driver_order`, paste mode sends its paste keystroke (and the Enter for `auto_submit`) through Hyprland's own dispatcher instead of a virtual keyboard. Hyprland delivers the shortcut to the focused window with the real keymap, so it needs no uinput access, no `ydotoold` and no `input` group membership.
+
+This is for apps where wtype's keystroke arrives as the wrong key. wtype uploads its own one-off keymap and puts its first key on keycode 1, which XWayland apps (Electron apps such as Codex, older Chromium builds) read as Escape. `paste_keys = "shift+insert"` then arrives as Shift+Escape, which can trigger an app shortcut instead of pasting.
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "shift+insert"
+driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
+```
+
+How it behaves:
+
+- **Opt-in.** It is never part of a default order, so nothing changes unless you add it.
+- **Hyprland only.** It is used only when `HYPRLAND_INSTANCE_SIGNATURE` is set and `hyprctl` is on `PATH`. Anywhere else it is skipped and the next driver in the list is tried. If the list names no other keystroke driver (`driver_order = ["hyprland"]`), paste mode falls back to wtype, eitype and ydotool after it.
+- **Paste mode only.** It cannot type text, so `mode = "type"` skips it.
+- **Both Hyprland config formats.** On Hyprland 0.55 and later (Lua config) voxtype runs `hyprctl dispatch 'hl.dsp.send_shortcut({ mods = "SHIFT", key = "Insert" })'`. On 0.54 and earlier it runs `hyprctl dispatch sendshortcut SHIFT, Insert`. It tries the Lua form first and remembers which one worked; the form a release doesn't understand is rejected without sending anything.
+- **Keys.** Modifiers `ctrl`, `shift`, `alt` and `super`, and keys named by their XKB keysym (`v`, `insert`, `return`, `F4`).
+
+Voxtype still owns the clipboard: it copies the text, sends the shortcut and, with `restore_clipboard = true`, restores what was there.
 
 #### Streaming performance: dotoold fast path
 
