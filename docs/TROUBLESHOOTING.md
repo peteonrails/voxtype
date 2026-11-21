@@ -642,8 +642,8 @@ If `info devices` lists your microphone again, recording works too; the daemon d
 
 ### "Microphone silent" notification stops a recording
 
-**Cause:** The dead-input guard received no sound after a 100 ms settling
-period and during its 1.5 second observation window. This usually means the
+**Cause:** Every sample the input delivered for the first 5 seconds of the
+recording was exactly zero. This usually means the
 selected microphone is off, muted in hardware, or asleep. The notification
 names the audio source that stayed silent.
 
@@ -655,20 +655,20 @@ pactl list sources short
 pavucontrol
 ```
 
-If the source is intentionally gated or takes more than 1.5 seconds to wake,
-increase `window_ms` or disable the guard. Lowering the threshold cannot make
-digital silence count as live input.
+If the source is noise-gated and you often wait more than 5 seconds before
+speaking, or it takes longer than that to wake, increase `window_ms` or
+disable the guard. The threshold cannot change the verdict: only exact
+digital silence stops a recording.
 
 ```toml
 [audio.dead_input]
-window_ms = 3000
+window_ms = 10000
 # enabled = false
 ```
 
-A source that emits a DC offset with slow drift can look like quiet live audio
-after the high-pass filter. If a dictation still produces no text without this
-alert, record the source with `arecord` and check the playback before changing
-the guard.
+A source stuck on a DC offset is not stopped: its samples are not zero. If a
+dictation still produces no text without this alert, record the source with
+`arecord` and check the playback.
 
 ### "Audio format not supported"
 

@@ -1144,7 +1144,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Audio",
         "Dead-input guard",
-        "Stop a capture that delivers no audible sound.",
+        "Stop a capture that delivers nothing but exact digital silence.",
     ),
     spec(
         "audio.dead_input.window_ms",
@@ -1156,7 +1156,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         },
         "Audio",
         "Dead-input window",
-        "Milliseconds to listen for audible input before stopping the recording.",
+        "Milliseconds of all-zero input before the recording is stopped.",
     ),
     spec(
         "audio.dead_input.threshold_dbfs",
@@ -1168,7 +1168,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         },
         "Audio",
         "Dead-input threshold",
-        "Frame level in dBFS that counts as an audible input.",
+        "Frame level in dBFS that ends the check early as live. It cannot stop a recording.",
     ),
     spec(
         "audio.feedback.enabled",

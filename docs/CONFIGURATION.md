@@ -709,13 +709,16 @@ Stops a recording whose input device delivers no sound.
 
 A microphone that is off, muted in hardware, or asleep can still open and
 stream. The guard checks the beginning of every recording and stops a capture
-that carries only silence or a DC offset. It plays the error cue and shows a
+that has delivered nothing but exact digital silence (every sample zero) for
+the whole window. Any sample that is not zero, however quiet, counts as input,
+so a noise-gated microphone that stays at zero until you speak is only stopped
+if you say nothing for the whole window. It plays the error cue and shows a
 notification naming the audio source.
 
 ```toml
 [audio.dead_input]
 enabled = true
-window_ms = 1500
+window_ms = 5000
 threshold_dbfs = -100.0
 ```
 
@@ -731,12 +734,12 @@ Set to `false` to record regardless of the input level. Use
 ### window_ms
 
 **Type:** Integer (milliseconds)
-**Default:** `1500`
+**Default:** `5000`
 **Required:** No
 
-How long the guard listens after its 100 ms settling period. It evaluates
-100 ms frames and treats the loudest frame as the verdict, so a brief silent
-startup does not discard a live recording. Values below `300` are raised to
+How long the guard waits, after its 100 ms settling period, for a sample that
+is not zero. A source that produces one at any point, including during the
+settling period, is live. Values below `300` are raised to
 `300`. Use `--dead-input-window <MS>` to override it for one run.
 
 ### threshold_dbfs
@@ -745,9 +748,9 @@ startup does not discard a live recording. Values below `300` are raised to
 **Default:** `-100.0`
 **Required:** No
 
-The level a frame must reach for the input to count as live. Measurement uses
-a 150 Hz high-pass filter, so a DC offset alone does not count as sound. Lower
-the threshold to make the guard less sensitive to quiet input, or use
+A frame at or above this level (measured through a 150 Hz high-pass filter)
+ends the check early as live. It cannot make the guard stop a recording: only
+exact silence is dead, whatever the threshold. Use
 `--dead-input-threshold <DBFS>` to override it for one run.
 
 ---

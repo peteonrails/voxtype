@@ -350,11 +350,11 @@ pub struct Cli {
     )]
     pub duck_media_fade_ms: Option<u32>,
 
-    /// Stop a recording when the microphone delivers no audible sound
+    /// Stop a recording when the microphone delivers only exact digital silence
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub dead_input_check: bool,
 
-    /// Keep recording when the microphone delivers no audible sound
+    /// Keep recording even when the microphone delivers only digital silence
     #[arg(
         long,
         help_heading = "Audio",
@@ -363,7 +363,7 @@ pub struct Cli {
     )]
     pub no_dead_input_check: bool,
 
-    /// Milliseconds to check microphone input before reporting it as silent
+    /// Milliseconds of all-zero microphone input before the recording is stopped
     #[arg(
         long,
         value_name = "MS",
@@ -372,7 +372,7 @@ pub struct Cli {
     )]
     pub dead_input_window: Option<u32>,
 
-    /// Minimum audible microphone level, in dBFS
+    /// Microphone level, in dBFS, that ends the silent-input check early
     #[arg(
         long,
         value_name = "DBFS",

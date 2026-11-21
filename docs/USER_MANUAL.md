@@ -995,12 +995,12 @@ max_duration_secs = 60
 # duck_media = false
 # duck_media_volume_percent = 70
 
-# Stop a capture that opens but delivers no sound. After a 100 ms settling
-# period, Voxtype checks the next 1.5 seconds, plays the error cue, and names
-# the source in a notification.
+# Stop a capture that opens but delivers only exact digital silence. If no
+# sample is non-zero within the first 5 seconds, Voxtype stops the recording,
+# plays the error cue, and names the source in a notification.
 [audio.dead_input]
 # enabled = true
-# window_ms = 1500
+# window_ms = 5000
 # threshold_dbfs = -100.0
 
 

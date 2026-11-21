@@ -39,7 +39,7 @@ fn absent_dead_input_table_keeps_the_guard_enabled() {
     let config: Config = toml::from_str("").expect("empty configuration should load");
 
     assert!(config.audio.dead_input.enabled);
-    assert_eq!(config.audio.dead_input.window_ms, 1_500);
+    assert_eq!(config.audio.dead_input.window_ms, 5_000);
     assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
 }
 

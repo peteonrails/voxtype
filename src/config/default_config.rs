@@ -99,18 +99,18 @@ max_duration_secs = 60
 # external_trigger_speech_threshold_dbfs = -20.0
 
 # [audio.dead_input]
-# Stop a recording when the selected input delivers only silence or a DC
-# offset. The guard checks the beginning of every capture, then plays the
-# error cue and names the source in a desktop notification if it finds no
-# audible input.
+# Stop a recording when the selected input delivers only exact digital
+# silence (every sample zero). Any sample that is not zero, however quiet,
+# counts as input, so a noise-gated microphone is only stopped if you say
+# nothing for the whole window. The daemon then plays the error cue and names
+# the source in a desktop notification.
 # enabled = true
 #
-# Observation time after a 100 ms settling period, in milliseconds.
-# window_ms = 1500
+# How long the input may stay at exact zero, after a 100 ms settling period.
+# window_ms = 5000
 #
-# The 100 ms frame level required for input to count as live, in dBFS.
-# Measurement uses a 150 Hz high-pass filter, so DC offset alone does not
-# count as sound.
+# A 100 ms frame at this level (after a 150 Hz high-pass filter) ends the
+# check early as live. It cannot stop a recording.
 # threshold_dbfs = -100.0
 
 # [audio.feedback]
@@ -585,7 +585,7 @@ mod tests {
         assert!(!config.history.record_window_title);
         assert_eq!(config.history.retention_days, 30);
         assert!(config.audio.dead_input.enabled);
-        assert_eq!(config.audio.dead_input.window_ms, 1_500);
+        assert_eq!(config.audio.dead_input.window_ms, 5_000);
         assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
     }
 
@@ -607,7 +607,7 @@ mod tests {
         // Same reason: history must never start on an upgrade.
         assert!(!config.history.enabled);
         assert!(config.audio.dead_input.enabled);
-        assert_eq!(config.audio.dead_input.window_ms, 1_500);
+        assert_eq!(config.audio.dead_input.window_ms, 5_000);
         assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
     }
 

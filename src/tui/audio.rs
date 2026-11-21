@@ -740,13 +740,13 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             heading("Silent-input window"),
             Line::from(""),
             Line::from(
-                "How long voxtype listens after the microphone settles. The \
-                 loudest 100 ms frame decides, so a short silent startup is \
-                 not treated as a dead microphone.",
+                "How long the input may deliver only exact zeros before \
+                 voxtype stops the recording. Any sample that is not zero, \
+                 however quiet, means the microphone works.",
             ),
             Line::from(""),
             Line::from(Span::styled(
-                "1500 ms is the default. 300 ms is the shortest allowed window.",
+                "5000 ms is the default. 300 ms is the shortest allowed window.",
                 Style::default().fg(Color::Gray),
             )),
         ],
@@ -754,8 +754,8 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             heading("Silent-input threshold"),
             Line::from(""),
             Line::from(
-                "A frame at or above this level counts as live microphone \
-                 input. Lower (more negative) values accept quieter input.",
+                "A frame at or above this level ends the check early as \
+                 live. It cannot stop a recording: only exact silence does.",
             ),
             Line::from(""),
             Line::from(Span::styled(
@@ -952,7 +952,7 @@ mod tests {
         assert_eq!(cfg.duck_media_volume_percent, 34);
         assert_eq!(cfg.duck_media_fade_ms, 150);
         assert!(cfg.dead_input.enabled);
-        assert_eq!(cfg.dead_input.window_ms, 1_500);
+        assert_eq!(cfg.dead_input.window_ms, 5_000);
         assert_eq!(cfg.dead_input.threshold_dbfs, -100.0);
     }
 }

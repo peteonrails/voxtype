@@ -39,9 +39,18 @@ fn load_wav(filename: &str) -> Vec<f32> {
 
 /// Run the detector over a fixture the way the chunk pump does: in small
 /// chunks, stopping at the first verdict.
+/// The fixtures are 2 s long, so this uses the 1.5 s window the offline
+/// survey measured over rather than the 5 s default.
+fn survey_config() -> DeadInputConfig {
+    DeadInputConfig {
+        window_ms: 1500,
+        ..DeadInputConfig::default()
+    }
+}
+
 fn judge(filename: &str) -> (Verdict, f32) {
     let samples = load_wav(filename);
-    let mut detector = DeadInputDetector::new(16000, &DeadInputConfig::default());
+    let mut detector = DeadInputDetector::new(16000, &survey_config());
     let mut verdict = Verdict::Pending;
     for chunk in samples.chunks(512) {
         verdict = detector.push(chunk);
@@ -117,24 +126,28 @@ fn dc_with_sub_audible_drift_is_left_alone() {
 
 #[test]
 fn the_guard_can_be_made_to_fail_on_live_audio() {
-    // The control for every assertion above: with the threshold lifted to
-    // -40 dBFS the same live fixtures are reported dead, so a passing
-    // verdict means the detector looked at the audio and not past it.
+    // The control for every assertion above: the same live fixtures with
+    // every sample zeroed are reported dead, so a passing verdict means
+    // the detector looked at the audio and not past it. Lifting the
+    // threshold is no longer enough: only exact silence is dead.
     for fixture in [
         "live_quietest.wav",
         "live_quiet_recent.wav",
         "live_builtin_mic.wav",
     ] {
-        let samples = load_wav(fixture);
+        let samples = vec![0.0; load_wav(fixture).len()];
+        let mut detector = DeadInputDetector::new(16000, &survey_config());
+        assert_eq!(detector.push(&samples), Verdict::Dead, "{fixture} zeroed");
+
         let config = DeadInputConfig {
             threshold_dbfs: -40.0,
-            ..DeadInputConfig::default()
+            ..survey_config()
         };
         let mut detector = DeadInputDetector::new(16000, &config);
         assert_eq!(
-            detector.push(&samples),
-            Verdict::Dead,
-            "{fixture} should fall below a -40 dBFS threshold"
+            detector.push(&load_wav(fixture)),
+            Verdict::Live,
+            "{fixture} is not silent, whatever the threshold"
         );
     }
 }
@@ -143,7 +156,7 @@ fn the_guard_can_be_made_to_fail_on_live_audio() {
 fn dead_input_defaults_are_enabled() {
     let config = DeadInputConfig::default();
     assert!(config.enabled, "the guard ships on");
-    assert_eq!(config.window_ms, 1500);
+    assert_eq!(config.window_ms, 5000);
     assert_eq!(config.threshold_dbfs, -100.0);
 }
 
@@ -170,10 +183,12 @@ fn peak_levels_match_the_offline_measurement() {
         let samples = load_wav(fixture);
         let config = DeadInputConfig {
             threshold_dbfs: 40.0,
-            ..DeadInputConfig::default()
+            ..survey_config()
         };
         let mut detector = DeadInputDetector::new(16000, &config);
-        assert_eq!(detector.push(&samples), Verdict::Dead);
+        let silent = samples.iter().all(|s| *s == 0.0);
+        let want = if silent { Verdict::Dead } else { Verdict::Live };
+        assert_eq!(detector.push(&samples), want, "{fixture}");
         let peak = detector.peak_dbfs();
         if offline_dbfs == f32::NEG_INFINITY {
             assert_eq!(peak, f32::NEG_INFINITY, "{fixture}");

@@ -171,7 +171,7 @@ pub struct DeadInputConfig {
 }
 
 fn default_dead_input_window_ms() -> u32 {
-    1_500
+    5_000
 }
 
 fn default_dead_input_threshold_dbfs() -> f32 {

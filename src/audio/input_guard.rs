@@ -87,6 +87,10 @@ pub struct DeadInputDetector {
     frame_energy: f64,
     frame_filled: usize,
     peak_rms: f32,
+    /// Whether any sample since the capture started was not exactly zero.
+    /// Only a source that has never produced one is judged dead: a quiet
+    /// or noise-gated microphone, or one with a DC offset, is left alone.
+    saw_nonzero: bool,
     verdict: Verdict,
 }
 
@@ -107,6 +111,7 @@ impl DeadInputDetector {
             frame_energy: 0.0,
             frame_filled: 0,
             peak_rms: 0.0,
+            saw_nonzero: false,
             verdict: Verdict::Pending,
         }
     }
@@ -118,6 +123,9 @@ impl DeadInputDetector {
         }
 
         for &sample in chunk {
+            if sample != 0.0 {
+                self.saw_nonzero = true;
+            }
             let filtered = self.filter.process(sample);
             if self.settle_left > 0 {
                 self.settle_left -= 1;
@@ -140,7 +148,11 @@ impl DeadInputDetector {
             }
 
             if self.window_left == 0 {
-                self.verdict = Verdict::Dead;
+                self.verdict = if self.saw_nonzero {
+                    Verdict::Live
+                } else {
+                    Verdict::Dead
+                };
                 return self.verdict;
             }
         }
@@ -307,16 +319,18 @@ mod tests {
     #[test]
     fn digital_silence_is_dead() {
         assert_eq!(
-            verdict_of(&vec![0.0; samples_for(2.0)], &config()),
+            verdict_of(&vec![0.0; samples_for(6.0)], &config()),
             Verdict::Dead
         );
     }
 
     #[test]
-    fn constant_dc_offset_is_dead() {
+    fn constant_dc_offset_is_left_alone() {
+        // Not exact zeros, so not provably dead: some working microphones
+        // sit on an offset between words.
         assert_eq!(
-            verdict_of(&vec![-0.19; samples_for(2.0)], &config()),
-            Verdict::Dead
+            verdict_of(&vec![-0.19; samples_for(6.0)], &config()),
+            Verdict::Live
         );
     }
 
@@ -346,11 +360,21 @@ mod tests {
     }
 
     #[test]
-    fn sub_audible_drift_is_dead() {
+    fn sub_audible_drift_is_left_alone() {
         assert_eq!(
-            verdict_of(&tone(samples_for(2.0), 3.0, 0.01, -0.19), &config()),
-            Verdict::Dead
+            verdict_of(&tone(samples_for(6.0), 3.0, 0.01, -0.19), &config()),
+            Verdict::Live
         );
+    }
+
+    #[test]
+    fn a_noise_gate_that_opens_late_is_left_alone() {
+        // A gated source outputs exact zeros until the user speaks. One
+        // non-zero sample anywhere in the window is enough.
+        let mut samples = vec![0.0; samples_for(4.5)];
+        samples.push(1e-6);
+        samples.extend(vec![0.0; samples_for(1.0)]);
+        assert_eq!(verdict_of(&samples, &config()), Verdict::Live);
     }
 
     #[test]
@@ -367,7 +391,8 @@ mod tests {
     #[test]
     fn silence_remains_pending_until_the_window_closes() {
         let mut detector = DeadInputDetector::new(SAMPLE_RATE, &config());
-        assert_eq!(detector.push(&vec![0.0; 25_599]), Verdict::Pending);
+        // 100 ms settle plus the 5 s default window.
+        assert_eq!(detector.push(&vec![0.0; 81_599]), Verdict::Pending);
         assert_eq!(detector.push(&[0.0]), Verdict::Dead);
     }
 
@@ -400,33 +425,36 @@ mod tests {
     #[test]
     fn a_decided_verdict_never_changes() {
         let mut detector = DeadInputDetector::new(SAMPLE_RATE, &config());
-        assert_eq!(detector.push(&vec![0.0; samples_for(2.0)]), Verdict::Dead);
+        assert_eq!(detector.push(&vec![0.0; samples_for(6.0)]), Verdict::Dead);
         assert_eq!(detector.push(&noise(samples_for(2.0), 0.1)), Verdict::Dead);
     }
 
     #[test]
-    fn startup_click_is_ignored() {
+    fn a_startup_click_counts_as_input() {
+        // Any sample that is not zero proves the source is delivering.
         let mut samples = noise(samples_for(0.01), 0.05);
-        samples.extend(vec![-0.19; samples_for(2.0)]);
-        assert_eq!(verdict_of(&samples, &config()), Verdict::Dead);
+        samples.extend(vec![0.0; samples_for(6.0)]);
+        assert_eq!(verdict_of(&samples, &config()), Verdict::Live);
     }
 
     #[test]
-    fn threshold_is_honoured() {
+    fn a_raised_threshold_cannot_kill_live_audio() {
+        // The threshold only lets loud input end the check early; quiet
+        // input is still live because its samples are not zero.
         let config = DeadInputConfig {
             threshold_dbfs: -40.0,
             ..config()
         };
         assert_eq!(
-            verdict_of(&noise(samples_for(2.0), 0.001), &config),
-            Verdict::Dead
+            verdict_of(&noise(samples_for(6.0), 0.001), &config),
+            Verdict::Live
         );
     }
 
     #[test]
     fn peak_dbfs_reports_the_loudest_frame() {
         let mut detector = DeadInputDetector::new(SAMPLE_RATE, &config());
-        detector.push(&vec![0.0; samples_for(2.0)]);
+        detector.push(&vec![0.0; samples_for(6.0)]);
         assert_eq!(detector.peak_dbfs(), f32::NEG_INFINITY);
 
         let mut detector = DeadInputDetector::new(SAMPLE_RATE, &config());
