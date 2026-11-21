@@ -250,6 +250,17 @@ pub struct Cli {
     )]
     pub soniox_api_key: Option<String>,
 
+    /// Soniox data-residency region of your API key's project: us, eu, jp, in
+    /// (or use VOXTYPE_SONIOX_REGION env var)
+    #[arg(
+        long,
+        value_name = "REGION",
+        value_parser = ["us", "eu", "jp", "in"],
+        help_heading = "Soniox",
+        hide_short_help = true
+    )]
+    pub soniox_region: Option<String>,
+
     // -- Hotkey --
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
@@ -863,6 +874,27 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    /// build.rs compiles this file without the crate, so the flag lists its
+    /// regions literally. Keep it in step with the config's list.
+    #[test]
+    fn soniox_region_flag_matches_config_regions() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "soniox_region")
+            .expect("--soniox-region");
+        let values: Vec<String> = arg
+            .get_possible_values()
+            .iter()
+            .map(|v| v.get_name().to_string())
+            .collect();
+        assert_eq!(values, crate::config::SONIOX_REGIONS);
+        let cli = Cli::parse_from(["voxtype", "--soniox-region", "eu"]);
+        assert_eq!(cli.soniox_region.as_deref(), Some("eu"));
+        assert!(Cli::try_parse_from(["voxtype", "--soniox-region", "mars"]).is_err());
+    }
 
     #[test]
     fn keep_failed_recordings_flags_parse_and_conflict() {

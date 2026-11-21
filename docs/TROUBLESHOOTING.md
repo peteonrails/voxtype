@@ -1792,7 +1792,7 @@ The env var is preferred (no key in shell history, no key in config backups).
 
 ### "Soniox: WS connect failed: ..." or "connect timeout"
 
-Network or DNS issue reaching `wss://stt-rt.soniox.com`. Check:
+Network or DNS issue reaching the Soniox realtime host (`wss://stt-rt.soniox.com`, or `stt-rt.<region>.soniox.com` when `[soniox] region` is set). Check:
 - Internet connectivity (`curl https://api.soniox.com`)
 - Firewall / corporate proxy blocking outbound 443
 - VPN that mangles WebSocket handshakes
@@ -1802,6 +1802,19 @@ Voxtype emits one `Streaming Error` notification and returns to idle. Press the 
 ### 401 Unauthorized / 403 Forbidden
 
 API key is invalid, revoked, or out of credit. Check the dashboard at https://console.soniox.com.
+
+A key that works in the Soniox console but gets `401` from voxtype usually belongs to a project in another region. Soniox projects are pinned to one region (US, EU, Japan or India) and their keys are refused by every other region's hosts. Set the region to match the project:
+
+```toml
+[soniox]
+region = "eu"   # or "jp", "in"; "us" is the default
+```
+
+Voxtype 1.3.2 and later send the key in the WebSocket `Authorization` header. Older versions send it in the session's first message, which Soniox stops accepting on 15 January 2027; upgrade if Soniox starts refusing a key that used to work.
+
+### "Unknown Soniox region '...'"
+
+`[soniox] region` (or `--soniox-region`, or `VOXTYPE_SONIOX_REGION`) must be one of `us`, `eu`, `jp` or `in`. Use the region the Soniox project that issued your key was created in.
 
 ### Soniox typed text occasionally diverges from spoken words (realtime mode)
 

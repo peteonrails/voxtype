@@ -32,7 +32,7 @@ pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
     openvino_driver_packages, CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig,
     OmnilingualConfig, OpenVinoConfig, ParaformerConfig, ParakeetConfig, ParakeetModelType,
-    SenseVoiceConfig, SonioxConfig, TranscriptionEngine,
+    SenseVoiceConfig, SonioxConfig, TranscriptionEngine, SONIOX_REGIONS,
 };
 pub use history::{
     parse_app_list as parse_history_app_list, HistoryConfig, HistoryOverrides,
