@@ -215,10 +215,7 @@ fn write_style_file(path: &Path, json: &str) -> Result<(), VoxtypeError> {
 }
 
 fn runtime_dir() -> PathBuf {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-        .join("voxtype")
+    crate::config::Config::runtime_dir()
 }
 
 fn resolve_package_dir(
