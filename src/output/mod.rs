@@ -310,13 +310,14 @@ pub trait TextOutput: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// Default driver order for type mode
+/// Default driver order for type mode. New drivers (xdotool) are opt-in
+/// through `driver_order` and never added here, so an upgrade does not
+/// change which driver types a user's text.
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
     OutputDriver::Wtype,
     OutputDriver::Eitype,
     OutputDriver::Dotool,
-    OutputDriver::Xdotool,
     OutputDriver::Ydotool,
     OutputDriver::Clipboard,
     OutputDriver::Xclip,
@@ -815,12 +816,32 @@ mod tests {
         assert_eq!(result, "Café ' emoji 😀");
     }
 
+    /// New drivers are opt-in: an upgrade must never change which driver
+    /// types a user's text.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn xdotool_is_opt_in_and_never_in_the_default_chain() {
+        assert!(!DEFAULT_DRIVER_ORDER.contains(&OutputDriver::Xdotool));
+        assert_eq!(
+            DEFAULT_DRIVER_ORDER,
+            &[
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Dotool,
+                OutputDriver::Ydotool,
+                OutputDriver::Clipboard,
+                OutputDriver::Xclip,
+            ]
+        );
+    }
+
     #[test]
     fn test_is_keystroke_method_classification() {
         assert!(is_keystroke_method("wtype"));
         assert!(is_keystroke_method("eitype"));
         assert!(is_keystroke_method("dotool"));
         assert!(is_keystroke_method("ydotool"));
+        assert!(is_keystroke_method("xdotool"));
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
         assert!(!is_keystroke_method("clipboard (xclip/xsel)"));

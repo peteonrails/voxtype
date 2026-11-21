@@ -156,6 +156,13 @@ fn method_line(skip: &SkippedMethod, env: &FixEnv) -> Option<String> {
                     "dotool: not installed. Fix: install it from https://sr.ht/~geb/dotool/"
                         .to_string()
                 }
+                "xdotool" if env.session != DisplaySession::X11 => {
+                    "xdotool: needs an X display (DISPLAY is unset)".to_string()
+                }
+                "xdotool" => format!(
+                    "xdotool: not installed. Fix: {}",
+                    install_command(os, "xdotool")
+                ),
                 "ydotool" if env.ydotool_installed => {
                     "ydotool: ydotoold is not running. Fix: systemctl --user enable --now ydotool"
                         .to_string()

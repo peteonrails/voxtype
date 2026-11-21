@@ -383,7 +383,7 @@ pub struct Cli {
         value_name = "DRIVERS",
         help_heading = "Output",
         long_help = "Output driver order for type mode (comma-separated).\n\
-        Available: wtype, dotool, ydotool, clipboard.\n\
+        Available: wtype, eitype, dotool, xdotool, ydotool, clipboard, xclip.\n\
         Example: --driver=ydotool,wtype,clipboard"
     )]
     pub driver: Option<String>,

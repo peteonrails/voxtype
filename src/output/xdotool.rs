@@ -7,6 +7,10 @@
 //! Requirements:
 //! - xdotool installed
 //! - An X11 display (DISPLAY set, X server reachable)
+//!
+//! Opt-in only: it is never in the default chain. Under Wayland it reaches
+//! X11 (XWayland) windows only, so a user picks it in `driver_order` for a
+//! plain X11 session or an X11-only target.
 
 use super::TextOutput;
 use crate::error::OutputError;
@@ -55,9 +59,9 @@ impl XdotoolOutput {
             .stderr(Stdio::piped());
 
         tracing::debug!(
-            "Running: xdotool type --delay {} --clearmodifiers -- \"{}\"",
+            "Running: xdotool type --delay {} --clearmodifiers ({} chars)",
             self.type_delay_ms,
-            text.chars().take(20).collect::<String>()
+            text.chars().count()
         );
 
         let output = cmd.output().await.map_err(|e| {
@@ -125,7 +129,10 @@ impl TextOutput for XdotoolOutput {
     }
 
     async fn is_available(&self) -> bool {
-        // Check if xdotool exists in PATH
+        // xdotool talks to an X server; without one it cannot type at all.
+        if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+            return false;
+        }
         let which_result = Command::new("which")
             .arg("xdotool")
             .stdout(Stdio::null())
