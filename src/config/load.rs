@@ -394,6 +394,38 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     Ok(config)
 }
 
+/// The file a config path names once symlinks are followed: the target of
+/// a link, the last target of a chain of links, or `path` itself.
+///
+/// Writers that replace the config by renaming a temp file over it must
+/// rename over this path, or they replace a symlink (a GNU Stow or dotfiles
+/// link) with a regular file and leave the real file stale. A relative link
+/// target is taken from the link's own directory, as the kernel does. A
+/// dangling link resolves to the missing file it points at, so a save
+/// creates that file and the link starts working again.
+pub fn resolve_config_file(path: &Path) -> std::io::Result<PathBuf> {
+    // Linux's MAXSYMLINKS: the most links the kernel follows in one lookup.
+    const MAX_LINKS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)?;
+                // Join, never normalize: `..` must cross the link's real
+                // directory, which a lexical cleanup would get wrong.
+                current = match current.parent() {
+                    Some(dir) => dir.join(target),
+                    None => target,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::from_raw_os_error(libc::ELOOP))
+}
+
 /// Save configuration to file
 #[allow(dead_code)]
 pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {

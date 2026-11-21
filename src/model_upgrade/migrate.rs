@@ -116,15 +116,29 @@ pub fn find_offer<'a>(status: &'a UpgradeStatus, id: &str) -> Result<&'a Offer, 
 }
 
 /// Restore `config` to exactly `snapshot`. `None` means the file did not
-/// exist before, so it is removed.
+/// exist before, so it is removed. A symlinked config is restored in the
+/// file it links to, and the link stays.
 fn restore_config(config: &Path, snapshot: &Option<Vec<u8>>) -> std::io::Result<()> {
+    use std::io::Write;
+    let target = crate::config::resolve_config_file(config)?;
     match snapshot {
         Some(bytes) => {
-            let tmp = config.with_extension("toml.migrate-restore");
-            std::fs::write(&tmp, bytes)?;
-            std::fs::rename(&tmp, config)
+            let dir = target
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            // Private until the snapshot's bytes are in place, like a save.
+            let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+            tmp.write_all(bytes)?;
+            if let Ok(metadata) = std::fs::metadata(&target) {
+                tmp.as_file().set_permissions(metadata.permissions())?;
+            }
+            tmp.as_file().sync_all()?;
+            tmp.persist(&target)
+                .map(|_| ())
+                .map_err(|error| error.error)
         }
-        None => match std::fs::remove_file(config) {
+        None => match std::fs::remove_file(&target) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         },

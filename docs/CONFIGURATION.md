@@ -111,6 +111,12 @@ A macOS install that predates this and stored files under
 `~/Library/Application Support/voxtype` keeps working until you move them into
 `~/.config/voxtype` and `~/.local/share/voxtype`.
 
+`config.toml` can be a symlink, for example into a dotfiles repository
+managed with GNU Stow. `voxtype configure`, `voxtype config set`, and the
+other commands that save settings write to the file the link points at and
+leave the link in place. The one-time `config.toml.bak` backup is made beside
+that file. If the link is dangling, saving creates the file it points at.
+
 ## What Happens When the Config Has an Error
 
 Since 1.1.0 the config parses section by section. One unreadable value no
