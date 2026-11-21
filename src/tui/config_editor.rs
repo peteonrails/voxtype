@@ -400,7 +400,16 @@ impl ConfigEditor {
             }
         }
 
-        let mut tmp = self.path.clone();
+        // rename replaces a symlink itself, so stage and commit beside its target.
+        let destination = if self.path.is_symlink() {
+            fs::canonicalize(&self.path).map_err(|source| EditorError::Write {
+                path: self.path.clone(),
+                source,
+            })?
+        } else {
+            self.path.clone()
+        };
+        let mut tmp = destination.clone();
         let mut file_name = tmp
             .file_name()
             .map(|n| n.to_os_string())
@@ -430,8 +439,8 @@ impl ConfigEditor {
             return Err(EditorError::Validate(format!("{}", e)));
         }
 
-        fs::rename(&tmp, &self.path).map_err(|e| EditorError::Write {
-            path: self.path.clone(),
+        fs::rename(&tmp, &destination).map_err(|e| EditorError::Write {
+            path: destination,
             source: e,
         })?;
 
@@ -589,6 +598,27 @@ mod tests {
             written.contains("large-v3"),
             "the file that was loaded must be the file that is written"
         );
+    }
+
+    #[test]
+    fn save_preserves_relative_config_symlink() {
+        let (dir, target) = temp_config("engine = \"whisper\"\n");
+        let config_dir = dir.path().join("stowed");
+        fs::create_dir(&config_dir).unwrap();
+        let link = config_dir.join("config.toml");
+        let relative = Path::new("../config.toml");
+        std::os::unix::fs::symlink(relative, &link).unwrap();
+
+        let mut editor = ConfigEditor::load_from_path(link.clone()).unwrap();
+        editor.set_string("whisper", "model", "large-v3");
+        editor.save().unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), relative);
+        assert!(fs::read_to_string(&target).unwrap().contains("large-v3"));
+
+        fs::remove_file(target).unwrap();
+        editor.set_string("whisper", "model", "small");
+        assert!(editor.save().is_err());
+        assert_eq!(fs::read_link(link).unwrap(), relative);
     }
 
     #[test]
