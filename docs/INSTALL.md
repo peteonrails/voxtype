@@ -28,16 +28,19 @@ This guide covers installing Voxtype on Linux and macOS.
 
 - **Linux:** any desktop. Optimized for Wayland, works on X11.
 - **macOS:** Apple Silicon (arm64), macOS 13 Ventura or later.
-- Architectures: x86_64 (with AVX2) and aarch64 on Linux; arm64 on macOS.
+- Architectures: x86_64 (x86-64-v2 or newer) and aarch64 on Linux; arm64 on macOS.
 
 ### CPU (prebuilt Linux binaries)
 
-Prebuilt binaries target the **x86-64-v3 baseline**: AVX2, FMA, BMI1, BMI2, F16C, MOVBE. Supported:
+The minimum for every prebuilt x86_64 binary is **x86-64-v2**: SSE4.2, POPCNT, SSSE3 and CMPXCHG16B. That means Intel Nehalem (2008) or newer, or AMD Bulldozer (2011) or newer. Intel Core 2 and older, and AMD CPUs before Bulldozer, are below this floor and no prebuilt binary runs on them, the OSD and audio bridge included.
 
-- Intel Haswell (2013) and newer
-- AMD Excavator (2015), Ryzen (any generation), EPYC
+| Binaries | Built for | Runs on |
+|----------|-----------|---------|
+| `baseline` daemon, OSD (`voxtype-osd*`), meetings window, audio bridge | x86-64-v2 | Nehalem / Bulldozer and newer |
+| `avx2`, `vulkan`, `onnx-avx2` and the GPU ONNX variants | Haswell (AVX2, FMA, BMI1/2) | Intel Haswell (2013) and newer, AMD Excavator (2015), any Ryzen or EPYC |
+| `avx512`, `onnx-avx512` | AVX-512 | CPUs with AVX-512F |
 
-Older CPUs need to [build from source](#build-from-source) with `-C target-cpu=native`. Voxtype installs a SIGILL handler at startup that prints a helpful message instead of a raw "Illegal instruction" crash when the CPU is too old.
+Packages pick the right daemon variant for your CPU. On a CPU with SSE4.2 but no AVX2 (Ivy Bridge, Sandy Bridge, early Atom), that is the `baseline` build. Below x86-64-v2, [build from source](#build-from-source) with `-C target-cpu=native`. Voxtype installs a SIGILL handler at startup that prints which case you hit instead of a raw "Illegal instruction" crash.
 
 ### glibc (Linux .deb and .rpm)
 
@@ -569,7 +572,7 @@ sudo apt install pipewire-alsa
 sudo voxtype setup gpu --enable
 ```
 
-**SIGILL ("Illegal instruction") on startup** — Your CPU is older than our Haswell baseline (AVX2 + FMA + BMI1/2). Build from source with `RUSTFLAGS="-C target-cpu=native"` or open an issue with your `lscpu` output.
+**SIGILL ("Illegal instruction") on startup** — The message says which case you hit. If the CPU has no AVX2, switch to the baseline build with `sudo voxtype setup variant --to voxtype-baseline`. If it says the CPU is below x86-64-v2 (no SSE4.2 or POPCNT, such as a Core 2), no prebuilt binary runs on it: build from source with `RUSTFLAGS="-C target-cpu=native"`, or open an issue with your `lscpu` output. See [CPU](#cpu-prebuilt-linux-binaries).
 
 ---
 

@@ -19,6 +19,15 @@ static SIGILL_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// detection happens once up front and the handler only picks a message.
 static CPU_HAS_AVX2: AtomicBool = AtomicBool::new(false);
 
+/// Whether this CPU meets x86-64-v2, the floor every prebuilt binary is
+/// compiled for, sampled alongside [`CPU_HAS_AVX2`].
+static CPU_MEETS_V2: AtomicBool = AtomicBool::new(true);
+
+/// Built at the x86-64-v2 floor rather than Haswell: the baseline daemon,
+/// and the OSD, meetings window and audio bridge from every Dockerfile.
+/// Those are the binaries that must not send users to the baseline build.
+const BUILT_FOR_V2_FLOOR: bool = cfg!(target_arch = "x86_64") && !cfg!(target_feature = "avx2");
+
 /// Constructor function that runs before main() via platform-specific init section
 /// This ensures the SIGILL handler is installed before any library
 /// initialization code that might use unsupported instructions.
@@ -47,7 +56,10 @@ pub fn install_sigill_handler() {
     // message told users to switch to the AVX2 binary, which was both the one
     // they were already running and the one their CPU cannot execute (#612).
     #[cfg(target_arch = "x86_64")]
-    CPU_HAS_AVX2.store(cpuid_has_avx2(), Ordering::SeqCst);
+    {
+        CPU_HAS_AVX2.store(cpuid_has_avx2(), Ordering::SeqCst);
+        CPU_MEETS_V2.store(cpuid_meets_x86_64_v2(), Ordering::SeqCst);
+    }
     #[cfg(not(target_arch = "x86_64"))]
     CPU_HAS_AVX2.store(true, Ordering::SeqCst);
 
@@ -62,37 +74,11 @@ pub fn install_sigill_handler() {
 extern "C" fn sigill_handler(_sig: i32) {
     // SAFETY: We can only use async-signal-safe functions here.
     // write() to stderr is safe, println! is not.
-    let msg = if is_baseline_build() {
-        // The baseline variant must never advise switching to itself (#740).
-        // A SIGILL here means the build carries something above its own
-        // x86-64-v2 floor, which is our bug, not the user's setup.
-        BASELINE_SIGILL_MESSAGE
-    } else if !CPU_HAS_AVX2.load(Ordering::Relaxed) {
-        PRE_AVX2_MESSAGE
-    } else {
-        concat!(
-            "\n",
-            "═══════════════════════════════════════════════════════════════════\n",
-            "  FATAL: Illegal CPU instruction (SIGILL)\n",
-            "═══════════════════════════════════════════════════════════════════\n",
-            "\n",
-            "  Your CPU doesn't support an instruction this binary requires.\n",
-            "\n",
-            "  This commonly happens when:\n",
-            "  • Running in a VM that doesn't expose all host CPU features\n",
-            "  • Using the AVX-512 binary on a CPU without AVX-512 support\n",
-            "\n",
-            "  Solutions:\n",
-            "  1. If using voxtype-bin, switch to the AVX2 binary:\n",
-            "        sudo ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype\n",
-            "\n",
-            "  2. If running in a VM, enable CPU passthrough or use the AVX2 binary\n",
-            "\n",
-            "  3. Run 'voxtype setup check' to verify system compatibility\n",
-            "\n",
-            "═══════════════════════════════════════════════════════════════════\n",
-        )
-    };
+    let msg = sigill_message(
+        is_baseline_build() || BUILT_FOR_V2_FLOOR,
+        CPU_HAS_AVX2.load(Ordering::Relaxed),
+        CPU_MEETS_V2.load(Ordering::Relaxed),
+    );
 
     unsafe {
         libc::write(
@@ -103,6 +89,53 @@ extern "C" fn sigill_handler(_sig: i32) {
         libc::_exit(1);
     }
 }
+
+/// Pick the SIGILL message. Pure, so the choice can be tested; the handler
+/// feeds it values sampled before any signal could arrive.
+///
+/// - Below x86-64-v2, no prebuilt voxtype binary runs, the baseline build
+///   and the companions (OSD, audio bridge) included (#7883 on Omarchy: a
+///   Core 2 was told to switch to the baseline build it was already below).
+/// - A v2-floor build on a v2 CPU should never SIGILL; that is our bug.
+/// - A Haswell-floor build on a CPU without AVX2 wants the baseline build.
+fn sigill_message(
+    built_for_v2_floor: bool,
+    cpu_has_avx2: bool,
+    cpu_meets_v2: bool,
+) -> &'static str {
+    if !cpu_meets_v2 {
+        BELOW_V2_FLOOR_MESSAGE
+    } else if built_for_v2_floor {
+        BASELINE_SIGILL_MESSAGE
+    } else if !cpu_has_avx2 {
+        PRE_AVX2_MESSAGE
+    } else {
+        GENERIC_SIGILL_MESSAGE
+    }
+}
+
+const GENERIC_SIGILL_MESSAGE: &str = concat!(
+    "\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+    "  FATAL: Illegal CPU instruction (SIGILL)\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+    "\n",
+    "  Your CPU doesn't support an instruction this binary requires.\n",
+    "\n",
+    "  This commonly happens when:\n",
+    "  • Running in a VM that doesn't expose all host CPU features\n",
+    "  • Using the AVX-512 binary on a CPU without AVX-512 support\n",
+    "\n",
+    "  Solutions:\n",
+    "  1. If using voxtype-bin, switch to the AVX2 binary:\n",
+    "        sudo ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype\n",
+    "\n",
+    "  2. If running in a VM, enable CPU passthrough or use the AVX2 binary\n",
+    "\n",
+    "  3. Run 'voxtype setup check' to verify system compatibility\n",
+    "\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+);
 
 /// Check if running in a virtual machine by checking the hypervisor CPUID bit.
 #[cfg(target_arch = "x86_64")]
@@ -150,6 +183,22 @@ fn cpuid_has_avx2() -> bool {
     }
 }
 
+/// x86-64-v2: CMPXCHG16B, LAHF/SAHF in 64-bit mode, POPCNT, SSE3, SSSE3,
+/// SSE4.1 and SSE4.2. Intel Nehalem (2008) and AMD Bulldozer (2011) and
+/// later. Core 2 lacks SSE4.2 and POPCNT.
+#[cfg(target_arch = "x86_64")]
+#[allow(unused_unsafe)]
+fn cpuid_meets_x86_64_v2() -> bool {
+    unsafe {
+        let ecx = core::arch::x86_64::__cpuid(1).ecx;
+        // SSE3 0, SSSE3 9, CX16 13, SSE4.1 19, SSE4.2 20, POPCNT 23.
+        let leaf1 = [0, 9, 13, 19, 20, 23].iter().all(|b| ecx & (1 << b) != 0);
+        let lahf = core::arch::x86_64::__cpuid(0x8000_0000).eax >= 0x8000_0001
+            && core::arch::x86_64::__cpuid(0x8000_0001).ecx & 1 != 0;
+        leaf1 && lahf
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[allow(unused_unsafe)]
 fn cpuid_has_avx512f() -> bool {
@@ -167,6 +216,15 @@ pub fn check_cpu_compatibility() -> Option<String> {
     let in_vm = is_running_in_vm();
     let has_avx2 = cpuid_has_avx2();
     let has_avx512f = cpuid_has_avx512f();
+
+    if !cpuid_meets_x86_64_v2() {
+        return Some(
+            "WARNING: This CPU is below x86-64-v2 (it lacks SSE4.2 or POPCNT), the \
+             minimum every prebuilt voxtype binary is built for. Expect crashes. \
+             Building from source with RUSTFLAGS=\"-C target-cpu=native\" may work."
+                .to_string(),
+        );
+    }
 
     if !has_avx2 && BUILT_REQUIRING_AVX2 {
         return Some(
@@ -218,15 +276,40 @@ const BASELINE_SIGILL_MESSAGE: &str = concat!(
     "  FATAL: Illegal CPU instruction (SIGILL)\n",
     "═══════════════════════════════════════════════════════════════════\n",
     "\n",
-    "  This is the baseline variant, built for x86-64-v2, and it should\n",
-    "  run on your CPU. A SIGILL here is a bug in the build, not a\n",
-    "  problem with your machine.\n",
+    "  This binary is built for x86-64-v2 (the baseline variant, the OSD\n",
+    "  and the audio bridge all are), and your CPU meets that, so it\n",
+    "  should run. A SIGILL here is a bug in the build, not a problem\n",
+    "  with your machine.\n",
     "\n",
     "  Please report it, including your CPU model (from /proc/cpuinfo):\n",
     "\n",
     "        https://github.com/peteonrails/voxtype/issues\n",
     "\n",
     "  If this is a VM, also note the hypervisor and CPU model setting.\n",
+    "\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+);
+
+/// SIGILL on a CPU below x86-64-v2. Nothing prebuilt runs there: pointing at
+/// the baseline build, as the pre-AVX2 message does, sends the user to
+/// another binary that crashes the same way.
+const BELOW_V2_FLOOR_MESSAGE: &str = concat!(
+    "\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+    "  FATAL: Illegal CPU instruction (SIGILL)\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+    "\n",
+    "  This CPU is below x86-64-v2, the minimum every prebuilt voxtype\n",
+    "  binary is built for: the daemon's baseline build, the OSD and the\n",
+    "  audio bridge. It lacks SSE4.2 or POPCNT (Intel Core 2 and older,\n",
+    "  AMD before Bulldozer), so no prebuilt variant will run here.\n",
+    "\n",
+    "  Building from source with RUSTFLAGS=\"-C target-cpu=native\" may\n",
+    "  work. If only the OSD crashes, turn it off with [osd] enabled =\n",
+    "  false in config.toml.\n",
+    "\n",
+    "  If this is a VM, the host may well meet x86-64-v2 and the\n",
+    "  hypervisor may simply not be exposing it. Enable CPU passthrough.\n",
     "\n",
     "═══════════════════════════════════════════════════════════════════\n",
 );
@@ -304,6 +387,13 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         {
             let has_avx2 = std::arch::is_x86_feature_detected!("avx2");
+            // Below x86-64-v2 every binary warns, whatever it was built
+            // for. Exercised under `qemu-x86_64 -cpu core2duo`.
+            if !cpuid_meets_x86_64_v2() {
+                let w = warning.expect("must warn below the x86-64-v2 floor");
+                assert!(w.contains("x86-64-v2"), "{w}");
+                return;
+            }
             if !has_avx2 && !BUILT_REQUIRING_AVX2 {
                 assert!(
                     warning.is_none(),
@@ -322,6 +412,51 @@ mod tests {
             }
         }
         let _ = warning;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn v2_cpuid_check_agrees_with_runtime_detection() {
+        let runtime = is_x86_feature_detected!("sse3")
+            && is_x86_feature_detected!("ssse3")
+            && is_x86_feature_detected!("sse4.1")
+            && is_x86_feature_detected!("sse4.2")
+            && is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("cmpxchg16b");
+        // lahfsahf has no std detection macro; every CPU with the others has it.
+        assert_eq!(cpuid_meets_x86_64_v2(), runtime);
+    }
+
+    /// Omarchy #7883: a Core 2 (below x86-64-v2) running the OSD or audio
+    /// bridge was told to switch to the baseline build, which it cannot run
+    /// either. Below the floor, every binary says so.
+    #[test]
+    fn below_the_v2_floor_no_binary_points_at_baseline() {
+        for v2_build in [true, false] {
+            for avx2 in [true, false] {
+                assert_eq!(
+                    sigill_message(v2_build, avx2, false),
+                    BELOW_V2_FLOOR_MESSAGE
+                );
+            }
+        }
+        assert!(BELOW_V2_FLOOR_MESSAGE.contains("x86-64-v2"));
+        assert!(!BELOW_V2_FLOOR_MESSAGE.contains("--to baseline"));
+    }
+
+    /// A companion (OSD, audio bridge) is a v2-floor build like the
+    /// baseline daemon: on a v2 CPU without AVX2 it must report a build bug,
+    /// not advise switching to the baseline daemon.
+    #[test]
+    fn v2_floor_builds_on_a_v2_cpu_report_a_build_bug() {
+        assert_eq!(sigill_message(true, false, true), BASELINE_SIGILL_MESSAGE);
+        assert_eq!(sigill_message(true, true, true), BASELINE_SIGILL_MESSAGE);
+    }
+
+    #[test]
+    fn haswell_floor_builds_keep_their_messages() {
+        assert_eq!(sigill_message(false, false, true), PRE_AVX2_MESSAGE);
+        assert_eq!(sigill_message(false, true, true), GENERIC_SIGILL_MESSAGE);
     }
 
     /// The whole point of #612: this message must not send someone to a

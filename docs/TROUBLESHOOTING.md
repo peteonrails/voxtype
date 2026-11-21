@@ -112,6 +112,29 @@ If `voxtype setup onnx --enable` (or `setup gpu --enable`) says the variant is
 not installed, check `/usr/lib/voxtype/package-variants` and rebuild with the
 one you need, for example `VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin`.
 
+## "Illegal CPU instruction (SIGILL)" from voxtype, the OSD or the audio bridge
+
+voxtype prints one of three messages instead of a bare "Illegal instruction":
+
+- **"This CPU does not support AVX2"**: the daemon variant needs a newer CPU
+  than you have. Switch to the baseline build, which needs only x86-64-v2:
+  `sudo voxtype setup variant --to voxtype-baseline`, then
+  `systemctl --user restart voxtype`.
+- **"This CPU is below x86-64-v2"**: the CPU lacks SSE4.2 or POPCNT (Intel
+  Core 2 and older, AMD before Bulldozer). Every prebuilt binary, including
+  the baseline daemon, the OSD and the audio bridge, is built for
+  x86-64-v2, so none of them can run there. Check with
+  `grep -o -w -e sse4_2 -e popcnt /proc/cpuinfo | sort -u`; both must be
+  listed. Building from source with `RUSTFLAGS="-C target-cpu=native"` may
+  work. If only the OSD crashes, set `[osd] enabled = false`. In a VM, enable
+  CPU passthrough first: the host often meets the floor when the guest's CPU
+  model does not.
+- **"This binary is built for x86-64-v2 ... should run on your CPU"**: a
+  build bug. Please report it with your `lscpu` output.
+
+The CPU requirements for each binary are in
+[INSTALL.md](INSTALL.md#cpu-prebuilt-linux-binaries).
+
 ## Status reports an ONNX backend for a GGUF model
 
 Upgrade to a build where `voxtype status --format json --extended` reports
