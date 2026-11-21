@@ -112,8 +112,24 @@ QtObject {
 
   // Put the window's left edge here: the card's own, or the pill's, which
   // sits at a fixed offset from the card's.
+  //
+  // A dragged pill is anchored on the side of the screen it is in, the way
+  // minimizing chose. Kept right-anchored at the left edge, the card's left
+  // (pill left + pill width - card width) goes negative, and a negative x
+  // means "never placed", so the card would expand against the right edge.
   function setLeft(left) {
-    root.x = root.minimized && root.pillRight ? left + root.pillWidth - root.cardWidth : left
+    if (!root.minimized) {
+      root.x = left
+      return
+    }
+    root.pillRight = left + root.pillWidth / 2 > root.screenWidth / 2
+    var cardX = root.pillRight ? left + root.pillWidth - root.cardWidth : left
+    if (cardX < 0) {
+      // A card wider than half the screen: keep the pill's left edge.
+      root.pillRight = false
+      cardX = left
+    }
+    root.x = Math.max(0, cardX)
   }
 
   // A drag of the inner edge: on the left edge the card keeps its right side.
