@@ -843,6 +843,83 @@ mod tests {
         }
     }
 
+    /// What keeping the state saves, measured on a real model. Ignored by
+    /// default because it needs one:
+    ///
+    /// VOXTYPE_BENCH_MODEL=/path/ggml-base.en.bin VOXTYPE_BENCH_WAV=/path/clip.wav \
+    ///   cargo test --release --lib whisper_state_reuse_timing -- --ignored --nocapture
+    ///
+    /// Each "fresh" run drops the cached state first, which is what every
+    /// transcription paid before the state was kept.
+    #[test]
+    #[ignore]
+    fn whisper_state_reuse_timing() {
+        let model = std::env::var("VOXTYPE_BENCH_MODEL").expect("VOXTYPE_BENCH_MODEL");
+        let wav = std::env::var("VOXTYPE_BENCH_WAV").expect("VOXTYPE_BENCH_WAV");
+        let runs: usize = std::env::var("VOXTYPE_BENCH_RUNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(5);
+        let reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.sample_rate, spec.channels),
+            (16_000, 1),
+            "16 kHz mono WAV"
+        );
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => {
+                let max = (1_i64 << (spec.bits_per_sample - 1)) as f32;
+                reader
+                    .into_samples::<i32>()
+                    .map(|s| s.unwrap() as f32 / max)
+                    .collect()
+            }
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+            }
+        };
+        let config = WhisperConfig {
+            model,
+            ..Default::default()
+        };
+        let t = WhisperTranscriber::new(&config).unwrap();
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let time = |f: &dyn Fn()| {
+            let start = std::time::Instant::now();
+            f();
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        // Warm up once so file caches and the first allocation are paid.
+        t.transcribe(&samples).unwrap();
+        let mut fresh = Vec::new();
+        let mut reused = Vec::new();
+        let mut create = Vec::new();
+        for _ in 0..runs {
+            *t.state.lock().unwrap() = None;
+            fresh.push(time(&|| {
+                t.transcribe(&samples).unwrap();
+            }));
+            reused.push(time(&|| {
+                t.transcribe(&samples).unwrap();
+            }));
+            *t.state.lock().unwrap() = None;
+            create.push(time(&|| t.prepare()));
+        }
+        eprintln!(
+            "whisper state timing ({} runs, {:.2}s clip): fresh state median {:.1} ms, \
+             reused state median {:.1} ms, state creation median {:.1} ms",
+            runs,
+            samples.len() as f32 / 16_000.0,
+            median(fresh),
+            median(reused),
+            median(create),
+        );
+    }
+
     #[test]
     fn with_cached_reuses_the_value() {
         let slot = Mutex::new(None);
