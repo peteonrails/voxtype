@@ -1690,6 +1690,31 @@ systemctl --user restart voxtype
 voxtype info accel
 ```
 
+### `setup gpu --enable` says Vulkan is not available on this machine
+
+**Cause:** `voxtype setup gpu --enable` checks that the Vulkan build can run before switching to it, because a build that cannot run crashes on every start and systemd restarts it in a loop. It refuses in two cases:
+
+- **The CPU has no AVX2.** The packaged `voxtype-vulkan` is compiled for Haswell-class CPUs and later. On an older CPU it would stop with an illegal instruction.
+- **The GPU has no 16-bit storage.** Whisper's Vulkan backend requires 16-bit storage buffers. Intel Haswell graphics on Mesa's `hasvk` driver (Iris Pro 5200, HD 4600 and similar) do not have them, and the Vulkan build aborts when it loads a model. voxtype reads this from `vulkaninfo` (package `vulkan-tools`). Without `vulkaninfo` it recognises Haswell graphics by PCI ID and otherwise allows the switch.
+
+`voxtype setup gpu --status` shows the same verdict next to the Vulkan backend.
+
+**Solution:** Stay on the CPU build. On a CPU without AVX2, use the baseline build:
+
+```bash
+sudo voxtype setup variant --to baseline
+systemctl --user restart voxtype
+```
+
+If an earlier version already switched you to Vulkan and the daemon is crash-looping, switch back:
+
+```bash
+sudo voxtype setup gpu --disable
+systemctl --user restart voxtype
+```
+
+A machine with a second GPU that does support 16-bit storage is not refused: Whisper's Vulkan backend skips the unsupported GPU and uses the other one.
+
 ### "OpenVINO fell back to GPU/CPU" notification
 
 **Cause:** `[openvino] device` names a device (usually `NPU`) that failed to initialize, so Voxtype fell back to the next device in the chain (GPU, then CPU). The notification names the packages for the configured device.

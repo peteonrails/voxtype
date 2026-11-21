@@ -40,6 +40,7 @@ pub mod skill;
 pub mod systemd;
 pub mod vad;
 pub mod variant_check;
+pub mod vulkan_check;
 pub mod waybar;
 
 use crate::config::Config;

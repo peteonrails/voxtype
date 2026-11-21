@@ -670,16 +670,13 @@ fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
     )
 }
 
+/// CPU features from CPUID. `is_x86_feature_detected!` was used here and
+/// folds to `true` for any feature the binary was compiled with, so the
+/// AVX2 and AVX-512 builds reported their own floor instead of the CPU's.
 pub fn detect_cpu() -> Cpu {
     Cpu {
-        #[cfg(target_arch = "x86_64")]
-        avx2: std::arch::is_x86_feature_detected!("avx2"),
-        #[cfg(target_arch = "x86_64")]
-        avx512: std::arch::is_x86_feature_detected!("avx512f"),
-        #[cfg(not(target_arch = "x86_64"))]
-        avx2: false,
-        #[cfg(not(target_arch = "x86_64"))]
-        avx512: false,
+        avx2: crate::cpu::cpu_has_avx2(),
+        avx512: crate::cpu::cpu_has_avx512f(),
     }
 }
 
@@ -835,6 +832,25 @@ fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
     }
 }
 
+/// Why a packaged variant cannot start on this CPU, for refusing a switch.
+///
+/// Narrower than [`variant_runs_on_cpu`]: it refuses only what is certain to
+/// SIGILL. Every packaged x86_64 build except the baseline is compiled for
+/// Haswell, and the AVX-512 builds for AVX-512. A source-built native binary
+/// was compiled for this machine, and the ONNX GPU builds' AVX-512 need is
+/// ORT's, which dispatches at runtime, so neither is refused here.
+fn cpu_floor_blocker(v: Variant, cpu: &Cpu) -> Option<&'static str> {
+    if !cfg!(target_arch = "x86_64") {
+        return None;
+    }
+    match v.acceleration() {
+        Acceleration::Baseline | Acceleration::Native => None,
+        Acceleration::Avx512 if !cpu.avx512 => Some("needs AVX-512, which this CPU lacks"),
+        _ if !cpu.avx2 => Some("needs AVX2, which this CPU lacks"),
+        _ => None,
+    }
+}
+
 fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
     match v.acceleration() {
         Acceleration::Cuda => g.nvidia,
@@ -969,6 +985,25 @@ pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
         );
     }
 
+    if let Some(why) = cpu_floor_blocker(variant, &detect_cpu()) {
+        anyhow::bail!(
+            "{} {}, so it would crash with an illegal instruction on start.\n\
+             Nothing was changed. See `voxtype setup gpu --status` for the builds \
+             this CPU can run.",
+            variant.binary_name(),
+            why
+        );
+    }
+    if variant == Variant::WhisperVulkan {
+        let facts = super::vulkan_check::detect(cfg!(target_arch = "x86_64"));
+        if let Some(blocker) = super::vulkan_check::blocker(&facts) {
+            anyhow::bail!(
+                "{}",
+                blocker.refusal("Nothing was changed. Keep using a CPU build.")
+            );
+        }
+    }
+
     // Whisper variants live behind `setup gpu`; ONNX variants behind
     // `setup onnx`. Pick the retry hint matching the user's destination
     // so a permission failure points them at the same subcommand they'd
@@ -1072,6 +1107,43 @@ mod tests {
         };
         assert!(!variant_runs_on_cpu(Variant::WhisperAvx2, &nothing));
         assert!(!variant_runs_on_cpu(Variant::WhisperNative, &nothing));
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn switching_refuses_only_builds_certain_to_sigill() {
+        let pre_haswell = Cpu {
+            avx2: false,
+            avx512: false,
+        };
+        assert_eq!(
+            cpu_floor_blocker(Variant::WhisperBaseline, &pre_haswell),
+            None
+        );
+        assert_eq!(
+            cpu_floor_blocker(Variant::WhisperNative, &pre_haswell),
+            None
+        );
+        for v in [
+            Variant::WhisperAvx2,
+            Variant::WhisperVulkan,
+            Variant::OnnxAvx2,
+            Variant::OnnxCuda13,
+        ] {
+            assert!(
+                cpu_floor_blocker(v, &pre_haswell).is_some_and(|w| w.contains("AVX2")),
+                "{v:?}"
+            );
+        }
+        let haswell = Cpu {
+            avx2: true,
+            avx512: false,
+        };
+        assert_eq!(cpu_floor_blocker(Variant::WhisperVulkan, &haswell), None);
+        assert!(cpu_floor_blocker(Variant::WhisperAvx512, &haswell)
+            .is_some_and(|w| w.contains("AVX-512")));
+        // ORT dispatches at runtime; the GPU EP builds are not refused here.
+        assert_eq!(cpu_floor_blocker(Variant::OnnxMigraphx, &haswell), None);
     }
 
     #[test]
