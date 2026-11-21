@@ -651,6 +651,23 @@ arecord -d 2 test.wav
 aplay test.wav
 ```
 
+### Feedback cues: start cue clipped on Bluetooth headphones
+
+**Cause:** Since 1.3.2 voxtype opens an audio output only while a feedback cue plays, and closes it afterwards. Earlier versions held one output open for the daemon's lifetime, which broke after suspend and resume (cues went silent) and could spin a CPU core on `alsa::poll() returned POLLERR`. With nothing open while idle, PipeWire suspends the sink, and a Bluetooth sink can take a moment to wake, so the first part of the start cue may be lost. The same change lets multipoint headphones hand off to another device while voxtype is idle.
+
+**Solution:** If the clipping bothers you more than the idle sink suspending, tell WirePlumber not to suspend sinks. For example, in `~/.config/wireplumber/wireplumber.conf.d/51-no-suspend.conf`:
+
+```
+monitor.bluez.rules = [
+  {
+    matches = [ { node.name = "~bluez_output.*" } ]
+    actions = { update-props = { session.suspend-timeout-seconds = 0 } }
+  }
+]
+```
+
+Then `systemctl --user restart wireplumber`. A warning `Audio output stalled, feedback cue abandoned` in the log means the output device stopped accepting audio; voxtype gives up on that cue after its length plus one second and opens a fresh output for the next one.
+
 ### Recording stops unexpectedly
 
 **Cause:** `max_duration_secs` limit reached. Voxtype shows a "Recording Limit Approaching" notification shortly before the limit (30 seconds before for limits of two minutes or more, 10 seconds before for shorter ones) and a "Recording Limit Reached" notification when it stops. What was captured up to the limit is still transcribed.

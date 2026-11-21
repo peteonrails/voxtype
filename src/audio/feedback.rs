@@ -58,15 +58,7 @@ impl AudioFeedback {
         let (cues, rx) = mpsc::channel::<(Instant, Cue)>();
         std::thread::Builder::new()
             .name("audio-feedback".into())
-            .spawn(move || {
-                for (queued, cue) in rx {
-                    if queued.elapsed() < STALE_AFTER {
-                        play_cue(cue);
-                    } else {
-                        tracing::warn!("Skipping stale feedback cue");
-                    }
-                }
-            })
+            .spawn(move || run_player(rx, play_cue))
             .map_err(|e| format!("Failed to start audio feedback thread: {}", e))?;
 
         Ok(Self {
@@ -108,6 +100,27 @@ impl AudioFeedback {
     }
 }
 
+/// Play queued cues one at a time, in order. A cue that waited longer than
+/// [`STALE_AFTER`] behind a slow device is dropped rather than played late.
+fn run_player<T>(rx: mpsc::Receiver<(Instant, T)>, mut play: impl FnMut(T)) {
+    for (queued, cue) in rx {
+        if queued.elapsed() < STALE_AFTER {
+            play(cue);
+        } else {
+            tracing::warn!("Skipping stale feedback cue");
+        }
+    }
+}
+
+/// Poll `is_empty` until it reports true or `deadline` passes. Returns
+/// whether the sink drained, so a wedged device cannot hold the stream open.
+fn wait_until_drained(is_empty: impl Fn() -> bool, deadline: Instant, poll: Duration) -> bool {
+    while !is_empty() && Instant::now() < deadline {
+        std::thread::sleep(poll);
+    }
+    is_empty()
+}
+
 fn play_cue(source: Cue) {
     let timeout = source.total_duration().unwrap_or_default() + Duration::from_secs(1);
     let (done_tx, done_rx) = mpsc::channel();
@@ -123,10 +136,7 @@ fn play_cue(source: Cue) {
             Ok(sink) => {
                 let deadline = Instant::now() + timeout;
                 sink.append(source);
-                while !sink.empty() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                if sink.empty() {
+                if wait_until_drained(|| sink.empty(), deadline, Duration::from_millis(10)) {
                     std::thread::sleep(DRAIN_GRACE);
                 } else {
                     tracing::warn!("Audio output stalled, feedback cue abandoned");
@@ -326,6 +336,53 @@ fn generate_mechanical_theme() -> SoundTheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The tests below drive the player with fakes. Nothing here may call
+    // `AudioFeedback::play` or `play_cue`: those open a real output device.
+
+    #[test]
+    fn player_plays_cues_in_order_and_skips_stale_ones() {
+        let (tx, rx) = mpsc::channel();
+        let stale = Instant::now()
+            .checked_sub(STALE_AFTER + Duration::from_millis(500))
+            .expect("clock far enough past boot");
+        tx.send((stale, "stale")).unwrap();
+        tx.send((Instant::now(), "start")).unwrap();
+        tx.send((Instant::now(), "stop")).unwrap();
+        drop(tx);
+
+        let mut played = Vec::new();
+        run_player(rx, |cue| played.push(cue));
+        assert_eq!(played, ["start", "stop"]);
+    }
+
+    #[test]
+    fn drain_wait_returns_once_the_sink_empties() {
+        let polls = std::cell::Cell::new(0);
+        let drained = wait_until_drained(
+            || {
+                polls.set(polls.get() + 1);
+                polls.get() > 3
+            },
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+        assert!(drained);
+    }
+
+    /// #859: a device that stops consuming samples must not hold the stream
+    /// (and its POLLERR-spinning thread) open forever.
+    #[test]
+    fn drain_wait_gives_up_on_a_stalled_sink() {
+        let start = Instant::now();
+        let drained = wait_until_drained(
+            || false,
+            start + Duration::from_millis(30),
+            Duration::from_millis(5),
+        );
+        assert!(!drained);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn test_generate_tone_wav() {
