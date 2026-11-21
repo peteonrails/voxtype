@@ -288,6 +288,13 @@ Upgrade Voxtype before editing that entry. The original file is left unchanged
 so unknown nested fields are not lost. An empty correction is intentional: it
 must not restore the original text when copying or re-sending.
 
+### `history copy` or `history paste` says there is no text
+
+The entry is empty: the engine returned nothing, or you saved an empty
+correction. There is nothing to copy or type, so the command exits nonzero
+and leaves the clipboard unchanged. Give the entry text with
+`voxtype history correct <ID> "TEXT"` if you want to copy it.
+
 ## Meeting view
 
 The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says

@@ -202,6 +202,28 @@ fn find(store: &HistoryStore, id: &str) -> anyhow::Result<HistoryEntry> {
     entry.with_context(|| format!("No dictation found for '{id}'"))
 }
 
+/// The text `copy` or `paste` would send, refusing an entry that has none.
+///
+/// An empty correction wins over the original text (it is the user's
+/// choice), but sending nothing is not a copy or a paste: every output
+/// driver returns success for empty text without running, so the command
+/// reported "copied" while the clipboard kept what it held before.
+fn text_to_send<'a>(entry: &'a HistoryEntry, verb: &str) -> anyhow::Result<&'a str> {
+    let text = entry.best_text();
+    if !text.is_empty() {
+        return Ok(text);
+    }
+    if entry.corrected_text.is_some() {
+        bail!(
+            "Dictation {} has an empty correction, so there is no text to {verb}. \
+             Give it text with `voxtype history correct {} \"TEXT\"`.",
+            entry.id,
+            entry.id
+        );
+    }
+    bail!("Dictation {} has no text to {verb}.", entry.id)
+}
+
 fn state(config: &config::Config, store: &HistoryStore) -> anyhow::Result<Value> {
     Ok(json!({
         "enabled": config.history.enabled,
@@ -372,6 +394,7 @@ async fn execute(
         }
         HistoryAction::Copy { id } => {
             let entry = find(&store, id.as_deref().unwrap_or("last"))?;
+            let text = text_to_send(&entry, "copy")?;
             let clipboard = config::OutputConfig {
                 mode: config::OutputMode::Clipboard,
                 append_text: None,
@@ -380,7 +403,7 @@ async fn execute(
             let mut errors = Vec::new();
             for driver in output::create_output_chain(&clipboard) {
                 if driver.is_available().await {
-                    match driver.output(entry.best_text()).await {
+                    match driver.output(text).await {
                         Ok(()) => return Ok(json!({"copied":entry.id,"driver":driver.name()})),
                         Err(e) => errors.push(e.to_string()),
                     }
@@ -390,6 +413,7 @@ async fn execute(
         }
         HistoryAction::Paste { id, delay_ms } => {
             let entry = find(&store, &id)?;
+            let text = text_to_send(&entry, "paste")?;
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             if config.output.mode == config::OutputMode::File {
                 if let Some(path) = &config.output.file_path {
@@ -403,7 +427,7 @@ async fn execute(
                     use voxtype::daemon::{deliver_to_file_observed, FileDelivery};
                     return match deliver_to_file_observed(
                         path,
-                        entry.best_text(),
+                        text,
                         &config.output,
                         &fallback,
                         None,
@@ -426,7 +450,7 @@ async fn execute(
             let chain = output::create_output_chain(&config.output);
             let delivered = output::deliver_with_fallback(
                 &chain,
-                entry.best_text(),
+                text,
                 output::OutputOptions {
                     history_context: None,
                     pre_output_command: config.output.pre_output_command.as_deref(),
