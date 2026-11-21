@@ -572,7 +572,7 @@ sudo apt install pipewire-alsa
 sudo voxtype setup gpu --enable
 ```
 
-**SIGILL ("Illegal instruction") on startup** — The message says which case you hit. If the CPU has no AVX2, switch to the baseline build with `sudo voxtype setup variant --to voxtype-baseline`. If it says the CPU is below x86-64-v2 (no SSE4.2 or POPCNT, such as a Core 2), no prebuilt binary runs on it: build from source with `RUSTFLAGS="-C target-cpu=native"`, or open an issue with your `lscpu` output. See [CPU](#cpu-prebuilt-linux-binaries).
+**SIGILL ("Illegal instruction") on startup**: the message says which case you hit. If the CPU has no AVX2, switch to the baseline build with `sudo voxtype setup variant --to voxtype-baseline`. If it says the CPU is below x86-64-v2 (no SSE4.2 or POPCNT, such as a Core 2), no prebuilt binary runs on it: build from source with `RUSTFLAGS="-C target-cpu=native"`, or open an issue with your `lscpu` output. See [CPU](#cpu-prebuilt-linux-binaries).
 
 ---
 
