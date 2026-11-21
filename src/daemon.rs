@@ -1360,6 +1360,16 @@ pub struct Daemon {
     osd_limit_reached: bool,
     osd_session_started_at_ms: u64,
     osd_session_suppressed: std::sync::atomic::AtomicBool,
+    /// When the daemon last went idle after being busy, as a trigger stamp
+    /// (nanoseconds since the epoch; 0 while it has been idle since
+    /// startup). A start request issued before this was issued while the
+    /// daemon was busy, so it is ignored like one handled while busy
+    /// (#1004). Without it, a `record toggle` sent during output waits in
+    /// the signal queue and starts a recording once output finishes.
+    idle_since: std::sync::atomic::AtomicU64,
+    /// Whether the last state written was idle, so a repeated idle write
+    /// does not move `idle_since` forward.
+    last_state_idle: std::sync::atomic::AtomicBool,
     // Whether this session's outcome has been published. The first one
     // wins: some paths report a specific outcome (no speech) and then
     // fall through a generic one (empty result) on the way to idle.
@@ -1603,6 +1613,8 @@ impl Daemon {
             osd_limit_reached: false,
             osd_session_started_at_ms: 0,
             osd_session_suppressed: std::sync::atomic::AtomicBool::new(false),
+            idle_since: std::sync::atomic::AtomicU64::new(0),
+            last_state_idle: std::sync::atomic::AtomicBool::new(true),
             osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
             model_upgrade_pending,
             history,
@@ -1858,6 +1870,7 @@ impl Daemon {
 
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
+        self.note_idle_transition(state_name);
         #[cfg(target_os = "linux")]
         if let Some(tray) = &self.tray {
             tray.update(crate::tray::TrayState::from_state_name(state_name));
@@ -6028,6 +6041,27 @@ impl Daemon {
         }
     }
 
+    fn note_idle_transition(&self, state_name: &str) {
+        use std::sync::atomic::Ordering;
+        let idle = state_name == "idle";
+        let was_idle = self.last_state_idle.swap(idle, Ordering::Relaxed);
+        if idle && !was_idle {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            self.idle_since.store(now, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a start request stamped `issued_at` was issued while the
+    /// daemon was still busy with the previous dictation. Requests with no
+    /// stamp (a bare SIGUSR1) are taken as current.
+    fn start_request_predates_idle(&self, issued_at: Option<u128>) -> bool {
+        let idle_since = self.idle_since.load(std::sync::atomic::Ordering::Relaxed);
+        matches!(issued_at, Some(issued) if idle_since > 0 && issued < u128::from(idle_since))
+    }
+
     /// Load the transcription model at startup (on_demand_loading off).
     fn preload_transcriber(
         &mut self,
@@ -7186,6 +7220,13 @@ impl Daemon {
                         tracing::info!(
                             "Ignoring start request: daemon is {} (stop or cancel it first)",
                             state
+                        );
+                    } else if self.start_request_predates_idle(start_request.issued_at) {
+                        // Sent while the last dictation was still being
+                        // typed or pasted; the event loop only got to it
+                        // now. Treat it as the busy daemon would have.
+                        tracing::info!(
+                            "Ignoring start request sent while the previous dictation was still being delivered"
                         );
                     } else {
                         // Read model override from file (set by `voxtype record start --model X`)
@@ -9857,5 +9898,40 @@ while True:
             let holder = std::fs::read_to_string(dir.join("voxtype.lock")).unwrap();
             assert_eq!(holder.trim(), std::process::id().to_string());
         });
+    }
+
+    /// #1004: a start sent while the last dictation was being delivered is
+    /// only handled once the event loop is free again, after the daemon has
+    /// gone idle. It must be ignored like a start handled while busy, not
+    /// start a recording late.
+    #[test]
+    fn a_start_issued_while_busy_is_ignored_once_idle() {
+        let config = Config {
+            state_file: None,
+            ..Default::default()
+        };
+        let daemon = Daemon::new(config, None);
+        let stamp = || trigger_stamp().parse::<u128>().unwrap();
+
+        // Idle since startup: every stamped start is current.
+        assert!(!daemon.start_request_predates_idle(Some(stamp())));
+
+        daemon.update_state("recording");
+        daemon.update_state("transcribing");
+        let sent_during_output = stamp();
+        std::thread::sleep(Duration::from_millis(2));
+        daemon.update_state("idle");
+        assert!(daemon.start_request_predates_idle(Some(sent_during_output)));
+
+        // A repeated idle write must not move the boundary past a start
+        // that was sent while idle.
+        std::thread::sleep(Duration::from_millis(2));
+        let sent_while_idle = stamp();
+        std::thread::sleep(Duration::from_millis(2));
+        daemon.update_state("idle");
+        assert!(!daemon.start_request_predates_idle(Some(sent_while_idle)));
+
+        // A bare SIGUSR1 carries no stamp and keeps working.
+        assert!(!daemon.start_request_predates_idle(None));
     }
 }
