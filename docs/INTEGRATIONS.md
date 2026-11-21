@@ -975,6 +975,14 @@ What a view needs for an agent chip and a consent dialog:
   `auto_summary_configured` is `[meeting.summary] auto` as set, `null` when
   unset.
 - `problem` explains a configured agent that cannot be used.
+- `llm` is `null` unless `[meeting.summary] backend` is `"omarchy"` or
+  `"openai"`. Then it is `{"provider", "available", "name", "model",
+  "endpoint", "local", "problem"}`: whether the model answers now (Omarchy
+  is asked with `omarchy-models status --json`), its chip label
+  ("Omarchy (qwen3.8-27b-gufo)"), and when it is not available, why, in
+  words that say how to start one. While it is available and `local`,
+  `backend` is `local` and `backend_name` is its label: it needs no consent.
+  The key is never part of the output.
 
 The consent dialog's answers map to `voxtype meeting assistant allow <id>`,
 `voxtype config set meeting.assistant.local_only true` (or `ask --local` for
