@@ -445,6 +445,21 @@ KDE Plasma: System Settings → Shortcuts → Custom Shortcuts. See [USER_MANUAL
 
 GNOME / X11 / other: leave evdev enabled (`[hotkey] enabled = true`) and use the configured key.
 
+### 5. Dictation history (optional)
+
+Voxtype can keep a private record of your dictations: what the engine heard, the text after cleanup, and whether it reached the window. It is stored as one file per day in `~/.local/share/voxtype/history`, readable only by you, and kept for 30 days. Audio is not kept.
+
+A config written by `voxtype setup` turns history on. A config from before 1.3.1 keeps it off after an upgrade, and so does the system-wide `/etc/voxtype/config.toml`. `voxtype setup check` shows whether it is on and prints the command to change it:
+
+```bash
+voxtype setup check       # shows the history state
+voxtype history enable    # turn it on
+voxtype history disable   # turn it off
+voxtype history pause     # stop recording for a while, e.g. before dictating a password
+```
+
+See [USER_MANUAL.md](USER_MANUAL.md#voxtype-history) for searching, copying and correcting past dictations.
+
 ---
 
 ## GPU Acceleration
