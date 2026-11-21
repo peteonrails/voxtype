@@ -423,16 +423,31 @@ impl Config {
         Self::runtime_dir_from(std::env::var("XDG_RUNTIME_DIR").ok())
     }
 
-    /// Use XDG_RUNTIME_DIR if available, otherwise fall back to the per-user
-    /// temp dir. macOS never sets XDG_RUNTIME_DIR, and a fixed /tmp/voxtype
-    /// is shared by every account on the Mac: /tmp is sticky, so one user's
-    /// lock files block the daemon and menubar of every other user.
-    /// `temp_dir()` is `$TMPDIR` (per user on macOS), else /tmp on Linux.
+    /// Use XDG_RUNTIME_DIR if available, otherwise fall back to
+    /// [`Self::runtime_dir_fallback`].
     fn runtime_dir_from(xdg_runtime_dir: Option<String>) -> PathBuf {
         xdg_runtime_dir
             .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
+            .unwrap_or_else(Self::runtime_dir_fallback)
             .join("voxtype")
+    }
+
+    /// macOS never sets XDG_RUNTIME_DIR, and a fixed /tmp/voxtype is shared
+    /// by every account on the Mac: /tmp is sticky, so one user's lock files
+    /// block the daemon and menubar of every other user. The per-user
+    /// `$TMPDIR` (what `temp_dir()` returns there) is private to the user.
+    #[cfg(target_os = "macos")]
+    fn runtime_dir_fallback() -> PathBuf {
+        std::env::temp_dir()
+    }
+
+    /// Linux keeps /tmp: the Quickshell OSD, the Omarchy panel and user
+    /// scripts fall back to /tmp/voxtype on their own, so following
+    /// `$TMPDIR` here would split the daemon from them whenever TMPDIR is
+    /// set and XDG_RUNTIME_DIR is not.
+    #[cfg(not(target_os = "macos"))]
+    fn runtime_dir_fallback() -> PathBuf {
+        PathBuf::from("/tmp")
     }
 
     /// Resolve the state file path from config
@@ -1111,10 +1126,18 @@ mod tests {
             Config::runtime_dir_from(Some("/run/user/1000".to_string())),
             PathBuf::from("/run/user/1000/voxtype")
         );
-        // Not a hardcoded /tmp/voxtype: that is shared by every macOS account.
+        // On macOS, not a hardcoded /tmp/voxtype: that is shared by every
+        // account on the Mac.
+        #[cfg(target_os = "macos")]
         assert_eq!(
             Config::runtime_dir_from(None),
             std::env::temp_dir().join("voxtype")
+        );
+        // On Linux, unchanged: the QML frontends fall back to /tmp too.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            Config::runtime_dir_from(None),
+            PathBuf::from("/tmp/voxtype")
         );
     }
 
