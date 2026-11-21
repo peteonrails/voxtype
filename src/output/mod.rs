@@ -23,6 +23,7 @@ pub mod active_window;
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
+pub(crate) mod clipboard_restore;
 pub mod deferred_notice;
 pub mod dotool;
 pub mod eitype;
