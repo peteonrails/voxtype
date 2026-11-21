@@ -464,8 +464,19 @@ pub fn run(state_file: PathBuf) -> ! {
     println!("Starting Voxtype menu bar...");
     println!("State file: {}", state_file.display());
 
-    // Single instance check
-    let lock_path = Config::runtime_dir().join("menubar.lock");
+    // Single instance check. The app launcher starts the daemon and the menubar
+    // together, so the runtime dir may not exist yet; without it the lock fails
+    // and the menubar would wrongly exit as "already running".
+    let runtime_dir = Config::runtime_dir();
+    if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
+        eprintln!(
+            "Error: Failed to create runtime directory {}: {}",
+            runtime_dir.display(),
+            e
+        );
+        std::process::exit(1);
+    }
+    let lock_path = runtime_dir.join("menubar.lock");
     let lock_path_str = lock_path.to_string_lossy().to_string();
     let mut pidlock = Pidlock::new(&lock_path_str);
 
