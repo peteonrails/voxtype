@@ -394,8 +394,14 @@ impl Config {
     }
 
     /// Get the system-wide config file path.
+    ///
+    /// `VOXTYPE_TEST_SYSTEM_CONFIG` replaces it, so integration tests can
+    /// put a system config in a temp dir instead of reading the real `/etc`.
     pub fn system_path() -> PathBuf {
-        PathBuf::from(Self::SYSTEM_PATH)
+        std::env::var_os("VOXTYPE_TEST_SYSTEM_CONFIG")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(Self::SYSTEM_PATH))
     }
 
     /// Resolve which config file should actually be loaded, in priority order:
@@ -405,17 +411,23 @@ impl Config {
     /// Returns `None` if neither exists, in which case the caller should fall
     /// back to built-in defaults. This does not consider the `--config` CLI
     /// flag; callers handle that explicitly.
+    ///
+    /// A user config that is a symlink counts as present even when the file
+    /// it names is missing (a Stow tree that is not mounted). Loading it
+    /// gives defaults with a warning, and saving creates the file it names.
+    /// Falling back to the system config instead made `config set` and
+    /// `history pause` write `/etc/voxtype/config.toml`.
     pub fn resolve_existing_path() -> Option<PathBuf> {
-        if let Some(user) = Self::default_path() {
-            if user.exists() {
+        Self::resolve_existing_in(Self::default_path(), Self::system_path())
+    }
+
+    fn resolve_existing_in(user: Option<PathBuf>, system: PathBuf) -> Option<PathBuf> {
+        if let Some(user) = user {
+            if std::fs::symlink_metadata(&user).is_ok() {
                 return Some(user);
             }
         }
-        let system = Self::system_path();
-        if system.exists() {
-            return Some(system);
-        }
-        None
+        system.exists().then_some(system)
     }
 
     /// Get the runtime directory for ephemeral files (state, sockets)
@@ -1095,6 +1107,28 @@ mod tests {
             PathBuf::from("/etc/voxtype/config.toml")
         );
         assert_eq!(Config::SYSTEM_PATH, "/etc/voxtype/config.toml");
+    }
+
+    #[test]
+    fn a_dangling_user_config_link_is_used_instead_of_the_system_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("etc/config.toml");
+        std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+        std::fs::write(&system, "[hotkey]\nkey = \"F12\"\n").unwrap();
+        let user = dir.path().join("config.toml");
+
+        // No user config at all: the system config is the fallback.
+        assert_eq!(
+            Config::resolve_existing_in(Some(user.clone()), system.clone()),
+            Some(system.clone())
+        );
+
+        // A link to a file that is missing is still the user's config.
+        std::os::unix::fs::symlink(dir.path().join("unmounted/config.toml"), &user).unwrap();
+        assert_eq!(
+            Config::resolve_existing_in(Some(user.clone()), system.clone()),
+            Some(user)
+        );
     }
 
     #[test]

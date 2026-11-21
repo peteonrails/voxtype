@@ -38,6 +38,10 @@ impl Stowed {
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("XDG_RUNTIME_DIR", self.root.path().join("runtime"))
+            .env(
+                "VOXTYPE_TEST_SYSTEM_CONFIG",
+                self.root.path().join("etc/voxtype/config.toml"),
+            )
             .env("PATH", "");
         if let Some(config) = config {
             command.arg("--config").arg(config);
@@ -110,4 +114,81 @@ fn link_and_target_share_one_history_privacy_state() {
     assert_eq!(keys.len(), 1, "one config, one privacy key: {keys:?}");
     let generation = std::fs::read(keys[0].join("generation")).unwrap();
     assert_eq!(u64::from_le_bytes(generation.try_into().unwrap()), 2);
+}
+
+/// A link whose target is missing (a Stow tree that is not mounted) is still
+/// the user's config. Voxtype used to skip it and load the system config,
+/// so `config set` and `history pause` then tried to write that instead.
+#[test]
+fn a_dangling_link_is_the_users_config_even_with_a_system_config() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config/voxtype");
+    std::fs::create_dir_all(&config).unwrap();
+    let link = config.join("config.toml");
+    symlink(LINK, &link).unwrap();
+    let target = root.path().join("dotfiles/voxtype/config.toml");
+    assert!(!target.exists() && !target.parent().unwrap().exists());
+
+    // Stands in for /etc/voxtype/config.toml: present, and not the user's.
+    let etc = root.path().join("etc/voxtype");
+    std::fs::create_dir_all(&etc).unwrap();
+    let system = etc.join("config.toml");
+    let system_text = "# system config\n[hotkey]\nkey = \"F12\"\n";
+    std::fs::write(&system, system_text).unwrap();
+    std::fs::set_permissions(&system, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_voxtype"))
+            .env_clear()
+            .env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_DATA_HOME", root.path().join("data"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("runtime"))
+            .env("VOXTYPE_TEST_SYSTEM_CONFIG", &system)
+            .env("PATH", "")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    // Loading gives the defaults, not the system config's F12, and says why.
+    let get = run(&["config", "get", "hotkey.key"]);
+    let value = String::from_utf8_lossy(&get.stdout);
+    assert!(!value.contains("F12"), "loaded the system config: {value}");
+    let warning = String::from_utf8_lossy(&get.stderr);
+    assert!(
+        warning.contains(&link.display().to_string())
+            && warning.contains("does not exist")
+            && warning.contains("dotfiles/voxtype/config.toml"),
+        "{warning}"
+    );
+
+    // Saving creates the file the link names and leaves the link alone.
+    run(&["config", "set", "hotkey.key", "F13"]);
+    assert_eq!(std::fs::read_link(&link).unwrap(), Path::new(LINK));
+    assert!(std::fs::read_to_string(&target).unwrap().contains("F13"));
+
+    run(&["history", "pause"]);
+    assert_eq!(std::fs::read_link(&link).unwrap(), Path::new(LINK));
+    let saved = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        saved.contains("paused = true") && saved.contains("F13"),
+        "{saved}"
+    );
+
+    assert_eq!(std::fs::read_to_string(&system).unwrap(), system_text);
+    assert_eq!(
+        std::fs::read_dir(&etc).unwrap().count(),
+        1,
+        "nothing may be written beside the system config"
+    );
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755)).unwrap();
 }

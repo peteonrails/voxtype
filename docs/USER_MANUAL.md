@@ -642,7 +642,10 @@ voxtype history clear --before 2026-11-01 --yes
 intended destination before its delay expires: without a delay, a terminal
 command can type back into that terminal. Re-sending does not add another
 dictation. Copy and paste prefer `corrected_text`, including an intentional
-empty correction, then processed text, then the engine's original text.
+empty correction, then processed text, then the engine's original text. An
+entry with no text, including one whose correction is empty, is refused with
+a nonzero exit status ("no text to copy"), and the clipboard is left as it
+was.
 Corrections preserve the original fields rather than replacing them.
 
 #### Pause and privacy

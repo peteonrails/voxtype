@@ -108,3 +108,131 @@ fn history_view_json_is_noninteractive_and_uses_the_same_authoritative_entries()
     assert_eq!(value["entries"][0]["raw_text"], "um synthetic invoice");
     assert_eq!(value["enabled"], true);
 }
+
+/// A scratch PATH holding a fake `wl-copy` and `which`, plus fake typing
+/// tools, all of which log their arguments and stdin instead of touching
+/// the real clipboard or keyboard.
+struct FakeTools {
+    bin: std::path::PathBuf,
+    log: std::path::PathBuf,
+}
+
+impl FakeTools {
+    fn new(root: &std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("fake-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = root.join("fake-tools.log");
+        let write = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write("which", &format!("[ -x \"{}/$1\" ]", bin.display()));
+        for tool in [
+            "wl-copy", "wtype", "dotool", "ydotool", "eitype", "xclip", "xsel",
+        ] {
+            write(
+                tool,
+                &format!(
+                    "printf '%s %s <' \"{tool}\" \"$*\" >> \"{log}\"\ncommand -p cat >> \"{log}\"\nprintf '>\\n' >> \"{log}\"",
+                    log = log.display()
+                ),
+            );
+        }
+        Self { bin, log }
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+impl Fixture {
+    fn add(&self, edit: impl FnOnce(&mut HistoryEntry)) -> String {
+        let store = HistoryStore::open(self.root.path().join("data/voxtype/history")).unwrap();
+        let mut entry = HistoryEntry::new(chrono::Local::now());
+        edit(&mut entry);
+        store.append(&entry).unwrap();
+        entry.id
+    }
+
+    fn run_with_tools(&self, tools: &FakeTools, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_voxtype"))
+            .env_clear()
+            .env("HOME", self.root.path())
+            .env("XDG_DATA_HOME", self.root.path().join("data"))
+            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
+            .env("XDG_RUNTIME_DIR", self.root.path().join("runtime"))
+            .env("WAYLAND_DISPLAY", "voxtype-test-no-such-display")
+            .env("PATH", &tools.bin)
+            .args([
+                "--config",
+                self.root.path().join("config.toml").to_str().unwrap(),
+                "history",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+}
+
+#[test]
+fn copy_runs_the_clipboard_command_with_the_entry_text() {
+    let f = Fixture::new();
+    let tools = FakeTools::new(f.root.path());
+    let out = f.run_with_tools(&tools, &["copy", &f.id, "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["copied"], f.id);
+    assert!(
+        tools.log().contains("wl-copy") && tools.log().contains("<Synthetic invoice.>"),
+        "{}",
+        tools.log()
+    );
+}
+
+#[test]
+fn copy_and_paste_refuse_an_entry_with_no_text_and_touch_nothing() {
+    let f = Fixture::new();
+    let tools = FakeTools::new(f.root.path());
+    let corrected_empty = f.add(|e| {
+        e.raw_text = "um private thing".into();
+        e.text = "Private thing.".into();
+        e.set_outcome(Outcome::Delivered, None);
+        e.corrected_text = Some(String::new());
+    });
+    let blank = f.add(|e| e.set_outcome(Outcome::Empty, None));
+
+    for (id, why) in [
+        (&corrected_empty, "has an empty correction"),
+        (&blank, "has no text"),
+    ] {
+        for verb in ["copy", "paste"] {
+            let json = f.run_with_tools(&tools, &[verb, id, "--json"]);
+            assert!(!json.status.success(), "{verb} {id} reported success");
+            let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+            let error = value["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains(why) && error.contains(&format!("no text to {verb}")),
+                "{verb} {id}: {value}"
+            );
+            assert!(value.get("copied").is_none() && value.get("pasted").is_none());
+
+            let human = f.run_with_tools(&tools, &[verb, id]);
+            assert!(!human.status.success(), "{verb} {id} reported success");
+            assert!(
+                String::from_utf8_lossy(&human.stderr).contains(why),
+                "{}",
+                String::from_utf8_lossy(&human.stderr)
+            );
+        }
+    }
+    // The empty correction must not fall back to the original text, and no
+    // clipboard or typing command may have run.
+    assert_eq!(tools.log(), "", "a tool ran for an entry with no text");
+}
