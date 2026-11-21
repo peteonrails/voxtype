@@ -30,7 +30,7 @@ This document describes the macOS-specific architecture for Voxtype.
 │  └─────────────────────────────────────────────────────────────┘│
 │                                                                  │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    /tmp/voxtype/                            ││
+│  │                  $TMPDIR/voxtype/                           ││
 │  │  - state (idle/recording/transcribing)                      ││
 │  │  - pid (daemon process ID)                                  ││
 │  │  - voxtype.lock (prevents multiple instances)               ││
@@ -70,7 +70,7 @@ Swift/SwiftUI app that provides:
 **Key Files:**
 - `macos/VoxtypeMenubar/Sources/VoxtypeMenubarApp.swift` - App entry point
 - `macos/VoxtypeMenubar/Sources/MenuBarView.swift` - Menu dropdown UI
-- `macos/VoxtypeMenubar/Sources/VoxtypeStatusMonitor.swift` - Polls /tmp/voxtype/state
+- `macos/VoxtypeMenubar/Sources/VoxtypeStatusMonitor.swift` - Polls $TMPDIR/voxtype/state
 - `macos/VoxtypeMenubar/Sources/VoxtypeCLI.swift` - Runs voxtype CLI commands
 
 ### 3. VoxtypeSetup.app (Settings Application)
@@ -171,8 +171,8 @@ cp target/release/voxtype /Applications/Voxtype.app/Contents/MacOS/
 | Settings app | `/Applications/VoxtypeSetup.app` |
 | Config file | `~/Library/Application Support/voxtype/config.toml` |
 | Models | `~/Library/Application Support/voxtype/models/` |
-| State file | `/tmp/voxtype/state` |
-| PID file | `/tmp/voxtype/pid` |
-| Lock file | `/tmp/voxtype/voxtype.lock` |
+| State file | `$TMPDIR/voxtype/state` |
+| PID file | `$TMPDIR/voxtype/pid` |
+| Lock file | `$TMPDIR/voxtype/voxtype.lock` |
 | LaunchAgent | `~/Library/LaunchAgents/io.voxtype.daemon.plist` |
 | Logs | `~/Library/Logs/voxtype/` (if enabled) |

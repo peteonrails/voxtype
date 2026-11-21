@@ -432,10 +432,18 @@ impl Config {
 
     /// Get the runtime directory for ephemeral files (state, sockets)
     pub fn runtime_dir() -> PathBuf {
-        // Use XDG_RUNTIME_DIR if available, otherwise fall back to /tmp
-        std::env::var("XDG_RUNTIME_DIR")
+        Self::runtime_dir_from(std::env::var("XDG_RUNTIME_DIR").ok())
+    }
+
+    /// Use XDG_RUNTIME_DIR if available, otherwise fall back to the per-user
+    /// temp dir. macOS never sets XDG_RUNTIME_DIR, and a fixed /tmp/voxtype
+    /// is shared by every account on the Mac: /tmp is sticky, so one user's
+    /// lock files block the daemon and menubar of every other user.
+    /// `temp_dir()` is `$TMPDIR` (per user on macOS), else /tmp on Linux.
+    fn runtime_dir_from(xdg_runtime_dir: Option<String>) -> PathBuf {
+        xdg_runtime_dir
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .unwrap_or_else(std::env::temp_dir)
             .join("voxtype")
     }
 
@@ -1128,6 +1136,19 @@ mod tests {
         assert_eq!(
             Config::resolve_existing_in(Some(user.clone()), system.clone()),
             Some(user)
+        );
+    }
+
+    #[test]
+    fn runtime_dir_prefers_xdg_and_falls_back_to_per_user_temp_dir() {
+        assert_eq!(
+            Config::runtime_dir_from(Some("/run/user/1000".to_string())),
+            PathBuf::from("/run/user/1000/voxtype")
+        );
+        // Not a hardcoded /tmp/voxtype: that is shared by every macOS account.
+        assert_eq!(
+            Config::runtime_dir_from(None),
+            std::env::temp_dir().join("voxtype")
         );
     }
 
