@@ -579,6 +579,153 @@ pub fn meeting_check(config: &Config, has_tool: impl Fn(&str) -> bool) -> Option
     })
 }
 
+/// What `voxtype doctor` saw of Omarchy's local text models.
+#[derive(Debug, Clone, Default)]
+pub struct OmarchyObservation {
+    /// `omarchy-models` (or `omarchy`) was found.
+    pub detected: bool,
+    /// The settings that choose Omarchy's model, e.g. `[meeting.summary] backend`.
+    pub used_by: Vec<&'static str>,
+    /// The running model (`recipe at endpoint`), or why there is none.
+    pub model: Option<Result<String, String>>,
+    /// The key file, or why it cannot be opened.
+    pub key: Option<Result<PathBuf, String>>,
+    /// Whether the model's endpoint answered `/v1/models` with the key.
+    pub endpoint: Option<Result<(), String>>,
+}
+
+/// Omarchy's local model: found, running, key readable, endpoint answering.
+/// Shown on an Omarchy install, or when config chooses Omarchy anywhere.
+pub fn omarchy_checks(obs: &OmarchyObservation) -> Vec<Check> {
+    let used = !obs.used_by.is_empty();
+    if !obs.detected && !used {
+        return Vec::new();
+    }
+    let used_by = obs.used_by.join(" and ");
+    let mut checks = Vec::new();
+    if !obs.detected {
+        checks.push(Check::error(
+            "omarchy.detected",
+            format!("Omarchy's model command was not found, but {used_by} = \"omarchy\""),
+            "Choose another backend there, e.g. `voxtype config set meeting.summary.backend disabled`",
+        ));
+        return checks;
+    }
+    checks.push(Check::ok(
+        "omarchy.detected",
+        if used {
+            format!("Omarchy detected; {used_by} uses its local model")
+        } else {
+            "Omarchy detected; voxtype is not set to use its local model".to_string()
+        },
+    ));
+    match &obs.model {
+        Some(Ok(model)) => checks.push(Check::ok(
+            "omarchy.model",
+            format!("Omarchy text model running: {model}"),
+        )),
+        Some(Err(why)) if used => checks.push(Check::warn(
+            "omarchy.model",
+            why.clone(),
+            "Start a text model with `omarchy models start <recipe>` or from the local models \
+             panel. Until then voxtype falls back as if Omarchy were not chosen.",
+        )),
+        Some(Err(_)) | None => checks.push(Check::ok(
+            "omarchy.model",
+            "No Omarchy text model is running",
+        )),
+    }
+    match &obs.key {
+        Some(Ok(path)) => checks.push(Check::ok(
+            "omarchy.key",
+            format!("Omarchy API key file is readable ({})", path.display()),
+        )),
+        Some(Err(why)) if used => checks.push(Check::warn(
+            "omarchy.key",
+            why.clone(),
+            "Omarchy writes the key when a model is first set up (`omarchy models use best text`)",
+        )),
+        _ => {}
+    }
+    match &obs.endpoint {
+        Some(Ok(())) => checks.push(Check::ok(
+            "omarchy.endpoint",
+            "Omarchy model endpoint answers with the key",
+        )),
+        Some(Err(why)) => checks.push(Check::warn(
+            "omarchy.endpoint",
+            why.clone(),
+            "Restart the model from Omarchy's local models panel, or see `omarchy models status`",
+        )),
+        None => {}
+    }
+    checks
+}
+
+/// Look at Omarchy's local model the way voxtype uses it. Runs
+/// `omarchy-models status --json` and one `/v1/models` request; never
+/// starts a model or runs one.
+fn observe_omarchy(config: &Config) -> OmarchyObservation {
+    use crate::llm::{omarchy, Provider};
+    let mut used_by = Vec::new();
+    let summary = config.meeting.summary.llm();
+    if summary
+        .as_ref()
+        .is_some_and(|c| c.provider == Provider::Omarchy)
+    {
+        used_by.push("[meeting.summary] backend");
+    }
+    let cleanup = config.output.post_process.as_ref().and_then(|p| p.llm());
+    if cleanup
+        .as_ref()
+        .is_some_and(|c| c.provider == Provider::Omarchy)
+    {
+        used_by.push("[output.post_process] backend");
+    }
+    let env = omarchy::OmarchyEnv::from_process();
+    let detected = env.models_command.is_some() || omarchy::is_omarchy_install();
+    if !detected {
+        return OmarchyObservation {
+            detected,
+            used_by,
+            ..Default::default()
+        };
+    }
+    let wanted = summary
+        .into_iter()
+        .chain(cleanup)
+        .find(|c| c.provider == Provider::Omarchy)
+        .and_then(|c| c.model);
+    let key = Some(omarchy::key_readable(&env).map_err(|e| e.to_string()));
+    let found = omarchy::discover(&env, wanted.as_deref());
+    let endpoint = found.as_ref().ok().map(|e| {
+        crate::llm::list_models(e, std::time::Duration::from_secs(3))
+            .map_err(|err| err.to_string())
+            .and_then(|ids| {
+                if ids.contains(&e.model) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} answers but does not list {}",
+                        e.label(),
+                        e.model
+                    ))
+                }
+            })
+    });
+    OmarchyObservation {
+        detected,
+        used_by,
+        model: Some(
+            found
+                .map(|e| format!("{} at {}", e.model, e.base_url))
+                .map_err(|e| e.to_string()),
+        ),
+        key,
+        endpoint,
+    }
+}
+
 /// The configured capture device, matched the way the daemon matches it
 /// (exact, case-insensitive, then substring). `devices` is `None` when the
 /// probe failed.
@@ -986,6 +1133,13 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     if linux {
         checks.extend(meeting_check(config, on_path));
     }
+    if scope == Scope::Full && linux {
+        let config = config.clone();
+        let observed = tokio::task::spawn_blocking(move || observe_omarchy(&config))
+            .await
+            .unwrap_or_default();
+        checks.extend(omarchy_checks(&observed));
+    }
 
     if let Some(unit) = &unit {
         checks.push(systemd_unit_check(
@@ -1019,6 +1173,7 @@ fn heading(id: &str) -> &'static str {
         "notifications" => "Notifications",
         "osd" => "OSD",
         "meeting" => "Meeting mode",
+        "omarchy" => "Omarchy local AI",
         "service" => "Service",
         "agents" => "Coding agents",
         _ => "Other",
@@ -1913,5 +2068,64 @@ mod tests {
         assert!(v["checks"][0].get("fix").is_none());
         assert_eq!(v["checks"][1]["id"], "vad.model");
         assert_eq!(v["checks"][1]["fix"], "Run: voxtype setup vad");
+    }
+
+    #[test]
+    fn omarchy_checks_report_the_four_lines() {
+        // Not Omarchy and not chosen: nothing to say.
+        assert!(omarchy_checks(&OmarchyObservation::default()).is_empty());
+
+        let healthy = OmarchyObservation {
+            detected: true,
+            used_by: vec!["[meeting.summary] backend"],
+            model: Some(Ok("qwen at http://127.0.0.1:11435/v1".into())),
+            key: Some(Ok(PathBuf::from("/home/u/.config/omarchy/agent-local/key"))),
+            endpoint: Some(Ok(())),
+        };
+        let checks = omarchy_checks(&healthy);
+        let ids: Vec<&str> = checks.iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "omarchy.detected",
+                "omarchy.model",
+                "omarchy.key",
+                "omarchy.endpoint"
+            ]
+        );
+        assert!(checks.iter().all(|c| c.severity == Severity::Ok));
+        assert_eq!(heading("omarchy.model"), "Omarchy local AI");
+
+        // Chosen but nothing running: a warning that says how to start one.
+        let stopped = OmarchyObservation {
+            model: Some(Err("No Omarchy text model is running".into())),
+            endpoint: None,
+            ..healthy.clone()
+        };
+        let model = omarchy_checks(&stopped)
+            .into_iter()
+            .find(|c| c.id == "omarchy.model")
+            .unwrap();
+        assert_eq!(model.severity, Severity::Warn);
+        assert!(model.fix.unwrap().contains("omarchy models start"));
+
+        // Not chosen: a stopped model is no problem.
+        let unused = OmarchyObservation {
+            used_by: Vec::new(),
+            ..stopped
+        };
+        assert!(omarchy_checks(&unused)
+            .iter()
+            .all(|c| c.severity == Severity::Ok));
+
+        // Chosen without Omarchy: an error.
+        let missing = OmarchyObservation {
+            detected: false,
+            used_by: vec!["[output.post_process] backend"],
+            ..Default::default()
+        };
+        let checks = omarchy_checks(&missing);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].severity, Severity::Error);
     }
 }

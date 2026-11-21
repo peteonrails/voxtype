@@ -455,6 +455,8 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.output.modifier_release_timeout_ms = ms;
     }
 
+    apply_llm_overrides(config, cli);
+
     // VAD overrides
     if cli.vad {
         config.vad.enabled = true;
@@ -481,4 +483,50 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     }
 
     top_level_model
+}
+
+/// `--post-process-*` and `--summary-*` (and their VOXTYPE_ variables).
+fn apply_llm_overrides(config: &mut config::Config, cli: &Cli) {
+    let any_post_process = cli.post_process_backend.is_some()
+        || cli.post_process_model.is_some()
+        || cli.post_process_url.is_some()
+        || cli.post_process_api_key_file.is_some()
+        || cli.post_process_prompt.is_some();
+    if any_post_process {
+        let pp = config
+            .output
+            .post_process
+            .get_or_insert_with(Default::default);
+        if let Some(backend) = &cli.post_process_backend {
+            pp.backend = backend.clone();
+        }
+        if let Some(model) = &cli.post_process_model {
+            pp.model = Some(model.clone());
+        }
+        if let Some(url) = &cli.post_process_url {
+            pp.url = Some(url.clone());
+        }
+        if let Some(file) = &cli.post_process_api_key_file {
+            pp.api_key_file = Some(file.clone());
+        }
+        if let Some(prompt) = &cli.post_process_prompt {
+            pp.prompt = Some(prompt.clone());
+        }
+    }
+    let summary = &mut config.meeting.summary;
+    if let Some(backend) = &cli.summary_backend {
+        summary.backend = backend.clone();
+    }
+    if let Some(model) = &cli.summary_omarchy_model {
+        summary.omarchy_model = Some(model.clone());
+    }
+    if let Some(url) = &cli.summary_openai_url {
+        summary.openai_url = Some(url.clone());
+    }
+    if let Some(model) = &cli.summary_openai_model {
+        summary.openai_model = Some(model.clone());
+    }
+    if let Some(file) = &cli.summary_openai_api_key_file {
+        summary.openai_api_key_file = Some(file.clone());
+    }
 }

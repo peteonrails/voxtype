@@ -329,7 +329,9 @@ const PASTE_KEY_CHOICES: &[&str] = &["auto", "shift+insert", "ctrl+v", "ctrl+shi
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
 const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
-const SUMMARY_BACKEND_CHOICES: &[&str] = &["agent", "local", "remote", "disabled"];
+const SUMMARY_BACKEND_CHOICES: &[&str] =
+    &["agent", "local", "remote", "disabled", "omarchy", "openai"];
+const POST_PROCESS_BACKEND_CHOICES: &[&str] = &["command", "omarchy", "openai"];
 const ASSISTANT_AGENT_CHOICES: &[&str] = crate::meeting::assistant::SUPPORTED_AGENTS;
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
@@ -1272,6 +1274,51 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Output",
         "Require an edit list",
         "Accept only a JSON list of exact, unambiguous edits from the post-process command.",
+    ),
+    spec(
+        "output.post_process.backend",
+        "output.post_process",
+        "backend",
+        closed(POST_PROCESS_BACKEND_CHOICES),
+        "Output",
+        "Post-process backend",
+        "Who cleans up each dictation: command (the post-process command), omarchy (the text model Omarchy runs on this machine) or openai (an OpenAI-compatible server). The model backends add roughly 2 to 6 seconds to every dictation; on failure the original text is used.",
+    ),
+    spec(
+        "output.post_process.model",
+        "output.post_process",
+        "model",
+        KeyType::String,
+        "Output",
+        "Post-process model",
+        "Model id for the openai backend, or the Omarchy recipe for the omarchy backend (unset: the last started text model that is running).",
+    ),
+    spec(
+        "output.post_process.url",
+        "output.post_process",
+        "url",
+        KeyType::String,
+        "Output",
+        "Post-process server URL",
+        "Base URL of the server for the openai backend, including /v1.",
+    ),
+    spec(
+        "output.post_process.api_key_file",
+        "output.post_process",
+        "api_key_file",
+        KeyType::String,
+        "Output",
+        "Post-process key file",
+        "A file holding the openai backend's API key. The key never goes in config.toml.",
+    ),
+    spec(
+        "output.post_process.prompt",
+        "output.post_process",
+        "prompt",
+        KeyType::String,
+        "Output",
+        "Post-process prompt",
+        "Instructions for the model backends. Unset uses a built-in prompt that fixes errors and keeps the wording.",
     ),
     // -- Text ---------------------------------------------------------------
     spec(
@@ -2544,7 +2591,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(SUMMARY_BACKEND_CHOICES),
         "Meeting",
         "Summary backend",
-        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama) or remote (an API). disabled, the default, also uses the assistant.",
+        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama), remote (an API), omarchy (the text model Omarchy runs on this machine, which also answers Ask without an agent) or openai (any OpenAI-compatible server). disabled, the default, also uses the assistant.",
     ),
     spec(
         "meeting.summary.ollama_url",
@@ -2581,6 +2628,42 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting",
         "Remote summary API key",
         "API key for the remote summary backend.",
+    ),
+    spec(
+        "meeting.summary.omarchy_model",
+        "meeting.summary",
+        "omarchy_model",
+        KeyType::String,
+        "Meeting",
+        "Omarchy model",
+        "Omarchy recipe the omarchy backend uses. Unset uses the last started text model that is running. Voxtype never starts a model.",
+    ),
+    spec(
+        "meeting.summary.openai_url",
+        "meeting.summary",
+        "openai_url",
+        KeyType::String,
+        "Meeting",
+        "OpenAI-compatible URL",
+        "Base URL of the server for the openai backend, including /v1, e.g. http://127.0.0.1:8080/v1. Only a server on this machine answers Ask.",
+    ),
+    spec(
+        "meeting.summary.openai_model",
+        "meeting.summary",
+        "openai_model",
+        KeyType::String,
+        "Meeting",
+        "OpenAI-compatible model",
+        "Model id the openai backend asks for.",
+    ),
+    spec(
+        "meeting.summary.openai_api_key_file",
+        "meeting.summary",
+        "openai_api_key_file",
+        KeyType::String,
+        "Meeting",
+        "OpenAI-compatible key file",
+        "A file holding the openai backend's API key. The key never goes in config.toml.",
     ),
     spec(
         "meeting.actions.remind_in_mins",
@@ -3370,6 +3453,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.post_process.trim" => json!(pp().trim),
         "output.post_process.fallback_on_empty" => json!(pp().fallback_on_empty),
         "output.post_process.edit_list" => json!(pp().edit_list),
+        "output.post_process.backend" => json!(pp().backend),
+        "output.post_process.model" => opt_str(pp().model.as_ref()),
+        "output.post_process.url" => opt_str(pp().url.as_ref()),
+        "output.post_process.api_key_file" => opt_str(pp().api_key_file.as_ref()),
+        "output.post_process.prompt" => opt_str(pp().prompt.as_ref()),
 
         "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
         "text.lard_model_path" => json!(cfg.text.lard_model_path),
@@ -3553,6 +3641,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.summary.ollama_model" => json!(cfg.meeting.summary.ollama_model),
         "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
         "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
+        "meeting.summary.omarchy_model" => opt_str(cfg.meeting.summary.omarchy_model.as_ref()),
+        "meeting.summary.openai_url" => opt_str(cfg.meeting.summary.openai_url.as_ref()),
+        "meeting.summary.openai_model" => opt_str(cfg.meeting.summary.openai_model.as_ref()),
+        "meeting.summary.openai_api_key_file" => {
+            opt_str(cfg.meeting.summary.openai_api_key_file.as_ref())
+        }
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
         "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
         "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {

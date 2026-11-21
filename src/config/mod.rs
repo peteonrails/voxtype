@@ -28,7 +28,9 @@ mod vad;
 mod whisper;
 
 pub use audio::{AudioConfig, AudioFeedbackConfig};
-pub use default_config::{default_config_content, DEFAULT_CONFIG};
+pub use default_config::{
+    default_config_content, generated_config_content, new_config_content, DEFAULT_CONFIG,
+};
 pub use engines::{
     openvino_driver_packages, CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig,
     OmnilingualConfig, OpenVinoConfig, ParaformerConfig, ParakeetConfig, ParakeetModelType,
