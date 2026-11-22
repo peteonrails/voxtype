@@ -165,6 +165,13 @@ Vulkan variants ship a worker that can use Vulkan, so the backend is set with
 there, `sudo voxtype setup gpu --enable` switches to the Vulkan variant and its
 worker.
 
+A `gguf_backend` the active build's worker lacks, such as `vulkan` on the
+avx2, avx512 or baseline build, stops the model from loading. `voxtype config
+validate-selection` and `voxtype doctor` report it with both fixes: switch to
+the Vulkan build, or set `<engine>.gguf_backend` to `auto`. The daemon explains
+it in a notification at startup and keeps running, with the tray showing an
+error, until a recording loads the model.
+
 ## Parakeet is compiled but startup requests an unavailable ONNX feature
 
 Check the exact model with `voxtype config get parakeet.model`. A name such as
