@@ -405,6 +405,9 @@ fi
 - Release .deb and .rpm, the source .rpm and install-arch.sh lead their
   setup steps with compositor keybindings; the input group is only the
   fallback for the built-in hotkey
+- A model that fails to load at startup no longer stops the daemon and
+  restart-loops it: the tray, status, meetings and history keep working,
+  the tray shows an error, and the next recording loads the model again
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
