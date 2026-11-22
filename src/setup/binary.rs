@@ -1321,6 +1321,7 @@ mod tests {
         assert_eq!(r.onnx, Some(Variant::OnnxAvx512));
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn no_avx2() -> Cpu {
         Cpu {
             avx2: false,
