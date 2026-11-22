@@ -24,6 +24,9 @@ Item {
   property var engineAvailability: ({})
 
   property string errorText: ""
+  // errorText is from switching to an engine with no model, not from a model
+  // pick, so the summary names the engine.
+  property bool errorIsSwitch: false
   property bool showDetails: false
   property bool downloadBusy: false
   onErrorTextChanged: showDetails = false
@@ -96,7 +99,7 @@ Item {
 
           Text {
             width: parent.width
-            text: "Browse models without changing your configuration. Download adds weights only. GGUF Use saves the selected model and engine together; other engines can select models while configured. Restart separately to apply."
+            text: "Browse an engine without changing your configuration. Download adds weights only. Use saves the engine together with the model you pick, or on its own for an engine with no model to download. Restart separately to apply."
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
@@ -126,9 +129,13 @@ Item {
       }
 
       Text {
+        objectName: "engineErrorText"
         visible: root.errorText !== ""
         width: parent.width
-        text: root.showDetails ? root.errorText : "Could not use this model. Configuration unchanged. Check details, then retry or choose another installed model."
+        text: root.showDetails ? root.errorText
+          : root.errorIsSwitch
+            ? "Could not switch to this engine. Configuration unchanged. Check details, then retry or choose another engine."
+            : "Could not use this model. Configuration unchanged. Check details, then retry or choose another installed model."
         color: ShellTheme.Color.urgent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption

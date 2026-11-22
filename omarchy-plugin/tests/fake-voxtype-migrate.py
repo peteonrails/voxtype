@@ -26,8 +26,17 @@ state["extra_engines"] maps further engines ("omnilingual", "dolphin", ...) to
 their installed models: each gets an engine choice, a compiled `info engines`
 row, a `<engine>.model` schema key and an `info models` catalog, and
 `config select-model` records its choice in state["extra_models"]. Like the
-real CLI, select-model accepts every engine `config set engine` offers and
-refuses `--language` for anything but gguf.
+real CLI, select-model accepts the engines with a model catalog
+(model_catalog::CATALOG_ENGINES), and refuses `--language` for anything but
+gguf. state["select_model_fail"] is a line it prints before exiting 2 instead
+of selecting.
+state["cloud_engines"] lists engines with no model to download ("deepgram"):
+each gets an engine choice, a compiled `info engines` row and its
+`<engine>.model` (a plain string) and `<engine>.language` schema keys, and no
+`info models` entry, as the real CLI reports Deepgram. `config set engine`
+takes any offered engine and records it in state["engine"], or with
+state["set_engine_fail"] prints that line and exits 2, changing nothing;
+select-model refuses a cloud engine with the real CLI's message.
 
 state["info_fail"] maps an `info` reader ("engines", "devices", "styles") to
 the stderr it should fail with (exit 1).
@@ -108,9 +117,13 @@ def status(state):
 
 
 FRONTENDS = ["auto", "gtk4", "native", "quickshell"]
-# config_set::ENGINE_NAMES: what the real select-model accepts.
+# model_catalog::CATALOG_ENGINES: the engines the real select-model accepts
+# (select_model_in checks this list).
 SELECTABLE = ("whisper", "parakeet", "moonshine", "sensevoice", "paraformer", "dolphin", "omnilingual",
               "cohere", "gguf", "openvino")
+# Engines `config set engine` takes that have no model catalog; select-model
+# refuses them (select_model_in), with the message main() prints.
+CLOUD = ("soniox", "deepgram")
 SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads", "meeting.my_name", "meeting.view",
             "meeting.audio.echo_guard"}
 
@@ -145,8 +158,9 @@ def schema(state):
         model_type["onnx_model_only"] = True
     engine = state.get("engine", "parakeet")
     extra = state.get("extra_engines", {})
+    cloud = state.get("cloud_engines", [])
     choices = ["whisper", "parakeet"] + (["gguf"] if "gguf_model" in state else []) \
-        + (["cohere"] if "cohere_models" in state else []) + list(extra)
+        + (["cohere"] if "cohere_models" in state else []) + list(extra) + list(cloud)
     keys = [
         {"key": "engine", "type": "enum", "choices": choices, "section": "Engine",
          "label": "Transcription engine", "description": "", "value": engine,
@@ -176,6 +190,17 @@ def schema(state):
         keys.append({"key": name + ".model", "type": "dynamic_enum", "source": "models", "section": "Engine",
                      "label": "Model", "description": "", "value": chosen, "file_value": chosen,
                      "engine": name, "compiled": True, "restart_required": True})
+    for name in cloud:
+        # As the real schema lists deepgram.*: the model is a plain string,
+        # not a catalog picker, and the language an open enum.
+        keys += [
+            {"key": name + ".model", "type": "string", "section": "Engine", "label": "Model",
+             "description": "", "value": "nova-3", "file_value": None, "engine": name, "compiled": True,
+             "restart_required": True},
+            {"key": name + ".language", "type": "enum", "choices": ["en", "auto", "multi"], "open": True,
+             "section": "Engine", "label": "Language", "description": "", "value": "en", "file_value": None,
+             "engine": name, "compiled": True, "restart_required": True},
+        ]
     if "gguf_model" in state:
         keys.append({"key": "gguf.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
                      "label": "Model", "description": "", "value": state["gguf_model"],
@@ -412,6 +437,7 @@ def main():
         if "cohere_models" in state:
             engines.append({"name": "cohere", "compiled": True})
         engines += [{"name": name, "compiled": True} for name in state.get("extra_engines", {})]
+        engines += [{"name": name, "compiled": True} for name in state.get("cloud_engines", [])]
         print(json.dumps(engines))
     elif args[:3] == ["info", "devices", "--json"]:
         print(json.dumps([{"name": "Built-in Microphone", "default": True}]))
@@ -426,6 +452,15 @@ def main():
         print(json.dumps({"my_name": mine, "suggestion": None if mine else state["my_name_suggestion"]}))
     elif args[:2] == ["config", "validate-selection"]:
         return 0
+    elif args[:3] == ["config", "set", "engine"] and len(args) == 4:
+        if args[3] not in schema(state)["keys"][0]["choices"]:
+            print("error: unknown engine '" + args[3] + "'", file=sys.stderr)
+            return 2
+        if state.get("set_engine_fail"):
+            print(state["set_engine_fail"], file=sys.stderr)
+            return 2
+        state["engine"] = args[3]
+        save(state)
     elif args[:2] in (["config", "set"], ["config", "unset"]) and len(args) >= 3 and args[2] in SETTABLE:
         key = args[2]
         values = state.setdefault("values", {})
@@ -466,8 +501,15 @@ def main():
         print(json.dumps({"class": "idle"}))
     elif args[:2] == ["config", "select-model"] and len(args) >= 4:
         engine, model = args[2], args[3]
+        if engine in CLOUD:
+            print("Error: select-model selects a downloaded model, and " + engine + " has none. Use `voxtype "
+                  "config set engine " + engine + "`. Config unchanged.", file=sys.stderr)
+            return 2
         if engine not in SELECTABLE or ("--language" in args and engine != "gguf"):
             print("error: select-model rejected " + " ".join(args[2:]), file=sys.stderr)
+            return 2
+        if state.get("select_model_fail"):
+            print(state["select_model_fail"], file=sys.stderr)
             return 2
         state["engine"] = engine
         if engine in state.get("extra_engines", {}):
