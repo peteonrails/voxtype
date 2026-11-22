@@ -1428,7 +1428,7 @@ remote_send_auto_language = true
 
 Path to the `whisper-cli` binary. Only used when `backend = "cli"`.
 
-If not specified, voxtype searches for `whisper-cli` or `whisper` in:
+If not specified, voxtype searches for `whisper-cli` in the places below. It never uses a program named plain `whisper`: that name belongs to OpenAI's Python CLI, which voxtype cannot drive.
 1. Your `$PATH`
 2. Common system locations (`/usr/local/bin`, `/usr/bin`)
 3. Current directory
