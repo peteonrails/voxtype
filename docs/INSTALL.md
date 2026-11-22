@@ -85,8 +85,8 @@ For the GTK4 OSD frontend, additionally install `gtk4` + `gtk4-layer-shell`.
 Pick your distro from the list below. The fastest path on each:
 
 - **Arch:** `paru -S voxtype-bin`
-- **Debian/Ubuntu:** `sudo apt install ./voxtype_1.1.1-1_amd64.deb`
-- **Fedora:** `sudo dnf install ./voxtype-1.1.1-1.x86_64.rpm`
+- **Debian/Ubuntu:** `sudo apt install ./voxtype_1.3.1-1_amd64.deb`
+- **Fedora:** `sudo dnf install ./voxtype-1.3.1-1.x86_64.rpm`
 - **macOS:** `brew install --cask peteonrails/voxtype/voxtype`
 - **NixOS:** `nix profile install github:peteonrails/voxtype#vulkan`
 - **AppImage:** not currently published; see [available alternatives](#appimage).
@@ -190,8 +190,8 @@ tuning, and rebuild instructions.
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
 
 ```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype_1.1.1-1_amd64.deb
-sudo apt install ./voxtype_1.1.1-1_amd64.deb
+wget https://github.com/peteonrails/voxtype/releases/download/v1.3.1/voxtype_1.3.1-1_amd64.deb
+sudo apt install ./voxtype_1.3.1-1_amd64.deb
 ```
 
 Recommended optional packages:
@@ -207,8 +207,8 @@ The .deb ships every Linux binary variant (baseline for pre-AVX2 CPUs, avx2, avx
 Requires Fedora 40+ (glibc 2.39+).
 
 ```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype-1.1.1-1.x86_64.rpm
-sudo dnf install ./voxtype-1.1.1-1.x86_64.rpm
+wget https://github.com/peteonrails/voxtype/releases/download/v1.3.1/voxtype-1.3.1-1.x86_64.rpm
+sudo dnf install ./voxtype-1.3.1-1.x86_64.rpm
 ```
 
 Recommended optional packages:
@@ -228,7 +228,7 @@ brew install --cask peteonrails/voxtype/voxtype
 voxtype configure
 ```
 
-Or download `voxtype-1.1.1-macos-universal.dmg` from the [latest release](https://github.com/peteonrails/voxtype/releases/latest). First launch opens a setup wizard that walks you through accessibility permissions, model download, and the FN-key hotkey.
+Or download `voxtype-1.3.1-macos-universal.dmg` from the [latest release](https://github.com/peteonrails/voxtype/releases/latest). First launch opens a setup wizard that walks you through accessibility permissions, model download, and the FN-key hotkey.
 
 ### NixOS
 
@@ -236,14 +236,14 @@ A flake ships every variant:
 
 ```bash
 # Imperative install
-nix profile install github:peteonrails/voxtype/v1.1.1#vulkan
+nix profile install github:peteonrails/voxtype/v1.3.1#vulkan
 
 # Available outputs: default, vulkan, rocm, onnx, onnx-cuda, onnx-migraphx,
 # osd-gtk4, osd-native, meetings-gtk4
-nix build github:peteonrails/voxtype/v1.1.1#osd-gtk4
+nix build github:peteonrails/voxtype/v1.3.1#osd-gtk4
 
 # Or pin in your flake inputs
-inputs.voxtype.url = "github:peteonrails/voxtype/v1.1.1";
+inputs.voxtype.url = "github:peteonrails/voxtype/v1.3.1";
 ```
 
 Each voxtype package includes the GGUF worker, the Quickshell QML tree (the OSD and the Voxtype Meetings view), the Voxtype Configuration and Voxtype Meetings desktop entries, and the `voxtype` icon. The GTK4 meetings window, which `voxtype meeting view` opens on desktops without Quickshell, is its own output, `meetings-gtk4`; install it beside the voxtype package so the daemon finds it on `PATH`. The wrapper puts the typing and clipboard tools on `PATH`, and appends ffmpeg, the PulseAudio client tools (`parec`, `pactl`, `paplay`), xdg-utils and bubblewrap for the meeting features, plus curl for model downloads and `which` for the output driver probes, so the system's own copies take precedence when present.
@@ -262,14 +262,14 @@ packages, so install is manual:
 
 ```bash
 # Whisper engine, CPU-only
-curl -L https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype-1.1.1-linux-aarch64-cpu \
+curl -L https://github.com/peteonrails/voxtype/releases/download/v1.3.1/voxtype-1.3.1-linux-aarch64-cpu \
   -o /tmp/voxtype
 chmod 755 /tmp/voxtype
 sudo mv /tmp/voxtype /usr/local/bin/voxtype
 voxtype --version
 
 # Or, for the ONNX engines (Parakeet, Moonshine, SenseVoice, Paraformer, etc.)
-curl -L https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype-1.1.1-linux-aarch64-onnx \
+curl -L https://github.com/peteonrails/voxtype/releases/download/v1.3.1/voxtype-1.3.1-linux-aarch64-onnx \
   -o /tmp/voxtype
 chmod 755 /tmp/voxtype
 sudo mv /tmp/voxtype /usr/local/bin/voxtype
