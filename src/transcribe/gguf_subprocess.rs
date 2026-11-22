@@ -12,7 +12,8 @@
 //! - The worker is long-lived and keeps the model resident across recordings.
 //! - A worker that dies is replaced on the next `prepare()` or `transcribe()`.
 
-use super::Transcriber;
+use super::lines::{lines_from_words, TimedWord};
+use super::{TimedSegment, Transcriber};
 use crate::config::{CohereConfig, Config, GgufConfig, ParakeetConfig};
 use crate::error::TranscribeError;
 use std::ffi::OsStr;
@@ -165,6 +166,7 @@ impl GgufSubprocessTranscriber {
             ))
         })?;
         if line.trim() == READY_SIGNAL {
+            self.publish_acceleration(child.id());
             return Ok(Worker {
                 child,
                 stdin,
@@ -193,6 +195,21 @@ impl GgufSubprocessTranscriber {
             }))
     }
 
+    /// Publish what the worker bound for `voxtype info accel`. The worker
+    /// wrote its report before READY; the daemon's journal never sees it,
+    /// because it logs under its own PID.
+    fn publish_acceleration(&self, worker_pid: u32) {
+        let Ok(config) = serde_json::from_str::<serde_json::Value>(&self.config_json) else {
+            return;
+        };
+        let (Some(model), Some(backend)) =
+            (config["model"].as_str(), config["gguf_backend"].as_str())
+        else {
+            return;
+        };
+        crate::setup::accel::publish_gguf_worker(self.engine, model, backend, worker_pid);
+    }
+
     /// One request. The error side carries whether the worker is still usable:
     /// a failure it reported cleanly leaves it serving, while a broken pipe or
     /// an unreadable reply means it has to be replaced.
@@ -200,7 +217,7 @@ impl GgufSubprocessTranscriber {
         &self,
         worker: &mut Worker,
         samples: &[f32],
-    ) -> Result<String, (TranscribeError, Health)> {
+    ) -> Result<Reply, (TranscribeError, Health)> {
         let broken = |e: TranscribeError| (e, Health::Broken);
         let pipe = |e: std::io::Error| {
             broken(TranscribeError::InferenceFailed(format!(
@@ -230,7 +247,7 @@ impl GgufSubprocessTranscriber {
             )))
         })?;
         if response["ok"].as_bool() == Some(true) {
-            return Ok(response["text"].as_str().unwrap_or_default().to_string());
+            return Ok(Reply::from_json(&response));
         }
         Err(match protocol_error(&line) {
             Some(e) => (e, Health::Serving),
@@ -243,6 +260,10 @@ impl GgufSubprocessTranscriber {
 }
 
 impl Transcriber for GgufSubprocessTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn prepare(&self) {
         let Ok(mut guard) = self.lock() else { return };
         let alive = guard
@@ -258,15 +279,28 @@ impl Transcriber for GgufSubprocessTranscriber {
     }
 
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        Ok(self.request(samples)?.text)
+    }
+
+    /// A line per sentence from the worker's word times when it sends them
+    /// (Parakeet GGUF in one pass); otherwise, from Cohere's GGUF, a windowed
+    /// pass or a worker that predates word times, one line over the clip.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        Ok(self.request(samples)?.lines(samples.len() as f32 / 16000.0))
+    }
+}
+
+impl GgufSubprocessTranscriber {
+    fn request(&self, samples: &[f32]) -> Result<Reply, TranscribeError> {
         if samples.is_empty() {
-            return Ok(String::new());
+            return Ok(Reply::default());
         }
         let mut guard = self.lock()?;
         if guard.is_none() {
             *guard = Some(self.spawn()?);
         }
         match self.run(guard.as_mut().expect("worker present"), samples) {
-            Ok(text) => Ok(text),
+            Ok(reply) => Ok(reply),
             Err((e, health)) => {
                 if health == Health::Broken {
                     *guard = None;
@@ -274,6 +308,56 @@ impl Transcriber for GgufSubprocessTranscriber {
                 Err(e)
             }
         }
+    }
+}
+
+/// A worker's answer: the text, and its words' times when it sent them.
+#[derive(Debug, Default, PartialEq)]
+struct Reply {
+    text: String,
+    words: Vec<TimedWord>,
+}
+
+impl Reply {
+    /// `{"ok":true,"text":..}`, with `"words":[{"text","t0","t1"}]` (ms) from
+    /// a worker that times them. A malformed word row is skipped.
+    fn from_json(response: &serde_json::Value) -> Self {
+        let words = response["words"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|w| {
+                        Some(TimedWord {
+                            text: w["text"].as_str()?.to_string(),
+                            start_secs: w["t0"].as_i64()? as f32 / 1000.0,
+                            end_secs: w["t1"].as_i64()? as f32 / 1000.0,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            text: response["text"].as_str().unwrap_or_default().to_string(),
+            words,
+        }
+    }
+
+    /// Meeting lines for a clip of `duration_secs`: by the word rules when
+    /// there are words, else the text as one line over the clip.
+    fn lines(self, duration_secs: f32) -> Vec<TimedSegment> {
+        let lines = lines_from_words(&self.words);
+        if !lines.is_empty() {
+            return lines;
+        }
+        let text = self.text.trim();
+        if text.is_empty() {
+            return Vec::new();
+        }
+        vec![TimedSegment {
+            text: text.to_string(),
+            start_secs: 0.0,
+            end_secs: duration_secs,
+        }]
     }
 }
 
@@ -425,6 +509,49 @@ mod tests {
         };
         let err = GgufSubprocessTranscriber::cohere(&config).err().unwrap();
         assert!(matches!(err, TranscribeError::ConfigError(_)), "{err}");
+    }
+
+    /// A worker that times words sends them; one that predates word times
+    /// (or runs Cohere, which has none) sends text only and the meeting
+    /// gets one line over the clip, as before.
+    #[test]
+    fn word_times_make_lines_and_their_absence_one_line() {
+        let timed: serde_json::Value = serde_json::from_str(
+            r#"{"ok":true,"text":"Okay. The build passed.","words":[
+                {"text":"Okay.","t0":400,"t1":820},
+                {"text":"The","t0":1520,"t1":1600},
+                {"text":"build","t0":1620,"t1":1900},
+                {"text":"passed.","t0":1920,"t1":2300},
+                {"text":"bad row"}
+            ]}"#,
+        )
+        .unwrap();
+        let lines = Reply::from_json(&timed).lines(3.0);
+        let spans: Vec<_> = lines
+            .iter()
+            .map(|l| (l.text.as_str(), l.start_secs, l.end_secs))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![("Okay.", 0.4, 0.82), ("The build passed.", 1.52, 2.3)]
+        );
+
+        let old: serde_json::Value =
+            serde_json::from_str(r#"{"ok":true,"text":" Okay. The build passed. "}"#).unwrap();
+        let reply = Reply::from_json(&old);
+        assert!(reply.words.is_empty());
+        let lines = reply.lines(3.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            (
+                lines[0].text.as_str(),
+                lines[0].start_secs,
+                lines[0].end_secs
+            ),
+            ("Okay. The build passed.", 0.0, 3.0)
+        );
+        let empty: serde_json::Value = serde_json::from_str(r#"{"ok":true,"text":""}"#).unwrap();
+        assert!(Reply::from_json(&empty).lines(3.0).is_empty());
     }
 
     #[test]

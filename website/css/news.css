@@ -189,11 +189,13 @@
 }
 
 /* Release download tables and long verification keys */
-#v122 .article-body > p code {
+#v122 .article-body > p code,
+#v130 .article-body > p code {
     overflow-wrap: anywhere;
 }
 
-#v122 table {
+#v122 table,
+#v130 table {
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed;
@@ -201,7 +203,9 @@
 }
 
 #v122 th,
-#v122 td {
+#v122 td,
+#v130 th,
+#v130 td {
     padding: var(--space-sm);
     text-align: left;
     vertical-align: top;
@@ -209,7 +213,9 @@
 }
 
 #v122 th:first-child,
-#v122 td:first-child {
+#v122 td:first-child,
+#v130 th:first-child,
+#v130 td:first-child {
     width: 35%;
 }
 

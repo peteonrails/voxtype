@@ -232,12 +232,34 @@ impl Default for SlidingWindowConfig {
 pub struct SlidingWindowStreamingTranscriber {
     base: Arc<dyn Transcriber>,
     config: SlidingWindowConfig,
+    measurements: Arc<std::sync::Mutex<StreamMeasurements>>,
+}
+
+#[derive(Default)]
+struct StreamMeasurements {
+    generation: u64,
+    current: Option<super::RuntimeMetadata>,
+    language: Option<String>,
 }
 
 impl SlidingWindowStreamingTranscriber {
     /// Wrap `base` in the sliding-window streaming engine.
     pub fn new(base: Arc<dyn Transcriber>, config: SlidingWindowConfig) -> Self {
-        Self { base, config }
+        Self {
+            base,
+            config,
+            measurements: Arc::default(),
+        }
+    }
+
+    fn clear_stream_measurements(&self) {
+        let mut measured = self
+            .measurements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        measured.generation = measured.generation.wrapping_add(1);
+        measured.current = None;
+        measured.language = None;
     }
 }
 
@@ -247,7 +269,40 @@ impl Transcriber for SlidingWindowStreamingTranscriber {
     }
 
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.clear_stream_measurements();
         self.base.transcribe(samples)
+    }
+
+    fn transcribe_timed(
+        &self,
+        samples: &[f32],
+    ) -> Result<Vec<super::TimedSegment>, TranscribeError> {
+        self.clear_stream_measurements();
+        self.base.transcribe_timed(samples)
+    }
+
+    fn short_clips_are_cheap(&self) -> bool {
+        self.base.short_clips_are_cheap()
+    }
+
+    fn last_detected_language(&self) -> Option<String> {
+        let measured = self
+            .measurements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if measured.current.is_some() {
+            return measured.language.clone();
+        }
+        self.base.last_detected_language()
+    }
+
+    fn runtime_metadata(&self) -> super::RuntimeMetadata {
+        self.measurements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current
+            .clone()
+            .unwrap_or_else(|| self.base.runtime_metadata())
     }
 
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
@@ -265,10 +320,24 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
 
         let base = Arc::clone(&self.base);
         let config = self.config;
+        let measurements = self.measurements.clone();
+        let generation = {
+            let mut measured = measurements
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            measured.generation = measured.generation.wrapping_add(1);
+            let mut loaded = base.runtime_metadata();
+            // A loaded context may still describe a preceding recording's decode.
+            loaded.backend = None;
+            measured.current = Some(loaded);
+            measured.language = None;
+            measured.generation
+        };
 
         let task = tokio::task::spawn_blocking(move || -> Result<(), TranscribeError> {
             let runtime = tokio::runtime::Handle::current();
             let mut session = Session::new(base, config);
+            session.measurements = Some((measurements, generation));
 
             // Skip the interval's immediate first tick so we don't
             // re-transcribe an empty buffer.
@@ -286,17 +355,30 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
             loop {
                 let outcome = runtime.block_on(async {
                     tokio::select! {
+                        // Audio first: once inference is slower than the
+                        // tick, the ticker is ready on every iteration, and
+                        // an unbiased select would keep re-transcribing a
+                        // stale buffer while the audio backs up and drops.
+                        biased;
                         chunk = samples_rx.recv() => match chunk {
                             Some(c) => Outcome::Chunk(c),
                             None => Outcome::Eof,
                         },
-                        _ = ticker.tick() => Outcome::Tick,
                         _ = &mut cancel_rx => Outcome::Cancelled,
+                        _ = ticker.tick() => Outcome::Tick,
                     }
                 });
 
                 match outcome {
-                    Outcome::Chunk(chunk) => session.feed(&chunk),
+                    Outcome::Chunk(chunk) => {
+                        session.feed(&chunk);
+                        // Take everything that queued up during the last
+                        // inference pass in one go, so the next pass sees
+                        // all of it.
+                        while let Ok(chunk) = samples_rx.try_recv() {
+                            session.feed(&chunk);
+                        }
+                    }
                     Outcome::Cancelled => {
                         // Abort promptly; contract allows ending without flush.
                         let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
@@ -304,9 +386,16 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
                     }
                     Outcome::Eof => {
                         // Graceful end: one last flush so no audio is lost.
-                        if let Some(tail) = session.final_flush() {
-                            let event = delta_to_event(tail, config.type_partials);
-                            let _ = runtime.block_on(events_tx.send(event));
+                        match session.final_flush() {
+                            Ok(Some(tail)) => {
+                                let event = delta_to_event(tail, config.type_partials);
+                                let _ = runtime.block_on(events_tx.send(event));
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                let _ =
+                                    runtime.block_on(events_tx.send(StreamingEvent::Error(err)));
+                            }
                         }
                         let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
                         return Ok(());
@@ -351,6 +440,7 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
 struct Session {
     base: Arc<dyn Transcriber>,
     config: SlidingWindowConfig,
+    measurements: Option<(Arc<std::sync::Mutex<StreamMeasurements>>, u64)>,
 
     // Audio accumulator.
     buffer: Vec<f32>,
@@ -383,6 +473,7 @@ impl Session {
         Self {
             base,
             config,
+            measurements: None,
             buffer: Vec::new(),
             sliding: false,
             full_text_parts: Vec::new(),
@@ -413,6 +504,9 @@ impl Session {
     /// Transcribe the whole buffer, applying the silence + hallucination
     /// gates. Returns `None` when there is nothing worth committing.
     fn transcribe_buffer(&self) -> Result<Option<String>, TranscribeError> {
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
         if (self.buffer.len() as f32) < self.config.min_audio_s * self.config.sample_rate as f32 {
             return Ok(None);
         }
@@ -420,7 +514,19 @@ impl Session {
             return Ok(None);
         }
         let infer_start = std::time::Instant::now();
-        let text = self.base.transcribe(&self.buffer)?;
+        let result = self.base.transcribe(&self.buffer);
+        if let Some((measurements, generation)) = &self.measurements {
+            let runtime = self.base.runtime_metadata();
+            let language = self.base.last_detected_language();
+            let mut measured = measurements
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if measured.generation == *generation {
+                measured.current = Some(runtime);
+                measured.language = language;
+            }
+        }
+        let text = result?;
         let infer_secs = infer_start.elapsed().as_secs_f32();
         let text = text.trim().to_string();
         tracing::trace!(
@@ -680,10 +786,10 @@ impl Session {
 
     /// One last transcription at end-of-recording. Returns the remaining tail
     /// delta (never cumulative text — the daemon already typed the partials).
-    fn final_flush(&mut self) -> Option<Delta> {
-        let final_text = match self.transcribe_buffer() {
-            Ok(Some(t)) => t,
-            _ => return None,
+    fn final_flush(&mut self) -> Result<Option<Delta>, TranscribeError> {
+        let final_text = match self.transcribe_buffer()? {
+            Some(t) => t,
+            None => return Ok(None),
         };
 
         if self.config.revision_mode {
@@ -708,7 +814,7 @@ impl Session {
                     Some(guess.split_whitespace().map(str::to_owned).collect())
                 }
             });
-            return tail.and_then(|t| self.reconcile_revision(t));
+            return Ok(tail.and_then(|t| self.reconcile_revision(t)));
         }
 
         let full_emitted = self.full_text_parts.join(" ");
@@ -716,7 +822,7 @@ impl Session {
         let delta = extract_new_text(&already_emitted, &final_text);
         let delta = delta.trim().to_string();
         let delta = dedupe_against_emitted(&full_emitted, &delta);
-        if delta.is_empty() {
+        Ok(if delta.is_empty() {
             None
         } else {
             // `delta` has no leading space (see `on_tick`); separate it from
@@ -728,7 +834,7 @@ impl Session {
             };
             self.full_text_parts.push(delta);
             Some(Delta::Append(typed))
-        }
+        })
     }
 }
 
@@ -1140,6 +1246,7 @@ mod tests {
 
         let delta = session
             .final_flush()
+            .expect("fixture inference succeeds")
             .expect("must fall back to a guess instead of silently giving up");
 
         assert_eq!(

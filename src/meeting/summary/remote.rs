@@ -62,8 +62,20 @@ impl RemoteSummarizer {
                     SummaryError::Request(e.to_string())
                 }
             }
-            ureq::Error::Status(status, _) => {
-                SummaryError::Request(format!("API returned status {}", status))
+            ureq::Error::Status(status, response) => {
+                let body = response.into_string().unwrap_or_default();
+                let detail = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(str::to_string))
+                    .or_else(|| {
+                        let text = body.trim();
+                        (!text.is_empty()).then(|| text.chars().take(300).collect())
+                    })
+                    .unwrap_or_else(|| format!("HTTP {status}"));
+                SummaryError::Backend(format!(
+                    "The remote summarizer at {} returned an error: {detail}",
+                    self.endpoint
+                ))
             }
         })?;
 

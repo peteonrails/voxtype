@@ -108,7 +108,9 @@ jobs:
             # cuda-13 dlopens ORT via ort/load-dynamic so the runtime ships
             # alongside the binary (Microsoft's prebuilt is the only 1.24.4
             # build with sm_120 Blackwell coverage, and it's distributed as
-            # .so only — see Dockerfile.onnx-cuda-13 header).
+            # .so only — see Dockerfile.onnx-cuda-13 header). The Dockerfile
+            # takes those three libraries from models.voxtype.io/build-inputs,
+            # pinned by sha256, not from github.com/microsoft/onnxruntime.
             companion_libs: 'libonnxruntime.so.1.24.4 libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
             timeout_minutes: 120
           - variant: onnx-migraphx
@@ -117,6 +119,10 @@ jobs:
             runner: ubuntu-24.04
             glibc_cap: '2.39'
             check_no_avx512: false
+            # Compiles ONNX Runtime 1.24.2 with the MIGraphX provider. The
+            # source archive also comes from models.voxtype.io/build-inputs,
+            # pinned by sha256; ONNX Runtime's own CMake dependencies are
+            # still downloaded from their GitHub repositories.
             companion_libs: 'libonnxruntime_providers_migraphx.so libonnxruntime_providers_shared.so'
             timeout_minutes: 180
           # Experimental aarch64 variants. CPU-only — no GPU EPs on arm64
@@ -196,11 +202,19 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved VERSION=${VERSION} (Cargo.toml: ${CARGO_VERSION})"
 
+      - name: Install Rust for source-seam regressions
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
       - name: Check release transport and desktop assets
         run: |
           python3 testing/test-release-transport.py
           python3 testing/test-release-validation.py
           python3 testing/test-platform-ci.py
+          python3 testing/test-meeting-portability.py
+          python3 testing/test-ci-baseline-model.py
+          python3 testing/test-build-input-pins.py
 
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |
@@ -384,8 +398,8 @@ jobs:
           export XDG_DATA_HOME="${RUNNER_TEMP}/xdg-data"
           export XDG_CONFIG_HOME="${RUNNER_TEMP}/xdg-config"
           mkdir -p "${XDG_DATA_HOME}/voxtype/models" "${XDG_CONFIG_HOME}/voxtype"
-          curl -sSL --retry 3 -o "${XDG_DATA_HOME}/voxtype/models/ggml-tiny.en.bin" \
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          bash scripts/ci/fetch-baseline-model.sh \
+            "${XDG_DATA_HOME}/voxtype/models/ggml-tiny.en.bin"
           printf 'engine = "whisper"\n\n[whisper]\nmodel = "tiny.en"\n' \
             > "${XDG_CONFIG_HOME}/voxtype/config.toml"
           qemu-x86_64-static -cpu Nehalem "${BIN}" transcribe tests/fixtures/vad/speech_hello.wav
@@ -465,6 +479,7 @@ jobs:
           name: voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd
           path: |
             releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd*
+            releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-meetings-gtk4*
             releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-audio-bridge
           if-no-files-found: error
           retention-days: 14

@@ -77,12 +77,17 @@ pub mod daemon;
 pub mod daemon_status;
 pub mod eager;
 pub mod error;
+pub mod failed_recording;
+pub mod failure_notice;
+pub mod history;
 #[cfg(target_os = "linux")]
 pub mod hotkey;
 #[cfg(target_os = "macos")]
 pub mod hotkey_macos;
 pub mod language_selection;
+pub mod logging;
 pub mod meeting;
+pub mod meeting_offer;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 pub mod model_catalog;
@@ -95,6 +100,8 @@ pub mod output;
 pub mod setup;
 pub mod state;
 pub mod status_json;
+#[cfg(all(test, unix))]
+pub(crate) mod test_support;
 pub mod text;
 pub mod transcribe;
 #[cfg(target_os = "linux")]
@@ -103,8 +110,8 @@ pub mod tui;
 pub mod vad;
 
 pub use cli::{
-    Cli, Commands, CompositorType, ConfigAction, InfoAction, MeetingAction, OutputModeOverride,
-    RecordAction, SetupAction,
+    AssistantAction, CalendarAction, Cli, Commands, CompositorType, ConfigAction, HistoryAction,
+    InfoAction, MeetingAction, OutputModeOverride, RecordAction, SetupAction, TodoistAction,
 };
 pub use config::Config;
 pub use daemon::Daemon;

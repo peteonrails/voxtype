@@ -7,6 +7,7 @@
 //! - CTC (Connectionist Temporal Classification): faster, character-level output
 //! - TDT (Token-Duration-Transducer): recommended, proper punctuation and word boundaries
 
+use super::lines::{lines_from_words, TimedWord};
 use super::{TimedSegment, Transcriber};
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
@@ -17,7 +18,8 @@ use crate::error::TranscribeError;
 ))]
 use parakeet_rs::ExecutionProvider;
 use parakeet_rs::{
-    ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait,
+    ExecutionConfig, Parakeet, ParakeetTDT, TimedToken, Transcriber as ParakeetTranscriberTrait,
+    TranscriptionResult,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -26,6 +28,7 @@ use std::sync::Mutex;
 const SAMPLE_RATE: usize = 16_000;
 
 /// Internal enum to hold either CTC or TDT model instance
+#[allow(clippy::large_enum_variant)] // one instance per transcriber; boxing buys nothing
 enum ParakeetModel {
     /// CTC model (character-level, faster)
     Ctc(Mutex<Parakeet>),
@@ -99,6 +102,10 @@ impl ParakeetTranscriber {
 }
 
 impl Transcriber for ParakeetTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -133,202 +140,128 @@ impl Transcriber for ParakeetTranscriber {
 
         self.transcribe_one(samples)
     }
+
+    /// A line per sentence, timed by Parakeet's own token times, for meeting
+    /// mode's per-utterance clips. Audio too long for one pass is windowed
+    /// by `transcribe` and comes back as one line over the clip.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        if samples.is_empty() || (self.max_window > 0 && samples.len() > self.max_window) {
+            let text = self.transcribe(samples)?;
+            return Ok(if text.is_empty() {
+                vec![]
+            } else {
+                vec![TimedSegment {
+                    text,
+                    start_secs: 0.0,
+                    end_secs: samples.len() as f32 / SAMPLE_RATE as f32,
+                }]
+            });
+        }
+        let start = std::time::Instant::now();
+        let result = self.infer(samples)?;
+        let mut lines = lines_from_tokens(&result.tokens);
+        let text = result.text.trim();
+        if lines.is_empty() && !text.is_empty() {
+            lines.push(TimedSegment {
+                text: text.to_string(),
+                start_secs: 0.0,
+                end_secs: samples.len() as f32 / SAMPLE_RATE as f32,
+            });
+        }
+        tracing::info!(
+            "Parakeet {:?} timed transcription completed in {:.2}s: {} line(s)",
+            self.model_type,
+            start.elapsed().as_secs_f32(),
+            lines.len()
+        );
+        Ok(lines)
+    }
 }
 
 impl ParakeetTranscriber {
-    /// One forward pass over audio already known to fit the model.
-    fn transcribe_one(&self, samples: &[f32]) -> Result<String, TranscribeError> {
-        let duration_secs = samples.len() as f32 / SAMPLE_RATE as f32;
+    /// One forward pass over audio already known to fit the model, with
+    /// parakeet-rs's per-token times.
+    fn infer(&self, samples: &[f32]) -> Result<TranscriptionResult, TranscribeError> {
         tracing::debug!(
             "Transcribing {:.2}s of audio ({} samples) with Parakeet {:?}",
-            duration_secs,
+            samples.len() as f32 / SAMPLE_RATE as f32,
             samples.len(),
             self.model_type
         );
-
-        let start = std::time::Instant::now();
-
-        let text = match &self.model {
-            ParakeetModel::Ctc(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-
-                let result = parakeet
-                    .transcribe_samples(
-                        samples.to_vec(),
-                        16000, // sample rate
-                        1,     // mono
-                        None,  // default timestamp mode
-                    )
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet CTC inference failed: {}",
-                            e
-                        ))
-                    })?;
-
-                result.text.trim().to_string()
-            }
-            ParakeetModel::Tdt(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-
-                let result = parakeet
-                    .transcribe_samples(
-                        samples.to_vec(),
-                        16000, // sample rate
-                        1,     // mono
-                        None,  // default timestamp mode
-                    )
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet TDT inference failed: {}",
-                            e
-                        ))
-                    })?;
-
-                result.text.trim().to_string()
-            }
+        let lock_failed = |e: String| {
+            TranscribeError::InferenceFailed(format!("Failed to lock Parakeet mutex: {}", e))
         };
+        // Default timestamp mode: tokens, whose text joins back into the
+        // transcript exactly.
+        match &self.model {
+            ParakeetModel::Ctc(parakeet) => parakeet
+                .lock()
+                .map_err(|e| lock_failed(e.to_string()))?
+                .transcribe_samples(samples.to_vec(), 16000, 1, None)
+                .map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Parakeet CTC inference failed: {}",
+                        e
+                    ))
+                }),
+            ParakeetModel::Tdt(parakeet) => parakeet
+                .lock()
+                .map_err(|e| lock_failed(e.to_string()))?
+                .transcribe_samples(samples.to_vec(), 16000, 1, None)
+                .map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Parakeet TDT inference failed: {}",
+                        e
+                    ))
+                }),
+        }
+    }
 
-        tracing::info!(
-            "Parakeet {:?} transcription completed in {:.2}s: {:?}",
-            self.model_type,
-            start.elapsed().as_secs_f32(),
-            if text.chars().count() > 50 {
-                format!("{}...", text.chars().take(50).collect::<String>())
-            } else {
-                text.clone()
-            }
+    /// One forward pass over audio already known to fit the model.
+    fn transcribe_one(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        let start = std::time::Instant::now();
+        let text = self.infer(samples)?.text.trim().to_string();
+        super::log_transcription(
+            &format!("Parakeet {:?} transcription", self.model_type),
+            start,
+            &text,
         );
-
         Ok(text)
     }
+}
 
-    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
-        let start = std::time::Instant::now();
+/// The longest a single token is taken to last. parakeet-rs ends a
+/// transducer token where the next one starts, so the last word before a
+/// pause would otherwise stretch across the whole pause and hide it.
+const MAX_TOKEN_SECS: f32 = 0.5;
 
-        let result = match &self.model {
-            ParakeetModel::Ctc(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-                parakeet
-                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet CTC inference failed: {}",
-                            e
-                        ))
-                    })?
+/// Words from Parakeet's timed tokens (a word starts at a token beginning
+/// with a space or the sentencepiece marker), each ending at most
+/// [`MAX_TOKEN_SECS`] after its last token began.
+fn words_from_tokens(tokens: &[TimedToken]) -> Vec<TimedWord> {
+    let mut words: Vec<TimedWord> = Vec::new();
+    for token in tokens {
+        let piece = token.text.replace('\u{2581}', " ");
+        let end = token.end.min(token.start + MAX_TOKEN_SECS).max(token.start);
+        match words.last_mut() {
+            Some(word) if !piece.starts_with(' ') => {
+                word.text.push_str(&piece);
+                word.end_secs = end;
             }
-            ParakeetModel::Tdt(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-                parakeet
-                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet TDT inference failed: {}",
-                            e
-                        ))
-                    })?
-            }
-        };
-
-        // Split the full text on sentence boundaries (.!?) and map each sentence
-        // back to token timestamps. result.text is properly assembled by parakeet-rs;
-        // individual tokens are subword pieces that can't be naively joined.
-        let full_text = result.text.trim();
-        let tokens = &result.tokens;
-
-        if full_text.is_empty() || tokens.is_empty() {
-            return Ok(vec![]);
+            _ => words.push(TimedWord {
+                text: piece.trim_start().to_string(),
+                start_secs: token.start,
+                end_secs: end,
+            }),
         }
-
-        // Split text into sentences on .!? boundaries
-        let mut sentences: Vec<String> = Vec::new();
-        let mut current = String::new();
-        for ch in full_text.chars() {
-            current.push(ch);
-            if ch == '.' || ch == '!' || ch == '?' {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    sentences.push(trimmed);
-                }
-                current = String::new();
-            }
-        }
-        if !current.trim().is_empty() {
-            sentences.push(current.trim().to_string());
-        }
-
-        // Map sentences to timestamps by distributing tokens proportionally.
-        // Each sentence gets the time span of its corresponding token range.
-        let total_sentences = sentences.len();
-        let total_tokens = tokens.len();
-        let tokens_per_sentence = if total_sentences > 0 {
-            total_tokens / total_sentences
-        } else {
-            total_tokens
-        };
-
-        let mut segments = Vec::new();
-        let mut token_idx = 0;
-
-        for (i, sentence) in sentences.iter().enumerate() {
-            let start_secs = if token_idx < tokens.len() {
-                tokens[token_idx].start
-            } else {
-                tokens.last().map(|t| t.end).unwrap_or(0.0)
-            };
-
-            // Last sentence gets all remaining tokens
-            let end_token_idx = if i == total_sentences - 1 {
-                total_tokens
-            } else {
-                (token_idx + tokens_per_sentence).min(total_tokens)
-            };
-
-            let end_secs = if end_token_idx > 0 && end_token_idx <= tokens.len() {
-                tokens[end_token_idx - 1].end
-            } else {
-                start_secs
-            };
-
-            segments.push(TimedSegment {
-                text: sentence.clone(),
-                start_secs,
-                end_secs,
-            });
-
-            token_idx = end_token_idx;
-        }
-
-        tracing::info!(
-            "Parakeet {:?} timed transcription completed in {:.2}s: {} segments",
-            self.model_type,
-            start.elapsed().as_secs_f32(),
-            segments.len()
-        );
-
-        Ok(segments)
     }
+    words
+}
+
+/// Meeting lines from Parakeet's timed tokens, by the shared word rules in
+/// [`super::lines`].
+pub(crate) fn lines_from_tokens(tokens: &[TimedToken]) -> Vec<TimedSegment> {
+    lines_from_words(&words_from_tokens(tokens))
 }
 
 /// Build the ONNX Runtime session config: the execution provider the
@@ -343,10 +276,15 @@ pub(super) fn build_execution_config(threads: Option<usize>) -> Option<Execution
 }
 
 /// Execution provider config based on compile-time feature flags
+// The early returns are only needless when exactly one GPU feature is on.
+#[allow(clippy::needless_return)]
 fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
+            if !crate::setup::parakeet::cudnn_present_or_warn() {
+                return None;
+            }
             tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
             return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
         }
@@ -357,6 +295,9 @@ fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-tensorrt")]
     {
         if probe_cuda_runtime() {
+            if !crate::setup::parakeet::cudnn_present_or_warn() {
+                return None;
+            }
             tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
             return Some(
                 ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT),
@@ -415,12 +356,7 @@ fn probe_cuda_runtime() -> bool {
         return false;
     }
 
-    let sym = unsafe {
-        libc::dlsym(
-            handle,
-            b"cudaRuntimeGetVersion\0".as_ptr() as *const libc::c_char,
-        )
-    };
+    let sym = unsafe { libc::dlsym(handle, c"cudaRuntimeGetVersion".as_ptr()) };
 
     if sym.is_null() {
         tracing::warn!("Could not find cudaRuntimeGetVersion in CUDA runtime library");
@@ -571,6 +507,77 @@ pub(super) fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Tokens as parakeet-rs's TDT decoder gives them: a word starts with a
+    /// space, and a token ends where the next one starts.
+    fn tokens(spec: &[(&str, f32)]) -> Vec<TimedToken> {
+        spec.iter()
+            .enumerate()
+            .map(|(i, &(text, start))| TimedToken {
+                text: text.to_string(),
+                start,
+                end: spec.get(i + 1).map_or(start + 0.08, |n| n.1),
+            })
+            .collect()
+    }
+
+    fn spans(lines: &[TimedSegment]) -> Vec<(&str, f32, f32)> {
+        lines
+            .iter()
+            .map(|l| (l.text.as_str(), l.start_secs, l.end_secs))
+            .collect()
+    }
+
+    #[test]
+    fn a_line_per_sentence_timed_by_its_tokens() {
+        let t = tokens(&[
+            (" Hel", 0.32),
+            ("lo", 0.48),
+            (".", 0.64),
+            (" See", 3.20),
+            (" you", 3.44),
+            (" at", 3.60),
+            (" 3", 3.76),
+            (".", 3.84),
+            ("5", 3.92),
+            ("?", 4.00),
+        ]);
+        let lines = lines_from_tokens(&t);
+        assert_eq!(
+            spans(&lines),
+            vec![("Hello.", 0.32, 1.14), ("See you at 3.5?", 3.2, 4.08)],
+            "the pause after the first sentence is not counted in it, and 3.5 is not cut"
+        );
+        let joined: String = t.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            joined.trim()
+        );
+    }
+
+    #[test]
+    fn a_pause_without_punctuation_starts_a_new_line() {
+        let t = tokens(&[
+            (" yes", 0.1),
+            (" right", 0.4),
+            (" so", 1.6),
+            (" anyway", 1.8),
+        ]);
+        assert_eq!(
+            spans(&lines_from_tokens(&t)),
+            vec![("yes right", 0.1, 0.9), ("so anyway", 1.6, 1.88)]
+        );
+        // Sentencepiece markers, as a raw vocabulary spells them.
+        let t = tokens(&[("\u{2581}ok", 0.1), ("\u{2581}then", 0.3)]);
+        assert_eq!(spans(&lines_from_tokens(&t)), vec![("ok then", 0.1, 0.38)]);
+        // Nothing but punctuation is not a line.
+        assert!(lines_from_tokens(&tokens(&[(".", 0.0)])).is_empty());
+        assert!(lines_from_tokens(&[]).is_empty());
+    }
 
     #[test]
     fn threads_set_the_onnx_intra_op_thread_count() {

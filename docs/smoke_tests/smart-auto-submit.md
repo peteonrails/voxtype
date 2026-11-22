@@ -22,6 +22,7 @@ voxtype record stop
 #
 # To verify via logs, the daemon must be running with debug logging (-v):
 #   journalctl --user -u voxtype --since "30 seconds ago" | grep "Smart auto-submit triggered"
+#   (if that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep "Smart auto-submit triggered")
 # At default log level the trigger fires silently - verify by observing Enter being pressed.
 ```
 

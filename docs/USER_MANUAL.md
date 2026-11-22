@@ -173,11 +173,30 @@ The tray is enabled by default and remains visible while idle. Opt out with
 and failed-dictation states without relying on audio feedback.
 
 Clicking the icon opens a compact native menu without launching settings or closing
-the tray drawer. Choose the explicit **Settings** gear row for the full settings
-frontend. The menu shows live status. There is one recording
+the tray drawer. Choose the explicit **Settings...** gear row for the full settings
+frontend (on Omarchy, the Voxtype panel on its settings view). With meeting mode on,
+**Meetings...** under it opens the live meeting view: the Voxtype panel's meeting view on
+Omarchy, otherwise `voxtype meeting view` for voxtype's own Quickshell shell. The menu shows live status. There is one recording
 control, **Start Recording** / **Stop Recording**, and **Cancel** is available while
 recording or transcribing. Starting another recording is disabled during inference.
 The tray uses the existing daemon control protocol, not a second recording daemon.
+
+Below the dictation entries are the meeting controls. With `[meeting] enabled = true`
+the tray offers **Start Meeting**, which runs `voxtype meeting start` with the default
+title. While a meeting records, it offers **Stop Meeting** and **Pause Meeting**
+(**Resume Meeting** while paused), and shows a greyed **Finishing Meeting...** while the
+last chunks are transcribed. The entries follow meetings started anywhere, including
+`voxtype meeting start` and the detection prompt. Start Meeting is greyed out while you
+are dictating.
+
+While meeting mode is off, the tray shows **Turn on meetings...** instead. Choosing it
+runs `voxtype config set meeting.enabled true` and restarts the voxtype service so the
+setting takes effect. At most once a day on daemon start, a notification makes the same
+offer with **Turn on**, **Not now** and **No, don't ask again**; the last hides the offer
+for good and shows a greyed **Start Meeting (meeting mode is off)**. Set
+`[meeting] offer_enable = false` to turn the offer off.
+
+The **Voxtype Meetings** entry in the application launcher opens `voxtype meeting view`.
 
 The tray and desktop entry share `voxtype-configure-launcher`: it prefers the
 available integrated Quickshell frontend, then a separately installed graphical
@@ -328,6 +347,9 @@ voxtype setup --download
 
 # 3. Start voxtype
 voxtype
+
+# If something doesn't work, ask voxtype what is wrong
+voxtype doctor
 ```
 
 The setup command will:
@@ -362,9 +384,11 @@ $ voxtype
 [INFO] Recording started...
 [INFO] Recording stopped (1.2s)
 [INFO] Transcribing...
-[INFO] Transcribed: "Hello world"
+[INFO] Transcribed 11 chars (whisper engine)
 [INFO] Typed 11 characters
 ```
+
+The log says that you dictated and how long the text was, not what you said. See [What the log contains](#what-the-log-contains) to make it show the text when you are reporting a recognition problem.
 
 ---
 
@@ -394,6 +418,8 @@ voxtype --model large-v3 transcribe interview.wav  # Use specific model
 
 Supported formats: WAV (16-bit PCM, 16kHz mono recommended)
 
+If the daemon fails to transcribe a recording, it saves the audio to `~/.local/state/voxtype/failed-audio/` and its notification and log line give the exact `voxtype transcribe` command to retry it. The 20 most recent failed recordings are kept, readable only by your user. Set `[audio] keep_failed_recordings = false` to keep none.
+
 ### `voxtype setup`
 
 Check dependencies and optionally download models.
@@ -405,6 +431,65 @@ voxtype setup model        # Interactive model selection
 voxtype setup vad          # Download the Silero VAD model
 voxtype setup onnx         # Switch between Whisper and ONNX engines
 ```
+
+### `voxtype doctor`
+
+Check everything voxtype depends on and print the fix for anything that is
+wrong. Run this first whenever something doesn't work.
+
+```bash
+voxtype doctor              # Human-readable report
+voxtype doctor --json       # Machine-readable, for scripts
+voxtype -c alt.toml doctor  # Check against another config file
+```
+
+Each line is marked `✓` (fine), `!` (works but degraded) or `✗` (broken),
+and every `!` and `✗` line is followed by a `Fix:` line with the command or
+setting that resolves it:
+
+```
+Transcription:
+  ✗ whisper model 'medium.en' is not downloaded
+      Fix: Run: voxtype setup --download --model medium.en
+```
+
+Checks follow your configuration, so features you haven't enabled are not
+checked. What is covered:
+
+| Area | Checked |
+|------|---------|
+| System | CPU instruction set compatibility |
+| Configuration | Config directory, models directory, config file |
+| Binary and GPU | The installed variant supports your engine; Vulkan, CUDA or MIGraphX runtime libraries for GPU variants |
+| Transcription | The configured engine's model (every engine, including the Whisper secondary model and the Soniox API key); the Silero model when VAD uses the Whisper backend |
+| Text cleanup | When `text.lard_disfluency` is on: the LARD model is installed and loads, and the dictation is known to be English |
+| Audio | The configured input device exists |
+| Output | A typing or clipboard tool works for your output mode; `WAYLAND_DISPLAY`/`DISPLAY` are visible to the systemd service |
+| Input | `/dev/input/event*` is readable when the built-in hotkey is on |
+| Notifications | `notify-send` and a notification server |
+| OSD | The OSD frontend that `[osd] frontend` resolves to (as `voxtype setup osd --status` reports it), and Quickshell's `qs`, when the OSD is on |
+| Meeting mode | `pactl` and `parec` when meeting loopback capture is on |
+| Service | The `voxtype.service` user unit is installed, enabled and running |
+| Coding agents | Detected coding agents (Claude Code, Codex and others) have the current voxtype-setup skill |
+
+`voxtype doctor` exits 0 when nothing failed (warnings are allowed) and 1
+when at least one check failed. The JSON form is
+`{"ok", "errors", "warnings", "checks": [{"id", "severity", "message", "fix"}]}`
+with severity `ok`, `warn` or `error`.
+
+`voxtype setup check` prints the same report under its old name and always
+exits 0.
+
+**At daemon startup** voxtype runs the quick subset of these checks (model
+files, VAD model, output tools, display environment, OSD and meeting tools),
+logs every problem, and sends one desktop notification listing the errors
+with their fixes. Model and VAD model failures are left out of that
+notification because they get their own. If the daemon restarts with the
+same problems (for example in a systemd restart loop), it does not notify
+again until the set of problems changes or a start comes up clean. Warnings
+only go to the log (`journalctl --user -u voxtype`, or
+`journalctl _SYSTEMD_USER_UNIT=voxtype.service` when
+[the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries)).
 
 ### `voxtype config`
 
@@ -443,10 +528,33 @@ sets the window class to `voxtype` so compositors can float it.
 | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
 | Text Cleanup | Independent deterministic stages, opt-in LARD cleanup/model path, learned punctuation/casing, smart auto-submit, replacements editor |
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
-| Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
+| Meeting | Every `[meeting]` setting, grouped as in the Settings panel: general, audio, speakers, calendar, summary, action items, sharing, call detection, assistant |
 | Notifications | Desktop notifications for recording start/stop and transcription |
 | Waybar | Status integration: icon theme + per-state icon overrides |
 | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
+
+#### The Meeting page
+
+The Meeting page lists every meeting setting in the config schema, the same
+list the Omarchy and Quickshell Settings panel shows, with the same labels and
+help, grouped under General, Audio, Speakers, Calendar, Summary, Action items,
+Sharing, Call detection and Assistant. A setting added to voxtype appears here
+without a TUI change.
+
+- A yes/no setting toggles with ←→ or Space; a setting with fixed choices
+  cycles through them; a number steps within its range (←→), or type it
+  with Enter.
+- Enter types any value. An empty value, or Delete on the row, removes the
+  setting from `config.toml` so its default applies. Values marked
+  `(default)` are not in your file.
+- The About pane gives the setting's help, its choices or range, its default,
+  its config key, and whether it takes effect at once or after a daemon
+  restart. After `s`, the page names the saved settings that need a restart;
+  quitting the TUI restarts a running daemon.
+- The calendar link is shown only as **set** or **not set**, and the remote
+  summary API key the same way: set the link with
+  `voxtype meeting calendar set-ics`, and type a new API key with Enter.
+- While **Meeting mode** is off, the other rows are dimmed.
 
 #### Keyboard
 
@@ -455,6 +563,7 @@ Global         Tab / Esc focus toggle    ?  help overlay   q quit
 Sidebar        ↑↓ / jk navigate          Enter / → / l open section
 Section form   ↑↓ navigate fields        ←→ / hl cycle value
                Space toggle              Enter / i edit text field
+               Delete back to default    (Meeting page)
                s save                    r revert
 Text editor    type insert               ←→ / Home / End / Ctrl-A/E
                Backspace / Delete        Ctrl-W delete word
@@ -485,6 +594,105 @@ and `~/.config/niri/config.kdl` for any `voxtype record` / `voxtype meeting`
 bindings, lists them in the About pane, and suggests config-format-specific
 snippets for any standard role you haven't bound (cancel, toggle, meeting
 start/stop). Suggestions skip key combos already in use by other actions.
+
+### `voxtype history`
+
+History keeps the engine's original text, the processed text, automatic edits,
+delivery outcome and optional user correction. Failed, empty, too-short and
+cancelled dictations can be inspected too. It does not retain dictation audio.
+
+An upgrade does **not** enable history for an existing config. Newly generated
+configs enable it with 30-day retention. To choose it explicitly:
+
+```bash
+voxtype history status --json
+voxtype history enable
+voxtype history                 # recent dictations, newest first
+voxtype history --failed       # failed, cancelled and empty outcomes
+voxtype history show last
+voxtype history search invoice # searches dictations and meetings together
+voxtype history copy           # copies the most recent transcript
+```
+
+Every history command accepts `--json`. JSON is written to stdout; a failed
+operation returns a nonzero exit status. `history view --json` returns recent
+entry data without opening an interactive window. `history view --tui` opens
+the terminal reader. Enter expands the selected entry to show the original
+text, processed text and automatic edits. Press `c` to copy the selected
+dictation through the same clipboard command as `voxtype history copy`.
+Press `a` to send it again. Confirming closes the reader and restores the
+terminal before a 1.5-second delay, giving you time to switch to the target
+application. Replay uses your selected configuration's output settings;
+cancel with `n` or Escape without sending anything.
+Search with `/` to include saved meetings. Select a meeting result and press
+`o` to close the reader and open that meeting through the normal meeting-view
+command, preserving the selected configuration.
+
+Recover or correct an entry using its ID from the list, or `last`:
+
+```bash
+voxtype history paste last --delay-ms 2000
+voxtype history correct last "The corrected sentence."
+voxtype history correct last ""  # an intentional empty correction
+voxtype history delete last
+voxtype history clear --before 2026-11-01 --yes
+```
+
+`paste` sends the saved text through the normal output chain. Switch to the
+intended destination before its delay expires: without a delay, a terminal
+command can type back into that terminal. Re-sending does not add another
+dictation. Copy and paste prefer `corrected_text`, including an intentional
+empty correction, then processed text, then the engine's original text. An
+entry with no text, including one whose correction is empty, is refused with
+a nonzero exit status ("no text to copy"), and the clipboard is left as it
+was.
+Corrections preserve the original fields rather than replacing them.
+
+#### Pause and privacy
+
+```bash
+voxtype history pause   # before starting a private dictation
+voxtype history resume
+voxtype history disable
+```
+
+Enable, disable, pause and resume write the corresponding validated config key.
+The running daemon reloads history settings without a restart. Explicit daemon
+flags and environment overrides still take precedence. An invalid config edit
+does not replace the daemon's last valid settings; check the command's exit
+status rather than assuming a failed write paused history. Disabling history
+keeps existing entries.
+
+History, recordings kept after a failed transcription (`[audio]
+keep_failed_recordings`) and text that could not be delivered (`[output]
+keep_undelivered_text`) are the places dictated words are stored, each with
+its own setting. The log is not one of them: at the normal level it holds the
+length of each dictation, not the words, whether history is on, paused or
+off. See [What the log contains](#what-the-log-contains).
+
+The built-in excluded apps include KeePassXC, Bitwarden, 1Password and Proton
+Pass. An exclusion suppresses the entry when the focused app is identified at
+either end of the dictation. **Unknown focus is not a privacy guarantee:** on
+unsupported desktops, or if compositor IPC fails or times out, the app can be
+unknown and the dictation is still recorded. A password manager in a browser
+tab is identified as the browser. Pause history before sensitive dictation in
+these cases. Window titles are recorded only after opting in.
+
+The authoritative record is one private JSONL file per day in
+`$XDG_DATA_HOME/voxtype/history` (normally `~/.local/share/voxtype/history`).
+Directories are `0700`, files `0600`; days older than a week are gzipped. The
+derived, contentless search index shares the meetings `index.db` and can be
+rebuilt with `voxtype history reindex`. `history.retention_days = 0` keeps all
+days; the default removes whole days older than 30 days.
+
+Deletion rewrites the affected day atomically and removes its index entries.
+It is not secure erasure of filesystem snapshots, backups or old disk blocks.
+Use full-disk encryption for data at rest. If a SQLite reader prevents clearing
+old WAL pages, the command reports incomplete index cleanup: close history and
+meeting views, then run `voxtype history reindex` and check its exit status.
+
+See [History configuration](CONFIGURATION.md#history) for exclusions, title
+recording, retention, environment variables and CLI overrides.
 
 ### `voxtype status`
 
@@ -543,6 +751,14 @@ voxtype setup gpu --enable   # Switch to Vulkan GPU backend (requires sudo)
 voxtype setup gpu --disable  # Switch back to CPU backend (requires sudo)
 ```
 
+A GGUF model (Cohere or Parakeet with a `.gguf` file, or `engine = "gguf"`)
+runs in `voxtype-gguf-worker` on `<engine>.gguf_backend` rather than on the
+binary variant. For those, `voxtype setup gpu` says so and suggests
+`voxtype config set <engine>.gguf_backend vulkan` (or `cpu`). The variant
+still decides which worker runs: the Vulkan and ONNX variants ship one that can
+use Vulkan, the CPU variants one that cannot. `voxtype info accel` shows the
+backend and device the worker bound.
+
 ### `voxtype setup dms`
 
 Install a status widget for DankMaterialShell (KDE Plasma alternative shell).
@@ -593,8 +809,10 @@ different user-owned directory. Writing outside of `$HOME` is refused
 unless `--force` is also passed.
 
 The command prints Hyprland, Sway, and River keybinding examples that
-toggle the Wave 2 engine-picker and meeting-controls panels via flag
-files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
+toggle the engine picker and the meeting view via flag files under
+`$XDG_RUNTIME_DIR/voxtype/`. The meeting view is the same one the Omarchy
+plugin shows (see [Live Meeting View](MEETING_MODE.md#live-meeting-view));
+it also opens when a meeting starts and on `voxtype meeting view`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
@@ -727,6 +945,8 @@ Continuous meeting transcription with chunked processing and speaker diarization
 ```bash
 voxtype meeting start                  # Start a meeting
 voxtype meeting start --title "Title"  # Start with a title
+voxtype meeting start --model large-v3-turbo --language de --url https://meet.example.com/x
+voxtype meeting start --announce       # Tell the call it is being recorded
 voxtype meeting stop                   # Stop the meeting
 voxtype meeting pause                  # Pause recording
 voxtype meeting resume                 # Resume recording
@@ -734,6 +954,7 @@ voxtype meeting status                 # Show current meeting status
 voxtype meeting list                   # List past meetings
 voxtype meeting export latest          # Export transcript (markdown)
 voxtype meeting summarize latest       # Generate AI summary
+voxtype meeting ask latest "What did Steve say?" --last 5m  # Ask the transcript
 ```
 
 ---
@@ -2009,7 +2230,7 @@ mode = "paste"
 **How it works**:
 1. Copies transcribed text to clipboard via `wl-copy`
 2. Waits briefly for clipboard to settle
-3. Simulates Ctrl+V keypress via `ydotool`
+3. Simulates the paste keystroke (Ctrl+V, or Ctrl+Shift+V in terminals; see below)
 
 **Pros**:
 - Works with any keyboard layout
@@ -2018,9 +2239,20 @@ mode = "paste"
 
 **Cons**:
 - Requires both wl-copy and ydotool
-- Won't work in applications where Ctrl+V has a different meaning (e.g., Vim command mode)
+- Won't work in applications where the paste keystroke has a different meaning (e.g., Vim command mode)
 - Overwrites clipboard contents (unless clipboard restoration is enabled)
 - No fallback behavior
+
+**Pasting into terminals**: Ctrl+V doesn't paste in a terminal. The terminal hands it to the running program as a raw `^V`, and a program like the Codex CLI reads that as "paste an image", so the dictation never shows up. When `paste_keys` is unset or set to `"auto"`, voxtype checks the focused window before each paste on Hyprland, Sway and niri, and sends Ctrl+Shift+V to terminals and Ctrl+V to everything else. On Hyprland, any window with Omarchy's `terminal` tag counts as a terminal; other windows are matched by class against a list of known terminal emulators. On other desktops `auto` sends Ctrl+V.
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"                  # the default when unset
+paste_keys_terminal = "ctrl+shift+v" # the default; Omarchy users can use "shift+insert"
+```
+
+An explicit `paste_keys = "shift+insert"` (the value in the shipped `/etc/voxtype/config.toml`) keeps sending that keystroke everywhere. Both settings are also available as `--paste-keys` / `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS` / `VOXTYPE_PASTE_KEYS_TERMINAL`. See [paste_keys](CONFIGURATION.md#paste_keys).
 
 **Clipboard Restoration**: By default, paste mode overwrites your clipboard with the transcribed text. If you want to preserve your clipboard contents, enable clipboard restoration:
 
@@ -2043,6 +2275,8 @@ fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
 On Wayland, wtype is tried first (best CJK support), then eitype (libei protocol, works on GNOME/KDE), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
+
+When typing falls back to the clipboard, the transcription notification is titled "Copied to clipboard, paste manually" instead of "Transcribed", and the first time it happens after the daemon starts, a notification lists each typing tool that was skipped, why, and how to fix it. If every method fails, a critical notification shows the text and saves it as a timestamped file in `~/.local/state/voxtype/undelivered/` (`$XDG_STATE_HOME`), which survives logout and keeps the newest 200. Set `[output] keep_undelivered_text = false` to save nothing and keep the text out of that notification. See [Troubleshooting](TROUBLESHOOTING.md#copied-to-clipboard-paste-manually-notification).
 
 ### Custom Driver Order
 
@@ -2313,15 +2547,23 @@ transcript.
 In `voxtype configure`, select **Text Cleanup**. The deterministic switches are
 spoken punctuation, filler removal, restart collapse, sentence-break repair and
 number formatting. Restart collapse remains off by default. **LARD disfluency
-cleanup** is a separate opt-in switch; **LARD model path** is an independent
-inline field. Enter or Space toggles a switch; Enter/i edits the path, Enter
-commits, Esc cancels, and an empty path restores the default location. `s` saves
+cleanup** is a separate opt-in switch; **LARD model path** and **Dictation
+language** are independent inline fields. Enter or Space toggles a switch;
+Enter/i edits a field, Enter commits, Esc cancels, and an empty value restores
+the default (the default model location, or `auto`). `s` saves
 and `r` reverts. Arrow keys or j/k navigate; the form scrolls to keep the selected
 row visible, including replacement edit/add/delete rows. Saving unchanged cleanup
 options does not add missing keys or copy CLI/environment overrides into the file.
 Existing model selections, sibling options and TOML comments are preserved.
 The TUI's normal exit behavior can restart the daemon after saved configuration
-changes; changing a model path does not itself install or validate a model.
+changes; changing a model path does not itself install a model. While the LARD
+switch is on, the form checks it as you edit: with no model at the path, or
+dictation that is not known to be English, the row reads
+`yes (model not installed)`, `yes (language not declared)` or
+`yes (language is not English)` and the help pane shows what is wrong and the
+fix. The switch still turns on. The **Dictation language** row shows what
+cleanup makes of its value, for example `auto (en, the model's only language)`,
+`auto (not known)`, or `en (unused: whisper.language is fr)`.
 Learned punctuation/casing is separate from deterministic cleanup and is disabled
 in the TUI if this client lacks the `punctuation-casing` build feature.
 
@@ -2330,23 +2572,90 @@ In the graphical Voxtype app, the **Text Cleanup** section separates **Clean up 
 from **LARD disfluency cleanup**. Clean up text contains independent deterministic
 stage switches. There is no master switch that resets your individual choices.
 The LARD switch only changes `text.lard_disfluency`; it does not change those
-rules, enable restart collapse, install a model, or restart the daemon. The
+rules, enable restart collapse, install a model, or restart the daemon. If you
+turn it on with no model installed (or with dictation that is not known to be
+English), a notice under the switch says it is not running and how to fix it;
+the notice goes away once it is fixed. **Dictation language**, under **Other
+text options**, is where you declare the language for a multilingual model. The
 separate model license is linked there and opens only when clicked. Controls
 not advertised by your executable's schema are not shown, so an older binary
 may not offer LARD yet. Punctuation/casing restoration and smart auto-submit
 remain under **Other text options**, not the deterministic cleanup group.
 
-Install the separate model with
-`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`, then run
-`voxtype config set text.lard_disfluency true` and restart the daemon. Check it
-with `voxtype setup lard --status`. Use an explicit English engine language;
-auto-detected and non-English languages skip this stage.
+Install the model, turn the stage on, and restart the daemon:
+
+```bash
+voxtype setup lard
+voxtype config set text.lard_disfluency true
+systemctl --user restart voxtype
+```
+
+`voxtype setup lard` downloads the 64 KB model from the Voxtype model mirror
+and installs it only if it matches the pinned checksum. If the download fails
+or the checksum does not match, the command says which and leaves any model you
+already have in place. To install without a network, pass a copy of the file:
+`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf` (the source tree
+carries one as `assets/models/lard-disfluency-v1.vxdf`). Check the result with
+`voxtype setup lard --status`, which reports both the installed file and
+whether the stage is running for your configuration. Nothing is downloaded
+unless you run that command: not at daemon start, and not when you turn the
+setting on.
+
+LARD removes words, so it only runs when Voxtype knows the dictation is
+English. Three things can tell it so, and the first one that applies decides:
+
+1. The engine's language is set to English (`whisper.language = "en"`, the
+   default for Whisper, or the `language` key of Cohere, GGUF, SenseVoice or
+   OpenVINO).
+2. The model can only write English: Whisper's `.en` models, Parakeet
+   `parakeet-tdt-0.6b-v2` and `parakeet-unified-en-0.6b`, Moonshine `base` and
+   `tiny`, `paraformer-en`. These need no setting at all.
+3. You declare it. A multilingual model that detects the language
+   automatically (Parakeet v3, Whisper on `auto`, SenseVoice on `auto`,
+   Dolphin, Omnilingual, Soniox) gives Voxtype nothing to go on, so say which
+   language you dictate in:
+
+   ```bash
+   voxtype config set text.language en
+   systemctl --user restart voxtype
+   ```
+
+`text.language` only informs text cleanup. It is not passed to the engine and
+does not change transcription. An engine language that is set to something
+else wins over it, so LARD never runs on text the engine was told to write in
+another language. If you dictate in more than one language with automatic
+detection, leave `text.language` on `auto` and LARD stays off. The full rule
+and the list of single-language models are in the
+[configuration reference](CONFIGURATION.md#language-text-cleanup).
+
+Turning the setting on without the model does not break dictation, but the
+stage does nothing until the model is installed. Voxtype tells you instead of
+skipping it quietly:
+
+- `voxtype config set text.lard_disfluency true` still writes the setting and
+  prints a `warning:` line with the fix.
+- `voxtype configure` and the graphical app mark the switch as not running.
+- `voxtype doctor` reports it as a failed check under **Text cleanup**.
+- The daemon includes it in its "Voxtype: N problems need attention"
+  notification at startup, once per boot until it is fixed.
+
+To clear it, run `voxtype setup lard` or turn the stage off with
+`voxtype config set text.lard_disfluency false`.
 
 This opt-in stage can remove a discarded phrase such as "I need a flight no"
 from "I need a flight no I need a hotel". It does not generate replacement
-words. The model is CC BY-SA 4.0 and has its own model card under
-`assets/models/`. Publication is pending approval, so there is no implicit model
-download. Missing or invalid weights leave the remaining cleanup available.
+words. It works one sentence at a time, so a word you say again in the next
+sentence ("an old gray owl. The owl said") is left alone, and it repairs the
+punctuation and capital around what it removes ("Hello world, hello world!"
+becomes "Hello world!"). Missing or invalid weights leave the remaining cleanup
+available.
+
+The model is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/),
+separately from Voxtype's MIT code. It was trained on the LARD dataset
+(Passali et al., LREC 2022), which derives from the Schema-Guided Dialogue
+dataset. The [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md)
+gives the attribution, provenance, evaluation and how to reproduce it; the same
+card is in the source tree as `assets/models/lard-disfluency-v1.MODEL_CARD.md`.
 See [LARD configuration](CONFIGURATION.md#lard_disfluency-and-lard_model_path)
 for CLI/environment overrides and finalized-streaming behavior.
 
@@ -2715,8 +3024,8 @@ voxtype --vad daemon
 ### VAD Backends
 
 - **auto** (compatibility default when omitted): Selects a backend for your transcription engine
-  - Whisper engine → Whisper VAD (requires model download)
-  - Parakeet engine → Energy VAD (no model needed)
+  - Whisper engine → Whisper VAD (requires model download; falls back to Energy VAD if the model is missing)
+  - Other engines → Energy VAD (no model needed)
 - **energy**: Fast RMS-based detection. Works with any engine, no model download required.
 - **whisper**: Silero VAD via whisper-rs. More accurate but requires downloading the model:
   ```bash
@@ -2739,6 +3048,10 @@ Recordings where speech falls below the detection threshold are rejected before 
 ## Meeting Mode
 
 Meeting mode provides continuous transcription for meetings, with chunked processing, speaker diarization, and export capabilities. Unlike push-to-talk (which transcribes short clips), meeting mode runs continuously and processes audio in chunks for the duration of a meeting.
+
+**Recording consent.** Laws on recording and transcribing conversations differ by place, and some require everyone on the call to agree. Voxtype doesn't tell the other people for you, so let them know you're using a meeting assistant. Until you run `voxtype meeting notice --ack` (or press **Got it** in the meeting view), `meeting start` prints this on stderr and the meeting view shows it. See [Recording Consent](MEETING_MODE.md#recording-consent).
+
+With `[meeting] announce_recording = true` (or `meeting start --announce`), the notice says "Voxtype will announce the recording to the call. You're still responsible for getting consent where the law requires it." instead, and voxtype plays "This meeting is being recorded and transcribed with Voxtype" into the call app's microphone when the meeting starts, so the others hear it, and keeps it out of the transcript. That is a courtesy, not consent: you remain responsible for the recording laws that apply. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
 
 ### Commands
 
@@ -2767,17 +3080,62 @@ voxtype meeting export <id> --output transcript.md     # Write to file
 voxtype meeting export <id> --timestamps --speakers    # Include timestamps and speaker labels
 voxtype meeting export <id> --metadata                 # Include metadata header
 
+# Share the summary and notes (and optionally the transcript)
+voxtype meeting share latest                           # Copy to the clipboard
+voxtype meeting share latest --transcript --to file    # Save to ~/Documents/Voxtype
+voxtype meeting share latest --to email                # Open a mail draft
+voxtype meeting share latest --preview                 # See what would be shared
+
+# Action items from the summary
+voxtype meeting actions latest                         # List them
+voxtype meeting todoist connect                        # Connect Todoist once, in the browser
+voxtype meeting actions latest --send todoist          # Add them to Todoist
+voxtype meeting actions latest --send reminder --mine  # Omarchy reminders for yours
+
+# Retitle a meeting, during or after it
+voxtype meeting title latest "Pete <> Chad Bi-Weekly"
+
+# Name untitled meetings from your calendar's private iCal link
+voxtype meeting calendar set-ics -                     # paste the link
+voxtype meeting calendar status
+
 # Speaker labeling (replace auto-generated IDs with names)
 voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label <id> 0 "Bob"
 
-# AI summarization (requires Ollama or remote API)
+# Move one line the diarizer got wrong to another speaker (id from show --json)
+voxtype meeting reassign latest 28 "Remote 2"
+voxtype meeting reassign latest 28 --reset
+
+# Notes and per-line annotations
+voxtype meeting notes latest --append "Ask Dana about travel"
+voxtype meeting annotate latest 28 "Check this number" --highlight
+
+# Correct or hide a line (id from show --json); --reset / --restore undo
+voxtype meeting edit latest 28 "We ship on Friday."
+voxtype meeting delete-line latest 31
+
+# AI summarization (your coding agent, or Ollama)
 voxtype meeting summarize latest
 voxtype meeting summarize <id> --format json --output summary.json
+voxtype meeting summarize latest --regenerate
+
+# Ask a question, during or after the meeting
+voxtype meeting ask latest "What are the action items so far?"
+voxtype meeting ask latest "Summarize the last few minutes" --last 5m
+
+# Which agent answers, and consent to send it transcripts
+voxtype meeting assistant status
+voxtype meeting assistant allow claude
 
 # Delete a meeting
 voxtype meeting delete <id>
 voxtype meeting delete <id> --force   # Skip confirmation
+
+# Finish or discard a meeting the daemon never finished (it crashed or was killed)
+voxtype meeting recover
+voxtype meeting recover --finish <id>
+voxtype meeting recover --discard <id>
 ```
 
 ### Configuration
@@ -2789,13 +3147,21 @@ Meeting mode is disabled by default. Enable it in `~/.config/voxtype/config.toml
 enabled = true
 chunk_duration_secs = 30         # Audio chunk size for processing
 storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
-retain_audio = false             # Keep raw audio files after transcription
+retain_audio = false             # Keep mic/loopback/mixed audio as Opus in the meeting folder
 max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
+show_view_on_start = true        # Omarchy: open the live meeting view when a meeting starts
+auto_label_from_title = true     # Name both sides of "Pete <> Andrew standup" from the title
+announce_recording = false       # Play "This meeting is being recorded..." into the call at start
+# announcement_file = "~/announce.wav"  # Your own clip instead of the built-in one
+announcement_voice = "kokoro"    # Built in; "jessica" downloads an ElevenLabs voice once
+announcement_volume = 0.5        # Call volume, linear gain: 1.0 full, 0.5 about -6 dB
 
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)
 loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
 echo_cancel = "auto"             # GTCRN neural enhancement + transcript dedup
+echo_guard = true                # Keep the call heard through speakers out of your lines
+echo_fuzzy_max_words = 4         # Longest line the misheard-words check looks at
 vad_threshold = 0.01             # Lower to 0.001 for quiet mics; 0.0 disables meeting VAD
 
 [meeting.diarization]
@@ -2819,23 +3185,27 @@ voxtype meeting label latest SPEAKER_00 "Alice"
 voxtype meeting label latest 1 "Bob"  # Short form: just the number
 ```
 
-Labels persist in the meeting data and appear in exports.
+Labels persist in the meeting data and appear in exports. To move a single line to another speaker instead, use `voxtype meeting reassign`; see [Meeting Mode](MEETING_MODE.md#moving-a-line-to-another-speaker).
 
-### AI Summarization
+### AI Summarization and Questions
 
-Meeting summarization uses Ollama (local) or a remote API to generate a summary with key points, action items, and decisions.
+The meeting assistant summarizes meetings (overview, decisions, action items with owners, chapters) and answers questions about them, during the meeting or after. It runs your own coding agent (Claude Code with its tools off, or Codex inside a bubblewrap jail) headless, or the local Ollama model. Transcripts go to an agent only after you allow it once.
 
 ```bash
-# Requires [meeting.summary] backend set to "local" or "remote"
+voxtype meeting assistant allow claude
 voxtype meeting summarize latest
-voxtype meeting summarize latest --format markdown --output summary.md
+voxtype meeting ask latest "What did Steve just say?" --last 2m
 ```
+
+Once an agent is allowed, each meeting is also summarized when it stops (`summary.md` in the meeting folder). See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) for agent selection, consent and where transcripts go.
 
 ### Echo Cancellation
 
 When `loopback_device` is enabled, meeting mode captures both your microphone and system audio (remote participants) on separate channels. Without echo cancellation, the remote participants' audio bleeds into your microphone recording and gets transcribed as your speech.
 
 Voxtype uses GTCRN, a lightweight neural speech enhancement model, to clean the mic signal before transcription. The model removes background noise and speaker bleed-through while preserving your voice. A second pass at the transcript level strips any residual echoed phrases.
+
+The echo guard (`echo_guard`, on by default) catches what gets through. A microphone line whose sound is all explained by the loopback is echo at any length: it is dropped when the loopback has the same words, or moved to the remote speaker when it does not. A short line that is a misheard copy of the remote, such as "Omarky problem." while the loopback said "the Omarchy package ... without any problems", is dropped too. It compares the audio levels of both tracks first, so your own lines, even a short reply ("yes", "only one?") said over the other side, are kept. See [CONFIGURATION.md](CONFIGURATION.md#echo_guard).
 
 The GTCRN model (~523 KB) is downloaded automatically the first time you run `voxtype meeting start`. To disable echo cancellation (e.g., if you have PipeWire's `echo-cancel` module configured):
 
@@ -2898,9 +3268,9 @@ While Voxtype is running:
 ### Verbosity Levels
 
 ```bash
-voxtype           # Normal output
-voxtype -v        # Verbose (shows transcription progress)
-voxtype -vv       # Debug (shows all internal operations)
+voxtype           # Normal output (info level)
+voxtype -v        # Debug level: each step of a dictation, and the transcribed text
+voxtype -vv       # Trace level: everything
 voxtype -q        # Quiet (errors only)
 ```
 
@@ -2908,7 +3278,32 @@ voxtype -q        # Quiet (errors only)
 
 ```bash
 journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
+
+### What the log contains
+
+At the normal level voxtype does not log what you say. A dictation is logged as its length and the engine that produced it (`Transcribed 42 chars (whisper engine)`), and the same goes for meeting transcript lines, text that could not be typed or copied, and text sent to a post-processing command. This matters because the systemd service logs to the journal, which keeps what it is given for weeks or months: with the text in it, the journal would hold everything you dictate even with [dictation history](#voxtype-history), `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` turned off.
+
+The text is logged at debug level, which is off unless you turn it on. Turn it on when you are reporting a recognition problem and want the log to show what the engine heard:
+
+```bash
+# In a terminal, with the service stopped
+systemctl --user stop voxtype
+voxtype -v
+
+# Or for the service: add the variable, restart, reproduce the problem
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
+```
+
+Remove the `Environment=` line and restart the service when you are done, or the journal keeps collecting what you dictate. A debug log contains your dictations, so read it before you attach it to a bug report.
+
+Two things are logged as they come, at any level: the output of a command you configured (`post_meeting_command`, and the error output of a failing post-processing command or hook), and meeting titles.
 
 ### Environment Variables
 

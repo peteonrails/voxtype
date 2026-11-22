@@ -590,6 +590,10 @@ install_companion_binary() {
 }
 install_companion_binary osd "$STAGING/usr/lib/voxtype/voxtype-osd"
 install_companion_binary osd-gtk4 "$STAGING/usr/lib/voxtype/voxtype-osd-gtk4"
+# The meeting window for desktops without Quickshell. `voxtype meeting view`
+# finds it beside the running binary, like the OSD launcher finds its
+# frontends, and only uses it when libgtk-4 loads.
+install_companion_binary meetings-gtk4 "$STAGING/usr/lib/voxtype/voxtype-meetings-gtk4"
 install_companion_binary osd-quickshell "$STAGING/usr/lib/voxtype/voxtype-osd-quickshell"
 if [[ -f "$STAGING/usr/lib/voxtype/voxtype-osd" ]]; then
     ln -sf /usr/lib/voxtype/voxtype-osd "$STAGING/usr/bin/voxtype-osd"
@@ -704,9 +708,11 @@ install -Dm755 packaging/scripts/voxtype-configure-launcher \
 install -Dm644 packaging/voxtype-configure.desktop \
     "$STAGING/usr/share/applications/voxtype-configure.desktop"
 
-# voxtype's own icon, named by the desktop entry's Icon=voxtype and passed to
-# notify-send as --icon=voxtype, so neither depends on an icon theme
-# providing a microphone glyph.
+# Voxtype Meetings launcher entry (`voxtype meeting view`), and voxtype's own
+# icon: named by both desktop entries' Icon=voxtype and passed to notify-send
+# as --icon=voxtype, so neither depends on an icon theme.
+install -Dm644 packaging/voxtype-meetings.desktop \
+    "$STAGING/usr/share/applications/voxtype-meetings.desktop"
 install -Dm644 assets/icon.svg \
     "$STAGING/usr/share/icons/hicolor/scalable/apps/voxtype.svg"
 install -Dm644 assets/icon.png \
@@ -911,6 +917,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-recommends libgtk4-layer-shell0 \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
+        --deb-suggests "libcudnn9-cuda-12 | libcudnn9-cuda-13" \
         --package "$DEB_FILE" \
         usr etc
 

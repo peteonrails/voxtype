@@ -65,7 +65,7 @@ OR — independently of language:
 │   └─ Any of 60+ languages, paid OK?     → Soniox (cloud, sub-100ms partials)
 │
 ├─ Want highest accuracy and don't mind a few seconds of wait?
-│   └─ Soniox async API (cloud, stt-async-v4)
+│   └─ Soniox async API (cloud, stt-async-v6)
 │
 └─ Cannot send audio off-device (privacy-sensitive)?
     └─ Pick any *local* engine above. Never Soniox.
@@ -474,7 +474,7 @@ Use the interactive model selector to browse and download models for any engine:
 voxtype setup model
 ```
 
-This shows all available models across all engines, marks installed models, and handles downloads from HuggingFace.
+This shows all available models across all engines, marks installed models, and handles downloads from Voxtype's model mirror at `models.voxtype.io`, checking each file's SHA-256.
 
 ### On-Demand Loading
 

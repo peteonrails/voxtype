@@ -27,6 +27,10 @@ pub enum HotkeyEvent {
     },
     Released,
     Cancel,
+    /// The paste-last key was pressed. The rdev backend does not read
+    /// `paste_last_key` yet, so this is never sent on macOS; it exists so the
+    /// daemon's match on the Linux variant compiles here too.
+    PasteLast,
 }
 
 /// Hotkey listener trait for macOS

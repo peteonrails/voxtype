@@ -61,6 +61,22 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.omarchy.link_settings_plugin = enabled;
     }
 
+    let history = config::HistoryOverrides {
+        enabled: cli.history,
+        paused: cli.history_paused,
+        retention_days: cli.history_retention_days,
+        exclude_apps: cli
+            .history_exclude_apps
+            .as_deref()
+            .map(config::parse_history_app_list),
+        record_app: cli.history_record_app,
+        record_window_title: cli.history_record_window_title,
+    };
+    history.apply(&mut config.history);
+    // The daemon re-reads [history] from disk when it changes; these still
+    // win over the file afterwards.
+    history.set_cli();
+
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;
     }
@@ -186,6 +202,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref cancel_key) = cli.cancel_key {
         config.hotkey.cancel_key = Some(cancel_key.clone());
     }
+    if let Some(ref paste_last_key) = cli.paste_last_key {
+        config.hotkey.paste_last_key = Some(paste_last_key.clone());
+    }
     if let Some(ref model_modifier) = cli.model_modifier {
         config.hotkey.model_modifier = Some(model_modifier.clone());
     }
@@ -276,6 +295,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.audio_feedback,
         cli.no_audio_feedback,
     );
+    apply_bool_override(
+        &mut config.audio.keep_failed_recordings,
+        cli.keep_failed_recordings,
+        cli.no_keep_failed_recordings,
+    );
     if cli.pause_media {
         config.audio.pause_media = true;
     }
@@ -331,12 +355,23 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.no_fallback_to_clipboard,
     );
     apply_bool_override(
+        &mut config.output.keep_undelivered_text,
+        cli.keep_undelivered_text,
+        cli.no_keep_undelivered_text,
+    );
+    apply_bool_override(
         &mut config.text.lard_disfluency,
         cli.lard_disfluency,
         cli.no_lard_disfluency,
     );
     if let Some(path) = &cli.lard_model_path {
         config.text.lard_model_path = Some(path.clone());
+    }
+    if let Some(language) = &cli.text_language {
+        if let Err(message) = config.text.set_language(language) {
+            eprintln!("Error: --text-language: {message}");
+            std::process::exit(1);
+        }
     }
     apply_bool_override(
         &mut config.text.punctuation_casing,
@@ -370,6 +405,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     );
     if let Some(ref keys) = cli.paste_keys {
         config.output.paste_keys = Some(keys.clone());
+    }
+    if let Some(ref keys) = cli.paste_keys_terminal {
+        config.output.paste_keys_terminal = Some(keys.clone());
     }
     if let Some(ref layout) = cli.dotool_xkb_layout {
         config.output.dotool_xkb_layout = Some(layout.clone());

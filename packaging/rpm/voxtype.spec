@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        1.2.2
+Version:        1.3.1
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -43,7 +43,7 @@ BuildRequires:  vulkan-loader-devel
 BuildRequires:  glslc
 # voxtype-gguf-worker-vulkan (ggml-vulkan's find_package(SPIRV-Headers))
 BuildRequires:  spirv-headers-devel
-# voxtype-osd-gtk4
+# voxtype-osd-gtk4 and voxtype-meetings-gtk4
 BuildRequires:  gtk4-devel
 BuildRequires:  gtk4-layer-shell-devel
 
@@ -52,6 +52,7 @@ Requires:       pipewire-alsa
 Recommends:     wtype
 Recommends:     wl-clipboard
 Recommends:     %{name}-osd-gtk4 = %{version}-%{release}
+Recommends:     %{name}-meetings-gtk4 = %{version}-%{release}
 Suggests:       ydotool
 Suggests:       libnotify
 Suggests:       quickshell
@@ -82,7 +83,8 @@ GPU acceleration can be enabled with: voxtype setup gpu --enable
 
 It also includes the OSD launcher (voxtype-osd), the Quickshell OSD
 frontend and its audio bridge, OSD styles, and the Omarchy Settings
-plugin. The GTK4 OSD frontend is in the voxtype-osd-gtk4 package.
+plugin. The GTK4 OSD frontend is in the voxtype-osd-gtk4 package, and the
+GTK4 meetings window in voxtype-meetings-gtk4.
 
 %package osd-gtk4
 Summary:        GTK4 waveform OSD for Voxtype
@@ -92,6 +94,16 @@ Requires:       %{name}%{?_isa} = %{version}-%{release}
 The GTK4 frontend for voxtype-osd: a layer-shell overlay that shows the
 recording waveform. voxtype-osd uses it automatically when it is
 installed and falls back to the other frontends when it is not.
+
+%package meetings-gtk4
+Summary:        GTK4 meetings window for Voxtype
+Requires:       %{name}%{?_isa} = %{version}-%{release}
+
+%description meetings-gtk4
+The GTK4 meetings window: the live transcript, past meetings, notes and
+the assistant in a normal window. `voxtype meeting view` opens it on
+desktops without Quickshell, and uses the Quickshell view when that is
+installed.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -125,12 +137,14 @@ install -D -m 755 target/release/voxtype variants/voxtype-vulkan
 %{vt_haswell_env} cargo build --release --locked -p voxtype-gguf-worker --features vulkan
 install -D -m 755 target/release/voxtype-gguf-worker variants/voxtype-gguf-worker-vulkan
 
-# OSD launcher, its GTK4 and Quickshell frontends, and the audio bridge the
-# Quickshell OSD reads levels from. Same invocation as Dockerfile.onnx, so
-# the daemon binaries above stay free of GTK4.
-%{vt_haswell_env} cargo build --release --locked --features osd-gtk4 \
+# OSD launcher, its GTK4 and Quickshell frontends, the audio bridge the
+# Quickshell OSD reads levels from, and the GTK4 meetings window. Same
+# invocation as Dockerfile.onnx, so the daemon binaries above stay free of
+# GTK4.
+%{vt_haswell_env} cargo build --release --locked --features osd-gtk4,meetings-gtk4 \
     --bin voxtype-osd --bin voxtype-osd-gtk4 \
-    --bin voxtype-osd-quickshell --bin voxtype-audio-bridge
+    --bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
+    --bin voxtype-meetings-gtk4
 
 # Man pages (compiles only clap and clap_mangen)
 cargo xtask man target/man
@@ -147,6 +161,8 @@ install -D -m 755 variants/voxtype-gguf-worker-vulkan %{buildroot}%{vt_libdir}/v
 # basename, so the bridge goes on PATH.
 install -D -m 755 target/release/voxtype-osd %{buildroot}%{vt_libdir}/voxtype-osd
 install -D -m 755 target/release/voxtype-osd-gtk4 %{buildroot}%{vt_libdir}/voxtype-osd-gtk4
+# `voxtype meeting view` finds the meetings window beside the daemon.
+install -D -m 755 target/release/voxtype-meetings-gtk4 %{buildroot}%{vt_libdir}/voxtype-meetings-gtk4
 install -D -m 755 target/release/voxtype-osd-quickshell %{buildroot}%{vt_libdir}/voxtype-osd-quickshell
 install -d %{buildroot}%{_bindir}
 ln -s ../lib/voxtype/voxtype-osd %{buildroot}%{_bindir}/voxtype-osd
@@ -200,6 +216,10 @@ install -D -m 644 packaging/voxtype-configure.desktop \
     %{buildroot}%{_datadir}/applications/voxtype-configure.desktop
 install -D -m 755 packaging/scripts/voxtype-configure-launcher \
     %{buildroot}%{_bindir}/voxtype-configure-launcher
+
+# Voxtype Meetings launcher entry, and the icon both entries use
+install -D -m 644 packaging/voxtype-meetings.desktop \
+    %{buildroot}%{_datadir}/applications/voxtype-meetings.desktop
 install -D -m 644 assets/icon.svg \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/voxtype.svg
 install -D -m 644 assets/icon.png \
@@ -313,13 +333,75 @@ fi
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 %{_datadir}/applications/voxtype-configure.desktop
 %{_bindir}/voxtype-configure-launcher
+%{_datadir}/applications/voxtype-meetings.desktop
 %{_datadir}/icons/hicolor/scalable/apps/voxtype.svg
 %{_datadir}/icons/hicolor/128x128/apps/voxtype.png
 
 %files osd-gtk4
 %{vt_libdir}/voxtype-osd-gtk4
 
+%files meetings-gtk4
+%{vt_libdir}/voxtype-meetings-gtk4
+
 %changelog
+* Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
+- Dictation history: a private, local record of each dictation, including
+  failed and cancelled ones, with the history command, search alongside
+  meetings, pause and resume, app exclusions, a history window, a terminal
+  reader and tray items
+- voxtype paste-last and [hotkey] paste_last_key send the last dictation
+  again
+- A correction in history can become a text replacement
+- text.language sets the language of dictated text; LARD and other
+  English-only cleanup run only on English text and stay inside one
+  sentence
+- Meeting playback: the transcript follows the waveform, and each speaker
+  has one colour
+- A notice when one side of a meeting records nothing
+- Zoom's web client window counts as a call for meeting detection
+- The meeting announcement plays at half its old level, set by
+  meeting.announcement_volume
+- One meeting view when the Omarchy plugin and the standalone shell both
+  run, opened on the focused monitor
+- config set and unset keep every entry of an inline table
+- A profile's post_process_command and output_mode apply again (#1097)
+- Configs saved through a symlink keep the link (#1102)
+- Keep $ in replacement values (#1059)
+- The hidden GTK4 OSD no longer wakes 120 times a second (#1090)
+- Streaming keeps audio while inference runs and honours output overrides
+- The silence auto-stop clock starts at the first frame
+- Parakeet prefers CUDA over MIGraphX on NVIDIA hosts with an AMD iGPU
+- Paste keystrokes map super, meta and win to wtype's logo
+- Soniox defaults to stt-rt-v6 and stt-async-v6
+- voxtype info accel reports the backend for GGUF engines (#1085)
+- Media ducking leaves voxtype's own cue sounds alone
+- Commands other than the daemon log to stderr, and an empty RUST_LOG is
+  treated as unset
+- A config save no longer undoes changes made since it loaded
+
+* Wed Nov 18 2026 Peter Jackson <pete@peteonrails.com> - 1.3.0-1
+- Meetings: live transcript view, echo cancellation and echo guard, hybrid
+  diarization, notes, annotations, line edits, search, sharing, action
+  items, recovery of interrupted meetings, import and retranscription
+- Ship the GTK4 meetings window in voxtype-meetings-gtk4
+- Built-in Kokoro recording announcement; the ElevenLabs voice is a download
+- Whisper, VAD, speaker and echo models download from models.voxtype.io
+- Notifications for failures that used to reach only the log: output
+  fallback and failure, microphone and model load, the evdev hotkey, VAD,
+  GPU and NPU fallback, OSD frontend fallback, post-processing and hooks,
+  degraded meetings; delivered over D-Bus when notify-send is missing
+- voxtype doctor, with the same checks grouped into one startup notification
+- Keep failed recordings and undelivered text, with settings to turn each off
+- Terminal-aware paste keys (paste_keys = "auto"); OSD scale, placement,
+  opacity and native rendering fixes
+- voxtype setup lard downloads the LARD model, and a missing model is reported
+- Dictated text is logged only at debug level
+- The recording announcement waits for the call app's settled mic stream, and
+  a detected browser call continues while its app has the mic or a window
+  shows it
+- Fix a daemon freeze when a speaker with many lines is named during a meeting
+- Fix macOS meeting portability
+
 * Thu Nov 12 2026 Peter Jackson <pete@peteonrails.com> - 1.2.2-1
 - Stable 1.2.2: automatic OSD frontend selection and Settings engine/model fixes
 - Handle failed output pipes, paste fallback and unresponsive audio-device lookups

@@ -17,5 +17,6 @@ sleep 2
 voxtype record cancel
 # Verify no transcription in logs:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i transcri
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i transcri
 ```
 

@@ -1,6 +1,7 @@
 # Whisper Models
 
-Download models from https://huggingface.co/ggerganov/whisper.cpp/tree/main
+Download models with `voxtype setup --download --model <name>`, which fetches
+them from https://models.voxtype.io and verifies their sha256.
 
 Place .bin files in this directory.
 

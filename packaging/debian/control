@@ -24,7 +24,8 @@ Rules-Requires-Root: no
 Package: voxtype
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, curl
-Recommends: wtype, wl-clipboard, voxtype-osd-gtk4 (= ${binary:Version})
+Recommends: wtype, wl-clipboard, voxtype-osd-gtk4 (= ${binary:Version}),
+            voxtype-meetings-gtk4 (= ${binary:Version})
 Suggests: ydotool, libnotify-bin, pipewire
 Description: Push-to-talk voice-to-text for Linux
  Voxtype is a push-to-talk voice-to-text daemon for Linux.
@@ -45,7 +46,8 @@ Description: Push-to-talk voice-to-text for Linux
  This package includes the AVX2 and Vulkan builds, the GGUF
  workers, the OSD launcher, the Quickshell OSD frontend and its audio
  bridge, OSD styles and the Omarchy Settings plugin. The GTK4 OSD frontend
- is in voxtype-osd-gtk4.
+ is in voxtype-osd-gtk4, and the GTK4 meetings window in
+ voxtype-meetings-gtk4.
 
 Package: voxtype-osd-gtk4
 Architecture: any
@@ -54,3 +56,12 @@ Description: GTK4 waveform OSD for Voxtype
  The GTK4 frontend for voxtype-osd: a layer-shell overlay that shows the
  recording waveform. voxtype-osd uses it automatically when it is
  installed and falls back to the other frontends when it is not.
+
+Package: voxtype-meetings-gtk4
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, voxtype (= ${binary:Version})
+Description: GTK4 meetings window for Voxtype
+ The GTK4 meetings window: the live transcript, past meetings, notes and
+ the assistant in a normal window. `voxtype meeting view` opens it on
+ desktops without Quickshell, and uses the Quickshell view when that is
+ installed.

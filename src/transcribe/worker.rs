@@ -9,6 +9,7 @@
 //! 1. Worker starts, loads model
 //! 2. Worker writes "READY\n" to stdout (signals model is loaded)
 //! 3. Parent sends audio via stdin: [u32 sample_count (LE)][f32 samples (LE)...]
+//!    The top bit of the count ([`TIMED_FLAG`]) asks for timed segments.
 //! 4. Worker transcribes and writes JSON response to stdout
 //! 5. Worker exits
 //!
@@ -23,6 +24,11 @@ use ureq::serde_json;
 /// Ready signal sent after model is loaded
 pub const READY_SIGNAL: &str = "READY";
 
+/// Set in the sample-count word to ask for [`Transcriber::transcribe_timed`]
+/// instead of `transcribe`. Counts are capped far below it, and the worker is
+/// always the parent's own binary, so the two ends agree on the format.
+pub const TIMED_FLAG: u32 = 1 << 31;
+
 /// JSON response from the worker
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
@@ -36,10 +42,17 @@ pub enum WorkerResponse {
         /// parents that ignore the field simply skip the hint.
         #[serde(skip_serializing_if = "Option::is_none")]
         language: Option<String>,
+        /// Whisper's timed segments, present when the parent asked for them
+        #[serde(skip_serializing_if = "Option::is_none")]
+        segments: Option<Vec<crate::transcribe::TimedSegment>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<super::RuntimeMetadata>,
     },
     Error {
         ok: bool,
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<super::RuntimeMetadata>,
     },
 }
 
@@ -49,6 +62,23 @@ impl WorkerResponse {
             ok: true,
             text,
             language,
+            segments: None,
+            metadata: None,
+        }
+    }
+
+    pub fn timed(segments: Vec<crate::transcribe::TimedSegment>, language: Option<String>) -> Self {
+        let text = segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        WorkerResponse::Success {
+            ok: true,
+            text,
+            language,
+            segments: Some(segments),
+            metadata: None,
         }
     }
 
@@ -56,7 +86,19 @@ impl WorkerResponse {
         WorkerResponse::Error {
             ok: false,
             error: msg.into(),
+            metadata: None,
         }
+    }
+
+    fn with_metadata(mut self, measurements: super::RuntimeMetadata) -> Self {
+        if measurements != super::RuntimeMetadata::default() {
+            match &mut self {
+                Self::Success { metadata, .. } | Self::Error { metadata, .. } => {
+                    *metadata = Some(measurements);
+                }
+            }
+        }
+        self
     }
 }
 
@@ -89,44 +131,57 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
         load_start.elapsed().as_secs_f32()
     );
 
+    run_loaded_worker(&transcriber, &mut io::stdin().lock(), &mut stdout_lock)
+}
+
+/// Loaded-engine protocol with injectable private IO for regression tests.
+/// Inference and input errors retain measurements from this engine instance.
+fn run_loaded_worker<R: Read, W: Write>(
+    transcriber: &dyn Transcriber,
+    stdin: &mut R,
+    mut stdout_lock: &mut W,
+) -> anyhow::Result<()> {
     // Step 2: Signal ready (model is loaded, waiting for audio)
     writeln!(stdout_lock, "{}", READY_SIGNAL)?;
     stdout_lock.flush()?;
     eprintln!("[worker] Signaled READY, waiting for audio...");
 
     // Step 3: Read audio from stdin
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
 
     // Read sample count (u32 little-endian)
     let mut count_buf = [0u8; 4];
     if let Err(e) = stdin.read_exact(&mut count_buf) {
-        write_response_to(
+        write_loaded_response(
             &mut stdout_lock,
             WorkerResponse::error(format!("Failed to read sample count: {}", e)),
+            transcriber,
         );
         return Ok(());
     }
-    let sample_count = u32::from_le_bytes(count_buf) as usize;
+    let count_word = u32::from_le_bytes(count_buf);
+    let timed = count_word & TIMED_FLAG != 0;
+    let sample_count = (count_word & !TIMED_FLAG) as usize;
 
     // Validate sample count (prevent OOM from malformed input)
     // Max 10 minutes at 16kHz = 9,600,000 samples = ~38MB
     const MAX_SAMPLES: usize = 16000 * 60 * 10;
     if sample_count > MAX_SAMPLES {
-        write_response_to(
+        write_loaded_response(
             &mut stdout_lock,
             WorkerResponse::error(format!(
                 "Sample count too large: {} (max {})",
                 sample_count, MAX_SAMPLES
             )),
+            transcriber,
         );
         return Ok(());
     }
 
     if sample_count == 0 {
-        write_response_to(
+        write_loaded_response(
             &mut stdout_lock,
             WorkerResponse::error("Empty audio buffer"),
+            transcriber,
         );
         return Ok(());
     }
@@ -141,9 +196,10 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
     };
 
     if let Err(e) = stdin.read_exact(samples_bytes) {
-        write_response_to(
+        write_loaded_response(
             &mut stdout_lock,
             WorkerResponse::error(format!("Failed to read audio samples: {}", e)),
+            transcriber,
         );
         return Ok(());
     }
@@ -157,6 +213,33 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
     // Step 4: Transcribe
     eprintln!("[worker] Starting transcription...");
     let transcribe_start = std::time::Instant::now();
+    if timed {
+        match transcriber.transcribe_timed(&samples) {
+            Ok(segments) => {
+                eprintln!(
+                    "[worker] Timed transcription complete in {:.2}s: {} segment(s)",
+                    transcribe_start.elapsed().as_secs_f32(),
+                    segments.len()
+                );
+                let language = transcriber.last_detected_language();
+                write_loaded_response(
+                    &mut stdout_lock,
+                    WorkerResponse::timed(segments, language),
+                    transcriber,
+                );
+            }
+            Err(e) => {
+                eprintln!("[worker] Transcription failed: {}", e);
+                write_loaded_response(
+                    &mut stdout_lock,
+                    WorkerResponse::error(e.to_string()),
+                    transcriber,
+                );
+            }
+        }
+        return Ok(());
+    }
+
     let result = transcriber.transcribe(&samples);
 
     match result {
@@ -171,15 +254,34 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
             // what keyboard layout to use. Field is omitted from the JSON
             // if no language was tracked.
             let language = transcriber.last_detected_language();
-            write_response_to(&mut stdout_lock, WorkerResponse::success(text, language));
+            write_loaded_response(
+                &mut stdout_lock,
+                WorkerResponse::success(text, language),
+                transcriber,
+            );
         }
         Err(e) => {
             eprintln!("[worker] Transcription failed: {}", e);
-            write_response_to(&mut stdout_lock, WorkerResponse::error(e.to_string()));
+            write_loaded_response(
+                &mut stdout_lock,
+                WorkerResponse::error(e.to_string()),
+                transcriber,
+            );
         }
     }
 
     Ok(())
+}
+
+fn write_loaded_response<W: Write>(
+    writer: &mut W,
+    response: WorkerResponse,
+    transcriber: &dyn Transcriber,
+) {
+    write_response_to(
+        writer,
+        response.with_metadata(transcriber.runtime_metadata()),
+    );
 }
 
 /// Write a JSON response to the given writer
@@ -193,6 +295,55 @@ fn write_response_to<W: Write>(writer: &mut W, response: WorkerResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_loaded_worker_emits_actual_metadata_on_success_and_inference_error() {
+        struct MeasuredEngine {
+            failed: bool,
+        }
+        impl Transcriber for MeasuredEngine {
+            fn transcribe(&self, _: &[f32]) -> Result<String, crate::error::TranscribeError> {
+                if self.failed {
+                    Err(crate::error::TranscribeError::InferenceFailed(
+                        "synthetic inference failure".into(),
+                    ))
+                } else {
+                    Ok("Synthetic transcript".into())
+                }
+            }
+
+            fn runtime_metadata(&self) -> crate::transcribe::RuntimeMetadata {
+                crate::transcribe::RuntimeMetadata {
+                    model: Some("actual-model.gguf".into()),
+                    backend: Some("fixture-cpu".into()),
+                    model_load_ms: Some(19),
+                }
+            }
+        }
+        for failed in [false, true] {
+            for timed in [false, true] {
+                let count = 4u32 | if timed { TIMED_FLAG } else { 0 };
+                let mut input = count.to_le_bytes().to_vec();
+                input.extend_from_slice(&[0; 16]);
+                let mut output = Vec::new();
+                run_loaded_worker(
+                    &MeasuredEngine { failed },
+                    &mut input.as_slice(),
+                    &mut output,
+                )
+                .unwrap();
+                let lines = String::from_utf8(output).unwrap();
+                assert_eq!(lines.lines().next(), Some(READY_SIGNAL));
+                let value: serde_json::Value =
+                    serde_json::from_str(lines.lines().nth(1).unwrap()).unwrap();
+                assert_eq!(value["ok"], !failed);
+                assert_eq!(value["metadata"]["model"], "actual-model.gguf");
+                assert_eq!(value["metadata"]["backend"], "fixture-cpu");
+                assert_eq!(value["metadata"]["model_load_ms"], 19);
+                assert_eq!(lines.lines().count(), 2);
+            }
+        }
+    }
 
     #[test]
     fn test_worker_response_serialization() {
@@ -215,6 +366,23 @@ mod tests {
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""language":"ru""#));
+    }
+
+    #[test]
+    fn timed_responses_carry_segments_and_joined_text() {
+        let seg = |text: &str, a: f32, b: f32| crate::transcribe::TimedSegment {
+            text: text.to_string(),
+            start_secs: a,
+            end_secs: b,
+        };
+        let r = WorkerResponse::timed(vec![seg("One.", 0.0, 1.5), seg("Two.", 2.0, 3.0)], None);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""text":"One. Two.""#), "{json}");
+        assert!(
+            json.contains(r#""segments":[{"text":"One.","start_secs":0.0,"end_secs":1.5}"#),
+            "{json}"
+        );
+        assert!(TIMED_FLAG as usize > 16000 * 60 * 10);
     }
 
     #[test]

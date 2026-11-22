@@ -7,6 +7,7 @@
 
 mod commands;
 mod config;
+mod history;
 mod info;
 mod meeting;
 mod record;
@@ -15,8 +16,11 @@ mod setup;
 
 pub use commands::Commands;
 pub use config::ConfigAction;
+pub use history::{HistoryAction, HISTORY_AFTER_HELP};
 pub use info::InfoAction;
-pub use meeting::MeetingAction;
+pub use meeting::{
+    AssistantAction, CalendarAction, MeetingAction, TodoistAction, CALENDAR_LINK_HELP,
+};
 pub use record::{OutputModeOverride, RecordAction};
 pub use root::Cli;
 pub use setup::{CompositorType, SetupAction};
@@ -59,7 +63,55 @@ pub const ENGINE_NAMES_CSV: &str =
 /// The authoritative dispatch lives in `src/meeting/diarization/mod.rs`'s
 /// `match backend.as_str()` block; a test in `src/config/meeting.rs` pins
 /// this list against those arms.
-pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml"];
+pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml", "hybrid"];
+
+/// Voices of the built-in recording announcement, for `meeting start
+/// --announcement-voice`. `crate::meeting::announce::VOICES` is this list;
+/// it lives here because `build.rs` includes this module standalone.
+pub(crate) const ANNOUNCEMENT_VOICES: &[&str] = &["kokoro", "jessica"];
+
+/// Parse `meeting start --announcement-volume`: a number from 0.0 to 1.0,
+/// refused with the range otherwise. `crate::meeting::announce::parse_volume`
+/// is this function; it lives here because `build.rs` includes this module
+/// standalone.
+pub(crate) fn parse_announcement_volume(raw: &str) -> Result<f32, String> {
+    let volume: f32 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{:?} is not a number; give a volume from 0.0 to 1.0", raw))?;
+    if !(0.0..=1.0).contains(&volume) {
+        return Err(format!(
+            "{} is out of range; give a volume from 0.0 (silent) to 1.0 (full level)",
+            raw.trim()
+        ));
+    }
+    Ok(volume)
+}
+
+/// Formats `voxtype meeting export --format` accepts, each with its short
+/// alias. Kept here rather than derived from
+/// `crate::meeting::export::ExportFormat` because `build.rs` includes this
+/// module standalone for man pages; a test in `src/meeting/export/mod.rs`
+/// pins every name and alias against `ExportFormat::parse`.
+pub(crate) const EXPORT_FORMATS: &[(&str, Option<&str>)] = &[
+    ("markdown", Some("md")),
+    ("text", Some("txt")),
+    ("json", None),
+    ("srt", None),
+    ("vtt", None),
+];
+
+/// `value_parser` for `meeting export --format`: an unknown format is
+/// refused at parse time with the list of valid ones.
+pub(crate) fn export_format_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(EXPORT_FORMATS.iter().map(|&(name, alias)| {
+        let value = clap::builder::PossibleValue::new(name);
+        match alias {
+            Some(alias) => value.alias(alias),
+            None => value,
+        }
+    }))
+}
 
 /// Values `voxtype setup --progress-format` accepts. `human` is curl's
 /// progress bar and the usual status lines; `json` emits one NDJSON event per

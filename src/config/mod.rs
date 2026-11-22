@@ -9,10 +9,12 @@
 mod audio;
 mod default_config;
 mod engines;
+mod history;
 mod hotkey;
 mod language;
 mod load;
 mod meeting;
+mod meeting_detect;
 mod notification;
 mod output;
 mod parse;
@@ -28,15 +30,24 @@ mod whisper;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
-    ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
-    TranscriptionEngine,
+    openvino_driver_packages, CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig,
+    OmnilingualConfig, OpenVinoConfig, ParaformerConfig, ParakeetConfig, ParakeetModelType,
+    SenseVoiceConfig, SonioxConfig, TranscriptionEngine,
+};
+pub use history::{
+    parse_app_list as parse_history_app_list, HistoryConfig, HistoryOverrides,
+    DEFAULT_EXCLUDE_APPS as DEFAULT_HISTORY_EXCLUDE_APPS,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::{LanguageConfig, COHERE_LANGUAGES};
-pub use load::{load_config, save_config};
+pub use load::{load_config, resolve_config_file, save_config};
 pub use meeting::{
-    MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingSummaryConfig,
+    MeetingActionsConfig, MeetingAudioConfig, MeetingCalendarConfig, MeetingConfig,
+    MeetingDiarizationConfig, MeetingShareConfig, MeetingStartOptions, MeetingSummaryConfig,
+};
+pub use meeting_detect::{
+    default_apps as default_call_apps, CallAppPattern, CallEnd, MeetingDetectConfig,
+    CALL_END_CHOICES,
 };
 pub use notification::NotificationConfig;
 pub use output::{
@@ -44,7 +55,8 @@ pub use output::{
     OutputMode,
 };
 pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
-pub use root::{Config, OmarchyConfig, TrayConfig};
+pub(crate) use root::EngineLanguage;
+pub use root::{ActiveGguf, Config, OmarchyConfig, TextLanguageSource, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;

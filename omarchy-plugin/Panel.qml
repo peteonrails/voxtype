@@ -19,6 +19,11 @@ import "components"
 //   omarchy-shell io.voxtype.settings toggle
 //   omarchy-shell io.voxtype.settings section Hotkey
 //
+// The live meeting view is the same plugin with {"view":"meetings"} (plus an
+// optional "tab" and "meeting_id"), or the `meetings` verb; it also opens by
+// itself when a meeting starts (components/OmarchyMeetingsHost.qml, around the
+// view shared with the standalone shell in quickshell/voxtype-meetings).
+//
 // The panel owns no settings model of its own: `voxtype config schema --json`
 // is the whole source of truth, re-read on every summon and after every write,
 // and each control writes straight back through `voxtype config set`. That
@@ -35,6 +40,10 @@ Item {
   property string omarchyPath: ""
 
   property bool opened: false
+  // The selected application view; each history config keeps its own client.
+  property string view: "settings"
+  property var historyHosts: ({})
+  property var activeHistoryHost: null
 
   // ---------------------------------------------------------------- state
 
@@ -81,6 +90,7 @@ Item {
   property string accelEvidence: ""
 
   property bool restartNeeded: false
+  property string restartFileState: ""
   property string restartError: ""
   // The daemon that was running when the banner went up, by main pid. It read
   // the config before the change, so a different pid means a restart happened
@@ -129,6 +139,22 @@ Item {
   // The `setup osd --status --json` object, or null (including a CLI that
   // predates --status, which means no offer).
   property var osdStatus: null
+  // The schema's `secrets` (values kept outside config.toml, such as the
+  // calendar's iCal link), and per secret key: its status_command answer, the
+  // last Set/Clear failure, what the last one reported, and a count of saves
+  // (each empties the row's field).
+  property var secrets: []
+  property var secretStatus: ({})
+  property var secretErrors: ({})
+  property var secretNotices: ({})
+  property var secretSaves: ({})
+
+  function withEntry(map, key, value) {
+    var next = ({})
+    for (var k in map) next[k] = map[k]
+    next[key] = value
+    return next
+  }
   // "Not now" whose recording failed: hidden for as long as the shell keeps
   // this panel loaded, as for the plugin copy banner.
   property bool osdDismissedHere: false
@@ -252,7 +278,26 @@ Item {
     var payload = {}
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
 
+    root.view = payload.view === "meetings" ? "meetings" : payload.view === "history" ? "history" : "settings"
     root.opened = true
+    if (root.view === "history") {
+      var path = payload.config === undefined ? "" : String(payload.config)
+      var host = root.historyHosts[path]
+      if (!host) {
+        host = historyHostFactory.createObject(root, { configPath: path })
+        if (!host) { root.opened = false; return }
+        var next = Object.assign({}, root.historyHosts)
+        next[path] = host
+        root.historyHosts = next
+      }
+      root.activeHistoryHost = host
+      host.window.refresh()
+      return
+    }
+    if (root.view === "meetings") {
+      meetings.select(payload)
+      return
+    }
     if (cli.downloading) root.browsingEngine = cli.downloadEngine
     // Re-read on every summon: the config file may have been edited by the
     // TUI, another shell, or an upgrade since the last time we looked.
@@ -266,6 +311,8 @@ Item {
     root.upgradeActionError = ""
     root.osdOfferError = ""
     root.osdStyleNotice = ""
+    root.secretErrors = ({})
+    root.secretNotices = ({})
     if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
     root.refreshAll()
@@ -285,6 +332,10 @@ Item {
   // `section` verb on an open panel both re-read all of it: either can follow a
   // change made behind the panel's back (an upgrade, a new binary, a tray
   // click after a model update).
+  // The account's full name, offered (as placeholder text) for an unset
+  // meeting.my_name; "" when there is none or the CLI cannot say.
+  property string myNameSuggestion: ""
+
   function refreshAll() {
     cli.fetchSchema()
     cli.fetchStatus()
@@ -297,6 +348,7 @@ Item {
     cli.fetchUpgrade()
     cli.fetchPluginLink()
     cli.fetchOsdStatus()
+    cli.fetchMyName()
   }
 
   // A binary that cannot be run cannot vouch for anything shown from its last
@@ -327,6 +379,8 @@ Item {
     root.upgradeStatus = null
     root.pluginLink = null
     root.osdStatus = null
+    root.secrets = []
+    root.secretStatus = ({})
     root.infoErrors = ({})
   }
 
@@ -521,7 +575,7 @@ Item {
     function open(): string {
       // Already up: leave the panel as the user left it rather than resetting
       // its search and section.
-      if (root.opened) return "ok"
+      if (root.opened && root.view === "settings") return "ok"
       return root.requestOpen("{}")
     }
 
@@ -541,7 +595,7 @@ Item {
     function section(name: string): string {
       var wanted = root.canonicalSection(name || "")
       if (wanted === "") return "usage: section <name>"
-      if (root.opened) {
+      if (root.opened && root.view === "settings") {
         // The tray's "Model update available" lands here on an open panel,
         // and so can a jump made after the binary or config changed. Re-read
         // everything, as a summon does, not just the upgrade offers.
@@ -561,6 +615,21 @@ Item {
         return "ok"
       }
       return root.requestOpen(JSON.stringify({ section: wanted }))
+    }
+
+    // History uses an immutable client for each explicit configuration.
+    function history(): string {
+      return root.requestOpen(JSON.stringify({ view: "history" }))
+    }
+
+    function historyConfig(path: string): string {
+      return root.requestOpen(JSON.stringify({ view: "history", config: path }))
+    }
+
+    // The live meeting view, or a no-op if it is already up.
+    function meetings(): string {
+      if (root.opened && root.view === "meetings") return "ok"
+      return root.requestOpen(JSON.stringify({ view: "meetings" }))
     }
 
     // Restarts the daemon, not the panel — the same button the restart banner
@@ -608,6 +677,7 @@ Item {
     // its signal(var) can wrap it as a QML sequence: length/indexing survive,
     // but Array.isArray does not. Rejecting that wrapper hides every section.
     var normalized = []
+    var restartValues = []
     var incoming = next.keys && next.keys.length !== undefined ? next.keys : []
     for (var i = 0; i < incoming.length; ++i) {
       if (!incoming[i]) continue
@@ -615,8 +685,32 @@ Item {
       for (var key in incoming[i]) spec[key] = incoming[i][key]
       spec.section = canonicalSection(spec.section || "")
       normalized.push(spec)
+      if (String(spec.key).indexOf("history.") !== 0)
+        restartValues.push([String(spec.key), spec.file_value])
     }
+    // Scalars use file-layer values rather than environment overrides or TOML
+    // formatting. Replacements and profiles are separate canonical structures;
+    // profile vocabulary is cached at daemon startup. Our own live History
+    // writes must not create or clear an unrelated restart requirement.
+    var restartState = JSON.stringify([restartValues, next.replacements || ({}), next.profiles || ({})])
+    if (root.configPath === String(next.config_path || "")
+        && root.restartFileState !== "" && root.restartFileState !== restartState
+        && !cli.upgrading && Date.now() - root.upgradeSettledAt > 2000
+        && cli.restartRequestedAt < root.configChangedAt)
+      root.noteRestartNeeded()
+    root.restartFileState = restartState
     root.keys = normalized
+    var secrets = []
+    var incomingSecrets = next.secrets && next.secrets.length !== undefined ? next.secrets : []
+    for (var si = 0; si < incomingSecrets.length; ++si) {
+      if (!incomingSecrets[si] || !incomingSecrets[si].key) continue
+      var secret = ({})
+      for (var sf in incomingSecrets[si]) secret[sf] = incomingSecrets[si][sf]
+      secret.section = canonicalSection(secret.section || "")
+      secrets.push(secret)
+    }
+    root.secrets = secrets
+    cli.fetchSecretStatuses(secrets)
     root.activeSection = canonicalSection(root.activeSection)
     root.engine = next.engine === undefined || next.engine === null ? "" : String(next.engine)
     root.voxtypeVersion = next.voxtype_version ? String(next.voxtype_version) : ""
@@ -722,6 +816,26 @@ Item {
     }
     onPluginLinkLoaded: function(status) { root.pluginLink = status }
     onOsdStatusLoaded: function(status) { root.osdStatus = status }
+    onMyNameLoaded: function(answer) { root.myNameSuggestion = answer && answer.suggestion ? String(answer.suggestion) : "" }
+    onSecretStatusLoaded: function(key, status) {
+      root.secretStatus = root.withEntry(root.secretStatus, key, status)
+    }
+    onSecretActionFinished: function(key, action, ok, message, result) {
+      root.secretErrors = root.withEntry(root.secretErrors, key, ok ? "" : message)
+      var notice = ""
+      if (ok && action === "set") {
+        root.secretSaves = root.withEntry(root.secretSaves, key, (root.secretSaves[key] || 0) + 1)
+        var host = result && result.host ? String(result.host) : ""
+        var n = result ? result.events : null
+        notice = host === "" ? "Saved." : "Linked to " + host + (n === null || n === undefined ? "." :
+          ": " + n + (n === 1 ? " event" : " events") + " in the next 48 hours.")
+      }
+      if (ok && action === "clear") notice = "Removed."
+      root.secretNotices = root.withEntry(root.secretNotices, key, notice)
+      // The schema carries set/host/last_error; reading it again also reads
+      // every status_command again.
+      cli.fetchSchema()
+    }
     onOsdActionFinished: function(action, ok, message) {
       if (action === "use-auto") {
         if (ok) {
@@ -733,7 +847,7 @@ Item {
           root.osdOfferError = message
         }
       } else if (!ok) {
-        console.warn("Voxtype Settings: could not record Not now for the OSD offer (" + message
+        console.warn("Voxtype panel: could not record Not now for the OSD offer (" + message
                      + "); hiding it for this session")
         root.osdDismissedHere = true
       }
@@ -741,7 +855,7 @@ Item {
     }
     onCopyDismissFinished: function(ok, message) {
       if (!ok) {
-        console.warn("Voxtype Settings: could not record Not now (" + message + "); hiding the banner for this session")
+        console.warn("Voxtype panel: could not record Not now (" + message + "); hiding the banner for this session")
         root.copyDismissedHere = true
       }
       cli.fetchPluginLink()
@@ -798,9 +912,10 @@ Item {
     }
     onWriteSucceeded: function(key) {
       root.clearError(key)
-      // The daemon only reads config at startup, so a successful write is
-      // exactly when the restart prompt becomes true.
-      root.noteRestartNeeded()
+      // History refreshes its settings and privacy generation without a
+      // restart. Do not imply a saved pause needs one, or clear a restart
+      // already required by an unrelated setting.
+      if (key.indexOf("history.") !== 0) root.noteRestartNeeded()
       root.restartError = ""
       cli.fetchSchema()
       if (key === "engine") cli.fetchModels()
@@ -887,7 +1002,7 @@ Item {
     property int ticks: 0
 
     interval: 5000
-    running: root.opened && !root.degraded
+    running: root.opened && root.view === "settings" && !root.degraded
     repeat: true
     onTriggered: {
       cli.fetchStatus()
@@ -915,7 +1030,7 @@ Item {
   // already doing.
   FileView {
     id: configWatcher
-    path: root.opened && root.configPath !== "" ? root.configPath : ""
+    path: root.opened && root.view === "settings" && root.configPath !== "" ? root.configPath : ""
     watchChanges: true
     printErrors: false
     // `voxtype config set` writes atomically, so the path is replaced rather
@@ -938,16 +1053,9 @@ Item {
       cli.fetchSchema()
       cli.fetchModels()
       cli.fetchOsdStatus()
-      // The banner's claim is that the file on disk no longer matches what the
-      // daemon loaded at startup, which an edit from the CLI or the TUI makes
-      // just as true as one made here. Without this the panel would quietly
-      // refresh to show a setting the running daemon is not using. An accepted
-      // upgrade is the exception: it restarted the daemon after its own write.
-      // A restart the panel started after the change (Switch on the OSD offer
-      // writes and restarts back to back) has already loaded it.
-      if (!cli.upgrading && Date.now() - root.upgradeSettledAt > 2000
-          && cli.restartRequestedAt < root.configChangedAt)
-        root.noteRestartNeeded()
+      // applySchema compares the refreshed non-History file-layer settings.
+      // A watcher notification alone cannot distinguish a live History save
+      // from an external edit that really requires a restart.
     }
   }
 
@@ -962,9 +1070,49 @@ Item {
 
   // ---------------------------------------------------------------- window
 
+  Component {
+    id: historyHostFactory
+    Item {
+      id: historyHost
+      required property string configPath
+      readonly property alias window: historyWindow
+      VoxtypeCli {
+        id: historyClient
+        manifest: root.manifest
+        historyConfigPath: historyHost.configPath
+      }
+      OmarchyTheme { id: historyTheme }
+      HistoryWindow {
+        id: historyWindow
+        client: historyClient
+        theme: historyTheme
+        visible: root.opened && root.view === "history" && root.activeHistoryHost === historyHost
+        onPasteRequested: root.dismiss()
+        onCloseRequested: root.dismiss()
+        onPasteFailed: root.requestOpen(JSON.stringify({ view: "history", config: historyHost.configPath }))
+        onVisibleChanged: {
+          if (!visible && root.opened && root.view === "history" && root.activeHistoryHost === historyHost)
+            root.dismiss()
+        }
+      }
+    }
+  }
+
+  OmarchyMeetingsHost {
+    id: meetings
+    bin: cli.bin
+    shown: root.opened && root.view === "meetings"
+    // Settings open: a meeting start does not take it over.
+    panelOpen: root.opened && root.view !== "meetings"
+    onOpenRequested: root.requestOpen(JSON.stringify({ view: "meetings" }))
+    onCloseRequested: root.dismiss()
+    // "Change in Settings" on the agent chip: the Meeting section.
+    onSettingsRequested: root.requestOpen(JSON.stringify({ section: "Meeting" }))
+  }
+
   PanelWindow {
     id: window
-    visible: root.opened
+    visible: root.opened && root.view === "settings"
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
@@ -1097,7 +1245,7 @@ Item {
                 objectName: "degradedTitle"
                 width: parent.width
                 text: root.cliMissing !== ""
-                  ? "Voxtype Settings could not run " + root.cliMissing + "."
+                  ? "The Voxtype panel could not run " + root.cliMissing + "."
                   : "This panel requires voxtype 0.8 or newer."
                 color: ShellTheme.Color.foreground
                 font.family: Style.font.family
@@ -1254,7 +1402,26 @@ Item {
             osdOfferError: root.osdOfferError
             onOsdSwitchRequested: root.switchToQuickshellOsd()
             onOsdNotNowRequested: { root.osdOfferError = ""; cli.dismissOsdOffer() }
+            secrets: root.secrets
+            secretStatus: root.secretStatus
+            secretBusyKey: cli.secretBusyKey
+            secretBusyAction: cli.secretBusyAction
+            secretErrors: root.secretErrors
+            secretNotices: root.secretNotices
+            secretSaves: root.secretSaves
+            onSecretSetRequested: function(spec, value) {
+              root.secretErrors = root.withEntry(root.secretErrors, String(spec.key), "")
+              root.secretNotices = root.withEntry(root.secretNotices, String(spec.key), "")
+              cli.setSecret(spec, value)
+            }
+            onSecretClearRequested: function(spec) {
+              root.secretErrors = root.withEntry(root.secretErrors, String(spec.key), "")
+              root.secretNotices = root.withEntry(root.secretNotices, String(spec.key), "")
+              cli.clearSecret(spec)
+            }
             rowNotes: ({ "osd.style": root.osdStyleHelp })
+            // An empty "Your name" shows the account's full name to type in.
+            rowPlaceholders: ({ "meeting.my_name": root.myNameSuggestion })
             rowNotices: ({ "osd.style": root.osdStyleNotice })
             onReplacementSetRequested: function(from, to) { cli.setReplacement(from, to) }
             onReplacementUnsetRequested: function(from) { cli.unsetReplacement(from) }

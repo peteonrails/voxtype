@@ -19,11 +19,14 @@
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
+pub mod active_window;
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
+pub mod deferred_notice;
 pub mod dotool;
 pub mod eitype;
+pub mod fallback;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -105,12 +108,24 @@ pub fn find_ydotool_socket() -> Option<PathBuf> {
     None
 }
 
+/// `text` as the output methods receive it from [`deliver_with_fallback`].
+///
+/// History records what was delivered, not what was about to be. Callers
+/// that only know the text they asked to deliver (the streaming path, which
+/// delivers in pieces) use this rather than repeating the rules. A
+/// successful delivery also reports it directly, in [`Delivered::text`].
+/// Writing to a file does not go through here and is not changed.
+///
 /// Normalize Unicode curly quotes to ASCII equivalents.
 ///
 /// Whisper sometimes outputs curly/smart quotes which can cause issues with
 /// keyboard simulation tools (wtype, dotool, ydotool). This function converts
 /// them to standard ASCII quotes to prevent unexpected line breaks or other
 /// typing artifacts.
+pub fn delivered_form(text: &str) -> Cow<'_, str> {
+    normalize_quotes(text)
+}
+
 fn normalize_quotes(text: &str) -> Cow<'_, str> {
     // Quick check to avoid allocation if no normalization needed
     let needs_normalization = text.chars().any(|c| {
@@ -159,7 +174,7 @@ pub fn is_parakeet_binary_active() -> bool {
     // If we can't read the symlink, check if parakeet feature is enabled
     #[cfg(feature = "parakeet")]
     {
-        return true;
+        true
     }
     #[cfg(not(feature = "parakeet"))]
     {
@@ -202,6 +217,27 @@ pub async fn send_transcription_notification(
     engine: crate::config::TranscriptionEngine,
     urgency: &str,
 ) {
+    send_transcription_notification_titled(
+        text,
+        original,
+        show_engine_icon,
+        engine,
+        urgency,
+        "Transcribed",
+    )
+    .await;
+}
+
+/// Send a transcription notification under `label` ("Transcribed", or a
+/// label saying the text is on the clipboard after a fallback).
+pub async fn send_transcription_notification_titled(
+    text: &str,
+    original: Option<&str>,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+    urgency: &str,
+    label: &str,
+) {
     use crate::text::diff;
 
     // When cleanup changed the transcription, show *what* it changed rather
@@ -231,9 +267,9 @@ pub async fn send_transcription_notification(
     let preview = body;
 
     let mut title = if show_engine_icon {
-        format!("{} Transcribed", engine_icon(engine))
+        format!("{} {}", engine_icon(engine), label)
     } else {
-        "Transcribed".to_string()
+        label.to_string()
     };
     if edits > 0 {
         title.push_str(&format!(
@@ -431,6 +467,7 @@ pub fn create_output_chain_with_override(
                 config.auto_submit,
                 config.append_text.clone(),
                 config.paste_keys.clone(),
+                config.paste_keys_terminal.clone(),
                 config.driver_order.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,
@@ -488,26 +525,78 @@ fn file_mode_lacks_path(config: &OutputConfig) -> bool {
 pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
 
-    let output = Command::new("sh")
+    let output = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|e| format!("{} hook failed to execute: {}", hook_name, e))?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            report_hook_failure(hook_name, &format!("could not be started: {e}"));
+            return Err(format!("{} hook failed to execute: {}", hook_name, e));
+        }
+    };
 
     if output.status.success() {
         tracing::info!("{} hook completed successfully", hook_name);
+        deferred_notice::succeeded(&format!("hook:{hook_name}:"));
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        report_hook_failure(
+            hook_name,
+            &hook_failure_reason(output.status.code(), &stderr),
+        );
         Err(format!("{} hook failed: {}", hook_name, stderr))
     }
 }
 
+/// What went wrong with a hook that ran, for its notice.
+fn hook_failure_reason(code: Option<i32>, stderr: &str) -> String {
+    let status = match code {
+        Some(127) => "was not found (exit 127)".to_string(),
+        Some(code) => format!("exited with code {code}"),
+        None => "was killed by a signal".to_string(),
+    };
+    let detail = deferred_notice::detail(stderr);
+    if detail.is_empty() {
+        status
+    } else {
+        format!("{status}: {detail}")
+    }
+}
+
+/// The notice for a failed hook. A failed pre/post output hook usually
+/// leaves a compositor submap or similar state wrong, which the user would
+/// otherwise only find out about by its side effects.
+fn hook_failure_notice(hook_name: &str, reason: &str) -> deferred_notice::Notice {
+    let setting = match hook_name {
+        "external_trigger_stop" => "`external_trigger_stop_command` in [audio]".to_string(),
+        name => format!("`{name}_command` in [output]"),
+    };
+    deferred_notice::Notice {
+        title: format!("Voxtype: {hook_name} hook failed"),
+        body: format!(
+            "The {hook_name} command {reason}. The dictation itself was not affected. \
+             Run the command by hand to see why, or fix {setting}."
+        ),
+    }
+}
+
+fn report_hook_failure(hook_name: &str, reason: &str) {
+    deferred_notice::report(
+        &format!("hook:{hook_name}:failed"),
+        hook_failure_notice(hook_name, reason),
+    );
+}
+
 /// Output configuration for the fallback chain
 pub struct OutputOptions<'a> {
+    /// Present only for a dictation whose history is being collected.
+    pub history_context: Option<&'a crate::history::recorder::DeliveryContext>,
     pub pre_output_command: Option<&'a str>,
     pub post_output_command: Option<&'a str>,
     /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before
@@ -542,6 +631,41 @@ pub async fn output_with_fallback(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<(), OutputError> {
+    output_with_fallback_report(chain, text, options)
+        .await
+        .1
+        .map(|_| ())
+}
+
+/// Which output method delivered the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivered {
+    /// The method's name, such as `wtype` or `clipboard`.
+    pub driver: String,
+    /// Whether an earlier method in the chain was skipped or failed first.
+    pub fell_back: bool,
+    /// The text the method was given: the caller's, after the changes this
+    /// module makes for the keyboard tools.
+    pub text: String,
+}
+
+/// [`output_with_fallback`], also saying which method delivered the text.
+pub async fn deliver_with_fallback(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+) -> Result<Delivered, OutputError> {
+    output_with_fallback_report(chain, text, options).await.1
+}
+
+/// [`deliver_with_fallback`], also reporting which methods were skipped on
+/// the way, so the caller can tell the user when the text landed on the
+/// clipboard instead of being typed.
+pub async fn output_with_fallback_report(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+) -> (fallback::OutputReport, Result<Delivered, OutputError>) {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
 
@@ -591,33 +715,13 @@ pub async fn output_with_fallback(
         }
     }
 
-    // Try each output method
-    let mut result = Err(OutputError::AllMethodsFailed);
-    for output in chain {
-        if skip_keystroke_methods && is_keystroke_method(output.name()) {
-            tracing::debug!(
-                "{} skipped (modifier still held), trying next",
-                output.name()
-            );
-            continue;
-        }
-
-        if !output.is_available().await {
-            tracing::debug!("{} not available, trying next", output.name());
-            continue;
-        }
-
-        match output.output(&normalized_text).await {
-            Ok(()) => {
-                tracing::debug!("Text output via {}", output.name());
-                result = Ok(());
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("{} failed: {}, trying next", output.name(), e);
-            }
-        }
-    }
+    let (report, result) = fallback::run_chain(
+        chain,
+        &normalized_text,
+        skip_keystroke_methods,
+        options.history_context,
+    )
+    .await;
 
     // Run post-output hook if configured (e.g., reset submap)
     // Always run this, even on failure, to ensure cleanup
@@ -627,7 +731,7 @@ pub async fn output_with_fallback(
         }
     }
 
-    result
+    (report, result)
 }
 
 #[cfg(test)]
@@ -795,6 +899,22 @@ mod tests {
             .map(|o| o.name())
             .collect();
         assert_eq!(names, vec!["paste (clipboard + keystroke)"]);
+    }
+
+    #[test]
+    fn hook_notice_names_the_hook_and_its_setting() {
+        let n = hook_failure_notice(
+            "post_output",
+            &hook_failure_reason(Some(1), "hyprctl: no such submap\nmore"),
+        );
+        assert_eq!(n.title, "Voxtype: post_output hook failed");
+        assert!(n
+            .body
+            .starts_with("The post_output command exited with code 1: hyprctl: no such submap."));
+        assert!(n.body.contains("`post_output_command` in [output]"));
+        let n = hook_failure_notice("external_trigger_stop", &hook_failure_reason(None, ""));
+        assert!(n.body.contains("was killed by a signal."));
+        assert!(n.body.contains("[audio]"));
     }
 
     #[test]

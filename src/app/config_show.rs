@@ -39,12 +39,29 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     let _ = writeln!(s, "  chunk_duration_secs = {}", meeting.chunk_duration_secs);
     let _ = writeln!(s, "  storage_path = {:?}", meeting.storage_path);
     let _ = writeln!(s, "  retain_audio = {}", meeting.retain_audio);
+    if let Some(ref cmd) = meeting.post_meeting_command {
+        let _ = writeln!(s, "  post_meeting_command = {:?}", cmd);
+    }
+    let _ = writeln!(
+        s,
+        "  post_meeting_timeout_secs = {}",
+        meeting.post_meeting_timeout_secs
+    );
     let _ = writeln!(s, "  max_duration_mins = {}", meeting.max_duration_mins);
+    let _ = writeln!(s, "  show_view_on_start = {}", meeting.show_view_on_start);
+    let _ = writeln!(s, "  view = {:?}", meeting.view);
+    let _ = writeln!(s, "  view_opacity = {}", meeting.view_opacity);
 
     let _ = writeln!(s, "\n[meeting.audio]");
     let _ = writeln!(s, "  mic_device = {:?}", meeting.audio.mic_device);
     let _ = writeln!(s, "  loopback_device = {:?}", meeting.audio.loopback_device);
     let _ = writeln!(s, "  echo_cancel = {:?}", meeting.audio.echo_cancel);
+    let _ = writeln!(s, "  echo_guard = {}", meeting.audio.echo_guard);
+    let _ = writeln!(
+        s,
+        "  echo_fuzzy_max_words = {}",
+        meeting.audio.echo_fuzzy_max_words
+    );
 
     let _ = writeln!(s, "\n[meeting.diarization]");
     let _ = writeln!(s, "  enabled = {}", meeting.diarization.enabled);
@@ -70,6 +87,39 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
         let _ = writeln!(s, "  remote_api_key = (set)");
     }
     let _ = writeln!(s, "  timeout_secs = {}", meeting.summary.timeout_secs);
+    match meeting.summary.auto {
+        Some(auto) => {
+            let _ = writeln!(s, "  auto = {}", auto);
+        }
+        None => {
+            let _ = writeln!(s, "  auto = (on once an agent is allowed)");
+        }
+    }
+
+    let a = &meeting.assistant;
+    let _ = writeln!(s, "\n[meeting.assistant]");
+    match a.agent {
+        Some(ref agent) => {
+            let _ = writeln!(s, "  agent = {:?}", agent);
+        }
+        None => {
+            let _ = writeln!(s, "  agent = (Omarchy default, then PATH)");
+        }
+    }
+    let _ = writeln!(s, "  local_only = {}", a.local_only);
+    let _ = writeln!(s, "  timeout_secs = {}", a.timeout_secs);
+    let _ = writeln!(s, "  max_transcript_chars = {}", a.max_transcript_chars);
+    match a.open_command.as_deref() {
+        None => {
+            let _ = writeln!(s, "  open_command = (open the meeting view)");
+        }
+        Some(cmd) if cmd.trim().is_empty() => {
+            let _ = writeln!(s, "  open_command = \"\" (no Open action)");
+        }
+        Some(cmd) => {
+            let _ = writeln!(s, "  open_command = {:?}", cmd);
+        }
+    }
 
     s
 }
@@ -182,6 +232,18 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     }
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
     println!("  pre_type_delay_ms = {}", config.output.pre_type_delay_ms);
+    println!(
+        "  paste_keys = {:?}",
+        config.output.paste_keys.as_deref().unwrap_or("auto")
+    );
+    println!(
+        "  paste_keys_terminal = {:?}",
+        config
+            .output
+            .paste_keys_terminal
+            .as_deref()
+            .unwrap_or("ctrl+shift+v")
+    );
     println!("  restore_clipboard = {}", config.output.restore_clipboard);
     println!(
         "  restore_clipboard_delay_ms = {}",
@@ -239,6 +301,10 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
 
     println!("\n---");
     match config::Config::resolve_existing_path() {
+        Some(path) if !path.exists() => println!(
+            "Config file: {:?} (symlink to a missing file, using defaults)",
+            path
+        ),
         Some(path) => println!("Config file: {:?} (loaded)", path),
         None => println!(
             "Config file: {:?} (not found, using defaults; system fallback {:?} also missing)",
@@ -270,6 +336,7 @@ mod tests {
             "[meeting.audio]",
             "[meeting.diarization]",
             "[meeting.summary]",
+            "[meeting.assistant]",
         ] {
             assert!(
                 rendered.contains(header),

@@ -34,27 +34,21 @@ The AVX2 binary works on most modern x86_64 CPUs. Use AVX-512 if your CPU suppor
 Download the Parakeet TDT 0.6B model:
 
 ```bash
-# Create models directory
-mkdir -p ~/.local/share/voxtype/models
-
-# Download and extract the model
-cd ~/.local/share/voxtype/models
-curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx -o encoder-model.onnx
-curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx.data -o encoder-model.onnx.data
-curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.onnx -o decoder_joint-model.onnx
-curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt -o vocab.txt
-curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/config.json -o config.json
-
-# Or download the full directory structure
-# The model should be at: ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v2/
+voxtype setup --download --model parakeet-tdt-0.6b-v3
 ```
 
-Alternatively, use the v3 model (https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx):
+The files come from Voxtype's model mirror at `models.voxtype.io`, and each one
+is checked against the SHA-256 in the mirror's manifest before it is saved.
+
+To download by hand instead (use `parakeet-tdt-0.6b-v2` for the v2 model):
 
 ```bash
 mkdir -p ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
 cd ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
-# Download encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx, vocab.txt, config.json
+for f in encoder-model.onnx encoder-model.onnx.data decoder_joint-model.onnx vocab.txt config.json; do
+  curl -L "https://models.voxtype.io/parakeet/parakeet-tdt-0.6b-v3/$f" -o "$f"
+done
+# manifest.json in the same directory lists each file's sha256
 ```
 
 ## Switching to a Parakeet Binary
@@ -108,6 +102,7 @@ Verify Parakeet is active:
 
 ```bash
 journalctl --user -u voxtype --since "1 minute ago" | grep -i parakeet
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -i parakeet
 # Should show: "Loading Parakeet Tdt model from..."
 ```
 

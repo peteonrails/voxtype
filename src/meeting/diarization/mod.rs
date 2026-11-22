@@ -6,8 +6,11 @@
 //!
 //! - **Simple**: Source-based attribution using mic vs loopback (Phase 2)
 //! - **ML**: ONNX-based speaker embeddings with clustering (Phase 3)
+//! - **Hybrid**: the track splits you from them, ML clustering splits the
+//!   remote side into Remote 1, Remote 2, ...
 //! - **Subprocess**: Memory-isolated ML diarization for resource-constrained systems
 
+pub mod hybrid;
 pub mod ml;
 pub mod simple;
 pub mod subprocess;
@@ -103,15 +106,50 @@ pub fn vad_subwindows(
     out
 }
 
+/// The sample range in a chunk that holds `segment`, or `None` when the
+/// segment lies outside the chunk's audio.
+pub fn segment_sample_range(
+    segment: &crate::meeting::TranscriptSegment,
+    chunk_start_ms: u64,
+    sample_rate: u32,
+    chunk_len: usize,
+) -> Option<(usize, usize)> {
+    let to_sample =
+        |ms: u64| (ms.saturating_sub(chunk_start_ms) * sample_rate as u64 / 1000) as usize;
+    let start = to_sample(segment.start_ms);
+    let end = to_sample(segment.end_ms).min(chunk_len);
+    (start < end).then_some((start, end))
+}
+
 /// Trait for diarization backends
 pub trait Diarizer: Send + Sync {
     /// Process audio samples and return diarized segments
+    ///
+    /// `samples` is one chunk of one track and `chunk_start_ms` is where it
+    /// starts on the meeting timeline. Segment times are meeting-relative,
+    /// so a backend subtracts `chunk_start_ms` to find a segment's audio.
     fn diarize(
         &self,
         samples: &[f32],
         source: AudioSource,
+        chunk_start_ms: u64,
         transcript_segments: &[crate::meeting::TranscriptSegment],
     ) -> Vec<DiarizedSegment>;
+
+    /// Speaker IDs to rename in segments already diarized, as
+    /// `(from, to)` pairs, collected once. A backend whose names depend on
+    /// how many speakers it has seen (hybrid's "Remote" becoming "Remote 1")
+    /// reports the change here so earlier chunks stay consistent.
+    fn take_speaker_renames(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Merge speakers that turned out to be one voice, returning
+    /// `(merged, kept)` pairs for the meeting to rename in what it has
+    /// already labelled. Called after every chunk; most backends never merge.
+    fn merge_similar_speakers(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        Vec::new()
+    }
 
     /// Get the backend name
     fn name(&self) -> &'static str;
@@ -122,7 +160,7 @@ pub trait Diarizer: Send + Sync {
 pub struct DiarizationConfig {
     /// Enable diarization
     pub enabled: bool,
-    /// Backend to use: "simple", "ml", or "remote"
+    /// Backend to use: "simple", "ml", "hybrid" or "subprocess"
     pub backend: String,
     /// Maximum number of speakers to detect
     pub max_speakers: u32,
@@ -159,58 +197,154 @@ impl Default for DiarizationConfig {
     }
 }
 
-/// Create a diarizer based on configuration
-pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
-    match config.backend.as_str() {
-        "simple" => Box::new(simple::SimpleDiarizer::new()),
-        "ml" => {
-            #[cfg(feature = "ml-diarization")]
-            {
-                // Auto-download model if missing
-                if !ml::MlDiarizer::default_model_path().exists() {
-                    tracing::info!("Speaker embedding model not found, attempting download...");
-                    crate::setup::model::ensure_ecapa_model();
-                }
+/// Create a diarizer based on configuration.
+///
+/// When the configured backend cannot be used and the simple backend stands
+/// in for it, the second value says why and how to fix it, so the daemon can
+/// tell the user instead of quietly producing coarser speaker labels.
+pub fn create_diarizer(config: &DiarizationConfig) -> (Box<dyn Diarizer>, Option<String>) {
+    let fallback = |notice: String| -> (Box<dyn Diarizer>, Option<String>) {
+        tracing::warn!("{}", notice);
+        (Box::new(simple::SimpleDiarizer::new()), Some(notice))
+    };
 
-                let mut diarizer = ml::MlDiarizer::new(config);
-                if diarizer.model_exists() {
-                    if let Err(e) = diarizer.load_model() {
-                        tracing::warn!("Failed to load ML diarization model: {}", e);
-                        tracing::info!("Falling back to simple diarization");
-                        return Box::new(simple::SimpleDiarizer::new());
-                    }
-                    tracing::info!("Using ML diarization with ONNX");
-                    return Box::new(diarizer);
-                } else {
-                    tracing::warn!("ML diarization model not found, falling back to simple");
-                    return Box::new(simple::SimpleDiarizer::new());
-                }
+    match config.backend.as_str() {
+        "simple" => (Box::new(simple::SimpleDiarizer::new()), None),
+        "ml" => match load_ml_diarizer(config) {
+            Ok(diarizer) => {
+                tracing::info!("Using ML diarization with ONNX");
+                (diarizer, None)
             }
-            #[cfg(not(feature = "ml-diarization"))]
-            {
-                tracing::warn!(
-                    "ML diarization requires the 'ml-diarization' feature, falling back to simple"
+            Err(reason) => fallback(format!(
+                "Speaker labels fall back to mic/remote only: {}",
+                reason
+            )),
+        },
+        "hybrid" => match load_ml_diarizer(config) {
+            Ok(remote) => {
+                tracing::info!(
+                    "Using hybrid diarization: mic is You, ONNX clustering splits the loopback"
                 );
-                Box::new(simple::SimpleDiarizer::new())
+                (Box::new(hybrid::HybridDiarizer::new(remote)), None)
             }
-        }
+            Err(reason) => fallback(format!(
+                "Speaker labels fall back to You and Remote, without telling remote \
+                 speakers apart: hybrid diarization needs ML speaker clustering, and {}",
+                reason
+            )),
+        },
         "subprocess" => {
             // Subprocess diarizer for memory-isolated ML diarization
-            Box::new(subprocess::SubprocessDiarizer::new(config.clone()))
+            (
+                Box::new(subprocess::SubprocessDiarizer::new(config.clone())),
+                None,
+            )
         }
-        _ => {
-            tracing::warn!(
-                "Unknown diarizer backend '{}', using simple",
-                config.backend
-            );
-            Box::new(simple::SimpleDiarizer::new())
+        other => fallback(format!(
+            "Speaker labels fall back to mic/remote only: unknown diarization backend \
+             '{}'. Set [meeting.diarization] backend to \"simple\", \"ml\" or \"hybrid\".",
+            other
+        )),
+    }
+}
+
+/// The ECAPA-TDNN clusterer, or why it is unavailable (this binary lacks the
+/// `ml-diarization` feature, or the model is missing or cannot be loaded),
+/// worded to follow "Speaker labels fall back to ...: " and name the fix.
+fn load_ml_diarizer(config: &DiarizationConfig) -> Result<Box<dyn Diarizer>, String> {
+    #[cfg(feature = "ml-diarization")]
+    {
+        // Auto-download model if missing
+        if !ml::MlDiarizer::default_model_path().exists() {
+            tracing::info!("Speaker embedding model not found, attempting download...");
+            crate::setup::model::ensure_ecapa_model();
         }
+
+        let mut diarizer = ml::MlDiarizer::new(config);
+        if !diarizer.model_exists() {
+            let fix = match config.model_path.as_deref() {
+                Some(path) => format!(
+                    "[meeting.diarization] model_path points to {}, which does not exist.",
+                    path
+                ),
+                None => format!(
+                    "Download it with: {}",
+                    crate::setup::model::ecapa_download_command()
+                ),
+            };
+            return Err(format!("the ML diarization model is missing. {}", fix));
+        }
+        if let Err(e) = diarizer.load_model() {
+            return Err(format!(
+                "the ML diarization model failed to load ({}). Delete it and download it \
+                 again with: {}",
+                e,
+                crate::setup::model::ecapa_download_command()
+            ));
+        }
+        Ok(Box::new(diarizer))
+    }
+    #[cfg(not(feature = "ml-diarization"))]
+    {
+        let _ = config;
+        Err(
+            "this voxtype binary was built without ML diarization. Install an ONNX build \
+             (voxtype-onnx-*) or set [meeting.diarization] backend = \"simple\"."
+                .to_string(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without the ml-diarization feature both clustering backends fall
+    /// back to source-based labels rather than failing the meeting.
+    #[test]
+    #[cfg(not(feature = "ml-diarization"))]
+    fn hybrid_and_ml_fall_back_to_simple_without_the_feature() {
+        for backend in ["ml", "hybrid"] {
+            let config = DiarizationConfig {
+                backend: backend.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(create_diarizer(&config).0.name(), "simple", "{backend}");
+        }
+    }
+
+    /// Bug: the ML backend took the chunk's start from its first segment, so
+    /// when speech began after the chunk did, every embedding window was
+    /// cut from the wrong audio.
+    #[test]
+    fn segment_sample_range_is_relative_to_the_chunk_not_its_first_segment() {
+        use crate::meeting::TranscriptSegment;
+        let chunk_start_ms = 90_000;
+        let chunk_len = 30 * 16_000;
+        let first = TranscriptSegment::new(0, 91_800, 94_200, "hi".into(), 3);
+        let later = TranscriptSegment::new(1, 99_800, 102_700, "there".into(), 3);
+
+        assert_eq!(
+            segment_sample_range(&first, chunk_start_ms, 16_000, chunk_len),
+            Some((28_800, 67_200))
+        );
+        assert_eq!(
+            segment_sample_range(&later, chunk_start_ms, 16_000, chunk_len),
+            Some((156_800, 203_200))
+        );
+    }
+
+    #[test]
+    fn segment_sample_range_clamps_to_the_chunk() {
+        use crate::meeting::TranscriptSegment;
+        let past_end = TranscriptSegment::new(0, 29_500, 30_400, "x".into(), 0);
+        assert_eq!(
+            segment_sample_range(&past_end, 0, 16_000, 480_000),
+            Some((472_000, 480_000))
+        );
+        let outside = TranscriptSegment::new(1, 31_000, 32_000, "x".into(), 0);
+        assert_eq!(segment_sample_range(&outside, 0, 16_000, 480_000), None);
+    }
 
     #[test]
     fn test_speaker_id_display() {
@@ -222,6 +356,47 @@ mod tests {
             SpeakerId::Named("Alice".to_string()).display_name(),
             "Alice"
         );
+    }
+
+    fn config_with_backend(backend: &str) -> DiarizationConfig {
+        DiarizationConfig {
+            backend: backend.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn simple_backend_has_no_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("simple"));
+        assert_eq!(diarizer.name(), "simple");
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn unknown_backend_falls_back_with_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("bogus"));
+        assert_eq!(diarizer.name(), "simple");
+        let notice = notice.expect("fallback must be explained");
+        assert!(notice.contains("'bogus'"));
+        assert!(notice.contains("backend"));
+    }
+
+    #[cfg(not(feature = "ml-diarization"))]
+    #[test]
+    fn ml_backend_without_feature_falls_back_with_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("ml"));
+        assert_eq!(diarizer.name(), "simple");
+        assert!(notice.unwrap().contains("voxtype-onnx"));
+    }
+
+    #[cfg(not(feature = "ml-diarization"))]
+    #[test]
+    fn hybrid_backend_without_feature_falls_back_with_notice() {
+        let (diarizer, notice) = create_diarizer(&config_with_backend("hybrid"));
+        assert_eq!(diarizer.name(), "simple");
+        let notice = notice.expect("fallback must be explained");
+        assert!(notice.contains("You and Remote"));
+        assert!(notice.contains("voxtype-onnx"));
     }
 
     #[test]

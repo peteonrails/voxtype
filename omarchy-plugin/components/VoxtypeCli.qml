@@ -93,6 +93,73 @@ Item {
     Quickshell.execDetached([root.terminalLauncher, command])
   }
 
+  // ------------------------------------------------------------- history
+
+  signal historyReply(string token, bool ok, var value, string message)
+  property var historyQueue: []
+  property string historyConfigPath: ""
+
+  function historyRequest(token, args) {
+    var command = [root.bin]
+    if (root.historyConfigPath !== "") command.push("--config", root.historyConfigPath)
+    command.push("history", "--json")
+    for (var i = 0; i < args.length; ++i) command.push(String(args[i]))
+    var queue = root.historyQueue.slice()
+    queue.push({token:String(token), command:command})
+    root.historyQueue = queue
+    root.pumpHistory()
+  }
+
+  function meetingRequest(token, id) {
+    var command = [root.bin]
+    if (root.historyConfigPath !== "") command.push("--config", root.historyConfigPath)
+    command.push("meeting", "view", String(id))
+    var queue = root.historyQueue.slice()
+    queue.push({token:String(token), command:command, meetingLaunch:true})
+    root.historyQueue = queue
+    root.pumpHistory()
+  }
+
+  function pumpHistory() {
+    if (historyProc.running || historyProc.startPending || root.historyQueue.length === 0) return
+    var request = root.historyQueue[0]
+    root.historyQueue = root.historyQueue.slice(1)
+    historyProc.token = request.token
+    historyProc.meetingLaunch = !!request.meetingLaunch
+    historyProc.out = ""
+    historyProc.err = ""
+    historyProc.launch(request.command)
+  }
+
+  CliProcess {
+    id: historyProc
+    property bool meetingLaunch: false
+    property string token: ""
+    property string out: ""
+    property string err: ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: historyProc.out = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: historyProc.err = String(text || "").trim() }
+    onExited: function(code) {
+      if (historyProc.meetingLaunch) {
+        root.historyReply(historyProc.token, code === 0, null, historyProc.err || (code === 0 ? "" : "Meeting launch did not complete"))
+        Qt.callLater(root.pumpHistory)
+        return
+      }
+      var value = null
+      var message = historyProc.err
+      try { value = JSON.parse(historyProc.out) }
+      catch (e) { message = message || "History command did not return JSON" }
+      if (value && value.error) message = String(value.error)
+      root.historyReply(historyProc.token, code === 0 && value !== null, value, message)
+      Qt.callLater(root.pumpHistory)
+    }
+    onFailedToStart: {
+      root.historyReply(historyProc.token, false, null, "Could not run " + root.bin)
+      root.cliUnavailable(root.bin)
+      Qt.callLater(root.pumpHistory)
+    }
+  }
+
   // ------------------------------------------------------------- schema
 
   function fetchSchema() {
@@ -196,12 +263,22 @@ Item {
     enqueueWrite({ key: String(key), args: [root.bin, "config", "unset", String(key)] })
   }
 
+  // The key path for one replacement. A spoken form with a dot ("e.g.") is
+  // TOML-quoted, or the dot would split it into nested tables. Others stay
+  // bare: binaries before quoted keys were parsed would keep the quotes as
+  // part of the name, and they rejected dotted entries anyway.
+  function replacementKey(from) {
+    var spoken = String(from)
+    if (spoken.indexOf(".") === -1) return "text.replacements." + spoken
+    return "text.replacements.\"" + spoken.replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\""
+  }
+
   function setReplacement(from, to) {
-    setKey("text.replacements." + from, to)
+    setKey(replacementKey(from), to)
   }
 
   function unsetReplacement(from) {
-    unsetKey("text.replacements." + from)
+    unsetKey(replacementKey(from))
   }
 
   CliProcess {
@@ -1145,6 +1222,33 @@ Item {
   readonly property bool osdSwitching: osdActionProc.running && osdActionProc.action === "use-auto"
   readonly property bool osdDismissing: osdActionProc.running && osdActionProc.action === "dismiss-offer"
 
+  // `voxtype meeting my-name --json`: {"my_name", "suggestion"}, the
+  // suggestion being the account's full name while my_name is unset. A
+  // voxtype without the command loads null; nothing else depends on it.
+  signal myNameLoaded(var answer)
+  function fetchMyName() {
+    if (myNameProc.running) return
+    myNameProc.out = ""
+    myNameProc.launch([root.bin, "meeting", "my-name", "--json"])
+  }
+
+  CliProcess {
+    id: myNameProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: myNameProc.out = String(text || "")
+    }
+    onFailedToStart: root.myNameLoaded(null)
+    onExited: function(exitCode) {
+      var parsed = null
+      if (exitCode === 0) {
+        try { parsed = JSON.parse(myNameProc.out) } catch (e) { parsed = null }
+      }
+      root.myNameLoaded(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null)
+    }
+  }
+
   function fetchOsdStatus() {
     if (osdStatusProc.running) {
       // The answer in flight may predate a write; ask again once it lands.
@@ -1219,6 +1323,153 @@ Item {
     onExited: function(exitCode) {
       root.osdActionFinished(osdActionProc.action, exitCode === 0, exitCode === 0 ? ""
         : (osdActionProc.err || ("voxtype setup osd --" + osdActionProc.action + " exited " + exitCode)))
+    }
+  }
+
+  // ------------------------------------------------------- secrets
+  //
+  // `config schema --json` lists values that live outside config.toml in a
+  // top-level `secrets` array (the calendar's private iCal link), each with
+  // the commands that read and change it:
+  //   {key, type: "secret", section, label, description, help, set, host,
+  //    last_error, set_command, clear_command, status_command}
+  // The value is never in the document. set_command takes it on stdin, never
+  // in argv, which `ps` shows to every user; set and clear print --json on
+  // success and one stderr line that names no secret on failure.
+
+  // A status_command's answer for `key`, or null when it could not be read.
+  signal secretStatusLoaded(string key, var status)
+  // action is "set" or "clear"; result is the --json answer on success.
+  signal secretActionFinished(string key, string action, bool ok, string message, var result)
+
+  readonly property string secretBusyKey: secretActionProc.running ? secretActionProc.key : ""
+  readonly property string secretBusyAction: secretActionProc.running ? secretActionProc.action : ""
+
+  // A command from a secret's entry as argv after the binary, or null.
+  function secretCommand(spec, field) {
+    var raw = spec ? spec[field] : null
+    if (!raw || raw.length === undefined || raw.length === 0) return null
+    var out = []
+    for (var i = 0; i < raw.length; i++) out.push(String(raw[i]))
+    return out
+  }
+
+  // Status answers are read one secret at a time.
+  property var secretStatusQueue: []
+
+  function fetchSecretStatuses(secrets) {
+    var queue = []
+    for (var i = 0; i < (secrets ? secrets.length : 0); i++) {
+      var args = root.secretCommand(secrets[i], "status_command")
+      if (args) queue.push({ key: String(secrets[i].key), args: args })
+    }
+    root.secretStatusQueue = queue
+    if (!secretStatusProc.running) root.nextSecretStatus()
+  }
+
+  function nextSecretStatus() {
+    if (root.secretStatusQueue.length === 0) return
+    var job = root.secretStatusQueue[0]
+    root.secretStatusQueue = root.secretStatusQueue.slice(1)
+    secretStatusProc.key = job.key
+    secretStatusProc.out = ""
+    secretStatusProc.launch([root.bin].concat(job.args))
+  }
+
+  CliProcess {
+    id: secretStatusProc
+    property string key: ""
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: secretStatusProc.out = String(text || "")
+    }
+    onFailedToStart: {
+      root.secretStatusLoaded(secretStatusProc.key, null)
+      Qt.callLater(root.nextSecretStatus)
+    }
+    onExited: function(exitCode) {
+      var parsed = null
+      if (exitCode === 0) {
+        try {
+          parsed = JSON.parse(secretStatusProc.out)
+        } catch (e) {
+          parsed = null
+        }
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = null
+      root.secretStatusLoaded(secretStatusProc.key, parsed)
+      Qt.callLater(root.nextSecretStatus)
+    }
+  }
+
+  function setSecret(spec, value) {
+    var text = String(value || "").trim()
+    var args = root.secretCommand(spec, "set_command")
+    if (text === "" || !args || secretActionProc.running) return
+    secretActionProc.value = text
+    root.runSecretAction(spec, "set", args)
+  }
+
+  function clearSecret(spec) {
+    var args = root.secretCommand(spec, "clear_command")
+    if (args) root.runSecretAction(spec, "clear", args)
+  }
+
+  function runSecretAction(spec, action, args) {
+    if (secretActionProc.running) return
+    secretActionProc.key = String(spec.key)
+    secretActionProc.action = action
+    secretActionProc.out = ""
+    secretActionProc.err = ""
+    secretActionProc.stdinEnabled = action === "set"
+    secretActionProc.launch([root.bin].concat(args))
+  }
+
+  CliProcess {
+    id: secretActionProc
+    property string key: ""
+    property string action: ""
+    property string out: ""
+    property string err: ""
+    // The value, held only until it is written to the command's stdin.
+    property string value: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: secretActionProc.out = String(text || "")
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: secretActionProc.err = String(text || "").trim()
+    }
+    onStarted: {
+      if (secretActionProc.action !== "set") return
+      secretActionProc.write(secretActionProc.value + "\n")
+      secretActionProc.value = ""
+      secretActionProc.stdinEnabled = false
+    }
+    onFailedToStart: {
+      secretActionProc.value = ""
+      root.secretActionFinished(secretActionProc.key, secretActionProc.action, false, "Could not run " + root.bin, null)
+      root.cliUnavailable(root.bin)
+    }
+    onExited: function(exitCode) {
+      secretActionProc.value = ""
+      var result = null
+      if (exitCode === 0) {
+        try {
+          result = JSON.parse(secretActionProc.out)
+        } catch (e) {
+          result = null
+        }
+      }
+      var message = ""
+      if (exitCode !== 0) {
+        var lines = secretActionProc.err.split("\n").filter(function(l) { return l.trim() !== "" })
+        message = lines.length > 0 ? lines[lines.length - 1].replace(/^Error:\s*/, "")
+          : ("voxtype " + secretActionProc.action + " exited " + exitCode)
+      }
+      root.secretActionFinished(secretActionProc.key, secretActionProc.action, exitCode === 0, message, result)
     }
   }
 

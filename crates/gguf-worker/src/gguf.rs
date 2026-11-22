@@ -89,7 +89,7 @@ impl GgufSession {
             model.backend(),
             device.description
         );
-        report_backend(&model_path, &model.backend(), &device.name);
+        report_backend(&model_path, &model.backend(), &device);
         let session = model
             .session_with(&SessionOptions {
                 n_threads: load.threads.unwrap_or(0).try_into().map_err(|_| {
@@ -120,18 +120,23 @@ impl GgufSession {
     }
 }
 
-/// Tell `voxtype status` which backend transcribe.cpp bound, through the file
-/// voxtype names in `VOXTYPE_GGUF_STATUS_FILE`. Best effort: status reporting
-/// must never stop a model from serving. Written to a temporary name and
-/// renamed so a reader never sees half a file.
-fn report_backend(model: &std::path::Path, backend: &str, device: &str) {
+/// Tell `voxtype status` and `voxtype info accel` which backend and device
+/// transcribe.cpp bound, through the file voxtype names in
+/// `VOXTYPE_GGUF_STATUS_FILE`. Best effort: status reporting must never stop a
+/// model from serving. Written to a temporary name and renamed so a reader
+/// never sees half a file. `pid` lets voxtype tell this worker's report from
+/// another's; voxtype reads the file after READY, so it is written before.
+fn report_backend(model: &std::path::Path, backend: &str, device: &transcribe_cpp::Device) {
     let Some(path) = std::env::var_os("VOXTYPE_GGUF_STATUS_FILE").map(PathBuf::from) else {
         return;
     };
     let body = serde_json::json!({
         "model": model.to_string_lossy(),
         "backend": backend,
-        "device": device,
+        "device": device.name,
+        "description": device.description,
+        "kind": device.kind,
+        "pid": std::process::id(),
     });
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let written =

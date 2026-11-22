@@ -40,6 +40,7 @@ grep -c "is_known_parakeet_model\|is_streaming_compatible_parakeet" \
    ```bash
    systemctl --user restart voxtype
    journalctl --user -u voxtype --since "30 seconds ago" | grep -A8 "Parakeet streaming"
+   # If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -A8 "Parakeet streaming"
    ```
 
    Expected error body:

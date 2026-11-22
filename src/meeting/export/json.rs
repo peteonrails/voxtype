@@ -11,6 +11,8 @@ pub struct JsonExporter;
 #[derive(Serialize)]
 struct ExportedMeeting {
     metadata: ExportedMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
     transcript: ExportedTranscript,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<ExportedSummary>,
@@ -29,6 +31,8 @@ struct ExportedMetadata {
     status: String,
     #[serde(rename = "chunkCount")]
     chunk_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -56,6 +60,8 @@ struct ExportedSegment {
     speaker: Option<String>,
     #[serde(rename = "chunkId")]
     chunk_id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    annotation: Option<crate::meeting::data::SegmentAnnotation>,
 }
 
 #[derive(Serialize)]
@@ -99,7 +105,9 @@ impl Exporter for JsonExporter {
                 duration_secs: meeting.metadata.duration_secs,
                 status: format!("{:?}", meeting.metadata.status).to_lowercase(),
                 chunk_count: meeting.metadata.chunk_count,
+                url: meeting.metadata.url.clone(),
             },
+            notes: meeting.notes.clone(),
             transcript: ExportedTranscript {
                 segments: meeting
                     .transcript
@@ -113,6 +121,7 @@ impl Exporter for JsonExporter {
                         source: format!("{:?}", s.source).to_lowercase(),
                         speaker: s.speaker_label.clone().or_else(|| s.speaker_id.clone()),
                         chunk_id: s.chunk_id,
+                        annotation: s.annotation.clone(),
                     })
                     .collect(),
                 total_chunks: meeting.transcript.total_chunks,

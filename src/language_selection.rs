@@ -68,7 +68,12 @@ impl LanguageMenu {
                 }
             }
             TranscriptionEngine::Parakeet => {
-                menu.current = if basename.contains("-v2") || basename.contains("-en-") {
+                // The registry's answer first, the one text cleanup uses, so
+                // the tray and cleanup never disagree about a known model.
+                menu.current = if config.model_language() == Some("en")
+                    || basename.contains("-v2")
+                    || basename.contains("-en-")
+                {
                     "en"
                 } else if basename.contains("-v3")
                     || (basename.starts_with("parakeet-ultra-")
@@ -83,6 +88,15 @@ impl LanguageMenu {
                     "Checkpoint determines language; no selectable language hint".into();
             }
             _ => {}
+        }
+        // The menu is about the engine. When text cleanup goes by a language
+        // the user declared instead, say so here, so "automatic" above is
+        // not read as the whole answer.
+        if let Some((code, crate::config::TextLanguageSource::Declared)) =
+            config.text_language_source()
+        {
+            menu.explanation
+                .push_str(&format!("; text cleanup uses {code} (text.language)"));
         }
         menu
     }
@@ -253,6 +267,42 @@ disfluency_removal = false
             assert!(menu.choices.is_empty());
             assert!(menu.explanation.contains("no selectable"));
         }
+    }
+
+    /// A declared dictation language does not change what the engine is
+    /// told or what the menu offers; it is mentioned beside it.
+    #[test]
+    fn a_declared_text_language_is_named_beside_the_engine_language() {
+        let mut config = Config::default();
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-ultra-Q8_0.gguf");
+        let undeclared = LanguageMenu::for_config(&config);
+        assert!(!undeclared.explanation.contains("text.language"));
+
+        config.text.language = "en".into();
+        let menu = LanguageMenu::for_config(&config);
+        assert_eq!(menu.current, "automatic");
+        assert!(menu.choices.is_empty());
+        assert!(menu
+            .explanation
+            .ends_with("; text cleanup uses en (text.language)"));
+
+        // English-only by the registry: the same answer cleanup gives.
+        for model in ["parakeet-tdt-0.6b-v2", "parakeet-unified-en-0.6b"] {
+            config.set_model_for(TranscriptionEngine::Parakeet, model);
+            let menu = LanguageMenu::for_config(&config);
+            assert_eq!(menu.current, "en", "{model}");
+            assert_eq!(config.text_language(), Some("en"));
+            // The model answers, so the declaration is not what is in use.
+            assert!(!menu.explanation.contains("text.language"));
+        }
+
+        // An engine language that is set leaves nothing for it to add.
+        let mut whisper = Config::default();
+        whisper.whisper.model = "large-v3-turbo".into();
+        whisper.text.language = "en".into();
+        assert!(!LanguageMenu::for_config(&whisper)
+            .explanation
+            .contains("text.language"));
     }
 
     #[test]

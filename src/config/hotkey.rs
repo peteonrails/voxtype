@@ -46,6 +46,14 @@ pub struct HotkeyConfig {
     #[serde(default)]
     pub cancel_key: Option<String>,
 
+    /// Optional key that pastes the last dictation again (built-in hotkey
+    /// detection only). A key, or modifiers and a key joined with `+`.
+    /// CTRL, ALT, SHIFT and SUPER match either side; LEFTCTRL and friends
+    /// match one. Needs history on, since that is where the text is kept.
+    /// Examples: "CTRL+ALT+V", "F9"
+    #[serde(default)]
+    pub paste_last_key: Option<String>,
+
     /// Optional modifier key for secondary model selection (evdev KEY_* name, without KEY_ prefix)
     /// When held while pressing the hotkey, uses secondary_model instead of the default model
     /// Examples: "LEFTSHIFT", "RIGHTALT", "LEFTCTRL"
@@ -67,6 +75,7 @@ impl Default for HotkeyConfig {
             mode: ActivationMode::default(),
             enabled: true,
             cancel_key: None,
+            paste_last_key: None,
             model_modifier: None,
             profile_modifiers: HashMap::new(),
         }

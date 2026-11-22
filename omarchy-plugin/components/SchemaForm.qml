@@ -52,6 +52,8 @@ Item {
   signal upgradeCleanupRequested()
   signal osdSwitchRequested()
   signal osdNotNowRequested()
+  signal secretSetRequested(var spec, string value)
+  signal secretClearRequested(var spec)
 
   // A row's field gave the keyboard back (Escape); the panel puts focus on the
   // card's key catcher so j/k drive the cursor again.
@@ -136,6 +138,28 @@ Item {
   // schema's: the Style row names the OSD frontend its styles belong to.
   property var rowNotes: ({})
   property var rowNotices: ({})
+  // The schema's own notice for a key: `notice`, present only while the key's
+  // current value asks for something that cannot run (LARD cleanup switched on
+  // with no model installed). A voxtype that predates the field sends none.
+  // The panel's notice about what it just did on the row wins.
+  function schemaNotice(spec) {
+    return spec && spec.notice ? String(spec.notice) : ""
+  }
+  // Placeholder text for a text field, by key.
+  property var rowPlaceholders: ({})
+
+  // The schema's `secrets` (see SecretRow): values kept outside config.toml,
+  // today the calendar's private iCal link. Each is one entry of the form's
+  // list, so the keyboard cursor and search reach it like any other row. The
+  // rest is keyed by the secret's key: its status_command answer, the action
+  // running for it, its last error and notice, and a count of saves.
+  property var secrets: []
+  property var secretStatus: ({})
+  property string secretBusyKey: ""
+  property string secretBusyAction: ""
+  property var secretErrors: ({})
+  property var secretNotices: ({})
+  property var secretSaves: ({})
 
   readonly property string osdSection: {
     for (var i = 0; i < root.keys.length; i++) {
@@ -166,8 +190,9 @@ Item {
     // Do not show editors for the configured engine below another catalog.
     if (root.showEngineCard && root.catalogEngine !== root.engine) return []
     var out = []
-    for (var i = 0; i < root.keys.length; i++) {
-      var spec = root.keys[i]
+    var listed = root.withSecrets(root.keys)
+    for (var i = 0; i < listed.length; i++) {
+      var spec = listed[i]
       if (!spec) continue
       if (!root.appliesToEngine(spec)) continue
       if (!root.appliesToModel(spec)) continue
@@ -187,6 +212,34 @@ Item {
       for (var j = 0; j < out.length; j++)
         if (root.cleanupGroup(String(out[j].key)) === groups[g]) ordered.push(out[j])
     return ordered
+  }
+
+  // `keys` with each secret placed in its section: before the first key that
+  // shares its parent (meeting.calendar.ics_link goes above
+  // meeting.calendar.command), else after the section's last key.
+  function withSecrets(keys) {
+    var out = keys.slice()
+    for (var i = 0; i < (root.secrets ? root.secrets.length : 0); i++) {
+      var secret = root.secrets[i]
+      if (!secret || !secret.key) continue
+      var key = String(secret.key)
+      var section = String(secret.section || "")
+      var parent = key.lastIndexOf(".") > 0 ? key.slice(0, key.lastIndexOf(".") + 1) : ""
+      var entry = {}
+      for (var k in secret) entry[k] = secret[k]
+      entry.type = "secret"
+      entry.section = section
+      var at = -1
+      var last = -1
+      for (var j = 0; j < out.length; j++) {
+        if (!out[j] || String(out[j].section || "") !== section) continue
+        last = j
+        if (at === -1 && parent !== "" && String(out[j].key).indexOf(parent) === 0) at = j
+      }
+      if (at === -1) at = last === -1 ? out.length : last + 1
+      out.splice(at, 0, entry)
+    }
+    return out
   }
 
   // These are independent canonical keys, not a synthetic master switch that
@@ -473,7 +526,9 @@ Item {
             required property var modelData
             required property int index
 
-            readonly property alias control: setting
+            readonly property bool isSecret: String(entry.modelData.type) === "secret"
+            readonly property string secretKey: entry.isSecret ? String(entry.modelData.key) : ""
+            readonly property var control: entry.isSecret ? secretLoader.item : setting
             readonly property bool highlighted: root.highlightIndex === root.leadingRows + entry.index
 
             width: parent.width
@@ -505,7 +560,7 @@ Item {
               objectName: "lardModelLicense"
               width: parent.width
               visible: root.cleanupHeading(entry.index) === "LARD disfluency cleanup"
-              text: "Optional local English-only model, off by default. Requires an explicit English language setting and separate model setup with voxtype setup lard --source /path/to/model.vxdf. Enabling the switch does not download a model. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; Voxtype source remains MIT."
+              text: "Optional local English-only model, off by default. Runs only on English dictation (an English engine language, an English-only model, or Dictation language set to en) and requires the model, which voxtype setup lard downloads (or installs from a file with --source /path/to/model.vxdf). Enabling the switch does not download it. Missing or invalid models leave deterministic cleanup running. The model has a separate <a href=\"" + root.lardLicenseUrl + "\"><font color=\"" + ShellTheme.Color.foreground + "\">CC BY-SA 4.0 license</font></a>; Voxtype source remains MIT."
               textFormat: Text.RichText
               onLinkActivated: function(link) { Qt.openUrlExternally(link) }
               color: Qt.darker(ShellTheme.Color.foreground, 1.5)
@@ -518,9 +573,31 @@ Item {
             // The cursor paints the whole row, not just its control, because
             // the label is what tells you which setting you are about to
             // change.
-            CursorSurface {
+            Loader {
+              id: secretLoader
               width: parent.width
-              height: setting.implicitHeight + Style.spacing.md * 2
+              active: entry.isSecret
+              visible: active
+              sourceComponent: SecretRow {
+                width: secretLoader.width
+                spec: entry.modelData
+                status: root.secretStatus[entry.secretKey] || null
+                busy: root.secretBusyKey === entry.secretKey ? root.secretBusyAction : ""
+                errorText: root.secretErrors[entry.secretKey] || ""
+                noticeText: root.secretNotices[entry.secretKey] || ""
+                savedCount: root.secretSaves[entry.secretKey] || 0
+                highlighted: entry.highlighted
+                onSetRequested: function(value) { root.secretSetRequested(entry.modelData, value) }
+                onClearRequested: root.secretClearRequested(entry.modelData)
+                onEditorFocusChanged: function(active) { root.noteEditorFocus(active) }
+                onEditorEscaped: root.focusReturned()
+              }
+            }
+
+            CursorSurface {
+              visible: !entry.isSecret
+              width: parent.width
+              height: visible ? setting.implicitHeight + Style.spacing.md * 2 : 0
               hasCursor: entry.highlighted
 
               SettingDelegate {
@@ -530,12 +607,13 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Style.spacing.md
                 anchors.rightMargin: Style.spacing.md
-                spec: entry.modelData
+                spec: entry.isSecret ? null : entry.modelData
                 choices: root.choicesFor(String(entry.modelData.key))
                 dynamicOptions: root.optionsForSource(entry.modelData.source)
                 errorText: root.errors[String(entry.modelData.key)] || ""
                 helpNote: root.rowNotes[String(entry.modelData.key)] || ""
-                noticeText: root.rowNotices[String(entry.modelData.key)] || ""
+                noticeText: root.rowNotices[String(entry.modelData.key)] || root.schemaNotice(entry.modelData)
+                placeholder: root.rowPlaceholders[String(entry.modelData.key)] || ""
                 highlighted: entry.highlighted
                 onSetRequested: function(key, value) { root.setRequested(key, value) }
                 onUnsetRequested: function(key) { root.unsetRequested(key) }

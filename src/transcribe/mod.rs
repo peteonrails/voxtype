@@ -15,6 +15,9 @@
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
 pub mod cli;
+pub mod lines;
+mod metadata;
+pub use metadata::RuntimeMetadata;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
@@ -105,13 +108,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// A timed segment from transcription (word or sentence level)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TimedSegment {
     pub text: String,
     /// Start time in seconds relative to the audio input
     pub start_secs: f32,
     /// End time in seconds relative to the audio input
     pub end_secs: f32,
+}
+
+/// Log a finished transcription: how long `what` took and how long the text
+/// is at info, the text itself only at debug.
+///
+/// The service logs to the journal at info, and the journal keeps what it is
+/// given, so a line carrying the words would hold everything a user dictates
+/// whatever they set for history, failed recordings and undelivered text.
+/// Every engine reports its result through here so none of them can log the
+/// words at the default level. `-v` or `RUST_LOG=voxtype=debug` brings the
+/// text back for a recognition report.
+pub(crate) fn log_transcription(what: &str, started: std::time::Instant, text: &str) {
+    tracing::info!(
+        "{} completed in {:.2}s ({} chars)",
+        what,
+        started.elapsed().as_secs_f32(),
+        text.chars().count()
+    );
+    tracing::debug!("{} text: {:?}", what, text);
 }
 
 /// Trait for speech-to-text implementations
@@ -134,6 +156,15 @@ pub trait Transcriber: Send + Sync {
                 end_secs: duration,
             }])
         }
+    }
+
+    /// Whether transcribing a short clip costs proportionally less than a
+    /// long one. Meeting mode transcribes each utterance on its own, to give
+    /// it a timestamp, only for engines where that is so. Whisper pads every
+    /// call to a 30 s window, and a process or HTTP request per call has a
+    /// fixed cost, so the default is no.
+    fn short_clips_are_cheap(&self) -> bool {
+        false
     }
 
     /// Prepare for transcription (optional, called when recording starts)
@@ -177,6 +208,12 @@ pub trait Transcriber: Send + Sync {
     /// [`Self::transcribe`].
     fn last_detected_language(&self) -> Option<String> {
         None
+    }
+
+    /// Runtime measurements from this engine instance, not compile-time GPU
+    /// capabilities. Backends without a measurement leave it unknown.
+    fn runtime_metadata(&self) -> RuntimeMetadata {
+        RuntimeMetadata::default()
     }
 }
 
@@ -547,6 +584,37 @@ pub fn create_transcriber_with_config_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every engine reports its result through `log_transcription`: the
+    /// timing and the length at info, the words only at debug.
+    #[test]
+    fn a_finished_transcription_is_logged_without_its_text_at_info() {
+        use crate::test_support::{own_process, LogCapture};
+        if !own_process(
+            "transcribe::tests::a_finished_transcription_is_logged_without_its_text_at_info",
+            |_| {},
+        ) {
+            return;
+        }
+        let text = "meet me at the quarry at nine";
+
+        let capture = LogCapture::at(tracing::Level::INFO);
+        log_transcription("Whisper transcription", std::time::Instant::now(), text);
+        let logged = capture.text();
+        drop(capture);
+        assert!(
+            logged.contains("Whisper transcription completed in ")
+                && logged.contains("s (29 chars)"),
+            "{logged}"
+        );
+        for word in ["meet", "quarry", "nine"] {
+            assert!(!logged.contains(word), "{logged}");
+        }
+
+        let capture = LogCapture::at(tracing::Level::DEBUG);
+        log_transcription("Whisper transcription", std::time::Instant::now(), text);
+        assert!(capture.text().contains(text), "{}", capture.text());
+    }
 
     #[test]
     fn gguf_is_chosen_by_extension_in_any_case() {

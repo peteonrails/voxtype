@@ -194,7 +194,7 @@ pub(crate) async fn dispatch(
             match action {
                 Some(SetupAction::Check) => {
                     warn_if_root("check");
-                    setup::run_checks(&config).await?;
+                    setup::run_checks(&config, config_path.as_deref()).await?;
                 }
                 Some(SetupAction::Systemd { uninstall, status }) => {
                     warn_if_root("systemd");
@@ -312,14 +312,14 @@ pub(crate) async fn dispatch(
                     status,
                 }) => {
                     if status {
-                        setup::gpu::show_status();
+                        setup::gpu::show_status(&config);
                     } else if enable {
                         setup::gpu::enable()?;
                     } else if disable {
                         setup::gpu::disable()?;
                     } else {
                         // Default: show status
-                        setup::gpu::show_status();
+                        setup::gpu::show_status(&config);
                     }
                 }
                 Some(SetupAction::Npu {
@@ -447,7 +447,7 @@ pub(crate) async fn dispatch(
                     status,
                 }) => {
                     warn_if_root("lard");
-                    setup::lard::setup(source.as_deref(), url.as_deref(), status)?;
+                    setup::lard::setup(source.as_deref(), url.as_deref(), status, &config)?;
                 }
                 Some(SetupAction::Punctuation { status }) => {
                     warn_if_root("punctuation");
@@ -596,8 +596,60 @@ pub(crate) async fn dispatch(
             send_record_command(&config, action, top_level_model.as_deref())?;
         }
 
+        Commands::Meeting {
+            action: voxtype::MeetingAction::Suggest { dry_run, watch },
+        } => {
+            super::meeting::run_meeting_suggest(&config, cli.config.clone(), dry_run, watch)
+                .await?;
+        }
+
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
+        }
+
+        Commands::PasteLast { delay_ms } => {
+            let result = if config.history.enabled {
+                super::history::run(
+                    &config,
+                    cli.config.clone(),
+                    voxtype::HistoryAction::Paste {
+                        id: "last".to_string(),
+                        delay_ms,
+                    },
+                    false,
+                )
+                .await
+            } else {
+                Err(anyhow::anyhow!(
+                    "Paste last needs history, which is off. Turn it on with: voxtype history enable"
+                ))
+            };
+            if let Err(error) = result {
+                // A keybinding has no terminal, so say it where it will be seen.
+                voxtype::notification::send("Voxtype", &error.to_string()).await;
+                return Err(error);
+            }
+        }
+
+        Commands::History {
+            action,
+            json,
+            limit,
+            failed,
+        } => {
+            super::history::run(
+                &config,
+                cli.config.clone(),
+                action.unwrap_or(voxtype::HistoryAction::List { limit, failed }),
+                json,
+            )
+            .await?;
+        }
+
+        Commands::Doctor { json } => {
+            if setup::doctor::run_cli(&config, config_path.as_deref(), json).await {
+                std::process::exit(1);
+            }
         }
 
         Commands::CheckUpdate => {

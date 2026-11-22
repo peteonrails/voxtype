@@ -43,7 +43,7 @@ Item {
       anchors.right: notNowButton.left
       anchors.rightMargin: Style.spacing.controlGap
       anchors.verticalCenter: parent.verticalCenter
-      text: "This is an older copy of Voxtype Settings. Switch to the one that updates with voxtype?"
+      text: "This is an older copy of the Voxtype panel. Switch to the one that updates with voxtype?"
       color: ShellTheme.Color.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall

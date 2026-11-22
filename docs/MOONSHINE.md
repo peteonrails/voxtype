@@ -67,12 +67,15 @@ This shows an interactive menu with all available engines and models. Select a M
 # Create model directory
 mkdir -p ~/.local/share/voxtype/models/moonshine-base
 
-# Download the three required files
+# Download the three required files from Voxtype's model mirror
 cd ~/.local/share/voxtype/models/moonshine-base
-curl -L https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/encoder_model.onnx -o encoder_model.onnx
-curl -L https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/decoder_model_merged.onnx -o decoder_model_merged.onnx
-curl -L https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/tokenizer.json -o tokenizer.json
+for f in encoder_model.onnx decoder_model_merged.onnx tokenizer.json; do
+  curl -L "https://models.voxtype.io/moonshine/moonshine-base/$f" -o "$f"
+done
 ```
+
+The mirror's `manifest.json` in the same directory lists each file's SHA-256.
+`voxtype setup model` checks them for you; a manual download does not.
 
 ## Configuration
 
@@ -215,6 +218,7 @@ If Moonshine returns empty text, check that your audio is 16kHz mono. Moonshine 
 
 ```bash
 journalctl --user -u voxtype --since "1 minute ago" | grep -i moonshine
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "1 minute ago" | grep -i moonshine
 ```
 
 ## Feedback

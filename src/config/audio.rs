@@ -17,6 +17,13 @@ pub struct AudioConfig {
     #[serde(default = "default_audio_max_duration_secs")]
     pub max_duration_secs: u32,
 
+    /// Keep the audio of a recording whose transcription failed, so it can
+    /// be retried with `voxtype transcribe <file>`. The most recent 20 are
+    /// kept under the state directory, readable only by the user. Off means
+    /// nothing is written and a failed dictation is gone.
+    #[serde(default = "default_keep_failed_recordings")]
+    pub keep_failed_recordings: bool,
+
     /// Pause MPRIS media players during recording and resume on stop
     #[serde(default)]
     pub pause_media: bool,
@@ -93,6 +100,7 @@ impl Default for AudioConfig {
             device: default_audio_device(),
             sample_rate: default_audio_sample_rate(),
             max_duration_secs: default_audio_max_duration_secs(),
+            keep_failed_recordings: default_keep_failed_recordings(),
             pause_media: false,
             pause_media_ignored_players: Vec::new(),
             duck_media: false,
@@ -117,6 +125,10 @@ fn default_audio_sample_rate() -> u32 {
 
 fn default_audio_max_duration_secs() -> u32 {
     60
+}
+
+fn default_keep_failed_recordings() -> bool {
+    true
 }
 
 /// 34 rather than 70 because the value now means amplitude directly. Before

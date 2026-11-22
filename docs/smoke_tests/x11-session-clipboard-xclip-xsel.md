@@ -22,6 +22,7 @@ xclip -selection clipboard -o
 
 # 4. Verify the log shows the correct dispatch
 journalctl --user -u voxtype --since "30 seconds ago" | grep -iE "xclip|xsel|wl-copy"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -iE "xclip|xsel|wl-copy"
 # Expected: "Using xclip for X11 clipboard" (or xsel if xclip is missing)
 # Not expected: "Text copied to clipboard" via wl-copy
 

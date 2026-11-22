@@ -76,7 +76,7 @@ The daemon never installs icons or rewrites configuration at startup.
 link_settings_plugin = true # default
 ```
 
-On Omarchy, lets the daemon link the packaged Voxtype Settings panel into
+On Omarchy, lets the daemon link the packaged Voxtype panel into
 `~/.config/omarchy/plugins` on its first start and ask the shell to rescan it
 after upgrades. It never replaces your own copy of the panel and never re-adds
 a panel you removed. Set `false` to leave `~/.config/omarchy` untouched;
@@ -110,6 +110,15 @@ Models follow the same scheme under `$XDG_DATA_HOME` (default `~/.local/share`).
 A macOS install that predates this and stored files under
 `~/Library/Application Support/voxtype` keeps working until you move them into
 `~/.config/voxtype` and `~/.local/share/voxtype`.
+
+`config.toml` can be a symlink, for example into a dotfiles repository
+managed with GNU Stow. `voxtype configure`, `voxtype config set`, and the
+other commands that save settings write to the file the link points at and
+leave the link in place. The one-time `config.toml.bak` backup is made beside
+that file. A dangling link, such as one into a Stow tree that is not mounted,
+is still your config: voxtype does not fall back to `/etc/voxtype/config.toml`.
+It loads the built-in defaults, logs a warning that names the link and the
+missing file, and saving a setting creates the file the link points at.
 
 ## What Happens When the Config Has an Error
 
@@ -252,6 +261,8 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `PAGEUP` - Page Up key
 - `PAGEDOWN` - Page Down key
 - `DELETE` - Delete key
+
+> **Using keyd?** keyd reports `RIGHTCTRL`, `RIGHTSHIFT`, and `RIGHTMETA` as the left-hand key, so those names never match. See [Hotkey Detection with Key Remappers (keyd)](TROUBLESHOOTING.md#hotkey-detection-with-key-remappers-keyd).
 
 **Example:**
 ```toml
@@ -420,6 +431,33 @@ secondary_model = "large-v3-turbo"
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --model <model>` instead.
 
+### paste_last_key
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+Optional key that sends your last dictation again, into whatever window has focus. Use it when the text went to the wrong window, or when you need it a second time after copying something else.
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+paste_last_key = "CTRL+ALT+V"
+```
+
+The value is a key, or modifiers and a key joined with `+`. `CTRL`, `ALT`, `SHIFT` and `SUPER` match either side of the keyboard; `LEFTCTRL`, `RIGHTALT` and the other evdev names match one key. A bare key such as `F9` works too.
+
+The text comes from [history](#history), so `history.enabled` must be `true`. With history off, or nothing in it yet, a desktop notification says so.
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). The focused application also receives the keys, so choose a combination it ignores. With compositor keybindings, bind a key to `voxtype paste-last` instead, which is the command this key runs:
+
+```
+bind = CTRL ALT, V, exec, voxtype paste-last
+```
+
+Also `VOXTYPE_PASTE_LAST_KEY` and `--paste-last-key`.
+
 ### cancel_key
 
 **Type:** String
@@ -528,13 +566,32 @@ sample_rate = 16000
 **Default:** `60`
 **Required:** No
 
-Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded.
+Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded, and a "Recording Limit Reached" notification says so. A "Recording Limit Approaching" notification comes first, 30 seconds before the limit (10 seconds for limits under two minutes, none under 30 seconds).
+
+Raise it for long dictations. A recording uses about 3.8 MB of memory per minute while it is captured. Parakeet transcribes recordings longer than [`[parakeet] max_window_secs`](#max_window_secs) in windows, so long recordings do not hit the model's length limit.
 
 **Example:**
 ```toml
 [audio]
 max_duration_secs = 120  # Allow 2-minute recordings
 ```
+
+### keep_failed_recordings
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, a recording whose transcription fails is saved as a WAV file in `~/.local/state/voxtype/failed-audio/` (or `$XDG_STATE_HOME/voxtype/failed-audio/`), and the "Transcription Failed" notification gives the `voxtype transcribe` command to retry it. The 20 most recent are kept and older ones are removed automatically. The directory and the files are private to your user (modes `0700` and `0600`).
+
+Set it to `false` to write no audio to disk. A dictation whose transcription fails is then lost, and the notification says the recording was not kept. Files saved earlier stay until you delete them.
+
+```toml
+[audio]
+keep_failed_recordings = false
+```
+
+Also available as `--no-keep-failed-recordings` (and `--keep-failed-recordings` to override a config that turns it off) or `VOXTYPE_KEEP_FAILED_RECORDINGS=false`.
 
 ### pause_media
 
@@ -1256,6 +1313,8 @@ cold_model_timeout_secs = 60  # Evict unused models after 1 minute
 
 The following options are used when `backend = "remote"`. They have no effect when using local transcription.
 
+In meeting mode the remote backend asks for `response_format=verbose_json` to get the server's segment timestamps, so a meeting chunk becomes one line per utterance. A server without `verbose_json` is detected on the first chunk and sent plain `json` from then on, with one line per chunk. Dictation always uses plain `json`.
+
 > **Privacy Notice**: Remote transcription sends your audio over the network. This feature was designed for users who self-host Whisper servers on their own hardware. While it can also connect to cloud services like OpenAI, users with privacy concerns should carefully consider the implications. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for details.
 
 ### remote_endpoint
@@ -1898,10 +1957,10 @@ export SONIOX_API_KEY="your-key-here"
 ### model
 
 **Type:** String
-**Default:** `"stt-rt-v4"`
+**Default:** `"stt-rt-v6"`
 **Required:** No
 
-Soniox model identifier. The current realtime model is `stt-rt-v4`.
+Soniox model identifier. The current realtime model is `stt-rt-v6`.
 
 ### language_hints
 
@@ -2001,17 +2060,17 @@ terms_file = "/home/me/dotfiles/voxtype-terms.json"
 **Default:** `false`
 **Required:** No
 
-Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v4`), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
+Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v6`), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
 
 When `true`:
 - Audio buffered while recording. On release, voxtype uploads the WAV to `https://api.soniox.com/v1/files`, creates a transcription job, polls until complete, fetches the transcript, then types it at the cursor in one shot.
 - `streaming` and `type_partials` are ignored.
-- `model` defaults to `stt-async-v4` (override only if you know what you're doing).
+- `model` defaults to `stt-async-v6` (override only if you know what you're doing).
 - Push-to-talk is **not** auto-promoted to toggle (no live cursor typing means no compositor-state clobbering).
 
 Latency: typical 15s recording → ~1s upload + 2-5s processing = 3-6s total wait after release. Compare to realtime which streams partials as you speak.
 
-**Accuracy:** the async model (`stt-async-v4`) is marketed as higher accuracy than the realtime model (`stt-rt-v4`). In practice quality varies by language and content — benchmark both for your use case before committing.
+**Accuracy:** the async model (`stt-async-v6`) is marketed as higher accuracy than the realtime model (`stt-rt-v6`). In practice quality varies by language and content — benchmark both for your use case before committing.
 
 ### async_max_wait_secs
 
@@ -2026,7 +2085,7 @@ Maximum total wait time (seconds) for an async API job to complete. If exceeded,
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
 | `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
-| `model` | - | - | `"stt-rt-v4"` | Soniox model (`stt-async-v4` when `async_api = true`) |
+| `model` | - | - | `"stt-rt-v6"` | Soniox model (`stt-async-v6` when `async_api = true`) |
 | `language_hints` | - | - | `["hu", "en"]` | Language preference |
 | `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |
 | `streaming` | - | - | `true` | Live WebSocket vs batch-on-release (realtime only) |
@@ -2063,7 +2122,7 @@ mode = "push_to_talk"   # Works with async_api; no toggle promotion
 [soniox]
 async_api = true
 language_hints = ["hu", "en"]
-# model defaults to stt-async-v4 when async_api = true
+# model defaults to stt-async-v6 when async_api = true
 # api_key set via SONIOX_API_KEY env var
 ```
 
@@ -2248,29 +2307,61 @@ The `paste` mode is an alternative for non-US keyboard layouts. Instead of typin
 ### paste_keys
 
 **Type:** String
-**Default:** `"shift+insert"` in the shipped `config.toml`; `"ctrl+v"` is the built-in fallback if the key is removed from the file entirely
+**Default:** `"shift+insert"` in the shipped `config.toml`; `"auto"` when the key is absent from the file (the config written by `voxtype setup` leaves it out)
 **Required:** No
 
-Keystroke to simulate for paste mode. The shipped default is `shift+insert` because it pastes correctly in terminal emulators as well as GUI apps — many terminals bind `ctrl+v` to their own function (readline's literal-insert, a tmux/screen prefix, etc.) rather than treating it as paste. Change this if your environment uses a different paste shortcut.
+Keystroke to simulate for paste mode, or `"auto"` to pick one per window.
 
-**Format:** `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
+With `"auto"`, voxtype asks the compositor which window has focus just before pasting. Terminals get `paste_keys_terminal` (default `ctrl+shift+v`); everything else gets `ctrl+v`. A terminal can't use `ctrl+v`: the terminal passes it to the running program as a raw `^V`, which readline treats as literal-insert, tmux and screen may use as a prefix, and the Codex CLI treats as "paste an image from the clipboard", so the dictation never arrives.
+
+Terminal detection works on:
+- **Hyprland**: `hyprctl activewindow -j`. A window with the `terminal` tag counts as a terminal (Omarchy tags every terminal it knows, and dynamic tags such as `terminal*` match too); otherwise the window class is checked against a list of known terminals.
+- **Sway**: `swaymsg -t get_tree`, matching the focused window's app_id or X11 class.
+- **niri**: `niri msg --json focused-window`, matching its app_id.
+
+On other desktops, or if the query fails or takes longer than 250ms, `auto` sends `ctrl+v`, which is what paste mode sent before `auto` existed. The query runs during the pre-paste delay, so it adds no latency.
+
+An explicit keystroke such as `"shift+insert"` is sent everywhere, exactly as before, unless `paste_keys_terminal` is also set.
+
+**Format:** `"auto"`, `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
 
 **Common values:**
-- `"shift+insert"` - Universal paste shortcut, works in terminals and GUI apps (shipped default)
+- `"auto"` - `ctrl+v` in GUI apps, `paste_keys_terminal` in terminals (built-in default)
+- `"shift+insert"` - Pastes in GUI apps and in terminals that map it to the clipboard (Omarchy's do); stock Ghostty, Kitty, Alacritty, foot and WezTerm paste the primary selection with it instead (shipped default)
 - `"ctrl+v"` - Standard GUI paste shortcut
-- `"ctrl+shift+v"` - Some terminal emulators
+- `"ctrl+shift+v"` - Clipboard paste in most terminal emulators
 
 **Example:**
 ```toml
 [output]
 mode = "paste"
-paste_keys = "shift+insert"  # For Hyprland/Omarchy
+paste_keys = "auto"
 ```
 
 **Supported keys:**
 - Modifiers: `ctrl`, `shift`, `alt`, `super` (also `leftctrl`, `rightctrl`, etc.)
 - Letters: `a-z`
 - Special: `insert`, `enter`
+
+### paste_keys_terminal
+
+**Type:** String
+**Default:** `"ctrl+shift+v"`
+**Required:** No
+
+Keystroke paste mode sends when the focused window is a terminal. Used by `paste_keys = "auto"`, and also when `paste_keys` holds an explicit keystroke: setting both makes `paste_keys` the GUI keystroke and this one the terminal keystroke.
+
+The default, `ctrl+shift+v`, is the clipboard paste binding in stock Ghostty, Kitty, Alacritty, foot, WezTerm, Konsole and GNOME Terminal, and in Omarchy's terminal configs. If your terminals map `shift+insert` to the clipboard, as Omarchy's do, you can use that to match Omarchy's universal paste (Super+V).
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"
+paste_keys_terminal = "shift+insert"
+```
+
+Also settable with `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS_TERMINAL`.
 
 ### restore_clipboard
 
@@ -2329,6 +2420,25 @@ When `true` and `mode = "type"`, falls back to clipboard if typing fails. With f
 mode = "type"
 fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 ```
+
+### keep_undelivered_text
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, a transcription that no output method could deliver (typing failed and so did the clipboard, or the clipboard fallback is off) is saved as a text file in `~/.local/state/voxtype/undelivered/` (or `$XDG_STATE_HOME/voxtype/undelivered/`). The "Voxtype: transcription not delivered" notification names the file and shows the text. The 200 most recent are kept and older ones are removed automatically. The directory and the files are private to your user (modes `0700` and `0600`).
+
+Set it to `false` to save no file. The notification then shows neither a file nor the text, because notification daemons keep a log of what they display. It still lists what failed and how to fix it, and says the text was not kept. A dictation that can't be typed or copied is then lost. Files saved earlier stay until you delete them.
+
+Whatever this is set to, voxtype's own log records the failure with the length of the text, not the text.
+
+```toml
+[output]
+keep_undelivered_text = false
+```
+
+Also available as `--no-keep-undelivered-text` (and `--keep-undelivered-text` to override a config that turns it off) or `VOXTYPE_KEEP_UNDELIVERED_TEXT=false`.
 
 ### driver_order
 
@@ -2424,6 +2534,7 @@ ls -la /tmp/dotool-pipe   # confirm FIFO exists
 After dictating a session, check the daemon log:
 ```bash
 journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "5 min ago" | grep "typed via"
 ```
 - `Text typed via dotoolc (N chars)` — fast path active
 - `Text typed via dotool (N chars)` — direct path; either the daemon is not running or voxtype had a per-call XKB hint
@@ -2708,7 +2819,7 @@ When `true`, shows a notification when recording stops (transcription begins).
 
 When `true`, shows a notification with the transcribed text after transcription completes.
 
-**Requires:** `notify-send` (libnotify)
+**Requires:** a notification server (mako, swaync, dunst, or your desktop's own). Voxtype uses `notify-send` (libnotify) when installed and otherwise talks to the server over D-Bus directly.
 
 **Example:**
 ```toml
@@ -2747,7 +2858,7 @@ show_edits = false
 **Default:** `"normal"`
 **Required:** No
 
-Sets the urgency level passed to `notify-send` for all voxtype notifications.
+Sets the urgency level of all voxtype notifications.
 
 On GNOME, notifications with `"low"` urgency are delivered to the notification drawer without showing as a popup banner. Use `"normal"` (the default) if you want notifications to pop up on screen. Use `"critical"` if you want notifications that persist until dismissed.
 
@@ -3018,7 +3129,8 @@ command = "~/.config/voxtype/lm-studio-cleanup.sh"
 **Required:** No
 
 Maximum time in milliseconds to wait for the command to complete. If exceeded,
-the original text is used and a warning is logged.
+the original text is used, a warning is logged, and a desktop notification says
+the cleanup timed out.
 
 **Recommendations:**
 - Simple shell commands: `5000` (5 seconds)
@@ -3088,11 +3200,22 @@ exit, timeout, empty output), Voxtype gracefully falls back to the original
 transcribed text and logs a warning. This ensures voice-to-text output is never
 blocked by post-processing issues.
 
+So that you know the cleanup didn't run, Voxtype also shows a desktop
+notification after the text is delivered, naming what went wrong and the setting
+to fix: the program that wasn't found, the exit code and first line of the
+command's stderr, the timeout (and how to raise it), the empty output, or an
+`edit_list` reply that was rejected. The
+first failure of each kind always notifies; the same failure repeating is quiet
+for 5 minutes, and a successful run resets it. A failing `pre_output_command`,
+`post_output_command` or `pre_recording_command` hook gets the same kind of
+notice.
+
 **Debugging:**
 Run voxtype with `-v` or `-vv` to see detailed logs about post-processing:
 ```bash
 voxtype -vv
 ```
+These logs show the text going into and coming out of the command. Without `-v` the log only says whether post-processing changed the text.
 
 ### Example LM Studio Script
 
@@ -3268,6 +3391,7 @@ restart collapse or change deterministic choices.
 | `text.repair_sentence_breaks` | `--repair-sentence-breaks` / `--no-repair-sentence-breaks` | `VOXTYPE_REPAIR_SENTENCE_BREAKS` |
 | `text.format_numbers` | `--format-numbers` / `--no-format-numbers` | `VOXTYPE_FORMAT_NUMBERS` |
 | `text.lard_disfluency` | `--lard-disfluency` / `--no-lard-disfluency` | `VOXTYPE_LARD_DISFLUENCY` |
+| `text.language` | `--text-language LANG` | `VOXTYPE_TEXT_LANGUAGE` |
 
 CLI flags override environment values, which override the config file. TUI edits
 operate on the file layer only, preserving omitted options unless you change them.
@@ -3284,35 +3408,188 @@ unrelated option does not pin extra cleanup keys into the file.
 > [`[output.post_process]`](#outputpost_process) remains inactive while
 > streaming; the daemon warns at startup if it is configured.
 
+### language (text cleanup)
+
+**Type:** String (a language code, or `"auto"`)
+**Default:** `"auto"`
+**Required:** No
+
+The language you dictate in, for text cleanup. Some cleanup depends on the
+language of the text: LARD disfluency cleanup is English-only, the default
+filler list keeps `um` in Portuguese and German where it is an ordinary word,
+and French keeps its space before `? ! : ;`. Voxtype needs to know what
+language the text is in before it applies any of that.
+
+Most configurations already say. Voxtype works out the language of the text
+in this order and stops at the first answer:
+
+1. **The engine's language setting**, when it names one language:
+   `whisper.language`, `cohere.language`, `gguf.language`,
+   `sensevoice.language` or `openvino.language`. `auto`, and a Whisper list of
+   several languages, do not name one.
+2. **The model**, when it can only write one language. An English-only model
+   counts as English with nothing else set. See the table below.
+3. **`text.language`**, the language you declare here.
+
+If none of the three gives an answer, the language is unknown: English-only
+cleanup does not run, and the other stages use their language-neutral rules.
+
+So `text.language` is for one situation: a model that handles several
+languages and detects them automatically (Parakeet v3, Whisper on `auto`,
+SenseVoice on `auto`, Dolphin, Omnilingual, Soniox). If you only ever dictate
+in English with such a model, say so:
+
+```bash
+voxtype config set text.language en
+systemctl --user restart voxtype
+```
+
+```toml
+[text]
+language = "en"
+```
+
+Use a code such as `en`, `en-US`, `pt-BR` or `fr`. Only the part before the
+hyphen decides which rules apply. `"auto"` declares nothing, which is how
+every existing config behaves.
+
+This setting describes your dictation to text cleanup and nothing else. It is
+not sent to the transcription engine and does not change what is transcribed.
+To tell the engine which language to expect, use that engine's own `language`
+key.
+
+**When the settings disagree, the declaration loses.** An engine language that
+is set wins over `text.language`, and so does a model that only writes one
+language. With `whisper.language = "fr"` and `text.language = "en"`, cleanup
+treats the text as French and English-only cleanup does not run. The same
+holds when a Whisper language list or Soniox `language_hints` leave the
+declared language out: the language is then treated as unknown.
+`voxtype config set text.language ...` prints a `warning:` line when the value
+it wrote is not the one in effect, and the graphical app shows the same note
+under the row.
+
+Declare a language only if it is the one you dictate in. If you switch
+languages while a multilingual model detects them, leave this on `auto`:
+English-only cleanup removes words, and it would do that to your other
+languages too.
+
+**Models that count as one language without any setting:**
+
+| Engine | English-only models | Models for another single language |
+|---|---|---|
+| Whisper (local and `whisper-cli`) | `tiny.en`, `base.en`, `small.en`, `medium.en` | |
+| Parakeet | `parakeet-tdt-0.6b-v2`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-unified-en-0.6b` | |
+| Moonshine | `base`, `tiny` | `base-ja`, `base-zh`, `tiny-ko`, `tiny-ar` |
+| Paraformer | `paraformer-en` | |
+| GGUF | `moonshine-streaming-small-Q8_0.gguf` | `moonshine-base-ja-Q8_0.gguf` (Japanese), `gigaam-v3-e2e-rnnt-Q8_0.gguf` (Russian) |
+| OpenVINO | the `.en` exports (`base.en-int8` and so on) | |
+
+Everything else is multilingual or unknown to Voxtype: Whisper's other models,
+Parakeet v3 and `parakeet-ultra`, SenseVoice, `paraformer-zh`, Dolphin,
+Omnilingual, Cohere, Soniox, a remote Whisper server, and any model you point
+to by path. A model given as a path is never classified, even if its file name
+looks like one of the models above. Declare the language for those.
+
+**CLI flag and environment variable:**
+
+```bash
+voxtype --text-language en
+VOXTYPE_TEXT_LANGUAGE=en voxtype
+```
+
+The daemon reads this at startup, so restart it after changing the value. In
+`voxtype configure` it is the **Dictation language** row under **Text
+Cleanup**, which also shows what cleanup makes of the current value.
+
 ### lard_disfluency and lard_model_path
 
 **Types:** Boolean and optional local file path
 **Defaults:** `false` and the XDG data directory's `voxtype/models/lard-disfluency-v1.vxdf`
 
-Opt in to English-only, trained disfluency removal. Select an explicit English
-engine language (`en`, `en-US`, or `en_US`); automatic or unsupported languages
-skip this stage. Vocabulary correction runs first, followed by filler filtering
+Opt in to English-only, trained disfluency removal. It runs only when the
+dictation is English: the engine's language is set to English (`en`, `en-US`,
+or `en_US`), the model is English-only, or you declared English in
+[`text.language`](#language-text-cleanup). A multilingual model on automatic detection with
+nothing declared skips this stage, and so does any other language.
+Vocabulary correction runs first, followed by filler filtering
 and trained disfluency cleanup, punctuation/casing, number formatting, then user
 replacements. User replacements remain authoritative.
 
-The compact VXDF model is separately licensed under CC BY-SA 4.0; see
-`assets/models/lard-disfluency-v1.MODEL_CARD.md` for provenance and evaluation.
-Install it explicitly, then enable cleanup:
+The stage looks for a restart inside one sentence. A word that comes back after
+a full stop, question mark or exclamation mark is ordinary prose, so
+`an old gray owl. The owl said` keeps both. It removes whole words only, never a
+punctuation mark on its own or one part of a word such as `that's`, `1.2` or
+`well-known`, and it never removes every word of a sentence. Where it does
+remove words it tidies what they leave: `Hello world, hello world!` becomes
+`Hello world!`, with the comma gone and the capital moved to the word that now
+opens the sentence.
+
+The compact VXDF model is licensed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), separately from
+Voxtype's MIT code. Its
+[model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md)
+gives the attribution, provenance and evaluation (also in the source tree as
+`assets/models/lard-disfluency-v1.MODEL_CARD.md`). Install it explicitly, then
+enable cleanup:
 
 ```bash
-voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+voxtype setup lard            # download from the Voxtype model mirror and verify
 voxtype setup lard --status
 voxtype config set text.lard_disfluency true
 ```
 
-No default download URL is enabled until publication approval. An explicit
-`voxtype setup lard --url https://your-approved-host/model.vxdf` also works,
-but must match the pinned 65,560-byte artifact and SHA-256
-`f11b45d644b2d829349df2ac2ad3d69c9cf19cd3fae888c69268bddf64cfb354`.
-A failed download or checksum check does not replace an installed model.
-Startup never downloads weights. Missing, corrupt, or unsupported models skip
+`voxtype setup lard` downloads
+`https://models.voxtype.io/text/lard-disfluency-v1.vxdf` and installs it only
+if it is the pinned 65,560-byte artifact with SHA-256
+`f11b45d644b2d829349df2ac2ad3d69c9cf19cd3fae888c69268bddf64cfb354`. A model
+that is already installed and verified is left alone. Two alternatives install
+the same pinned bytes from somewhere else:
+
+```bash
+voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf   # a local file, no network
+voxtype setup lard --url https://your-mirror/lard-disfluency-v1.vxdf
+```
+
+A failed install says what went wrong (the HTTP status, an unreachable host, or
+the checksum it received against the one it expected) and never replaces an
+installed model.
+Startup never downloads weights, and turning the setting on does not either:
+installing is always this command. Missing, corrupt, or unsupported models skip
 only the LARD stage; other configured cleanup still applies. The stage never
 replaces a whole dictation with empty output.
+
+With `lard_disfluency = true` and nothing to run (no model at the path, a file
+that does not load, or dictation that is not known to be English), the stage
+is skipped and Voxtype says so. For a language problem the message names what
+in your configuration makes the dictation not English, and the fix is the
+command for that case. With a multilingual model on automatic detection:
+
+```
+LARD disfluency cleanup is on but is being skipped: it only runs on English,
+and nothing says parakeet dictation with parakeet-tdt-0.6b-v3 is English
+    Fix: If you dictate in English, declare it: voxtype config set text.language en,
+    or turn it off: voxtype config set text.lard_disfluency false
+```
+
+The same report appears in each of these places:
+
+- `voxtype doctor` fails the `text.lard_disfluency` check under **Text
+  cleanup** and prints the fix.
+- The daemon logs it and includes it in the grouped "Voxtype: N problems need
+  attention" startup notification, once per boot until it is fixed.
+- `voxtype config set` writes the value, exits 0, and prints a `warning:` line
+  on stderr. Writes to other keys print it only when they cause the problem,
+  for example switching to a multilingual model with the engine language on
+  `auto`.
+- `voxtype config schema --json` adds a `notice` string to the
+  `text.lard_disfluency` entry, which the graphical app shows under the switch.
+  The field is absent when there is nothing to report.
+- `voxtype configure` shows it in the switch's row and help pane.
+
+A `--model` override recording (`voxtype record start --model ...`, or the
+secondary-model hotkey) is checked on its own: LARD runs on it only if that
+model's text is English by the same rules. An English-only configured model
+does not make a multilingual override English.
 
 Use `--lard-disfluency`, `--no-lard-disfluency`, or `--lard-model-path FILE`
 for a CLI override. Environment variables are `VOXTYPE_LARD_DISFLUENCY` and
@@ -3436,6 +3713,20 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 "omar g" = "Omarchy"
 "omar key" = "Omarchy"
 ```
+
+**From the command line:** add, change or remove one entry without editing the
+file. Either form above is kept as it is. Quote the spoken form as in TOML when
+it contains a dot; quoted and unquoted forms name the same entry.
+
+```bash
+voxtype config set text.replacements.btw 'by the way'
+voxtype config set 'text.replacements.vox type' voxtype
+voxtype config set 'text.replacements."e.g."' 'for example'
+voxtype config unset 'text.replacements."vox type"'
+```
+
+`config unset` on an entry that isn't there prints that it is not set and
+leaves the file alone.
 
 ### smart_auto_submit
 
@@ -3652,10 +3943,10 @@ voxtype --vad daemon
 VAD detection algorithm to use:
 
 - `auto` - Automatically select based on transcription engine:
-  - Whisper engine: uses Whisper VAD (more accurate, requires model)
-  - Parakeet engine: uses Energy VAD (fast, no model needed)
+  - Whisper engine: uses Whisper VAD (more accurate, requires model). If the Silero model is missing or fails to load, falls back to Energy VAD and logs a warning.
+  - Other engines: use Energy VAD (fast, no model needed)
 - `energy` - Simple RMS energy-based detection. Fast and works with any engine, no model download required.
-- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`.
+- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`. If the model is missing or fails to load, the daemon runs without VAD and shows a desktop notification at startup with the fix.
 
 **Example:**
 ```toml
@@ -3719,10 +4010,49 @@ Meeting mode configuration. Meeting mode provides continuous transcription with 
 ### enabled
 
 **Type:** Boolean
-**Default:** `false`
+**Default:** `false` for a config without the key; `true` in the config `voxtype setup` writes for a new install
 **Required:** No
 
-Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available.
+Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available. Changing it needs a daemon restart.
+
+### offer_enable
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+While meeting mode is off, the tray shows **Turn on meetings...**, and a notification offers Turn on, Not now, and "No, don't ask again" at most once a day on daemon start. "No, don't ask again" is remembered in `~/.local/state/voxtype/meeting_offer.json`. Set `offer_enable = false` to turn the offer off entirely. Nothing is ever turned on without your click.
+
+### status_notifications
+
+**Type:** String (`"auto"`, `"always"`, `"never"`)
+**Default:** `"auto"`
+**Required:** No
+
+The Meeting Started, Paused, Resumed and Ended notifications, and "A meeting didn't finish" when the daemon starts after it stopped mid-meeting. They name the meeting by its title (or its date-based name), and Ended adds how long it ran.
+
+- `"auto"` - Skip them while a meeting view is on screen, minimized or not, since it already shows the same thing.
+- `"always"` - Always show them.
+- `"never"` - Never show them.
+
+`[output.notification] on_recording_start` and `on_recording_stop` still turn them off as before. Meeting errors always notify, whatever this is set to. That includes ["One side of the meeting is not being transcribed"](MEETING_MODE.md#troubleshooting), which reports transcript being lost: `"never"` does not turn it off, and `"auto"` does not skip it for a meeting view on screen. Changing it needs a daemon restart.
+
+### my_name
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Your name, shown instead of "You" for your side of every meeting: in the meeting view, exports, `transcript.md`, summaries, the meeting assistant and `voxtype meeting search`. The assistant's prompt also names you as the person asking, so "I" in a question means your side. It is only a display label: your side stays keyed `You` in `transcript.json` and the index, so attribution and `meeting label` work as before, and a name you give with `meeting label <meeting> You "..."` wins for that meeting. You can also use it wherever a command takes a speaker, for example `meeting reassign <meeting> 12 Pete`.
+
+Voxtype never sets it for you. When it is unset, `voxtype meeting my-name` shows the full name on your account as a suggestion, and `meeting show` and `meeting search` offer it once in the terminal.
+
+```toml
+[meeting]
+my_name = "Pete"
+```
+
+Changing it needs a daemon restart for the live view; exports and search pick it up at once.
 
 ### chunk_duration_secs
 
@@ -3746,7 +4076,35 @@ Directory for meeting transcript storage.
 **Default:** `false`
 **Required:** No
 
-Keep raw audio chunk files after transcription. Useful for debugging or re-transcribing with different settings.
+Keep the meeting's audio in its folder: `mic.opus` (your microphone, after echo cancellation when it runs), `loopback.opus` (the other side) and `mixed.opus` (both). The files are written chunk by chunk as the meeting records, so a crash loses at most the last chunk (`chunk_duration_secs`). Opus at 24 kbps takes about 10 MB per hour per file for speech.
+
+Needs `ffmpeg` with libopus. Without it the audio is kept as WAV (`mic.wav` and so on, about 115 MB per hour per file) and a warning is logged. See [Meeting Mode](MEETING_MODE.md#keeping-the-audio).
+
+```toml
+[meeting]
+retain_audio = true
+```
+
+### post_meeting_command
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Shell command run once a meeting has stopped and its folder is final (after the automatic summary, when one runs). It runs through `sh -c` in the meeting folder, in the background, with `VOXTYPE_MEETING_ID`, `VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` (the path of `meeting.json`) set. Its output goes to the daemon log, and a failure never affects the daemon.
+
+```toml
+[meeting]
+post_meeting_command = 'cp -r "$VOXTYPE_MEETING_DIR" ~/Documents/meetings/'
+```
+
+### post_meeting_timeout_secs
+
+**Type:** Integer
+**Default:** `300`
+**Required:** No
+
+Seconds before `post_meeting_command` is killed, along with anything it started.
 
 ### max_duration_mins
 
@@ -3755,6 +4113,128 @@ Keep raw audio chunk files after transcription. Useful for debugging or re-trans
 **Required:** No
 
 Maximum meeting duration in minutes. Set to `0` for unlimited.
+
+### show_view_on_start
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Open the live meeting view when a meeting starts, however it was started: `voxtype meeting start`, the call detection prompt's Record button, or the tray. Which view opens is [`view`](#view): the Quickshell view (the Voxtype plugin for the Omarchy shell, or voxtype's standalone Quickshell shell) opens itself, and the daemon opens the GTK4 window, or `voxtype meeting watch` in a terminal for an explicit `view = "terminal"`. When `view` resolves to nothing, this does nothing. It is read when each meeting starts, so a change applies to the next meeting without a restart. An open Voxtype panel is never replaced by the view.
+
+```bash
+voxtype config set meeting.show_view_on_start false
+```
+
+### view
+
+**Type:** String (`"auto"`, `"quickshell"`, `"gtk4"`, `"terminal"`, `"none"`)
+**Default:** `"auto"`
+**Required:** No
+
+Which meeting view opens, both for `voxtype meeting view` (including from an Ask notification's Open action) and when a meeting starts (see `show_view_on_start`). `auto` uses the Quickshell view when Quickshell can run (its launcher is installed, `qs` is on PATH and there is a Wayland session), else the GTK4 window `voxtype-meetings-gtk4` when it is installed, GTK 4 loads and there is a display, else nothing. `terminal` runs `voxtype meeting watch`, opening a terminal with `xdg-terminal-exec` when not already in one, and is never picked by `auto`. Any value other than `auto` and `quickshell` keeps the Quickshell view from opening on its own when a meeting starts, so a Quickshell desktop can use the GTK4 window instead. See [MEETING_MODE.md](MEETING_MODE.md#without-quickshell-the-meeting-window).
+
+**Environment variable:** `VOXTYPE_MEETING_VIEW`
+
+```toml
+[meeting]
+view = "gtk4"
+```
+
+### view_opacity
+
+**Type:** Float (0.3 to 1.0)
+**Default:** `0.8`
+**Required:** No
+
+How opaque the meeting view's background is, so it reads as an overlay on the window behind it. The text stays fully opaque, and the card turns fully opaque while the pointer is on it or you are typing in it, easing back about 1.5 seconds later. `1.0` keeps it solid.
+
+```bash
+voxtype config set meeting.view_opacity 0.6
+```
+
+### auto_label_from_title
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Name the speakers of a two-person meeting from its title. In a meeting titled "Pete <> Andrew standup", "Pete / Chris", "Pete and Chris 1:1" or "Chris - Pete sync", the side that is you names your microphone (`You`) and the other side names every remote voice. You are recognized by `my_name` when it is set, and by your account's full name (the GECOS field), or by your login name as a first name when the account has no full name, and a first-name match is enough. If neither side of the title is you, if both could be, or if the title names three or more people, nothing is named. A name you give with `voxtype meeting label` is never replaced. It applies to live meetings, imports with separate microphone and remote channels, and `voxtype meeting retranscribe`. See [Naming Speakers from the Title](MEETING_MODE.md#naming-speakers-from-the-title).
+
+```bash
+voxtype config set meeting.auto_label_from_title false
+```
+
+### announce_recording
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When a meeting starts, play "This meeting is being recorded and transcribed with Voxtype" once: into the call app's microphone stream, so the other people on the call hear it, and on your speakers. The call app is found as [meeting detection](MEETING_MODE.md#meeting-detection) finds it; a meeting started before the call waits up to two minutes for one. It plays once the call app has kept the same microphone stream for five seconds: call apps open the microphone on their pre-join screen and again when you join, and an announcement played into the first of those is over before you are in the meeting. Without a call, or when the link into the call fails, it plays on your speakers only and `voxtype meeting status` says so. The announcement is kept out of the transcript. It needs PipeWire (`pw-play`, `pw-link`, `pw-dump`).
+
+This is a courtesy, not legal compliance: you remain responsible for the laws on recording calls. See [Announcing the Recording](MEETING_MODE.md#announcing-the-recording).
+
+The built-in clip is a Kokoro-82M voice in every build; `announcement_voice` picks another.
+
+`meeting start` reads it each time, so a change applies to the next meeting without a restart.
+
+**CLI:** `voxtype meeting start --announce` or `--no-announce`, for one meeting
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCE_RECORDING`
+
+```bash
+voxtype config set meeting.announce_recording true
+```
+
+### announcement_file
+
+**Type:** String (path)
+**Default:** unset (the built-in clip)
+**Required:** No
+
+An audio file (WAV, FLAC or Ogg) to announce with instead of the built-in clip, for your own wording or language. `~/` is expanded. With `announce_recording` on, a file that does not exist refuses `meeting start`. Voxtype does not know what a custom clip says, so it keeps out of the transcript the lines that fall mostly within the time the clip played.
+
+**CLI:** `voxtype meeting start --announcement-file <FILE>`
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCEMENT_FILE`
+
+```bash
+voxtype config set meeting.announcement_file ~/.config/voxtype/announcement-de.wav
+```
+
+### announcement_voice
+
+**Type:** String (`"kokoro"`, `"jessica"`)
+**Default:** `"kokoro"`
+**Required:** No
+
+The built-in announcement's voice. `kokoro` is the Kokoro-82M voice `af_heart`, in the binary and MIT. `jessica` is an ElevenLabs voice that is not part of voxtype: it is downloaded once from `models.voxtype.io`, checked against its published sha256, and kept in `~/.local/share/voxtype/sounds/`. Its terms are not MIT: it may be redistributed only unmodified, as part of voxtype, and may not be used to train or improve AI models. A meeting downloads it itself when it isn't there yet, waiting up to 15 seconds, and plays `kokoro` if that fails; `voxtype meeting announcement --voice jessica` downloads it beforehand. `announcement_file` overrides both. Unknown values play `kokoro`.
+
+`meeting start` reads it each time, so a change applies to the next meeting without a restart.
+
+**CLI:** `voxtype meeting start --announcement-voice <kokoro|jessica>`, for one meeting
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE`
+
+```bash
+voxtype config set meeting.announcement_voice jessica
+voxtype meeting announcement --voice jessica
+```
+
+### announcement_volume
+
+**Type:** Float (0.0 to 1.0)
+**Default:** `0.5`
+**Required:** No
+
+How loud the other people on the call hear the announcement. 1.0 is the clip at full level, the only level in earlier releases; 0.0 is silent. The number is a linear gain on the clip, passed to `pw-play --volume`: 0.5 is about 6 dB down, and about 0.3 (10 dB down) sounds roughly half as loud. Voxtype sets this level on its own stream into the call and tells WirePlumber not to restore a remembered volume over it. The copy on your own speakers is not affected: it plays at the volume your mixer gives `pw-play`. The flag, the environment variable and `voxtype config set` refuse values outside 0.0 to 1.0; a value written into the file by hand is clamped. See [How loud](MEETING_MODE.md#how-loud).
+
+`meeting start` reads it each time, so a change applies to the next meeting without a restart.
+
+**CLI:** `voxtype meeting start --announcement-volume <0.0-1.0>`, for one meeting
+**Environment variable:** `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME`
+
+```bash
+voxtype config set meeting.announcement_volume 0.3
+```
 
 ---
 
@@ -3780,7 +4260,7 @@ System audio loopback capture for recording remote meeting participants. Uses `p
 
 - `"auto"` - Detect a monitor source automatically via `pactl`. Prefers a source that is currently RUNNING (active audio output).
 - `"disabled"` - Mic-only capture, no loopback.
-- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`).
+- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`). When it is a sink's monitor, the echo canceller (`echo_cancel`) removes that sink's sound rather than the default output's, so a call played on a non-default output is cancelled too.
 
 To list available monitor sources:
 
@@ -3790,14 +4270,57 @@ pactl list short sources | grep monitor
 
 ### echo_cancel
 
-**Type:** String (`"auto"`, `"disabled"`)
+**Type:** String (`"auto"`, `"webrtc"`, `"gtcrn"`, `"disabled"`)
 **Default:** `"auto"`
 **Required:** No
 
-Echo cancellation mode for removing speaker bleed-through from the microphone signal when loopback capture is active.
+How a meeting removes what the speakers play from the microphone, so it is not transcribed as You.
 
-- `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
-- `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
+- `"auto"` - Run PipeWire's WebRTC echo canceller for the length of the meeting and record the mic from it, unless the default output is headphones, a headset or Bluetooth audio. Then, or when the canceller cannot start, use GTCRN neural speech enhancement instead (its model, about 523 KB, is downloaded on the first `voxtype meeting start`).
+- `"webrtc"` - The WebRTC canceller whatever the output; GTCRN if it cannot start.
+- `"gtcrn"` - GTCRN only, the behaviour before 1.3.0.
+- `"disabled"` - Neither.
+
+The canceller needs PipeWire with its echo-cancel module and WebRTC plugin, plus `pactl` and `parec`, and changes nothing in PipeWire's configuration: it runs only while a meeting does. It is skipped when your default microphone is already an echo canceller, and when `mic_device` names a device that is not a PipeWire source. A phrase-level transcript dedup pass runs in every mode. See [Meeting Mode](MEETING_MODE.md#echo-cancellation).
+
+```toml
+[meeting.audio]
+echo_cancel = "auto"
+```
+
+### echo_guard
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Keep the call out of your lines when it reaches your microphone through speakers. With speakers instead of headphones, the microphone hears the other side (or a video playing on your desktop), and the speech engine transcribes it as You. Echo cancellation (`echo_cancel`, or PipeWire's) removes most of it from the audio; the guard is the safety net in the transcript.
+
+For every microphone line, voxtype compares the two tracks' audio levels over that line. Echo is the loopback's audio, delayed and quieter, so its level follows the loopback's; your voice is louder than the echo path explains, or comes while the other side is silent.
+
+- **A line that is only echo**, at least 300 ms of sound with nine-tenths of it explained by the loopback and no stretch of your own voice, whatever its length:
+  - is dropped when the loopback has the same speech at the same time, even partly (a few of the same words). The loopback's own line already holds those words, transcribed from the clean signal, so keeping the echo would show them twice.
+  - otherwise moves to the remote speaker it overlaps (or `Remote`), keeping its words: the loopback's transcript missed them, so dropping the line would lose the only copy. `voxtype meeting reassign <meeting> <line> You` moves it back.
+- **A short line that is the remote misheard** (up to `echo_fuzzy_max_words` words, most of them matching the remote line at the same time by spelling or sound, such as "Omarky problem." while the loopback said "the Amarky package ... without any problems") is dropped.
+- **A no-speech phrase over the remote** is dropped: a microphone line of at most four words that is only what speech engines write for faint sound they cannot make out ("Thank you.", "Thanks for watching.", "You.", "Bye.", and the same in German, French, Spanish, Portuguese, Italian, Dutch, Russian, Japanese, Chinese and Korean), when its audio holds no voice of yours and the remote is talking within a second of it. The echo canceller's faint residual is the usual source. A "thank you" you say is loud enough to read as your voice and stays.
+- **A short line that opens with the remote's words** is dropped: a microphone line of at most eight words whose first three words come, in a row, in the remote line spoken at the same time, when its audio holds no voice of yours. This catches a speech engine that started on the faint echo and ran off into words of its own. (Before any of this, every meeting line has a phrase of three or more words repeated three or more times in a row reduced to one copy, guard or not.)
+- **A no-speech phrase on a silent loopback** is dropped too: a loopback line of the same kind with no speech on the loopback under it (no 150 ms of sound above the meeting's VAD level, or three times the loopback's own noise floor if higher), such as the "Thank you." an engine writes for the silence as a call is joined. A "thank you" the other side really says is speech on the loopback and stays.
+- **Your own lines stay**, even over the other side and even in the same words ("yes" over their "yes"): a line with any stretch of your own voice, 150 ms louder than the echo explains, is never touched by the guard. Neither is a line whose audio could not be measured (no remote speech in that chunk).
+
+`false` turns the whole guard off and leaves only the older checks: short lines with exactly the remote's words, and runs of four or more of the remote's words. Applies only while loopback capture is active. The older name `echo_fuzzy` is read too.
+
+### echo_fuzzy_max_words
+
+**Type:** Integer (1-12)
+**Default:** `4`
+**Required:** No
+
+The longest microphone line, in words, that the guard's misheard-words check looks at. Lines the audio shows to be echo go at any length; this only limits the check that works from the words. Raising it catches longer misheard fragments but also lets that check judge more of your own lines; the audio-level guard still applies to each.
+
+```bash
+voxtype config set meeting.audio.echo_guard false
+voxtype config set meeting.audio.echo_fuzzy_max_words 3
+```
 
 ### vad_threshold
 
@@ -3809,11 +4332,15 @@ RMS threshold for meeting chunk voice activity detection. Lower values are more 
 
 For quiet USB/XLR mics, try `0.001`.
 
+A threshold above the level a track reaches skips all of that track, so one side of the meeting goes missing from the transcript. The daemon notices sound that keeps being skipped and says ["One side of the meeting is not being transcribed"](MEETING_MODE.md#troubleshooting), with the level it measured and the value to set. A running meeting keeps the threshold it started with; a change applies after a daemon restart.
+
 **Example:**
 ```toml
 [meeting.audio]
 loopback_device = "auto"
-echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+echo_cancel = "auto"  # WebRTC canceller on speakers, GTCRN on headphones
+echo_guard = true  # Keep the call heard through speakers out of your lines
+echo_fuzzy_max_words = 4
 vad_threshold = 0.001  # Optional: quiet mic tuning
 ```
 
@@ -3833,15 +4360,21 @@ Enable speaker diarization to identify different speakers in meeting transcripts
 
 ### backend
 
-**Type:** String (`"simple"`, `"ml"`, `"remote"`)
+**Type:** String (`"simple"`, `"ml"`, `"hybrid"`, `"subprocess"`)
 **Default:** `"simple"`
 **Required:** No
+**CLI:** `voxtype meeting start --diarization <backend>` (or `VOXTYPE_MEETING_DIARIZATION`) for one meeting
 
 Diarization backend to use:
 
 - `"simple"` - Uses audio source (mic vs loopback) to attribute speech as "You" or "Remote". No model download required.
 - `"ml"` - ONNX-based speaker embeddings (ECAPA-TDNN) to identify individual remote speakers. The model is downloaded automatically on first use. **Experimental:** speaker clustering works best with longer speech segments; short segments may produce too many unique speaker IDs.
-- `"remote"` - Remote diarization API.
+- `"hybrid"` - Your microphone is always "You"; ECAPA-TDNN clustering runs only over system audio and names the remote participants. One remote voice is "Remote"; once a second voice speaks, they are "Remote 1", "Remote 2" and so on, and segments already saved as "Remote" (with any label given to it) become "Remote 1". Echo of the call on your microphone cannot become a speaker. Requires the `ml-diarization` feature (the ONNX binaries) and the same model as `"ml"`; otherwise it falls back to `"simple"` with a warning, and `--diarization hybrid` on the command line is refused.
+- `"subprocess"` - Same as `"ml"` in a separate process for memory isolation.
+
+```bash
+voxtype config set meeting.diarization.backend hybrid
+```
 
 ### max_speakers
 
@@ -3851,6 +4384,14 @@ Diarization backend to use:
 
 Maximum number of speakers to detect.
 
+### similarity_threshold
+
+**Type:** Float
+**Default:** `0.25`
+**Required:** No (used by the `"ml"` and `"hybrid"` backends)
+
+Cosine similarity a voice must reach to join an existing speaker. Lower merges more (fewer speakers), higher splits more. 0.20 to 0.30 is the useful range. If one remote voice shows up as both "Remote 1" and "Remote 2" under `"hybrid"`, lower it; if two people share one name, raise it.
+
 ---
 
 ## [meeting.summary]
@@ -3859,25 +4400,46 @@ AI summarization settings for meeting transcripts.
 
 ### backend
 
-**Type:** String (`"local"`, `"remote"`, `"disabled"`)
+**Type:** String (`"agent"`, `"local"`, `"remote"`, `"disabled"`)
 **Default:** `"disabled"`
 **Required:** No
 
-- `"local"` - Use Ollama for local summarization.
-- `"remote"` - Use a remote API.
-- `"disabled"` - No summarization.
+The summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and this setting no longer applies.
+
+- `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
+- `"local"` - The older Ollama summarizer (no chapters). Questions (`meeting ask`) use the same Ollama model.
+- `"remote"` - A remote API, for summaries only.
+- `"disabled"` - The default. Behaves like `"agent"`; summaries at stop follow `auto`.
+
+The full order, for questions and summaries:
+
+| Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
+|-----------|-------------------------------|--------------------------------------------|
+| `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
+| `--agent <id>` | That agent, once allowed | That agent, once allowed |
+| The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
+| Not allowed, and `[meeting.summary] backend = "local"` | The local model | The older Ollama summarizer |
+| Not allowed, and `[meeting.summary] backend = "remote"` | As in the rows below | The remote summarizer |
+| Not allowed, and an agent was found | Asks to allow it | Asks to allow it |
+| No agent found | The local model | The local model |
+
+`voxtype meeting assistant status` shows which backend each one uses. A failing backend is named in the error with its reason; a failing local model is never replaced by an agent, and a failing agent hands a summary to the local model only when `backend = "local"` is set and it answers.
 
 ### ollama_url
 
 **Type:** String
 **Default:** `"http://localhost:11434"`
-**Required:** No (only used when `backend = "local"`)
+**Required:** No
+
+The Ollama server for the local model: the `"local"` summarizer and the meeting assistant's local model.
 
 ### ollama_model
 
 **Type:** String
 **Default:** `"llama3.2"`
-**Required:** No (only used when `backend = "local"`)
+**Required:** No
+
+The model the local model runs, for the `"local"` summarizer and the meeting assistant.
 
 ### timeout_secs
 
@@ -3885,9 +4447,432 @@ AI summarization settings for meeting transcripts.
 **Default:** `120`
 **Required:** No
 
-Timeout for summarization requests.
+Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant uses `[meeting.assistant] timeout_secs`.
+
+### auto
+
+**Type:** Boolean
+**Default:** unset
+**Required:** No
+
+Summarize each meeting when it stops, in the background, after the transcript is saved. Unset means on once an agent has been allowed (`voxtype meeting assistant allow <agent>`) and off otherwise, so nothing changes for anyone who has not set up the assistant. `true` also summarizes with the local model or the `"local"`/`"remote"` summarizers; `false` leaves summaries to `voxtype meeting summarize`.
+
+```toml
+[meeting.summary]
+auto = false
+```
 
 ---
+
+## [meeting.share]
+
+Settings for `voxtype meeting share`. See [Sharing a Meeting](MEETING_MODE.md#sharing-a-meeting).
+
+### command
+
+**Type:** String
+**Default:** none
+**Required:** No
+
+Shell command `voxtype meeting share --to command` runs through `sh -c`, with the share on stdin. It also gets `VOXTYPE_MEETING_ID`, `VOXTYPE_MEETING_TITLE`, `VOXTYPE_MEETING_DIR`, `VOXTYPE_SHARE_FORMAT` (`markdown`, `text` or `html`), `VOXTYPE_SHARE_FILE` (a temporary file with the same content) and `VOXTYPE_SHARE_TRANSCRIPT` (`1` or `0`). `--command` overrides it for one share. It only ever runs when you share.
+
+```bash
+voxtype config set meeting.share.command 'pandoc "$VOXTYPE_SHARE_FILE" -o ~/notes.pdf'
+```
+
+### timeout_secs
+
+**Type:** Integer (1 to 3600)
+**Default:** `60`
+**Required:** No
+
+Seconds before the share command, and anything it started, is stopped.
+
+### folder
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+Folder `voxtype meeting share --to file` saves into, and where an email share saves a transcript to attach. `"auto"` is the `Voxtype` folder in your documents folder (`~/Documents/Voxtype`, or `$XDG_DOCUMENTS_DIR/Voxtype`). A leading `~/` is expanded.
+
+```bash
+voxtype config set meeting.share.folder ~/Notes/Meetings
+```
+
+---
+
+## [meeting.actions]
+
+Settings for `voxtype meeting actions --send`. See [Action Items](MEETING_MODE.md#action-items).
+
+### remind_in_mins
+
+**Type:** Integer (1 to 10080)
+**Default:** `60`
+**Required:** No
+
+Minutes until an Omarchy reminder for an action item goes off. An item due at a time later today ("by 3pm") goes off at that time instead. `--in` overrides it for one send.
+
+```bash
+voxtype config set meeting.actions.remind_in_mins 30
+```
+
+### todoist_project_id
+
+**Type:** String
+**Default:** none (the Inbox)
+**Required:** No
+
+The Todoist project action items are added to, by ID. The ID is the last part of the project's URL in Todoist's web app. `--project` overrides it for one send. The Todoist connection itself is not a setting: `voxtype meeting todoist connect` stores its token in `~/.local/state/voxtype/todoist.json`.
+
+### todoist_token_file
+
+**Type:** String
+**Default:** none
+**Required:** No
+
+A file holding a Todoist personal API token, used instead of `voxtype meeting todoist connect` on a machine without a browser. Voxtype reads the token from the file each time it sends; the token itself never goes in `config.toml`. Keep the file readable only by you (`chmod 600`). A leading `~/` is expanded.
+
+```bash
+voxtype config set meeting.actions.todoist_token_file ~/.config/voxtype/todoist-token
+```
+
+---
+
+## [meeting.assistant]
+
+The meeting assistant answers `voxtype meeting ask` and writes summaries, through your own coding agent run headless with every tool off, or the local Ollama model from `[meeting.summary]`. Transcripts go to an agent only after you allow it once per agent. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) and its privacy section.
+
+### agent
+
+**Type:** String (`"claude"`, `"codex"`, `"pi"`)
+**Default:** unset
+**Required:** No
+
+The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`) when that command exists, then `claude` or `pi` found on PATH. OpenCode and Hermes are not supported: neither can be run with its tools off. Codex keeps a command tool that cannot be turned off, so it runs inside a bubblewrap (`bwrap`) jail that sees no files from your home except its `auth.json`; it needs `bwrap` installed and is only used when named here or as the Omarchy default.
+
+**CLI override:** `--agent` on `meeting ask` and `meeting summarize`
+**Environment variable:** `VOXTYPE_MEETING_AGENT`
+
+### local_only
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Never send transcripts to an agent; answer and summarize with the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
+
+**CLI override:** `--local` on `meeting ask` and `meeting summarize`
+
+### timeout_secs
+
+**Type:** Integer
+**Default:** `180`
+**Required:** No
+
+Seconds to wait for an answer or a summary before giving up.
+
+### max_transcript_chars
+
+**Type:** Integer
+**Default:** `100000`
+**Required:** No
+
+Transcript characters sent verbatim. A longer meeting is sent as a running summary of its earlier part plus as many recent lines as fit in three quarters of this budget.
+
+### open_command
+
+**Type:** String
+**Default:** unset
+**Required:** No
+
+Command run, through `sh -c`, when the Open action of a `meeting ask --notify` notification is clicked. `VOXTYPE_MEETING_ID` and `VOXTYPE_ASK_ID` are set to the meeting and the answer's `id` in `asks.jsonl`.
+
+Unset, Open raises the meeting view on its Ask tab: `voxtype meeting view "$VOXTYPE_MEETING_ID" --tab ask`, run with the same voxtype binary that answered rather than whichever `voxtype` is first on PATH. A binary without the `meeting view` command shows no Open action. An empty string (`open_command = ""`, set in the config file) turns the Open action off.
+
+```toml
+[meeting.assistant]
+agent = "claude"
+local_only = false
+timeout_secs = 180
+max_transcript_chars = 100000
+```
+
+---
+
+## [meeting.calendar]
+
+A title from your calendar for a meeting that starts without one you chose. See [Titles from Your Calendar](MEETING_MODE.md#titles-from-your-calendar).
+
+The calendar's private iCal link, the first place voxtype looks, is not a setting: it is a secret, kept outside `config.toml` by `voxtype meeting calendar set-ics`.
+
+### command
+
+**Type:** String
+**Default:** `""`
+**Required:** No
+
+A command printing the next meeting as JSON, in the format of the Omarchy Next Meeting widget. Asked when no iCal link is set or the link has no event near the meeting's start. Empty uses that widget's own command when the widget is on your Omarchy bar, and otherwise asks nothing. It runs through `bash -lc` with `~/.local/bin` and `~/bin` first on `PATH`.
+
+```bash
+voxtype config set meeting.calendar.command "~/bin/next-meeting --json"
+```
+
+### window_mins
+
+**Type:** Integer (0 to 120)
+**Default:** `10`
+**Required:** No
+
+An event names the meeting when it is in progress, or when it starts within this many minutes before or after the meeting starts.
+
+### timeout_secs
+
+**Type:** Integer (1 to 60)
+**Default:** `3`
+**Required:** No
+
+Seconds to wait for the calendar command. The lookup runs alongside the recording, so a slow calendar never delays the start; past this, the meeting keeps its title. Fetching the iCal link has its own 30 second limit and runs in the background.
+
+---
+
+## [meeting.detect]
+
+Notices a call starting (Zoom, Microsoft Teams, Google Meet or Teams in a browser) and offers to record it with a notification. Detection only suggests: nothing is recorded until you press Record, except for apps in `auto_record_apps`. It runs inside the daemon and only while `[meeting] enabled = true`. See [Meeting detection](MEETING_MODE.md#meeting-detection) for how calls are recognized.
+
+```toml
+[meeting.detect]
+enabled = true
+auto_record_apps = []
+debounce_secs = 5
+on_call_end = "stop"
+stop_grace_secs = 20
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** unset (on for Omarchy, off elsewhere)
+**Required:** No
+
+Turn call detection on or off. When unset, detection is on when Omarchy is detected and off on every other desktop, so upgrading changes nothing outside Omarchy. Changing it needs a daemon restart.
+
+### auto_record_apps
+
+**Type:** Array of strings, or one comma-separated string
+**Default:** `[]`
+**Required:** No
+
+Call apps, by the `name` in `apps` (for example `"Zoom"` or `"Google Meet"`), whose calls are recorded without asking. Matching ignores case.
+
+```toml
+auto_record_apps = ["Zoom"]
+```
+
+### debounce_secs
+
+**Type:** Integer
+**Default:** `5`
+**Required:** No
+
+How long a call app must hold the microphone before voxtype prompts, and how long a call must show no sign of itself before it counts as over. Keeps a quick mic test or a permission check from prompting.
+
+### on_call_end
+
+**Type:** String (`"stop"`, `"ask"`, `"keep"`)
+**Default:** `"stop"`
+**Required:** No
+
+What happens when a detected call ends while a meeting records. `"stop"` shows **Call ended** with **Keep recording** and stops the meeting after `stop_grace_secs` unless you keep it; the stop runs the summary at stop as usual. `"ask"` offers **Stop meeting** and **Keep recording** and waits for you. `"keep"` leaves the meeting recording. A meeting started by hand with no detected call is never stopped. Changing it needs a daemon restart.
+
+A call has ended when nothing shows it any more for `debounce_secs`:
+
+- A call in a browser (an app with `titles` or `classes`) has ended when the browser has released the microphone and no window shows the call. While the browser still has the microphone, or a window still shows the call, the call goes on. So bringing another tab to the front does not end it, and neither does the browser letting go of the microphone while the call's tab or window is still there. When Hyprland cannot be asked for its windows, the window is not taken to be gone.
+- A call that has been seen in a window of its own (one found by `classes`, such as the Zoom web client's) is shown by that window alone from then on, not by `titles`. It has ended when that window is closed and the microphone released, even if a tab whose title matches is still in front.
+- A native client (an app with neither) has ended its call when it releases the microphone.
+
+A call tab or call window left open after you hang up therefore keeps the recording going until you close it, stop the meeting, or [`max_duration_mins`](#max_duration_mins) is reached. See [When a call is over](MEETING_MODE.md#when-a-call-is-over).
+
+### stop_grace_secs
+
+**Type:** Integer (0 to 600)
+**Default:** `20`
+**Required:** No
+
+Seconds between the **Call ended** notification and the automatic stop, with `on_call_end = "stop"`. If the call shows again in that time (its app takes the microphone again, or its window comes back), it is the same call: the stop is called off and the call is not offered a second time. The same time applies with `"ask"`, whose question is withdrawn, and with `"keep"`. With `0` an ended call is forgotten at once.
+
+### apps
+
+**Type:** Array of tables
+**Default:** Zoom, Microsoft Teams, Google Meet, Microsoft Teams (web), Zoom (web)
+**Required:** No
+
+The call apps to watch for. Setting `apps` replaces the built-in list, so copy the entries you want to keep. Each entry has:
+
+- `name` - shown in the prompt and used by `auto_record_apps`
+- `streams` - case-insensitive substrings of a PipeWire capture stream's `application.name`, `application.process.binary` or `node.name`
+- `titles` - case-insensitive substrings of a window title that confirm a call.
+- `classes` - case-insensitive substrings of a window class that confirm a call, for a call that has a window of its own whose title does not name the service. The meeting is titled from that window.
+
+Leave both `titles` and `classes` empty for a native client whose mic use always means a call. Browsers need one of them, because they open the mic for many things. Both accept an array or one comma-separated string. An entry written before `classes` existed works as it did.
+
+```toml
+[[meeting.detect.apps]]
+name = "Zoom"
+streams = ["zoom"]
+
+[[meeting.detect.apps]]
+name = "Google Meet"
+streams = ["chromium", "chrome", "firefox", "brave"]
+titles = ["Meet - ", "Google Meet"]
+
+[[meeting.detect.apps]]
+name = "Zoom (web)"
+streams = ["chromium", "chrome", "firefox", "brave"]
+titles = ["Zoom Meeting", "Zoom Workplace"]
+classes = ["zoom.us__wc_join_"]
+
+[[meeting.detect.apps]]
+name = "Jitsi"
+streams = ["chromium", "firefox"]
+titles = ["Jitsi Meet"]
+```
+
+The built-in Zoom (web) entry is the only one with `classes`. A Chromium-based browser started with `--app=URL`, which is how Omarchy opens web apps and Zoom links, gives the window a class made from the address: `https://app.zoom.us/wc/join/123` becomes `chrome-app.zoom.us__wc_join_123-Default`. `hyprctl clients` shows the class of every open window. Pick a pattern that only a call's window has: a web app's home window is open whether or not a call is, so it confirms nothing. That is why the Zoom web app's own window (`...zoom.us__wc_home-...`) is not in the built-in pattern, and why Meet and Teams have no `classes`: their titles already show a call, and their web app windows are open all day.
+
+Windows come from Hyprland. On other compositors only apps with neither `titles` nor `classes` are detected.
+
+---
+
+## [history]
+
+Dictation history keeps a record of every dictation, including the ones that
+failed or were cancelled, so text that went into the wrong window, or never
+arrived, can be found and sent again. Each day is one plain file,
+`~/.local/share/voxtype/history/YYYY-MM-DD.jsonl`, with one JSON line per
+dictation; you can read it with `cat` or `grep` without voxtype. Days older
+than a week are gzipped (`zgrep` reads them). Browse and search with
+`voxtype history`; see the [user manual](USER_MANUAL.md#dictation-history).
+
+```toml
+[history]
+enabled = true
+# paused = false
+# retention_days = 30
+# exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
+# record_app = true
+# record_window_title = false
+```
+
+**History is on for new installs and off for existing configs.** The config
+template `voxtype setup` writes sets `enabled = true`. A config written before
+1.3.1 has no `[history]` table and stays off, so an upgrade never starts
+writing your dictation to disk without you choosing it. Turn it on with
+`voxtype config set history.enabled true` or the tray's **Enable History**.
+
+None of these settings needs a daemon restart: the daemon re-reads `[history]`
+when the config file changes.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false` (the template written for new installs sets `true`)
+
+Record dictations. Also `VOXTYPE_HISTORY_ENABLED` and the daemon flag
+`--history[=BOOL]`.
+
+### paused
+
+**Type:** Boolean
+**Default:** `false`
+
+Stop recording until resumed, without turning history off. A dictation made
+while paused is never written: not to the day file and not to the search
+index. Pause before dictating something private: `voxtype history pause`,
+then `voxtype history resume`. The tray and `voxtype history` both show when
+history is paused. Also `VOXTYPE_HISTORY_PAUSED` and `--history-paused[=BOOL]`.
+
+### retention_days
+
+**Type:** Integer
+**Default:** `30`
+
+Days of history to keep. Older day files are deleted, along with their search
+index rows, when the daemon starts and once a day after that. `0` keeps
+history forever. There is no size limit; at typical use a year of history is
+a few megabytes. Also `VOXTYPE_HISTORY_RETENTION_DAYS` and
+`--history-retention-days`.
+
+### exclude_apps
+
+**Type:** List of strings (or one comma-separated string)
+**Default:** `["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]`
+
+Apps whose dictations are never recorded. Each name is matched against the
+focused window's app (its class or app ID), ignoring case, spaces, dots and
+dashes, anywhere in the name: `KeePassXC` matches `org.keepassxc.KeePassXC`.
+Setting the list replaces the built-in one, so keep the password managers in
+it when you add your own. Also `VOXTYPE_HISTORY_EXCLUDE_APPS` and
+`--history-exclude-apps` (comma-separated).
+
+> **Limit:** voxtype can only see the focused app on Hyprland, Sway and niri.
+> On other desktops (GNOME, KDE, X11) the app is unknown, so exclusions cannot
+> apply and every dictation is recorded with an empty app. A password manager
+> running in a browser tab is the browser as far as the desktop is concerned.
+> Pause history instead in those cases.
+>
+> The same limitation applies if a supported compositor's lookup fails or times
+> out. History still records the dictation with an unknown app; exclusions are
+> not a fail-closed protection. Pause before starting sensitive dictation.
+
+### record_app
+
+**Type:** Boolean
+**Default:** `true`
+
+Save which app each dictation went to (`kitty`, `firefox`). Exclusions still
+work when this is off; the app is just not written. Also
+`VOXTYPE_HISTORY_RECORD_APP` and `--history-record-app[=BOOL]`.
+
+### record_window_title
+
+**Type:** Boolean
+**Default:** `false`
+
+Also save the focused window's title. Off by default because titles carry
+email subjects, document names and URLs. Also
+`VOXTYPE_HISTORY_RECORD_WINDOW_TITLE` and `--history-record-window-title[=BOOL]`.
+
+### Privacy
+
+- The history directory is created `0700` and every file in it `0600`.
+- **Where dictated words are stored.** History is one of three places voxtype
+  keeps what you dictate. The other two are recordings whose transcription
+  failed (`[audio] keep_failed_recordings`, the audio itself, in
+  `~/.local/state/voxtype/failed-audio/`) and text that no output method
+  could deliver (`[output] keep_undelivered_text`, in
+  `~/.local/state/voxtype/undelivered/`). Each has its own setting. Pausing
+  history, turning it off, excluding an app or deleting an entry does not
+  touch the other two, so turn those off as well if nothing you dictate
+  should reach the disk.
+- **The log is not one of those places.** At the default level voxtype does
+  not log what you say: the service journal (`journalctl --user -u voxtype`)
+  holds the length of each dictation and its engine, for example
+  `Transcribed 42 chars (whisper engine)`, and history's own log lines (a
+  write that failed, retention, a settings change) carry no text. The words
+  are logged only at debug level, which is off unless you turn it on with
+  `voxtype -v` or `RUST_LOG`. While it is on, the journal keeps every
+  dictation whatever the history settings say, a paused or excluded one
+  included. See [RUST_LOG](#rust_log).
+- voxtype does not control what happens to the text after it hands it over:
+  `output.mode = "file"` writes it to the file you named, and an
+  `[output.post_process]` command receives the text and can keep it.
+- Deleting an entry rewrites its day file and removes it from the search
+  index, which runs with SQLite's `secure_delete` so the text does not linger
+  in free pages. The old file blocks on disk are the filesystem's to reuse;
+  full-disk encryption covers them, and there is no separate encryption at
+  rest.
 
 ## [status]
 
@@ -4076,6 +5061,12 @@ Most configuration options can be overridden via command line:
 | output.mode = "clipboard" | `--clipboard` |
 | output.mode = "paste" | `--paste` |
 | status.icon_theme | `--icon-theme` (status subcommand) |
+| history.enabled | `--history[=BOOL]` |
+| history.paused | `--history-paused[=BOOL]` |
+| history.retention_days | `--history-retention-days` |
+| history.exclude_apps | `--history-exclude-apps` |
+| history.record_app | `--history-record-app[=BOOL]` |
+| history.record_window_title | `--history-record-window-title[=BOOL]` |
 | Verbosity | `-v`, `-vv`, `-q` |
 
 **Example:**
@@ -4090,12 +5081,25 @@ voxtype status --format json --icon-theme nerd-font
 
 ### RUST_LOG
 
-Controls log verbosity via the tracing crate.
+Controls log verbosity via the tracing crate. It takes precedence over `-v`, `-vv` and `-q`.
 
 ```bash
 RUST_LOG=debug voxtype
 RUST_LOG=voxtype=trace voxtype
 ```
+
+**Dictated text and the log.** At the default level (info) voxtype does not log what you say. A dictation is logged as its length and its engine, for example `Transcribed 42 chars (whisper engine)`, and meeting transcript lines, undelivered text and post-processed text are logged the same way. The systemd service logs to the journal, so this is what keeps your words out of `journalctl --user -u voxtype` (and `journalctl _SYSTEMD_USER_UNIT=voxtype.service`, which reads the same log when [the user journal has no voxtype entries](TROUBLESHOOTING.md#the-user-journal-has-no-voxtype-entries)) when `[history]`, `[audio] keep_failed_recordings` and `[output] keep_undelivered_text` are off.
+
+The text is logged at debug level (`voxtype -v`, or `RUST_LOG=voxtype=debug`), which you turn on yourself, typically to show what the engine heard in a report about a recognition problem. For the service:
+
+```bash
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+```
+
+Remove the line and restart when you are done: while it is set, the journal keeps every dictation. See [Troubleshooting](TROUBLESHOOTING.md#dictated-text-in-the-log) for the lines to look for.
 
 ### XDG_CONFIG_HOME
 
@@ -4126,6 +5130,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+| `VOXTYPE_PASTE_LAST_KEY` | string | `hotkey.paste_last_key` |
 
 **Whisper / Engine:**
 
@@ -4148,6 +5153,7 @@ Any config file setting can be overridden via environment variable. These are ap
 |----------|------|-------------------|
 | `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
 | `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
+| `VOXTYPE_KEEP_FAILED_RECORDINGS` | bool | `audio.keep_failed_recordings` |
 | `VOXTYPE_PAUSE_MEDIA` | bool | `audio.pause_media` |
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |
@@ -4164,20 +5170,38 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_PRE_TYPE_DELAY` | integer | `output.pre_type_delay_ms` |
 | `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
+| `VOXTYPE_KEEP_UNDELIVERED_TEXT` | bool | `output.keep_undelivered_text` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
+| `VOXTYPE_PASTE_KEYS_TERMINAL` | string | `output.paste_keys_terminal` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
 | `VOXTYPE_DOTOOL_XKB_VARIANT` | string | `output.dotool_xkb_variant` |
 | `VOXTYPE_EITYPE_XKB_LAYOUT` | string | `output.eitype_xkb_layout` |
 | `VOXTYPE_EITYPE_XKB_VARIANT` | string | `output.eitype_xkb_variant` |
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
 | `VOXTYPE_LARD_DISFLUENCY` | bool | `text.lard_disfluency` |
+| `VOXTYPE_MEETING_ANNOUNCE_RECORDING` | bool | `meeting.announce_recording` |
+| `VOXTYPE_MEETING_ANNOUNCEMENT_FILE` | path | `meeting.announcement_file` |
+| `VOXTYPE_MEETING_ANNOUNCEMENT_VOICE` | string | `meeting.announcement_voice` |
+| `VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME` | float | `meeting.announcement_volume` |
 | `VOXTYPE_LARD_MODEL_PATH` | path | `text.lard_model_path` |
+| `VOXTYPE_TEXT_LANGUAGE` | string | `text.language` |
 | `VOXTYPE_PUNCTUATION_CASING` | bool | `text.punctuation_casing` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |
 | `VOXTYPE_COLLAPSE_RESTARTS` | bool | `text.collapse_restarts` |
 | `VOXTYPE_REPAIR_SENTENCE_BREAKS` | bool | `text.repair_sentence_breaks` |
 | `VOXTYPE_FORMAT_NUMBERS` | bool | `text.format_numbers` |
+
+**History:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_HISTORY_ENABLED` | bool | `history.enabled` |
+| `VOXTYPE_HISTORY_PAUSED` | bool | `history.paused` |
+| `VOXTYPE_HISTORY_RETENTION_DAYS` | integer | `history.retention_days` |
+| `VOXTYPE_HISTORY_EXCLUDE_APPS` | comma-separated | `history.exclude_apps` |
+| `VOXTYPE_HISTORY_RECORD_APP` | bool | `history.record_app` |
+| `VOXTYPE_HISTORY_RECORD_WINDOW_TITLE` | bool | `history.record_window_title` |
 
 Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 
@@ -4429,7 +5453,7 @@ frontend = "auto"           # Default. Picks the best frontend this system can r
 3. `native` when `voxtype-osd-native` is installed
 4. otherwise no OSD; the daemon logs why and keeps running
 
-The daemon logs its choice and the reason once at startup. `voxtype setup osd --status` shows the same thing without starting anything, and `voxtype status --format json --extended` reports it as `osd_frontend_active`. An explicit `gtk4`, `native` or `quickshell` is never changed: if that binary is missing, the launcher falls back to whichever frontend is installed, as before. `VOXTYPE_OSD_FRONTEND` overrides the config value. Configs written before 1.2.2 that say `frontend = "gtk4"` keep GTK4. Configs without the key now get `auto`.
+The daemon logs its choice and the reason once at startup. `voxtype setup osd --status` shows the same thing without starting anything, and `voxtype status --format json --extended` reports it as `osd_frontend_active`. An explicit `gtk4`, `native` or `quickshell` is never changed while it can run. If that binary is missing, or `quickshell` is set and Quickshell (`qs` or `quickshell`) is not on PATH, the launcher falls back to whichever frontend is installed, and the daemon sends a desktop notification saying which OSD it shows instead and why. It also notifies when an explicit frontend is set and no OSD can run at all. Both notices come once per daemon start. With `auto`, finding no OSD to run is only logged. `VOXTYPE_OSD_FRONTEND` overrides the config value. Configs written before 1.2.2 that say `frontend = "gtk4"` keep GTK4. Configs without the key now get `auto`.
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
 find it:
@@ -4450,6 +5474,67 @@ is only required for source builds or for customization, and the bridge
 symlink is what puts the sidecar on PATH where the QML expects it. Pass
 `--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
+
+### OSD placement and waveform
+
+The placement keys apply to every frontend. The waveform keys and the
+decibel scale below describe the GTK4 and native frontends; Quickshell
+styles draw their own visuals and set their own gain per recipe.
+
+```toml
+[osd]
+position = "bottom-center"   # bottom-center, top-center, bottom-left,
+                             # bottom-right, top-left, top-right
+margin_px = 24               # gap from the screen edges, logical pixels
+top_margin = 0.85            # centered positions: top edge as a fraction
+                             # of the output's height (like swayosd)
+waveform_gain = 10.0         # waveform sensitivity, 10 = neutral
+peak_decay_db_per_sec = 6.0  # how fast the level meter's held-peak tick falls
+opacity = 0.95               # GTK4/native card opacity, constant while shown
+```
+
+The OSD appears on the focused output and is placed using only that output's
+size, in its logical pixels, so monitors with different resolutions, scales
+or offsets each get the same relative placement.
+
+- **Corner positions** sit `margin_px` from both edges they are anchored to.
+- **`bottom-center`** puts the card's top edge at `top_margin` of the
+  output's height. With the default 0.85 the card sits in the same band as
+  swayosd's volume and brightness popups.
+- **`top-center`** uses `top_margin` the same way when it is 0.5 or less.
+  A larger value (such as the 0.85 default) is mirrored, so the card keeps
+  the same distance from the top edge that `bottom-center` keeps from the
+  bottom one.
+- With any position, `margin_px` is the minimum gap to the top and bottom
+  edges, so `top_margin` can never push the card off the screen.
+
+The GTK4 and native waveform shows the absolute input level on a fixed decibel scale: the
+centerline is -48 dBFS (a typical mic's noise floor sits below it, so
+silence is flat) and the card's edge is 0 dBFS, the loudest input the mic
+can produce. Normal speech lands around mid-height, louder speech draws
+taller, and only input close to clipping reaches the edge. There is no
+automatic gain, so the height always reflects how loud the mic actually is.
+
+`waveform_gain` shifts that scale. 10 is neutral; every doubling shows the
+input 6 dB louder (20 = +6 dB, 40 = +12 dB) and every halving 6 dB quieter
+(5 = -6 dB). Raise it for a quiet mic, lower it for a hot one. The waveform
+never draws outside the card at any value. Earlier versions multiplied
+the raw samples by this key, which pushed everything above -20 dBFS (most
+speech) off the card; an old config that keeps the default 10 gets the new
+scale unchanged.
+
+The waveform scrolls at a constant 100 frames per second of wall time, a
+fixed 50 ms behind the newest audio so capture batches arriving in bursts
+don't make it stutter. Each moment of audio keeps its shape as it scrolls.
+
+The level meter uses the same scale, so a loudness that reaches half the
+waveform's height fills half the meter. It moves on every display frame:
+it rises within about 15 ms of a louder sound and falls back over about
+300 ms. Its held-peak tick marks the loudest recent peak and falls at
+`peak_decay_db_per_sec`.
+
+In the GTK4 and native frontends, `opacity` sets the card's opacity, which
+stays the same for as long as the card is shown.
 
 ### Quickshell OSD customization
 
@@ -4513,10 +5598,18 @@ Decorative package roles follow the same palette: `grid` and `glow` are
 translucent accent, `core` is translucent foreground, and `amber` follows
 `warning` (which need not be yellow in the selected theme).
 
-With the Quickshell frontend, Omarchy theme switches apply live: the launcher
-watches the active theme and rewrites the resolved style, and the OSD picks up
-the new colors immediately without a restart. The GTK4 frontend reads the
-theme at startup, so it picks up a new theme the next time the OSD starts.
+With the Quickshell and native frontends, Omarchy theme switches apply live:
+Quickshell's launcher watches the active theme and rewrites the resolved
+style, and the native OSD reloads its palette, so the new colors show up
+without a restart. The GTK4 frontend reads the theme at startup, so it picks
+up a new theme the next time the OSD starts. The meter's green, yellow and
+red zones come from the theme's ANSI colors, read from `color2`, `color3` and
+`color1` or, in current Omarchy themes, from `green`, `yellow` and `red`.
+
+The native frontend renders at the output's exact scale through
+`wp_fractional_scale_v1` and `wp_viewporter`, so it stays sharp on outputs
+scaled by 1.25, 1.333 or 1.6. On compositors without those protocols it falls
+back to the nearest integer scale.
 
 Recipe layer `type` can be `shadow`, `background`, `waveform`, `line`,
 `bars`, `dots`, `pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,

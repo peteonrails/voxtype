@@ -1,8 +1,9 @@
 //! Quickshell QML tree installer for voxtype.
 //!
 //! Copies the Quickshell QML tree (`shell.qml`, `OsdSurface.qml`,
-//! `EnginePicker.qml`, `MeetingControls.qml`, and the `voxtype-shared/`
-//! module) into the user's data directory so the `voxtype-osd-quickshell`
+//! `EnginePicker.qml`, `MeetingControls.qml`, the `voxtype-shared/` module,
+//! and the `voxtype-meetings/` meeting view shared with the Omarchy plugin)
+//! into the user's data directory so the `voxtype-osd-quickshell`
 //! launcher can find it. Also symlinks the `voxtype-audio-bridge` sidecar
 //! into a user-owned PATH directory so the QML can spawn it. Prints
 //! Hyprland/Sway/River keybinding examples for the Wave 2 widgets that
@@ -43,6 +44,7 @@ const QUICKSHELL_SUBDIR: &str = "voxtype/quickshell";
 /// Files at the root of the QML tree that are part of the install.
 const ROOT_FILES: &[&str] = &[
     "shell.qml",
+    "history.qml",
     "OsdSurface.qml",
     "EnginePicker.qml",
     "MeetingControls.qml",
@@ -64,6 +66,15 @@ const SHARED_FILES: &[&str] = &[
 ];
 
 const SHARED_SUBDIR: &str = "voxtype-shared";
+
+/// The meeting view, shared with the Omarchy plugin (which stages the same
+/// directory as `components/meetings/`). Every `.qml` and `.js` file in it is
+/// installed, so a new component cannot be left out of one host's copy.
+const MEETINGS_SUBDIR: &str = "voxtype-meetings";
+
+fn is_meetings_file(name: &str) -> bool {
+    name.ends_with(".qml") || name.ends_with(".js")
+}
 
 /// Resolve the default install target.
 ///
@@ -142,6 +153,22 @@ fn enumerate_files(source: &Path) -> Vec<(PathBuf, PathBuf)> {
             if src.is_file() {
                 out.push((src, PathBuf::from(SHARED_SUBDIR).join(name)));
             }
+        }
+    }
+    let meetings_src = source.join(MEETINGS_SUBDIR);
+    if let Ok(entries) = fs::read_dir(&meetings_src) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| is_meetings_file(n))
+            .collect();
+        names.sort();
+        for name in names {
+            out.push((
+                meetings_src.join(&name),
+                PathBuf::from(MEETINGS_SUBDIR).join(name),
+            ));
         }
     }
     out
@@ -583,7 +610,16 @@ mod tests {
         for f in SHARED_FILES {
             fs::write(shared.join(f), format!("// fake shared {}\n", f)).unwrap();
         }
+        let meetings = dir.join(MEETINGS_SUBDIR);
+        fs::create_dir_all(&meetings).unwrap();
+        for f in FAKE_MEETINGS_FILES {
+            fs::write(meetings.join(f), format!("// fake meetings {}\n", f)).unwrap();
+        }
+        // Not QML: never installed.
+        fs::write(meetings.join("notes.txt"), "scratch\n").unwrap();
     }
+
+    const FAKE_MEETINGS_FILES: &[&str] = &["Meetings.qml", "MeetingView.qml", "MeetingText.js"];
 
     #[test]
     fn install_copies_all_expected_files() {
@@ -592,7 +628,18 @@ mod tests {
         make_fake_source(src.path());
 
         let written = install_tree(src.path(), dst.path(), false).unwrap();
-        assert_eq!(written.len(), ROOT_FILES.len() + SHARED_FILES.len());
+        assert_eq!(
+            written.len(),
+            ROOT_FILES.len() + SHARED_FILES.len() + FAKE_MEETINGS_FILES.len()
+        );
+        for f in FAKE_MEETINGS_FILES {
+            assert!(
+                dst.path().join(MEETINGS_SUBDIR).join(f).is_file(),
+                "expected {} in voxtype-meetings/",
+                f
+            );
+        }
+        assert!(!dst.path().join(MEETINGS_SUBDIR).join("notes.txt").exists());
 
         for f in ROOT_FILES {
             assert!(

@@ -346,6 +346,47 @@ pub struct SetOutcome {
     pub value: TypedValue,
     pub path: PathBuf,
     pub restart_required: bool,
+    /// Set when the write succeeded but left a feature switched on that
+    /// cannot run, with the fix. The value is still written: refusing it
+    /// would break scripts that set the key before installing the model.
+    pub warning: Option<String>,
+    /// False when there was nothing to do: an unset of a key the file
+    /// doesn't contain. The file is left untouched in that case.
+    pub changed: bool,
+}
+
+/// The LARD problem a write should be warned about, if any.
+///
+/// `before` is the problem the config had before the edit. A write to one of
+/// the LARD keys always reports what is wrong. Any other write reports it only
+/// when it changed the answer (turning an engine's language to `auto`, say),
+/// so unrelated settings do not nag about it.
+///
+/// Setting `text.language` to something the engine's language or the model
+/// overrides is reported too: the write succeeds and changes nothing, and
+/// saying so beats two settings that silently disagree.
+fn lard_warning(
+    key: &str,
+    before: Option<crate::setup::lard::Problem>,
+    editor: &ConfigEditor,
+) -> Option<String> {
+    let candidate = editor.candidate_config().ok()?;
+    let lard = crate::setup::lard::problem(&candidate).and_then(|after| {
+        let lard_key = matches!(key, "text.lard_disfluency" | "text.lard_model_path");
+        (lard_key || before.as_ref() != Some(&after)).then(|| after.summary())
+    });
+    let unused = (key == "text.language")
+        .then(|| candidate.text_language_conflict())
+        .flatten();
+    match (unused, lard) {
+        (Some(unused), Some(lard)) => Some(format!("{unused}. {lard}")),
+        (unused, lard) => unused.or(lard),
+    }
+}
+
+/// The LARD problem of the config an editor holds, before it is edited.
+fn lard_problem(editor: &ConfigEditor) -> Option<crate::setup::lard::Problem> {
+    crate::setup::lard::problem(&editor.candidate_config().ok()?)
 }
 
 /// Look up `key` in the allowlist and reject it if its engine feature is
@@ -376,6 +417,8 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
             value: TypedValue::Str(raw.to_string()),
             path: written,
             restart_required: true,
+            warning: None,
+            changed: true,
         });
     }
 
@@ -392,6 +435,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
     }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
+    let lard_before = lard_problem(&editor);
     schema::apply(&mut editor, &found, &value);
     if key == "gguf.model" {
         if let Some(metadata) =
@@ -438,25 +482,40 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
         value,
         path: editor.path().to_path_buf(),
         restart_required: spec.restart_required,
+        warning: lard_warning(spec.key, lard_before, &editor),
+        changed: true,
     })
 }
 
 /// Remove an allowlisted key from the config file, falling back to its
-/// built-in default. Removing a key that isn't present succeeds.
+/// built-in default.
+///
+/// Removing a key that isn't present succeeds without writing the file, and
+/// reports `changed: false` so the caller can say so instead of claiming it
+/// removed something.
 pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError> {
     let found = lookup(key)?;
     let spec = found.spec();
     let (table, field) = found.target();
 
     let mut editor = ConfigEditor::load_from_path(path)?;
-    editor.unset(table, field);
-    editor.save()?;
+    let lard_before = lard_problem(&editor);
+    let changed = editor.remove_key(table, field);
+    if changed {
+        editor.save()?;
+    }
 
     Ok(SetOutcome {
         key: found.dotted_key(),
         value: TypedValue::Str(String::new()),
         path: editor.path().to_path_buf(),
-        restart_required: spec.restart_required,
+        restart_required: changed && spec.restart_required,
+        warning: if changed {
+            lard_warning(spec.key, lard_before, &editor)
+        } else {
+            None
+        },
+        changed,
     })
 }
 
@@ -839,6 +898,36 @@ gguf_backend = "cpu"
         );
     }
 
+    /// `echo_cancel` takes its current names, and the names early 1.3.0
+    /// test builds used ("aec", "off") are written as those, not refused;
+    /// a config still holding an old name loads and means the same.
+    #[test]
+    fn echo_cancel_takes_webrtc_and_still_reads_the_old_names() {
+        use crate::audio::echo_cancel::Mode;
+        let (_dir, path) = full_config();
+        let key = "meeting.audio.echo_cancel";
+        for value in ["webrtc", "gtcrn", "disabled", "auto"] {
+            set_key(path.clone(), key, value).unwrap();
+            assert_eq!(reload(&path).meeting.audio.echo_cancel, value);
+        }
+        let out = set_key(path.clone(), key, "aec").unwrap();
+        assert_eq!(out.value, TypedValue::Str("webrtc".to_string()));
+        assert_eq!(reload(&path).meeting.audio.echo_cancel, "webrtc");
+        set_key(path.clone(), key, "off").unwrap();
+        assert_eq!(reload(&path).meeting.audio.echo_cancel, "disabled");
+        assert!(set_key(path.clone(), key, "loud").is_err());
+
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            text.replace("echo_cancel = \"disabled\"", "echo_cancel = \"aec\""),
+        )
+        .unwrap();
+        let cfg = reload(&path);
+        assert_eq!(cfg.meeting.audio.echo_cancel, "aec");
+        assert_eq!(Mode::parse(&cfg.meeting.audio.echo_cancel), Mode::Webrtc);
+    }
+
     /// The OSD styling keys (#501) must be reachable through `config set`,
     /// not just by hand-editing the TOML: a style package path, the
     /// development plugin_path (set and unset), and the nested [osd.frame]
@@ -968,6 +1057,139 @@ gguf_backend = "cpu"
         assert_eq!(err.exit_code(), 2);
     }
 
+    /// Turning LARD on with no model still writes the key (scripts set it
+    /// before installing the model) but says what is wrong and how to fix it.
+    #[test]
+    fn enabling_lard_without_a_model_warns_and_still_writes() {
+        let (_dir, path) = full_config();
+        set_key(path.clone(), "whisper.language", "en").unwrap();
+
+        // A path alone asks for nothing while the stage is off.
+        let out = set_key(
+            path.clone(),
+            "text.lard_model_path",
+            "/nonexistent/voxtype-test/lard.vxdf",
+        )
+        .unwrap();
+        assert_eq!(out.warning, None);
+
+        let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
+        assert!(reload(&path).text.lard_disfluency);
+        let warning = out.warning.expect("a missing model must be reported");
+        assert!(warning.contains("/nonexistent/voxtype-test/lard.vxdf"));
+        assert!(warning.contains("voxtype config set text.lard_disfluency false"));
+
+        // Unrelated writes do not repeat it.
+        let out = set_key(path.clone(), "hotkey.mode", "toggle").unwrap();
+        assert_eq!(out.warning, None);
+
+        // Asking again does.
+        let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
+        assert!(out.warning.is_some());
+
+        let out = set_key(path.clone(), "text.lard_disfluency", "false").unwrap();
+        assert_eq!(out.warning, None);
+    }
+
+    #[test]
+    fn lard_warning_follows_the_model_and_the_language() {
+        let (_dir, path) = full_config();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::setup::lard::SOURCE_TREE_PATH);
+        set_key(path.clone(), "whisper.language", "en").unwrap();
+        set_key(
+            path.clone(),
+            "text.lard_model_path",
+            model.to_str().unwrap(),
+        )
+        .unwrap();
+
+        // Model present, explicit English: nothing to say.
+        let out = set_key(path.clone(), "text.lard_disfluency", "true").unwrap();
+        assert_eq!(out.warning, None);
+
+        // The default model is English-only, so automatic detection changes
+        // nothing: the text is still English.
+        let out = set_key(path.clone(), "whisper.language", "auto").unwrap();
+        assert_eq!(out.warning, None);
+
+        // A write to another key that stops the stage running is reported
+        // once, where it happens: a multilingual model on automatic.
+        let out = set_key(path.clone(), "whisper.model", "large-v3-turbo").unwrap();
+        let warning = out.warning.expect("model change");
+        assert!(warning.contains("it only runs on English"), "{warning}");
+        assert!(
+            warning.contains("voxtype config set text.language en"),
+            "{warning}"
+        );
+        let out = set_key(path.clone(), "hotkey.mode", "toggle").unwrap();
+        assert_eq!(out.warning, None);
+
+        // Unsetting goes through the same check.
+        let out = unset_key(path.clone(), "hotkey.mode").unwrap();
+        assert_eq!(out.warning, None);
+        let out = unset_key(path.clone(), "text.lard_model_path").unwrap();
+        assert!(out.warning.expect("still not English").contains("English"));
+
+        // Declaring the language is the fix the warning named.
+        set_key(
+            path.clone(),
+            "text.lard_model_path",
+            model.to_str().unwrap(),
+        )
+        .unwrap();
+        let out = set_key(path.clone(), "text.language", "EN").unwrap();
+        assert_eq!(out.warning, None);
+        assert_eq!(out.value, TypedValue::Str("en".into()));
+        assert_eq!(reload(&path).text_language(), Some("en"));
+        assert_eq!(crate::setup::lard::problem(&reload(&path)), None);
+
+        // Taking it back stops the stage again, and says so.
+        let out = unset_key(path.clone(), "text.language").unwrap();
+        assert!(out
+            .warning
+            .expect("undeclared again")
+            .contains("voxtype config set text.language en"));
+    }
+
+    #[test]
+    fn text_language_takes_codes_and_reports_a_declaration_that_is_not_used() {
+        let (_dir, path) = full_config();
+        set_key(path.clone(), "whisper.model", "large-v3-turbo").unwrap();
+
+        for bad in ["english", "e", "en us", ""] {
+            let err = set_key(path.clone(), "text.language", bad).unwrap_err();
+            assert!(matches!(err, ConfigSetError::BadValue(_)), "{bad:?}: {err}");
+        }
+        assert_eq!(reload(&path).text.language, "auto");
+
+        // The engine was told French: the declaration is written, changes
+        // nothing, and the output says which setting wins.
+        set_key(path.clone(), "whisper.language", "fr").unwrap();
+        let out = set_key(path.clone(), "text.language", "en").unwrap();
+        assert_eq!(
+            out.warning.as_deref(),
+            Some(
+                "text.language is en, but text cleanup treats dictation as fr: \
+                 whisper.language is fr, and the engine's language wins"
+            )
+        );
+        assert_eq!(reload(&path).text_language(), Some("fr"));
+
+        // Agreeing with the engine, or filling in for automatic detection,
+        // is nothing to warn about.
+        let out = set_key(path.clone(), "text.language", "fr-CA").unwrap();
+        assert_eq!(out.warning, None);
+        set_key(path.clone(), "whisper.language", "auto").unwrap();
+        let out = set_key(path.clone(), "text.language", "pt-BR").unwrap();
+        assert_eq!(out.warning, None);
+        assert_eq!(reload(&path).text_language(), Some("pt-BR"));
+
+        let out = set_key(path.clone(), "text.language", "auto").unwrap();
+        assert_eq!(out.warning, None);
+        assert_eq!(reload(&path).text_language(), None);
+    }
+
     #[test]
     fn unset_key_restores_the_default() {
         let (_dir, path) = full_config();
@@ -991,6 +1213,62 @@ gguf_backend = "cpu"
         unset_key(path.clone(), "whisper.initial_prompt").unwrap();
         unset_key(path.clone(), "whisper.initial_prompt").unwrap();
         assert!(reload(&path).whisper.initial_prompt.is_none());
+    }
+
+    #[test]
+    fn unsetting_an_absent_key_reports_it_and_leaves_the_file_alone() {
+        let source = "[text]\nreplacements = { \"vox type\" = \"Voxtype\" }\n";
+        let (dir, path) = temp_config(source);
+        for key in ["text.replacements.nope", "osd.opacity"] {
+            let out = unset_key(path.clone(), key).unwrap();
+            assert!(!out.changed, "{key}");
+            assert!(!out.restart_required, "{key}");
+            assert_eq!(out.key, key);
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        assert!(
+            !dir.path().join("config.toml.bak").exists(),
+            "a no-op unset must not write anything"
+        );
+
+        let out = unset_key(path.clone(), "text.replacements.vox type").unwrap();
+        assert!(out.changed);
+        assert!(replacements(&path).is_empty());
+    }
+
+    #[test]
+    fn quoted_key_segments_address_the_existing_entry() {
+        // Quoting used to become part of the name: set created a second
+        // entry '"cone ogres"' and unset reported success but removed nothing.
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        let out = set_key(path.clone(), "text.replacements.\"cone ogres\"", "Owners").unwrap();
+        assert_eq!(out.key, "text.replacements.cone ogres");
+        set_key(path.clone(), "text.replacements.'vox type'", "VoxType").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("cone ogres", "Owners"), ("vox type", "VoxType")])
+        );
+        assert!(!fs::read_to_string(&path).unwrap().contains("'\"cone"));
+
+        let out = unset_key(path.clone(), "text.replacements.\"cone ogres\"").unwrap();
+        assert!(out.changed);
+        assert_eq!(replacements(&path), pairs(&[("vox type", "VoxType")]));
+
+        set_key(path.clone(), "text.replacements.\"e.g.\"", "for example").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("vox type", "VoxType"), ("e.g.", "for example")])
+        );
+        let out = unset_key(path.clone(), "text.replacements.'e.g.'").unwrap();
+        assert!(out.changed);
+        assert_eq!(out.key, "text.replacements.\"e.g.\"");
+
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(matches!(
+            set_key(path.clone(), "text.replacements.\"cone ogres", "X"),
+            Err(ConfigSetError::UnknownKey(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]
@@ -1023,6 +1301,226 @@ gguf_backend = "cpu"
             cfg.text.replacements.contains_key("omw"),
             "unsetting one entry must not disturb the others"
         );
+    }
+
+    /// The inline form our own default config, README and CONFIGURATION.md
+    /// show. Adding one entry used to replace the whole inline table with a
+    /// fresh `[text.replacements]`, dropping every existing entry.
+    const INLINE_REPLACEMENTS: &str = "# keep this comment\n[text]\nspoken_punctuation = true # keep me too\nreplacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" }\n";
+
+    fn replacements(path: &std::path::Path) -> Vec<(String, String)> {
+        let mut out: Vec<_> = reload(path).text.replacements.into_iter().collect();
+        out.sort();
+        out
+    }
+
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut out: Vec<_> = entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn adding_to_inline_replacements_keeps_every_entry_inline() {
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        set_key(path.clone(), "text.replacements.inovara", "Enovara").unwrap();
+
+        assert_eq!(
+            replacements(&path),
+            pairs(&[
+                ("cone ogres", "CODEOWNERS"),
+                ("vox type", "Voxtype"),
+                ("inovara", "Enovara"),
+            ])
+        );
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(
+                "replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\", inovara = \"Enovara\" }"
+            ),
+            "the table stays inline and tidy:\n{after}"
+        );
+        assert!(!after.contains("[text.replacements]"));
+        assert!(after.contains("# keep this comment"));
+        assert!(after.contains("spoken_punctuation = true # keep me too"));
+    }
+
+    #[test]
+    fn overwriting_an_inline_replacement_keeps_the_others() {
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        set_key(path.clone(), "text.replacements.vox type", "VoxType").unwrap();
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("cone ogres", "CODEOWNERS"), ("vox type", "VoxType")])
+        );
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains(
+            "replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"VoxType\" }"
+        ));
+    }
+
+    #[test]
+    fn unsetting_an_inline_replacement_removes_only_that_entry() {
+        // Unset used to report success and leave an inline entry in place.
+        let (_dir, path) = temp_config(INLINE_REPLACEMENTS);
+        unset_key(path.clone(), "text.replacements.vox type").unwrap();
+        assert_eq!(replacements(&path), pairs(&[("cone ogres", "CODEOWNERS")]));
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("replacements = { \"cone ogres\" = \"CODEOWNERS\" }"));
+
+        unset_key(path.clone(), "text.replacements.cone ogres").unwrap();
+        assert!(replacements(&path).is_empty());
+        unset_key(path.clone(), "text.replacements.cone ogres").unwrap();
+    }
+
+    #[test]
+    fn quoted_keys_with_spaces_round_trip_in_every_form() {
+        for source in [
+            INLINE_REPLACEMENTS,
+            "[text.replacements]\n\"cone ogres\" = \"CODEOWNERS\"\n\"vox type\" = \"Voxtype\"\n",
+        ] {
+            let (_dir, path) = temp_config(source);
+            set_key(path.clone(), "text.replacements.oh marky", "Omarchy").unwrap();
+            assert_eq!(
+                replacements(&path),
+                pairs(&[
+                    ("cone ogres", "CODEOWNERS"),
+                    ("vox type", "Voxtype"),
+                    ("oh marky", "Omarchy"),
+                ]),
+                "source:\n{source}"
+            );
+            let after = fs::read_to_string(&path).unwrap();
+            assert!(after.contains("\"oh marky\" = \"Omarchy\""), "{after}");
+        }
+    }
+
+    #[test]
+    fn standard_replacements_table_is_unchanged_in_form() {
+        let source = "[text.replacements]\n# my fixes\n\"vox type\" = \"Voxtype\" # spelling\n";
+        let (_dir, path) = temp_config(source);
+        set_key(path.clone(), "text.replacements.btw", "by the way").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[text.replacements]\n# my fixes\n\"vox type\" = \"Voxtype\" # spelling\nbtw = \"by the way\"\n"
+        );
+        unset_key(path.clone(), "text.replacements.btw").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn dotted_key_replacements_keep_every_entry() {
+        for (source, expect) in [
+            (
+                "text.replacements = { \"vox type\" = \"Voxtype\" } # mine\n[hotkey]\nkey = \"HOME\"\n",
+                "text.replacements = { \"vox type\" = \"Voxtype\", btw = \"by the way\" } # mine\n",
+            ),
+            (
+                "[text]\nreplacements.\"vox type\" = \"Voxtype\"\n",
+                "replacements.btw = \"by the way\"",
+            ),
+            (
+                "text.replacements.\"vox type\" = \"Voxtype\"\n",
+                "text.replacements.btw = \"by the way\"",
+            ),
+        ] {
+            let (_dir, path) = temp_config(source);
+            set_key(path.clone(), "text.replacements.btw", "by the way").unwrap();
+            assert_eq!(
+                replacements(&path),
+                pairs(&[("vox type", "Voxtype"), ("btw", "by the way")]),
+                "source:\n{source}"
+            );
+            let after = fs::read_to_string(&path).unwrap();
+            assert!(after.contains(expect), "source:\n{source}\nafter:\n{after}");
+
+            unset_key(path.clone(), "text.replacements.vox type").unwrap();
+            assert_eq!(
+                replacements(&path),
+                pairs(&[("btw", "by the way")]),
+                "source:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_in_an_inline_section_keep_their_siblings() {
+        // Not only replacements: any section written inline used to lose
+        // every other setting in it when one key was set.
+        let source = "text = { spoken_punctuation = true, replacements = { \"vox type\" = \"Voxtype\" } }\nosd = { position = \"top-right\" }\n";
+        let (_dir, path) = temp_config(source);
+        set_key(path.clone(), "text.format_numbers", "true").unwrap();
+        set_key(path.clone(), "text.replacements.btw", "by the way").unwrap();
+        set_key(path.clone(), "osd.opacity", "0.5").unwrap();
+
+        let cfg = reload(&path);
+        assert!(cfg.text.spoken_punctuation);
+        assert!(cfg.text.format_numbers);
+        assert_eq!(cfg.osd.position, crate::osd::config::OsdPosition::TopRight);
+        assert_eq!(cfg.osd.opacity, 0.5);
+        assert_eq!(
+            replacements(&path),
+            pairs(&[("vox type", "Voxtype"), ("btw", "by the way")])
+        );
+
+        unset_key(path.clone(), "osd.position").unwrap();
+        let cfg = reload(&path);
+        assert_eq!(
+            cfg.osd.position,
+            crate::config::Config::default().osd.position
+        );
+        assert_eq!(cfg.osd.opacity, 0.5);
+    }
+
+    #[test]
+    fn no_replacement_is_lost_across_a_round_trip() {
+        // Add, overwrite and remove entries in every form a user can write
+        // the table in, and check the final map against a model of it.
+        for source in [
+            INLINE_REPLACEMENTS,
+            "[text.replacements]\n\"cone ogres\" = \"CODEOWNERS\"\n\"vox type\" = \"Voxtype\"\n",
+            "text.replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" }\n",
+            "text = { replacements = { \"cone ogres\" = \"CODEOWNERS\", \"vox type\" = \"Voxtype\" } }\n",
+            "[text]\nreplacements.\"cone ogres\" = \"CODEOWNERS\"\nreplacements.\"vox type\" = \"Voxtype\"\n",
+        ] {
+            let (_dir, path) = temp_config(source);
+            let mut model: std::collections::BTreeMap<String, String> = [
+                ("cone ogres", "CODEOWNERS"),
+                ("vox type", "Voxtype"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+            let steps: &[(&str, Option<&str>)] = &[
+                ("inovara", Some("Enovara")),
+                ("oh marky", Some("Omarchy")),
+                ("vox type", Some("VoxType")),
+                ("cone ogres", None),
+                ("btw", Some("by the way")),
+                ("inovara", None),
+                ("cone ogres", Some("CODEOWNERS")),
+            ];
+            for (key, value) in steps {
+                let dotted = format!("text.replacements.{key}");
+                match value {
+                    Some(v) => {
+                        set_key(path.clone(), &dotted, v).unwrap();
+                        model.insert(key.to_string(), v.to_string());
+                    }
+                    None => {
+                        unset_key(path.clone(), &dotted).unwrap();
+                        model.remove(*key);
+                    }
+                }
+                let got: std::collections::BTreeMap<_, _> =
+                    reload(&path).text.replacements.into_iter().collect();
+                assert_eq!(got, model, "source:\n{source}\nafter step {key:?}");
+            }
+        }
     }
 
     #[test]

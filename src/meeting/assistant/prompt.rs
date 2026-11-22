@@ -1,0 +1,585 @@
+//! The prompt shared by `meeting ask` and summaries.
+//!
+//! ```text
+//! Meeting: Weekly sync, 2026-11-11 14:00, 32m. Speakers: Pete (You), Steve (Remote 1).
+//! The user asking is Pete (You).
+//! [00:41] Steve: ...
+//! [00:52] Pete: ...
+//! User notes: ...
+//! Annotations:
+//! [01:58] Note: check this number
+//! Question: what did Steve just say?
+//! Answer briefly. Cite the [mm:ss] of the lines you rely on.
+//! ```
+//!
+//! Speaker names are what the transcript shows on screen: labels,
+//! per-line reassignments and annotations are applied by the storage layer
+//! when the transcript is loaded, before it gets here.
+
+use crate::meeting::data::{MeetingData, TranscriptSegment};
+use chrono::{DateTime, Local, Utc};
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// A note or highlight on one transcript line, as the prompt shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Annotation {
+    pub start_ms: u64,
+    pub text: String,
+}
+
+/// A `[mm:ss]` an answer cites.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Citation {
+    /// As written, without brackets: `01:58` or `1:02:03`.
+    pub ts: String,
+    pub ms: u64,
+}
+
+/// One rendered transcript line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    pub start_ms: u64,
+    pub text: String,
+}
+
+/// `mm:ss`, or `h:mm:ss` from an hour on.
+pub fn ts(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+/// Parse `mm:ss` or `h:mm:ss` into milliseconds.
+pub fn parse_ts(s: &str) -> Option<u64> {
+    let parts: Vec<u64> = s
+        .trim()
+        .split(':')
+        .map(|p| p.parse::<u64>().ok())
+        .collect::<Option<_>>()?;
+    let secs = match parts.as_slice() {
+        [m, s] if *s < 60 => m * 60 + s,
+        [h, m, s] if *m < 60 && *s < 60 => h * 3600 + m * 60 + s,
+        _ => return None,
+    };
+    Some(secs * 1000)
+}
+
+/// Every `[mm:ss]` / `[h:mm:ss]` in `answer`, in order, without repeats.
+/// Ranges like `[01:58-02:10]` cite both ends.
+pub fn citations(answer: &str) -> Vec<Citation> {
+    let mut out: Vec<Citation> = Vec::new();
+    let mut rest = answer;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else { break };
+        for part in after[..close].split([',', '-', '–']) {
+            let part = part.trim();
+            if let Some(ms) = parse_ts(part) {
+                if !out.iter().any(|c| c.ts == part) {
+                    out.push(Citation {
+                        ts: part.to_string(),
+                        ms,
+                    });
+                }
+            }
+        }
+        rest = &after[close + 1..];
+    }
+    out
+}
+
+/// The end of the transcript so far, in meeting time.
+pub fn transcript_end_ms(meeting: &MeetingData) -> u64 {
+    meeting
+        .transcript
+        .segments
+        .iter()
+        .map(|s| s.end_ms)
+        .max()
+        .unwrap_or(0)
+}
+
+fn duration_text(meeting: &MeetingData, now: DateTime<Utc>) -> String {
+    let secs = meeting.metadata.duration_secs.unwrap_or_else(|| {
+        (now - meeting.metadata.started_at)
+            .num_seconds()
+            .max((transcript_end_ms(meeting) / 1000) as i64) as u64
+    });
+    let mins = secs.div_ceil(60);
+    let live = if meeting.metadata.ended_at.is_none() {
+        " so far"
+    } else {
+        ""
+    };
+    if mins >= 60 {
+        format!("{}h {}m{live}", mins / 60, mins % 60)
+    } else {
+        format!("{mins}m{live}")
+    }
+}
+
+/// `Pete (You), Steve (Remote 1), Remote 2`: each speaker's display name,
+/// with the diarizer's ID when a name was given, in order of first line.
+pub fn speaker_list(segments: &[TranscriptSegment]) -> String {
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for s in segments {
+        let key = s.speaker_key();
+        if !seen.iter().any(|(k, _)| *k == key) {
+            seen.push((key, s.speaker_display()));
+        }
+    }
+    seen.iter()
+        .map(|(key, name)| {
+            if key == name {
+                name.clone()
+            } else {
+                format!("{name} ({key})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The reader line: who the user is in this transcript. `my_name` wins when
+/// set; otherwise the user is whoever the "You" side is shown as. None
+/// when there is nothing to say (no `my_name` and no lines from the user).
+pub fn reader_line(segments: &[TranscriptSegment], my_name: Option<&str>) -> Option<String> {
+    let you = crate::meeting::data::MY_SPEAKER_KEY;
+    let shown_as = segments
+        .iter()
+        .find(|s| s.speaker_key() == you)
+        .map(|s| s.speaker_display());
+    let name = my_name.map(str::trim).filter(|n| !n.is_empty());
+    match (name, shown_as) {
+        (Some(n), Some(d)) if d == n => Some(format!("The user asking is {n} ({you}).")),
+        (Some(n), Some(d)) => Some(format!(
+            "The user asking is {n}, shown in this transcript as {d} ({you})."
+        )),
+        (Some(n), None) => Some(format!("The user asking is {n}.")),
+        (None, Some(d)) if d == you => Some(format!("The user asking is the speaker {you}.")),
+        (None, Some(d)) => Some(format!("The user asking is {d} ({you}).")),
+        (None, None) => None,
+    }
+}
+
+/// The first line of the prompt.
+pub fn header(meeting: &MeetingData, now: DateTime<Utc>) -> String {
+    let speakers = speaker_list(&meeting.transcript.segments);
+    format!(
+        "Meeting: {}, {}, {}. Speakers: {}.",
+        meeting.metadata.display_title(),
+        meeting
+            .metadata
+            .started_at
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M"),
+        duration_text(meeting, now),
+        if speakers.is_empty() {
+            "none yet".to_string()
+        } else {
+            speakers
+        }
+    )
+}
+
+/// `[mm:ss] Name: text` for every segment with text.
+pub fn lines(segments: &[TranscriptSegment]) -> Vec<Line> {
+    segments
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|s| Line {
+            start_ms: s.start_ms,
+            text: format!(
+                "[{}] {}: {}",
+                ts(s.start_ms),
+                s.speaker_display(),
+                s.text.trim()
+            ),
+        })
+        .collect()
+}
+
+/// Lines from the last `window` of the transcript (ending at `end_ms`).
+pub fn last_window(all: &[Line], window: Duration, end_ms: u64) -> Vec<Line> {
+    let from = end_ms.saturating_sub(window.as_millis() as u64);
+    all.iter().filter(|l| l.start_ms >= from).cloned().collect()
+}
+
+fn size(lines: &[Line]) -> usize {
+    lines.iter().map(|l| l.text.len() + 1).sum()
+}
+
+/// How the transcript fits the character budget.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fit {
+    /// Everything, verbatim.
+    Whole(Vec<Line>),
+    /// Too long: `recent` verbatim, `earlier` to be summarized.
+    Split {
+        earlier: Vec<Line>,
+        recent: Vec<Line>,
+    },
+}
+
+/// Fit `all` into `budget` characters. When it does not fit, the most
+/// recent lines that fit in three quarters of the budget stay verbatim and
+/// the rest is summarized into the remaining quarter.
+pub fn fit(all: Vec<Line>, budget: usize) -> Fit {
+    if size(&all) <= budget {
+        return Fit::Whole(all);
+    }
+    let keep = budget * 3 / 4;
+    let mut used = 0;
+    let mut cut = all.len();
+    while cut > 0 {
+        let n = all[cut - 1].text.len() + 1;
+        if used + n > keep {
+            break;
+        }
+        used += n;
+        cut -= 1;
+    }
+    // Always keep at least the last line, truncated if it alone is huge.
+    if cut == all.len() {
+        cut -= 1;
+    }
+    let mut earlier = all;
+    let mut recent = earlier.split_off(cut);
+    for l in &mut recent {
+        if l.text.len() > keep {
+            let mut end = keep;
+            while !l.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            l.text.truncate(end);
+            l.text.push('…');
+        }
+    }
+    Fit::Split { earlier, recent }
+}
+
+/// Split `lines` into pieces of at most `budget` characters each.
+pub fn pieces(lines: &[Line], budget: usize) -> Vec<Vec<Line>> {
+    let mut out: Vec<Vec<Line>> = Vec::new();
+    let mut cur: Vec<Line> = Vec::new();
+    let mut used = 0;
+    for l in lines {
+        let n = l.text.len() + 1;
+        if !cur.is_empty() && used + n > budget {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        used += n;
+        cur.push(l.clone());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Everything the agent is told about the meeting.
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    pub header: String,
+    /// Who is asking, so "I" and "me" in a question resolve to a speaker.
+    pub reader: Option<String>,
+    /// Summary of the part of the meeting before `recent`, and where it ends.
+    pub earlier_summary: Option<(String, u64)>,
+    /// Said when only part of the meeting is included on purpose (`--last`).
+    pub excerpt: Option<String>,
+    pub lines: Vec<Line>,
+    pub notes: Option<String>,
+    pub annotations: Vec<Annotation>,
+}
+
+impl Context {
+    fn render(&self) -> String {
+        let mut p = String::new();
+        p.push_str(&self.header);
+        p.push('\n');
+        if let Some(reader) = &self.reader {
+            p.push_str(reader);
+            p.push('\n');
+        }
+        if let Some(excerpt) = &self.excerpt {
+            p.push_str(excerpt);
+            p.push('\n');
+        }
+        if let Some((summary, through)) = &self.earlier_summary {
+            p.push_str(&format!(
+                "Summary of the meeting up to [{}]:\n{}\nTranscript from [{}] on:\n",
+                ts(*through),
+                summary.trim(),
+                ts(*through)
+            ));
+        }
+        if self.lines.is_empty() {
+            p.push_str("(No transcript lines yet.)\n");
+        }
+        for l in &self.lines {
+            p.push_str(&l.text);
+            p.push('\n');
+        }
+        if let Some(notes) = self
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            p.push_str("User notes:\n");
+            p.push_str(notes);
+            p.push('\n');
+        }
+        if !self.annotations.is_empty() {
+            p.push_str("Annotations:\n");
+            for a in &self.annotations {
+                p.push_str(&format!("[{}] {}\n", ts(a.start_ms), a.text.trim()));
+            }
+        }
+        p
+    }
+
+    /// The prompt for one question.
+    pub fn ask(&self, question: &str) -> String {
+        let mut p = self.render();
+        p.push_str(SECOND_PERSON);
+        p.push_str(&format!("Question: {}\n", question.trim()));
+        p.push_str("Answer briefly. Cite the [mm:ss] of the lines you rely on.\n");
+        p
+    }
+
+    /// The prompt for a full summary, answered as JSON.
+    pub fn summary(&self) -> String {
+        let mut p = self.render();
+        p.push_str(SUMMARY_INSTRUCTIONS);
+        p.push_str(SECOND_PERSON);
+        p
+    }
+}
+
+/// Without this an agent writes "You expected their lines" about the user,
+/// as if You were a third person in the meeting.
+const SECOND_PERSON: &str = "Write about the user asking in the second person (\"you said\", \"your action item\"), never as a third person named You.\n";
+
+const SUMMARY_INSTRUCTIONS: &str = r#"Summarize this meeting. Where the user's notes say what mattered, expand on them from the transcript rather than ignoring them.
+Use speaker names exactly as written above, also for action item owners. Reply with only a JSON object, no other text:
+{
+  "overview": "3-5 sentences on what the meeting covered and concluded",
+  "key_points": ["..."],
+  "decisions": ["..."],
+  "action_items": [{"description": "...", "owner": "speaker name or null", "due": "the deadline as said, or null", "at": "mm:ss"}],
+  "chapters": [{"start": "mm:ss", "title": "..."}]
+}
+Chapters follow the order of the meeting; each start is the [mm:ss] of the line where that topic begins.
+List every action item someone took on or was given. "due" is only the deadline someone actually said ("Friday", "by end of day", "November 20"), word for word, never one you infer; "at" is the [mm:ss] of the line where the item was given.
+"#;
+
+/// Prompt that folds `lines` into a running summary of the meeting so far.
+pub fn rolling_summary_prompt(header: &str, previous: Option<&str>, lines: &[Line]) -> String {
+    let mut p = String::new();
+    p.push_str(header);
+    p.push('\n');
+    if let Some(prev) = previous {
+        p.push_str("Summary so far:\n");
+        p.push_str(prev.trim());
+        p.push_str("\nTranscript that follows:\n");
+    }
+    for l in lines {
+        p.push_str(&l.text);
+        p.push('\n');
+    }
+    p.push_str(
+        "Write a running summary of the meeting so far that someone could use to answer \
+         questions about it: topics in order with their [mm:ss], what each speaker said that \
+         matters, numbers, decisions and action items with owners. Plain text, at most 400 words.\n",
+    );
+    p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting::data::AudioSource;
+
+    fn seg(id: u32, secs: u64, key: &str, label: Option<&str>, text: &str) -> TranscriptSegment {
+        let mut s = TranscriptSegment::new(id, secs * 1000, secs * 1000 + 2000, text.into(), 0);
+        s.source = if key == "You" {
+            AudioSource::Microphone
+        } else {
+            AudioSource::Loopback
+        };
+        s.speaker_id = Some(key.to_string());
+        s.speaker_label = label.map(String::from);
+        s
+    }
+
+    #[test]
+    fn timestamps_round_trip() {
+        assert_eq!(ts(41_000), "00:41");
+        assert_eq!(ts(3_723_000), "1:02:03");
+        assert_eq!(parse_ts("00:41"), Some(41_000));
+        assert_eq!(parse_ts("1:02:03"), Some(3_723_000));
+        assert_eq!(parse_ts("1:99"), None);
+        assert_eq!(parse_ts("abc"), None);
+    }
+
+    #[test]
+    fn citations_are_found_once_each() {
+        let c = citations("Steve said so [00:41], again [00:41] and at [01:58-02:10]. [note]");
+        let ts: Vec<&str> = c.iter().map(|c| c.ts.as_str()).collect();
+        assert_eq!(ts, vec!["00:41", "01:58", "02:10"]);
+        assert_eq!(c[1].ms, 118_000);
+    }
+
+    #[test]
+    fn speakers_show_names_and_ids() {
+        let segs = vec![
+            seg(0, 1, "You", Some("Pete"), "hi"),
+            seg(1, 5, "Remote 1", Some("Steve"), "hello"),
+            seg(2, 9, "Remote 2", None, "hey"),
+            seg(3, 12, "You", Some("Pete"), "ok"),
+        ];
+        assert_eq!(
+            speaker_list(&segs),
+            "Pete (You), Steve (Remote 1), Remote 2"
+        );
+    }
+
+    fn mk(n: usize, len: usize) -> Vec<Line> {
+        (0..n)
+            .map(|i| Line {
+                start_ms: i as u64 * 1000,
+                text: "x".repeat(len - 1),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_short_transcript_fits_whole() {
+        assert!(matches!(fit(mk(10, 10), 100), Fit::Whole(l) if l.len() == 10));
+    }
+
+    #[test]
+    fn a_long_transcript_keeps_the_recent_lines() {
+        match fit(mk(100, 10), 200) {
+            Fit::Split { earlier, recent } => {
+                assert_eq!(recent.len(), 15); // 150 chars of 200 * 3/4
+                assert_eq!(earlier.len(), 85);
+                assert_eq!(recent[0].start_ms, 85_000);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_huge_line_is_truncated_not_dropped() {
+        match fit(mk(2, 1000), 100) {
+            Fit::Split { recent, .. } => {
+                assert_eq!(recent.len(), 1);
+                assert!(recent[0].text.len() <= 75 + '…'.len_utf8());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn pieces_respect_the_budget() {
+        let p = pieces(&mk(10, 10), 35);
+        assert_eq!(p.iter().map(Vec::len).collect::<Vec<_>>(), vec![3, 3, 3, 1]);
+    }
+
+    #[test]
+    fn last_window_is_a_time_window() {
+        let all = mk(600, 10); // one line a second for ten minutes
+        let w = last_window(&all, Duration::from_secs(120), 600_000);
+        assert_eq!(w.first().unwrap().start_ms, 480_000);
+        assert_eq!(w.len(), 120);
+    }
+
+    #[test]
+    fn prompt_has_every_section() {
+        let ctx = Context {
+            header: "Meeting: X".into(),
+            reader: Some("The user asking is Pete (You).".into()),
+            earlier_summary: Some(("They planned.".into(), 60_000)),
+            excerpt: None,
+            lines: vec![Line {
+                start_ms: 61_000,
+                text: "[01:01] Steve: ship it".into(),
+            }],
+            notes: Some("check budget".into()),
+            annotations: vec![Annotation {
+                start_ms: 118_000,
+                text: "Note: check this number".into(),
+            }],
+        };
+        let p = ctx.ask("what did Steve say?");
+        assert!(p.contains("Summary of the meeting up to [01:00]:\nThey planned."));
+        assert!(p.contains("[01:01] Steve: ship it\n"));
+        assert!(p.contains("User notes:\ncheck budget\n"));
+        assert!(p.contains("Annotations:\n[01:58] Note: check this number\n"));
+        assert!(p.ends_with(
+            "Question: what did Steve say?\nAnswer briefly. Cite the [mm:ss] of the lines you rely on.\n"
+        ));
+        assert!(ctx.summary().contains("\"chapters\""));
+    }
+
+    #[test]
+    fn reader_line_names_the_user_with_my_name_winning() {
+        let you = seg(0, 1, "You", None, "hi");
+        let labelled = seg(0, 1, "You", Some("Peter J"), "hi");
+        let remote = seg(1, 2, "Remote 1", Some("Steve"), "yo");
+        assert_eq!(
+            reader_line(&[you.clone(), remote.clone()], None).as_deref(),
+            Some("The user asking is the speaker You.")
+        );
+        let mut named = you.clone();
+        named.speaker_label = Some("Pete".into());
+        assert_eq!(
+            reader_line(&[named], Some("Pete")).as_deref(),
+            Some("The user asking is Pete (You).")
+        );
+        assert_eq!(
+            reader_line(std::slice::from_ref(&labelled), Some("Pete")).as_deref(),
+            Some("The user asking is Pete, shown in this transcript as Peter J (You).")
+        );
+        assert_eq!(
+            reader_line(std::slice::from_ref(&labelled), None).as_deref(),
+            Some("The user asking is Peter J (You).")
+        );
+        assert_eq!(
+            reader_line(std::slice::from_ref(&remote), Some("Pete")).as_deref(),
+            Some("The user asking is Pete.")
+        );
+        assert_eq!(reader_line(&[remote], None), None);
+        assert_eq!(
+            reader_line(&[you], Some("  ")).as_deref(),
+            Some("The user asking is the speaker You.")
+        );
+    }
+
+    #[test]
+    fn the_reader_line_follows_the_header() {
+        let ctx = Context {
+            header: "Meeting: X".into(),
+            reader: Some("The user asking is Pete (You).".into()),
+            ..Default::default()
+        };
+        assert!(ctx
+            .ask("what did I say?")
+            .starts_with("Meeting: X\nThe user asking is Pete (You).\n"));
+    }
+
+    #[test]
+    fn answers_and_summaries_speak_to_the_user() {
+        let ctx = Context::default();
+        assert!(ctx.ask("what did I say?").contains(SECOND_PERSON));
+        assert!(ctx.summary().ends_with(SECOND_PERSON));
+    }
+}

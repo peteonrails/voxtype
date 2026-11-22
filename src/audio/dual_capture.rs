@@ -5,7 +5,10 @@
 //!
 //! Mic capture uses cpal (ALSA). Loopback capture uses `parec` (PulseAudio
 //! recording client) which works with PipeWire's PulseAudio compatibility
-//! layer and can access monitor sources that aren't visible to ALSA.
+//! layer and can access monitor sources that aren't visible to ALSA. While
+//! the meeting echo canceller runs (`audio::echo_cancel`), the mic is
+//! recorded with `parec` too, from the canceller's source, which ALSA
+//! cannot name either.
 
 use super::cpal_capture::CpalCapture;
 use super::AudioCapture;
@@ -34,25 +37,40 @@ pub struct SourcedSample {
     pub timestamp: u64,
 }
 
-/// Loopback capture via parec subprocess
-struct ParecLoopback {
+/// Capture from a PulseAudio/PipeWire source via a parec subprocess
+struct ParecCapture {
     /// Source name (PulseAudio/PipeWire source)
     source: String,
+    /// Samples to drop from the start, to line this track up with another
+    skip: usize,
     /// Child process
     child: Option<std::process::Child>,
     /// Shared buffer for received samples
     buffer: Arc<Mutex<Vec<f32>>>,
     /// Reader thread handle
     reader_thread: Option<std::thread::JoinHandle<()>>,
+    /// Fed by the reader thread, for meeting.sock's level events
+    meter: Arc<crate::meeting::levels::TrackMeter>,
 }
 
-impl ParecLoopback {
-    fn new(source: String) -> Self {
+impl ParecCapture {
+    fn new(source: String, meter: Arc<crate::meeting::levels::TrackMeter>) -> Self {
+        Self::skipping(source, 0, meter)
+    }
+
+    /// Capture `source`, dropping its first `skip` samples.
+    fn skipping(
+        source: String,
+        skip: usize,
+        meter: Arc<crate::meeting::levels::TrackMeter>,
+    ) -> Self {
         Self {
             source,
+            skip,
             child: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             reader_thread: None,
+            meter,
         }
     }
 
@@ -64,12 +82,31 @@ impl ParecLoopback {
                 "--format=float32le",
                 "--channels=1",
                 "--rate=16000",
+                "--latency-msec=100",
                 "--raw",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| AudioError::Connection(format!("Failed to start parec: {}", e)))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    AudioError::Connection(PAREC_NOT_FOUND.to_string())
+                } else {
+                    AudioError::Connection(format!("Failed to start parec: {}", e))
+                }
+            })?;
+
+        // parec exits at once when it cannot reach a PulseAudio server or the
+        // source does not exist. Give it a moment so that failure surfaces
+        // here, at meeting start, rather than as a transcript with no remote
+        // side.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(AudioError::Connection(format!(
+                "parec could not record from '{}' ({})",
+                self.source, status
+            )));
+        }
 
         let mut stdout = child
             .stdout
@@ -77,10 +114,12 @@ impl ParecLoopback {
             .ok_or_else(|| AudioError::Connection("Failed to capture parec stdout".to_string()))?;
 
         self.child = Some(child);
-        tracing::info!("Loopback capture started via parec: {}", self.source);
+        tracing::info!("Capture started via parec: {}", self.source);
 
         // Spawn reader thread
         let buffer = Arc::clone(&self.buffer);
+        let meter = Arc::clone(&self.meter);
+        let mut skip = self.skip;
         self.reader_thread = Some(std::thread::spawn(move || {
             use std::io::Read;
             let mut raw_buf = [0u8; 4096]; // 1024 f32 samples
@@ -103,8 +142,11 @@ impl ParecLoopback {
                                 samples.push(sample);
                             }
                         }
+                        let dropped = skip.min(samples.len());
+                        skip -= dropped;
+                        meter.feed(&samples[dropped..]);
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend(samples);
+                            buf.extend(&samples[dropped..]);
                         }
                     }
                     Err(_) => break,
@@ -137,20 +179,92 @@ impl ParecLoopback {
     }
 }
 
-impl Drop for ParecLoopback {
+impl Drop for ParecCapture {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
+/// Error text for a missing `parec`, matched by `LoopbackIssue::from_start_error`.
+const PAREC_NOT_FOUND: &str = "parec not found";
+
+/// Why a meeting records only the microphone although loopback was requested.
+///
+/// Without loopback the remote participants vanish from the transcript, so
+/// the daemon tells the user at meeting start, with the fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopbackIssue {
+    /// `pactl` is not installed, so no monitor source could be detected.
+    PactlMissing,
+    /// `pactl` ran but could not list sources (usually no PulseAudio server).
+    PactlFailed(String),
+    /// The audio server lists no `.monitor` source.
+    NoMonitorSource,
+    /// `parec` is not installed.
+    ParecMissing,
+    /// `parec` started but could not record from the source.
+    ParecFailed(String),
+}
+
+impl LoopbackIssue {
+    fn from_start_error(error: &AudioError) -> Self {
+        match error {
+            AudioError::Connection(text) if text == PAREC_NOT_FOUND => LoopbackIssue::ParecMissing,
+            AudioError::Connection(text) => LoopbackIssue::ParecFailed(text.clone()),
+            other => LoopbackIssue::ParecFailed(other.to_string()),
+        }
+    }
+
+    /// User-facing text: what is wrong and how to fix it.
+    pub fn message(&self) -> String {
+        const INSTALL: &str = "Install pactl and parec (libpulse on Arch, \
+                               pulseaudio-utils on Debian, Ubuntu and Fedora).";
+        const SERVER: &str = "On PipeWire, install pipewire-pulse and run \
+                              `systemctl --user enable --now pipewire-pulse.socket`.";
+        const PICK: &str = "Set [meeting.audio] loopback_device to a monitor source \
+                            listed by `pactl list short sources`.";
+        match self {
+            LoopbackIssue::PactlMissing => {
+                format!("Remote audio is not recorded: pactl is not installed. {INSTALL}")
+            }
+            LoopbackIssue::PactlFailed(detail) => format!(
+                "Remote audio is not recorded: pactl could not list sources ({detail}). {SERVER}"
+            ),
+            LoopbackIssue::NoMonitorSource => {
+                format!("Remote audio is not recorded: no monitor source was found. {PICK}")
+            }
+            LoopbackIssue::ParecMissing => {
+                format!("Remote audio is not recorded: parec is not installed. {INSTALL}")
+            }
+            LoopbackIssue::ParecFailed(detail) => {
+                format!("Remote audio is not recorded: {detail}. {SERVER} {PICK}")
+            }
+        }
+    }
+}
+
+/// Where the microphone is recorded from.
+enum MicCapture {
+    /// The configured device, via cpal/ALSA
+    Cpal(CpalCapture),
+    /// A PipeWire/PulseAudio source, via parec (the echo canceller's)
+    Parec(ParecCapture),
+}
+
 /// Dual audio capture for mic + loopback
 pub struct DualCapture {
-    /// Microphone capture (via cpal/ALSA)
-    mic_capture: CpalCapture,
+    /// Microphone capture
+    mic_capture: MicCapture,
     /// Loopback capture (via parec subprocess)
-    loopback: Option<ParecLoopback>,
+    loopback: Option<ParecCapture>,
     /// Sample counter for timestamps
     sample_counter: u64,
+    /// Per-track levels for meeting.sock, fed as the audio arrives
+    meters: crate::meeting::levels::MeetingMeters,
+    /// Feeds the microphone meter from the capture's chunk stream
+    mic_meter_task: Option<tokio::task::JoinHandle<()>>,
+    /// Why loopback was requested but is not recording, if it isn't
+    loopback_issue: Option<LoopbackIssue>,
 }
 
 impl DualCapture {
@@ -159,68 +273,137 @@ impl DualCapture {
         mic_config: &AudioConfig,
         loopback_device: Option<&str>,
     ) -> Result<Self, AudioError> {
-        let mic_capture = CpalCapture::new(mic_config)?;
+        Self::with_mic(
+            MicCapture::Cpal(CpalCapture::new(mic_config)?),
+            loopback_device,
+            crate::meeting::levels::MeetingMeters::new(true),
+        )
+    }
 
+    /// Like [`DualCapture::new`], feeding `meters`: another capture's, so
+    /// level events that follow it carry on when this one replaces it.
+    pub fn new_metered(
+        mic_config: &AudioConfig,
+        loopback_device: Option<&str>,
+        mut meters: crate::meeting::levels::MeetingMeters,
+    ) -> Result<Self, AudioError> {
+        if meters.loopback.is_none() {
+            meters.loopback = Some(crate::meeting::levels::TrackMeter::new());
+        }
+        Self::with_mic(
+            MicCapture::Cpal(CpalCapture::new(mic_config)?),
+            loopback_device,
+            meters,
+        )
+    }
+
+    /// Like [`DualCapture::new`], recording the mic from the PipeWire or
+    /// PulseAudio source `mic_source` (the echo canceller's) with parec.
+    /// The first `delay_ms` of it are dropped: the canceller delivers the
+    /// mic that much later than the loopback, which comes straight from the
+    /// sink's monitor, and dropping it puts both tracks on one timeline.
+    pub fn with_mic_source(
+        mic_source: &str,
+        loopback_device: Option<&str>,
+        delay_ms: u32,
+    ) -> Result<Self, AudioError> {
+        let meters = crate::meeting::levels::MeetingMeters::new(true);
+        Self::with_mic(
+            MicCapture::Parec(ParecCapture::skipping(
+                mic_source.to_string(),
+                16 * delay_ms as usize,
+                meters.mic.clone(),
+            )),
+            loopback_device,
+            meters,
+        )
+    }
+
+    fn with_mic(
+        mic_capture: MicCapture,
+        loopback_device: Option<&str>,
+        mut meters: crate::meeting::levels::MeetingMeters,
+    ) -> Result<Self, AudioError> {
+        let loopback_meter = meters
+            .loopback
+            .clone()
+            .expect("created with a loopback meter");
+        let mut loopback_issue = None;
         let loopback = match loopback_device {
             Some("disabled") | Some("") | None => None,
             Some("auto") => match Self::find_monitor_source() {
-                Some(source) => {
+                Ok(source) => {
                     tracing::info!("Auto-detected loopback source: {}", source);
-                    Some(ParecLoopback::new(source))
+                    Some(ParecCapture::new(source, loopback_meter))
                 }
-                None => {
-                    tracing::warn!("No monitor source found, using mic only");
+                Err(issue) => {
+                    tracing::warn!("Using mic only: {}", issue.message());
+                    loopback_issue = Some(issue);
                     None
                 }
             },
             Some(device) => {
                 tracing::info!("Using configured loopback source: {}", device);
-                Some(ParecLoopback::new(device.to_string()))
+                Some(ParecCapture::new(device.to_string(), loopback_meter))
             }
         };
+        if loopback.is_none() {
+            meters.loopback = None;
+        }
 
         Ok(Self {
             mic_capture,
             loopback,
             sample_counter: 0,
+            meters,
+            mic_meter_task: None,
+            loopback_issue,
         })
     }
 
-    /// Find a PipeWire/PulseAudio monitor source via pactl
-    fn find_monitor_source() -> Option<String> {
-        // pactl list short sources output format:
-        // ID\tNAME\tDRIVER\tFORMAT\tSTATUS
-        let output = std::process::Command::new("pactl")
+    /// Find a PipeWire/PulseAudio monitor source via pactl, or why there
+    /// is none.
+    fn find_monitor_source() -> Result<String, LoopbackIssue> {
+        let sources = std::process::Command::new("pactl")
             .args(["list", "short", "sources"])
             .output()
-            .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // First pass: prefer RUNNING monitor sources (active audio output)
-        for line in stdout.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() >= 5 {
-                let name = fields[1];
-                let status = fields[4];
-                if name.contains(".monitor") && status == "RUNNING" {
-                    tracing::debug!("Found running monitor source: {}", name);
-                    return Some(name.to_string());
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    LoopbackIssue::PactlMissing
+                } else {
+                    LoopbackIssue::PactlFailed(e.to_string())
                 }
-            }
+            })?;
+
+        if !sources.status.success() {
+            let stderr = String::from_utf8_lossy(&sources.stderr);
+            let detail = stderr
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| sources.status.to_string());
+            return Err(LoopbackIssue::PactlFailed(detail));
         }
-        // Fall back to any monitor source
-        for line in stdout.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() >= 2 {
-                let name = fields[1];
-                if name.contains(".monitor") {
-                    tracing::debug!("Found monitor source: {}", name);
-                    return Some(name.to_string());
-                }
-            }
-        }
-        None
+
+        let default_sink = std::process::Command::new("pactl")
+            .arg("get-default-sink")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        pick_monitor_source(
+            default_sink.as_deref(),
+            &String::from_utf8_lossy(&sources.stdout),
+        )
+        .ok_or(LoopbackIssue::NoMonitorSource)
+    }
+
+    /// Why loopback was requested but is not recording. `None` when loopback
+    /// is recording or was never requested. Meaningful after `start()`.
+    pub fn loopback_issue(&self) -> Option<&LoopbackIssue> {
+        self.loopback_issue.as_ref()
     }
 
     /// Check if loopback capture is active
@@ -230,21 +413,54 @@ impl DualCapture {
 
     /// Start both captures
     pub async fn start(&mut self) -> Result<(), AudioError> {
-        let _mic_rx = self.mic_capture.start().await?;
+        match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => {
+                let mut mic_rx = mic.start().await?;
+                // cpal already sends each block it records on this channel
+                // (dropping blocks rather than waiting when it is full);
+                // reading it here gives the microphone meter the same audio,
+                // at no cost to the capture. The parec mic feeds its meter
+                // from its reader thread.
+                let mic_meter = self.meters.mic.clone();
+                self.mic_meter_task = Some(tokio::spawn(async move {
+                    while let Some(block) = mic_rx.recv().await {
+                        mic_meter.feed(&block);
+                    }
+                }));
+            }
+            MicCapture::Parec(ref mut mic) => mic.start()?,
+        }
 
         if let Some(ref mut loopback) = self.loopback {
             if let Err(e) = loopback.start() {
                 tracing::warn!("Loopback capture failed, continuing with mic only: {}", e);
+                self.loopback_issue = Some(LoopbackIssue::from_start_error(&e));
                 self.loopback = None;
+                self.meters.loopback = None;
             }
         }
 
         Ok(())
     }
 
+    /// The meters of this capture, for the level publisher.
+    pub fn meters(&self) -> crate::meeting::levels::MeetingMeters {
+        self.meters.clone()
+    }
+
     /// Stop both captures and return all samples
     pub async fn stop(&mut self) -> Result<DualSamples, AudioError> {
-        let mic_samples = self.mic_capture.stop().await?;
+        if let Some(task) = self.mic_meter_task.take() {
+            task.abort();
+        }
+        let mic_samples = match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => mic.stop().await?,
+            MicCapture::Parec(ref mut mic) => {
+                let samples = mic.get_samples();
+                mic.stop();
+                samples
+            }
+        };
 
         let loopback_samples = if let Some(ref mut loopback) = self.loopback {
             let samples = loopback.get_samples();
@@ -262,7 +478,10 @@ impl DualCapture {
 
     /// Get current samples without stopping (for continuous recording)
     pub async fn get_samples(&mut self) -> DualSamples {
-        let mic = self.mic_capture.get_samples().await;
+        let mic = match self.mic_capture {
+            MicCapture::Cpal(ref mut mic) => mic.get_samples().await,
+            MicCapture::Parec(ref mic) => mic.get_samples(),
+        };
 
         let loopback = if let Some(ref loopback) = self.loopback {
             loopback.get_samples()
@@ -345,9 +564,131 @@ impl DualSamples {
     }
 }
 
+/// Choose the monitor to record the far side of a call from.
+///
+/// The default sink's monitor comes first, because that is where call audio
+/// plays. Taking the first RUNNING monitor instead picked whichever output
+/// happened to be active (an idle S/PDIF sink on a USB card) and recorded
+/// silence while the call played on the speakers. A running monitor, then
+/// any monitor, are fallbacks for servers without a default sink.
+///
+/// `sources` is `pactl list short sources` output: ID, NAME, DRIVER, FORMAT,
+/// STATUS separated by tabs.
+fn pick_monitor_source(default_sink: Option<&str>, sources: &str) -> Option<String> {
+    let monitors: Vec<(&str, &str)> = sources
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let name = *fields.get(1)?;
+            name.ends_with(".monitor")
+                .then(|| (name, fields.get(4).copied().unwrap_or("")))
+        })
+        .collect();
+
+    if let Some(sink) = default_sink {
+        let wanted = format!("{sink}.monitor");
+        if let Some((name, _)) = monitors.iter().find(|(name, _)| *name == wanted) {
+            tracing::debug!("Using the default sink's monitor: {}", name);
+            return Some(name.to_string());
+        }
+    }
+    if let Some((name, _)) = monitors.iter().find(|(_, status)| *status == "RUNNING") {
+        tracing::debug!("Found running monitor source: {}", name);
+        return Some(name.to_string());
+    }
+    monitors.first().map(|(name, _)| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    const SOURCES: &str = "64\talsa_output.usb-Generic_USB_Audio-00.HiFi__SPDIF__sink.monitor\tPipeWire\ts16le 2ch 48000Hz\tIDLE
+65\talsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED
+66\talsa_output.usb-Generic_USB_Audio-00.HiFi__Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED
+70\talsa_input.usb-Generic_USB_Audio-00.HiFi__Mic1__source\tPipeWire\ts32le 2ch 48000Hz\tRUNNING
+";
+
+    #[test]
+    fn default_sink_monitor_wins_over_the_first_listed_monitor() {
+        // Pete's machine on 2026-11-11: calls played on Speaker, auto picked
+        // the S/PDIF monitor listed first, and the remote track was silent.
+        assert_eq!(
+            pick_monitor_source(
+                Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink"),
+                SOURCES
+            )
+            .as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor")
+        );
+    }
+
+    #[test]
+    fn default_sink_monitor_wins_over_a_running_one() {
+        let sources = SOURCES.replace(
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED",
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tRUNNING",
+        );
+        assert_eq!(
+            pick_monitor_source(
+                Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink"),
+                &sources
+            )
+            .as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink.monitor")
+        );
+    }
+
+    #[test]
+    fn without_a_default_sink_a_running_monitor_then_any_monitor() {
+        let running = SOURCES.replace(
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED",
+            "Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tRUNNING",
+        );
+        assert_eq!(
+            pick_monitor_source(None, &running).as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__Headphones__sink.monitor")
+        );
+        assert_eq!(
+            pick_monitor_source(Some("gone_sink"), SOURCES).as_deref(),
+            Some("alsa_output.usb-Generic_USB_Audio-00.HiFi__SPDIF__sink.monitor")
+        );
+    }
+
+    #[test]
+    fn input_sources_are_never_picked() {
+        let only_mic = "70\talsa_input.usb-Mic__source\tPipeWire\ts32le 2ch 48000Hz\tRUNNING\n";
+        assert_eq!(pick_monitor_source(None, only_mic), None);
+    }
+
     use super::*;
+
+    #[test]
+    fn loopback_issue_messages_name_the_fix() {
+        assert!(LoopbackIssue::PactlMissing.message().contains("libpulse"));
+        assert!(LoopbackIssue::ParecMissing
+            .message()
+            .contains("pulseaudio-utils"));
+        assert!(LoopbackIssue::PactlFailed("Connection refused".into())
+            .message()
+            .contains("pipewire-pulse"));
+        assert!(LoopbackIssue::NoMonitorSource
+            .message()
+            .contains("loopback_device"));
+    }
+
+    #[test]
+    fn parec_start_errors_classify() {
+        let missing = AudioError::Connection(PAREC_NOT_FOUND.to_string());
+        assert_eq!(
+            LoopbackIssue::from_start_error(&missing),
+            LoopbackIssue::ParecMissing
+        );
+        let failed =
+            AudioError::Connection("parec could not record from 'x' (exit status: 1)".into());
+        assert!(matches!(
+            LoopbackIssue::from_start_error(&failed),
+            LoopbackIssue::ParecFailed(_)
+        ));
+    }
 
     #[test]
     fn test_dual_samples_merge_mic_only() {

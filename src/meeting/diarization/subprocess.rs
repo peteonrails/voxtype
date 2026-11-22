@@ -133,6 +133,7 @@ impl Diarizer for SubprocessDiarizer {
         &self,
         samples: &[f32],
         source: AudioSource,
+        _chunk_start_ms: u64,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {
         match Self::process_in_worker(&self.config, samples, transcript_segments) {

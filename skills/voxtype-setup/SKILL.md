@@ -14,8 +14,9 @@ confirm, change, verify.
 
 - **Look before you touch anything.** Every command in step 1 is read-only.
 - **Show the plan and get a yes before changing anything.** Commands that need
-  `sudo` (`setup gpu`, `setup onnx`, `setup npu`) swap system binaries, so name
-  them explicitly when you ask.
+  `sudo` (`setup gpu`, `setup onnx`) swap system binaries, so name them
+  explicitly when you ask. `setup npu` only edits the user's config and runs
+  without `sudo`.
 - **Back up the config first:** `cp ~/.config/voxtype/config.toml ~/.config/voxtype/config.toml.bak`
 - **Change config with `voxtype config set <key> <value>`**, not by editing the
   file. It type-checks the value, keeps comments, and rejects keys this binary
@@ -37,8 +38,13 @@ voxtype info engines           # engines compiled into this binary, which one is
 voxtype info models            # downloadable and installed models per engine
 voxtype config get --json      # current effective settings
 voxtype setup migrate --json   # upgrade offers for the current model (GGUF, Parakeet Ultra)
-voxtype setup check            # missing dependencies and permissions
+voxtype doctor                 # every check voxtype knows, with a Fix: line under each problem
 ```
+
+`voxtype doctor` marks each line `✓` (fine), `!` (degraded) or `✗` (broken),
+exits 1 when a check failed, and has `--json` for scripts. It only checks
+features the config turns on. `voxtype setup check` prints the same report
+under its old name and always exits 0.
 
 And the hardware Voxtype doesn't report:
 
@@ -70,13 +76,25 @@ voxtype --config /etc/voxtype/config.toml config get --json   # current template
 voxtype config get --json                                     # this user
 ```
 
+Two keys in that file are not what `voxtype setup` writes for a new user, so
+don't read them as recommendations: it sets `output.paste_keys` to
+`shift+insert` (a new user config leaves the key out, which means `auto`, see
+step 6), and it leaves `meeting.enabled` off (a new user config turns it on).
+
 Most differences are personal choices: hotkey, engine, language, OSD style,
 output mode. Leave those alone unless the user wants to revisit them. What is
 worth raising:
 
 - **Settings the template now turns on**, such as `vad.enabled` (skips
   transcribing silence and stops Whisper inventing text when the key is
-  pressed by accident), `text.format_numbers` and `text.repair_sentence_breaks`
+  pressed by accident), `text.filter_filler_words`, `text.format_numbers` and
+  `text.repair_sentence_breaks`. With `vad.enabled` on and no `vad.backend`
+  in the file, the backend is `auto`: the Whisper engine then wants the Silero
+  model (`voxtype setup vad`) and falls back to Energy VAD without it. The
+  template sets `vad.backend` to `energy`, which needs no model
+- **Meeting mode**, which stays off on an upgraded install until the user
+  turns it on (`voxtype config set meeting.enabled true`, then a restart).
+  Ask whether they record calls before suggesting it
 - **Model upgrade offers**: `voxtype setup migrate` lists them for the
   configured model
 - **An OSD frontend pinned explicitly** (`gtk4` or `native`) when `auto`
@@ -115,9 +133,21 @@ the output settings in step 6, which come after the basics work.
 | English, or one of the 25 European languages Parakeet covers | Parakeet in GGUF format. If `voxtype setup migrate` offers `parakeet-ultra` or `format-gguf`, take it, since that is the supported path forward |
 | Any other language, or a mix that includes one | Whisper `large-v3-turbo` on a GPU, `small` on CPU only |
 | English only, CPU only, and responsiveness matters most | Whisper `base.en` or `small.en` |
-| Chinese, Japanese, Korean, Cantonese | Whisper `large-v3-turbo`. SenseVoice is smaller and faster, but it runs on ONNX Runtime (see below) |
-| A language nothing else covers | Whisper, or Omnilingual (ONNX Runtime, see below) |
-| Long recordings (meetings, files over a few minutes) | Parakeet. It splits long audio into windows. Whisper on very long files can get stuck repeating a sentence |
+| Chinese, Japanese, Korean, Cantonese | Whisper `large-v3-turbo`, or the smaller and faster `SenseVoiceSmall-Q8_0.gguf` or a `Qwen3-ASR` GGUF model under the `gguf` engine, when `voxtype info models` lists them for this binary |
+| A language nothing else covers | Whisper first. A `Qwen3-ASR` GGUF model covers about 30 languages. Omnilingual covers the most, but it runs on ONNX Runtime (see below) |
+| Long recordings (meetings, files over a few minutes) | Parakeet. It splits long audio into windows. Whisper on very long files can get stuck repeating a sentence. Meetings use the dictation engine and model unless `voxtype meeting start --engine` or `--model` picks another for that meeting |
+
+If the user dictates in one language only and the plan uses a model that
+handles several and detects them automatically (Parakeet v3 or `parakeet-ultra`,
+Whisper with `language = "auto"`, SenseVoice, Dolphin, Omnilingual, Soniox),
+record that language for text cleanup:
+`voxtype config set text.language en`. It is not passed to the engine and does
+not change transcription. It tells cleanup that depends on the language what
+it is reading, which is what lets the English-only `text.lard_disfluency` stage
+run with such a model. Skip it for an English-only model (`base.en`,
+`parakeet-tdt-0.6b-v2`) or when the engine's own `language` is already set:
+both answer the question on their own. Leave it on `auto` for a user who
+switches languages.
 
 Voxtype 2.0 removes ONNX Runtime. Prefer Whisper and GGUF models (the `.gguf`
 names in `voxtype info models`) over the ONNX model directories for anything you
@@ -153,6 +183,10 @@ memory between dictations:
 voxtype config set whisper.on_demand_loading true   # or <engine>.on_demand_loading
 ```
 
+This also applies to meetings. With the model kept loaded, a meeting starts on
+dictation's loaded model at once. With on-demand loading, each meeting loads
+its own copy when it starts, so its first lines arrive a little later.
+
 On a laptop with a discrete GPU using Whisper, also run
 `voxtype config set whisper.gpu_isolation true`. Transcription then runs in a
 subprocess that exits afterwards, so the discrete GPU can power down between
@@ -161,10 +195,18 @@ response.
 
 ### Hotkey
 
-Compositor keybindings (Hyprland, Sway, River and others) need no special
-permissions and are the recommended setup. Run
-`voxtype setup compositor <name> --help` for the compositor in use. The
-built-in evdev hotkey works everywhere but needs the user in the `input` group.
+Compositor keybindings need no special permissions and are the recommended
+setup: bind a key to `voxtype record start` and its release to
+`voxtype record stop`, or one key to `voxtype record toggle`, then turn the
+built-in hotkey off with `voxtype config set hotkey.enabled false`. On
+Hyprland, Sway and River, `voxtype setup compositor <hyprland|sway|river>`
+adds the config that stops held modifier keys from interfering with typed
+text. Run it with `--help` first.
+
+The built-in evdev hotkey works everywhere but needs the user in the `input`
+group. If it is on and voxtype can't open a keyboard, a notification titled
+"Voxtype: built-in hotkey unavailable" says so once. For a user on compositor
+keybindings the fix is `hotkey.enabled false`, not the `input` group.
 
 ## 4. Change
 
@@ -173,8 +215,9 @@ After the user approves the plan:
 1. Back up `config.toml`.
 2. Download the model: `voxtype setup --download --model <name>`. Downloading
    does not select it.
-3. Select it: `voxtype config set engine <engine>` and
-   `voxtype config set <engine>.model <name>`, or accept a migrate offer with
+3. Select it: `voxtype config select-model <engine> <model>` sets both in one
+   checked write (the same as `voxtype config set engine <engine>` and
+   `voxtype config set <engine>.model <name>`), or accept a migrate offer with
    `voxtype setup migrate --accept <offer>`, which downloads, verifies and
    switches in one step.
 4. Apply the acceleration, threads and memory settings from the plan.
@@ -185,10 +228,24 @@ After the user approves the plan:
 
 1. Ask the user to dictate one sentence. Acceleration can't be confirmed until
    a model has loaded.
-2. Run `voxtype info accel`. It should report the backend you planned.
+2. Run `voxtype info accel`. It should report the backend you planned. For a
+   GGUF model that is the `<engine>.gguf_backend` the worker bound (for
+   example `vulkan`) and its device, not the binary variant.
 3. Run `voxtype status --format json --extended` to confirm the engine and model.
-4. If the daemon fails to start, read `journalctl --user -u voxtype -n 50`. To
-   undo everything, restore `config.toml.bak` and restart.
+4. If anything is off, run `voxtype doctor` again before reading logs. It
+   names the problem and the fix. Since 1.3.0 the daemon also shows a desktop
+   notification when the microphone, the model, the output tools, VAD, the
+   OSD, a post-process command or the GPU fails, and one grouped notification
+   at startup. Read those to the user: each says what to run.
+5. If the daemon fails to start, read `journalctl --user -u voxtype -n 50`. If
+   that prints nothing, the user journal has no entries for the daemon: use
+   `journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50`. To undo everything,
+   restore `config.toml.bak` and restart.
+
+The log does not contain what the user said. A dictation is logged as
+`Transcribed 29 chars (whisper engine)`. To see the words when chasing a
+recognition problem, run the daemon with `-v` and tell the user that the log
+then holds every dictation until they turn it off again.
 
 Report what you changed, why each choice fits this machine, and the command to
 undo it.
@@ -212,9 +269,17 @@ optional. Explain the trade-off, recommend one, and let them choose. Every
 
 Settings that matter for each:
 
-- **Paste in terminals.** Many terminals don't paste on `ctrl+v`. Set
-  `output.paste_keys` to `shift+insert` (works in terminals and most GUI apps)
-  or `ctrl+shift+v`.
+- **Paste in terminals.** Many terminals don't paste on `ctrl+v`. With
+  `output.paste_keys` set to `auto` (the default when the key is absent),
+  paste mode sends `ctrl+v` to GUI apps and `output.paste_keys_terminal`
+  (default `ctrl+shift+v`) to terminals on Hyprland, Sway and niri. On other
+  desktops `auto` sends `ctrl+v` everywhere, so a user who dictates into
+  terminals there needs `output.paste_keys` set to `ctrl+shift+v`, or to
+  `shift+insert` if their terminals paste the clipboard with it (Omarchy's
+  do. Stock Ghostty, Kitty, Alacritty, foot and WezTerm paste the primary
+  selection instead). A config that already sets `paste_keys` explicitly keeps
+  sending that keystroke everywhere. `voxtype config set output.paste_keys auto`
+  switches it to the per-window choice.
 - **Keep the clipboard.** `voxtype config set output.restore_clipboard true`
   puts the previous clipboard back after pasting.
 - **Typing on a non-US layout.** Set the layout for the driver in use, for
@@ -255,41 +320,91 @@ What to tell the user about it:
 - It does not run when streaming is enabled.
 - Use instruct or chat models, not reasoning models, which print their
   thinking into the output.
-- `[profiles.<name>]` sections can hold different commands, chosen by holding a
-  modifier with the hotkey. `docs/CONFIGURATION.md` covers profiles.
+- A failing command is no longer silent: a notification names the failure
+  (not found, exit code, timeout, empty output) after the text is delivered.
+- It also runs on every line of a meeting transcript, so a slow command slows
+  meetings and a logging command logs calls.
+- `[profiles.<name>]` sections can hold different commands. With the built-in
+  hotkey a profile is chosen by holding a modifier. With compositor
+  keybindings, bind `voxtype record start --profile <name>`.
+  `docs/CONFIGURATION.md` covers profiles.
 - Check the built-in `[text]` options before reaching for an LLM:
   `text.filter_filler_words`, `text.spoken_punctuation` and
   `text.replacements.<spoken> <written>` handle the common cases with no latency.
+  For English, `text.lard_disfluency` removes fillers and false starts with a
+  small trained model: install it with `voxtype setup lard` (a 64 KB download,
+  licensed CC BY-SA 4.0), turn the key on and restart. It needs an explicit
+  English engine language, and `voxtype doctor` says when it is on but not
+  running.
 
 ### Dictation history (on and off)
 
-Built-in transcript history is on the roadmap
-([#209](https://github.com/peteonrails/voxtype/issues/209)). Check whether this
-version already has it before doing anything else:
+Check the installed executable before choosing the built-in history or a legacy
+workaround. Inspect the exact `history.enabled` and `history.paused` keys in
+`voxtype config schema --json`, and check `voxtype history --help`. A mention of
+history in a description is not proof that those settings are supported.
 
 ```bash
-voxtype config schema | grep -i history
-voxtype --help | grep -i history
+voxtype config schema --json
+voxtype history --help
 ```
 
-If either shows a history setting or command, use that and skip the rest of
-this section: read its `--help` or `voxtype config schema` entry to turn it on
-and off, and tell the user where it stores transcripts.
+When those keys and the command exist, use the built-in feature and skip the
+legacy logger below. Ask before enabling it for an upgrading user: old configs
+stay off, while newly generated configs turn it on. Explain that the files
+contain dictated text, including failed and cancelled results, and are not
+encrypted by Voxtype.
 
-Until then, the post-process command can keep a history. Tell the user it is a
-stopgap that built-in history will replace, and that they can switch it off
-once they upgrade. Ask first, and tell them plainly that the log will contain
-everything they dictate, including anything sensitive.
+```bash
+voxtype history enable --json
+voxtype history status --json
+voxtype history pause --json       # before anything sensitive
+voxtype history resume --json
+voxtype history disable --json     # keeps existing files
+```
+
+These changes apply without a manual restart, unless a daemon flag or environment
+override takes precedence. The files live under the XDG data directory, normally
+`~/.local/share/voxtype/history/YYYY-MM-DD.jsonl`, with older days compressed as
+`.jsonl.gz`. Retention is 30 days; `history.retention_days = 0` keeps everything.
+Common password managers are excluded by `history.exclude_apps`. Focus detection
+supports Hyprland, Sway/i3 and niri; on other desktops or a failed lookup the app
+is unknown and exclusions cannot apply. Pause instead of trusting exclusions in
+those cases. Window titles require explicit `history.record_window_title = true`.
+
+Two things voxtype keeps on its own are not history, and both are on by
+default since 1.3.0:
+
+- `audio.keep_failed_recordings`: when a transcription fails, the recording is
+  saved to `~/.local/state/voxtype/failed-audio/` (the 20 newest, readable only
+  by the user) so `voxtype transcribe <file>` can retry it.
+- `output.keep_undelivered_text`: text that could be neither typed nor copied
+  is saved to `~/.local/state/voxtype/undelivered/` (the 200 newest).
+
+A user who wants nothing written to disk turns both off with
+`voxtype config set audio.keep_failed_recordings false` and
+`voxtype config set output.keep_undelivered_text false`. Files saved earlier
+stay until they are deleted.
+
+Only for an older executable without the built-in history command, the
+post-process logger below is a legacy workaround. It does not honor history
+pause or app exclusions and does not capture failed or cancelled dictations.
+Ask first and explain that its separate log contains dictated text, including
+anything sensitive. The command also runs on meeting transcripts, so with
+meeting mode in use the log gets every line of every recorded call, including
+what other people said. Do not combine it with built-in history. Remove the legacy
+post-process hook when upgrading, preserving any unrelated cleanup command;
+enabling or pausing built-in history cannot control this separate logger.
 
 To turn it on, install this script as `~/.local/bin/voxtype-history`:
 
 ```sh
 #!/bin/sh
 # Voxtype post-process command: log each transcription, pass it through unchanged.
+umask 077
 log="${VOXTYPE_HISTORY_FILE:-$HOME/.local/share/voxtype/history.tsv}"
 mkdir -p "$(dirname "$log")"
 text=$(cat)
-umask 077
 printf '%s\t%s\n' "$(date -Iseconds)" "$(printf '%s' "$text" | tr '\t\n' '  ')" >> "$log"
 printf '%s' "$text"
 ```

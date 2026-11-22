@@ -1,0 +1,533 @@
+//! `voxtype meeting recover` and the daemon's `recoverable` event, through
+//! the real binary, against scratch XDG directories.
+//!
+//! The fixture is a meeting folder as a killed daemon leaves it: the
+//! meeting still `active` in the index, its transcript saved after the last
+//! chunk, nothing finished. The next daemon start must announce it on
+//! meeting.sock; `recover` must list, finish and discard such meetings.
+
+#![cfg(target_os = "linux")]
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use voxtype::meeting::data::{AudioSource, MeetingMetadata, Transcript, TranscriptSegment};
+use voxtype::meeting::{MeetingStorage, StorageConfig};
+
+struct Scratch {
+    dir: tempfile::TempDir,
+    /// The session bus the commands see; none by default.
+    bus: std::cell::RefCell<String>,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["config/voxtype", "data/voxtype", "runtime/voxtype", "state"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        let s = Self {
+            dir,
+            bus: std::cell::RefCell::new("disabled:".to_string()),
+        };
+        // No agent is ever asked for a summary; the post-meeting command
+        // leaves a mark to show it ran.
+        std::fs::write(
+            s.path("config/voxtype/config.toml"),
+            format!(
+                "[hotkey]\nenabled = false\n\n[osd]\nenabled = false\n\n\
+                 [whisper]\non_demand_loading = true\n\n\
+                 [meeting]\nenabled = true\npost_meeting_command = \"touch {}\"\n\n\
+                 [meeting.summary]\nauto = false\n",
+                s.path("hook-ran").display()
+            ),
+        )
+        .unwrap();
+        s
+    }
+
+    fn path(&self, sub: &str) -> PathBuf {
+        self.dir.path().join(sub)
+    }
+
+    fn storage(&self) -> MeetingStorage {
+        MeetingStorage::open(StorageConfig {
+            storage_path: self.path("data/voxtype/meetings"),
+            retain_audio: false,
+            max_meetings: 0,
+            my_name: None,
+        })
+        .unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_voxtype"));
+        cmd.env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", self.dir.path())
+            .env("XDG_CONFIG_HOME", self.path("config"))
+            .env("XDG_DATA_HOME", self.path("data"))
+            .env("XDG_STATE_HOME", self.path("state"))
+            .env("XDG_CACHE_HOME", self.path("cache"))
+            .env("XDG_RUNTIME_DIR", self.path("runtime"))
+            .env("DBUS_SESSION_BUS_ADDRESS", self.bus.borrow().as_str())
+            .env("RUST_LOG", "warn")
+            .args(args)
+            .stdin(Stdio::null());
+        cmd
+    }
+
+    fn voxtype(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    /// A meeting as a daemon killed mid-meeting leaves it: active, with
+    /// the transcript of the chunks it got through.
+    fn killed_meeting(&self, title: &str) -> String {
+        let storage = self.storage();
+        let mut metadata = MeetingMetadata::new(Some(title.to_string()));
+        metadata.started_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        storage.create_meeting(&metadata).unwrap();
+        let mut transcript = Transcript::new();
+        for (id, speaker, source, text) in [
+            (
+                0,
+                "You",
+                AudioSource::Microphone,
+                "Let's go through the release.",
+            ),
+            (1, "Remote 1", AudioSource::Loopback, "The build is green."),
+        ] {
+            let start = id as u64 * 5_000;
+            let mut seg = TranscriptSegment::new(id, start, start + 4_000, text.into(), 0);
+            seg.source = source;
+            seg.speaker_id = Some(speaker.to_string());
+            transcript.add_segment(seg);
+        }
+        transcript.total_chunks = 1;
+        storage.save_transcript(&metadata.id, &transcript).unwrap();
+        metadata.id.to_string()
+    }
+
+    fn daemon(&self) -> Daemon {
+        let child = self
+            .command(&["daemon"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let socket = self.path("runtime/voxtype/meeting.sock");
+        let started = Instant::now();
+        let stream = loop {
+            if let Ok(stream) = UnixStream::connect(&socket) {
+                break stream;
+            }
+            assert!(started.elapsed() < Duration::from_secs(30), "no daemon");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        Daemon {
+            child,
+            lines: BufReader::new(stream),
+        }
+    }
+}
+
+struct Daemon {
+    child: Child,
+    lines: BufReader<UnixStream>,
+}
+
+impl Daemon {
+    /// The next meeting.sock event named `event`.
+    fn next(&mut self, event: &str) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(Instant::now() < deadline, "no {event} event");
+            let mut line = String::new();
+            match self.lines.read_line(&mut line) {
+                Ok(0) => panic!("meeting.sock closed before a {event} event"),
+                Ok(_) => {
+                    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if v["event"] == event {
+                        return v;
+                    }
+                }
+                Err(e) => panic!("reading meeting.sock: {e}"),
+            }
+        }
+    }
+
+    /// SIGKILL, as a crash would end it.
+    fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn json(output: &Output) -> serde_json::Value {
+    assert!(
+        output.status.success(),
+        "voxtype failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn the_next_daemon_announces_a_killed_meeting_and_recover_finishes_it() {
+    let s = Scratch::new();
+    let id = s.killed_meeting("Release sync");
+
+    // Without a daemon, recover already sees it.
+    let listed = json(&s.voxtype(&["meeting", "recover", "--json"]));
+    assert_eq!(listed["meetings"][0]["id"], id);
+
+    let mut daemon = s.daemon();
+    // hello first, then the recovery card's list.
+    let hello = daemon.next("hello");
+    assert_eq!(hello["status"], "idle");
+    let event = daemon.next("recoverable");
+    let meetings = event["meetings"].as_array().unwrap();
+    assert_eq!(meetings.len(), 1);
+    let m = &meetings[0];
+    assert_eq!(m["id"], id);
+    assert_eq!(m["title"], "Release sync");
+    assert_eq!(m["lines"], 2);
+    assert_eq!(m["has_audio"], false);
+    assert_eq!(m["last_chunk_ms"], 9_000);
+    assert_eq!(m["untranscribed_chunks"], 0);
+    assert!(m["started_at"].is_string() && m["stopped_at"].is_string());
+    assert!(m["duration_secs"].as_u64().unwrap() >= 240, "{m}");
+    let show = json(&s.voxtype(&["meeting", "show", &id, "--json"]));
+    assert_eq!(show["metadata"]["status"], "interrupted");
+
+    // A panel that connects later gets the list right after hello.
+    let mut late = s.daemon_socket();
+    assert_eq!(read_event(&mut late)["event"], "hello");
+    assert_eq!(read_event(&mut late)["event"], "recoverable");
+
+    let finished = json(&s.voxtype(&["meeting", "recover", "--finish", &id[..8], "--json"]));
+    // The metadata, as `meeting show --json` has it, and what was done.
+    assert_eq!(finished["id"], id);
+    assert_eq!(finished["status"], "completed");
+    assert!(finished["ended_at"].is_string());
+    assert_eq!(finished["recovered"]["transcribed_chunks"], 0);
+    assert_eq!(finished["recovered"]["summary"]["state"], "skipped");
+    assert_eq!(finished["recovered"]["post_meeting_command"], "succeeded");
+    assert!(s.path("hook-ran").exists());
+
+    // The card goes away: the daemon announces an empty list.
+    let event = daemon.next("recoverable");
+    assert_eq!(event["meetings"], serde_json::json!([]));
+    let show = json(&s.voxtype(&["meeting", "show", &id, "--json"]));
+    assert_eq!(show["metadata"]["status"], "completed");
+    assert!(show["metadata"]["ended_at"].is_string());
+    assert!(
+        json(&s.voxtype(&["meeting", "recover", "--json"]))["meetings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // A finished meeting is not recoverable again.
+    let again = s.voxtype(&["meeting", "recover", "--discard", &id]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("not interrupted"));
+    daemon.kill();
+}
+
+#[test]
+fn a_meeting_left_by_a_killed_daemon_can_be_discarded() {
+    let s = Scratch::new();
+    // The first daemon dies by SIGKILL with the meeting still active.
+    let first = s.daemon();
+    let id = s.killed_meeting("Standup");
+    first.kill();
+
+    let mut daemon = s.daemon();
+    let event = daemon.next("recoverable");
+    assert_eq!(event["meetings"][0]["id"], id);
+    let folder = s
+        .storage()
+        .get_meeting_path(&s.storage().resolve_meeting_id(&id).unwrap())
+        .unwrap();
+    assert!(folder.exists());
+
+    let out = json(&s.voxtype(&["meeting", "recover", "--discard", &id, "--json"]));
+    assert_eq!(out["discarded"], id);
+    assert!(!folder.exists());
+    assert_eq!(
+        daemon.next("recoverable")["meetings"],
+        serde_json::json!([])
+    );
+    let gone = s.voxtype(&["meeting", "show", &id]);
+    assert!(!gone.status.success());
+}
+
+#[test]
+fn with_nothing_to_recover_the_daemon_says_nothing() {
+    let s = Scratch::new();
+    let mut daemon = s.daemon();
+    assert_eq!(daemon.next("hello")["status"], "idle");
+    // Asking the daemon to announce again is a known later event: every
+    // `recoverable` up to and including it, the startup one included if it
+    // arrived, must be empty, so no card ever shows.
+    let trigger = s.path("runtime/voxtype/meeting_recoverable");
+    std::fs::write(&trigger, "").unwrap();
+    assert_eq!(
+        daemon.next("recoverable")["meetings"],
+        serde_json::json!([])
+    );
+    while trigger.exists() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // A connection made now gets hello and nothing for the card: the next
+    // line is the announcement asked for after it.
+    let mut late = s.daemon_socket();
+    assert_eq!(read_event(&mut late)["event"], "hello");
+    std::fs::write(&trigger, "").unwrap();
+    let next = read_event(&mut late);
+    assert_eq!(next["event"], "recoverable", "{next}");
+    assert_eq!(next["meetings"], serde_json::json!([]));
+    let out = s.voxtype(&["meeting", "recover"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No meetings to recover."));
+}
+
+impl Scratch {
+    fn daemon_socket(&self) -> BufReader<UnixStream> {
+        let stream = UnixStream::connect(self.path("runtime/voxtype/meeting.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        BufReader::new(stream)
+    }
+}
+
+fn read_event(lines: &mut BufReader<UnixStream>) -> serde_json::Value {
+    let mut line = String::new();
+    lines.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+// ---------------------------------------------------------------- the notice
+
+/// A private session bus, so nothing reaches the user's desktop.
+struct PrivateBus {
+    child: Child,
+    address: String,
+}
+
+impl PrivateBus {
+    fn start() -> Option<Self> {
+        let mut child = Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut line = String::new();
+        BufReader::new(child.stdout.take()?)
+            .read_line(&mut line)
+            .ok()?;
+        let address = line.trim().to_string();
+        (!address.is_empty()).then_some(Self { child, address })
+    }
+}
+
+impl Drop for PrivateBus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Logs every notification and clicks `answer` on the ones about meetings
+/// that didn't finish.
+struct FakeNotifications {
+    answer: &'static str,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl FakeNotifications {
+    #[allow(clippy::too_many_arguments)]
+    async fn notify(
+        &self,
+        #[zbus(signal_context)] ctxt: zbus::SignalContext<'_>,
+        _app_name: String,
+        _replaces_id: u32,
+        _app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        _hints: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        _expire_timeout: i32,
+    ) -> u32 {
+        let mut log = self.log.lock().unwrap();
+        log.push(format!("{summary}|{body}|{}", actions.join(",")));
+        let id = 100 + log.len() as u32;
+        if summary.contains("didn't finish") {
+            let answer = self.answer;
+            let ctxt = ctxt.to_owned();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = FakeNotifications::action_invoked(&ctxt, id, answer).await;
+            });
+        }
+        id
+    }
+
+    fn get_capabilities(&self) -> Vec<String> {
+        vec!["actions".into(), "body".into()]
+    }
+
+    fn close_notification(&self, _id: u32) {}
+
+    #[zbus(signal)]
+    async fn action_invoked(
+        ctxt: &zbus::SignalContext<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_meeting_is_announced_once_and_finish_finishes_it() {
+    let Some(bus) = PrivateBus::start() else {
+        eprintln!("skipping: dbus-daemon is not available");
+        return;
+    };
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.Notifications")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/Notifications",
+            FakeNotifications {
+                answer: "finish",
+                log: log.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let s = Scratch::new();
+    *s.bus.borrow_mut() = bus.address.clone();
+    let id = s.killed_meeting("Release sync");
+    let notices = || -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("didn't finish"))
+            .cloned()
+            .collect()
+    };
+
+    let daemon = tokio::task::block_in_place(|| s.daemon());
+    // The click on Finish runs `meeting recover --finish`.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let show = tokio::task::block_in_place(|| s.voxtype(&["meeting", "show", &id, "--json"]));
+        let v: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap_or_default();
+        if v["metadata"]["status"] == "completed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Finish never finished it: {:?}",
+            notices()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        notices(),
+        vec![
+            "A meeting didn't finish|Release sync\nVoxtype stopped while it recorded. Finish it \
+             from what was saved, or open the meeting view.|finish,Finish,open,Open"
+                .to_string()
+        ]
+    );
+    daemon.kill();
+
+    // Another crash: only the new meeting is announced, and only once.
+    let second = s.killed_meeting("Standup");
+    let third = s.killed_meeting("Retro");
+    let daemon = tokio::task::block_in_place(|| s.daemon());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon.kill();
+    let daemon = tokio::task::block_in_place(|| s.daemon());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon.kill();
+    let seen = notices();
+    assert_eq!(seen.len(), 2, "{seen:#?}");
+    assert!(
+        seen[1].starts_with("2 meetings didn't finish|"),
+        "{seen:#?}"
+    );
+    assert!(seen[1].ends_with("|open,Open"), "{seen:#?}");
+    assert!(seen[1].contains("Standup") && seen[1].contains("Retro"));
+    let _ = (second, third);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_notifications_never_keeps_it_quiet() {
+    let Some(bus) = PrivateBus::start() else {
+        eprintln!("skipping: dbus-daemon is not available");
+        return;
+    };
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.Notifications")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/Notifications",
+            FakeNotifications {
+                answer: "open",
+                log: log.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let s = Scratch::new();
+    let config = s.path("config/voxtype/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "[meeting]\n",
+            "[meeting]\nstatus_notifications = \"never\"\n",
+        ),
+    )
+    .unwrap();
+    *s.bus.borrow_mut() = bus.address.clone();
+    s.killed_meeting("Release sync");
+    let mut daemon = tokio::task::block_in_place(|| s.daemon());
+    // The card still gets it.
+    tokio::task::block_in_place(|| daemon.next("recoverable"));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon.kill();
+    let seen = log.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|l| l.contains("didn't finish")),
+        "{seen:#?}"
+    );
+}
