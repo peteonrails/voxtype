@@ -1208,7 +1208,7 @@ Streaming needs `on_demand_loading = false` for the active engine; with on-deman
 
 Tuning (re-transcription interval, buffer size, etc.) lives in the shared `[streaming]` section below, since `[openvino] streaming` wraps the same engine. `[whisper]` also still accepts its own `streaming_interval_secs` / `streaming_max_buffer_secs` / `streaming_min_speech_rms` / `streaming_min_audio_secs` / `streaming_partial_min_words` / `streaming_type_partials` / `streaming_revision_mode` fields for backward compatibility — they're used only when config.toml has no `[streaming]` section.
 
-**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
+**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled in local mode with `on_demand_loading` off. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 
 **Example:**
 ```toml
@@ -1723,8 +1723,9 @@ cursor while you dictate. On Wayland compositors backed by libinput
 key never fires `bindrd` and the daemon gets stuck in streaming. Use
 `[hotkey] mode = "toggle"`, or bind your compositor to `voxtype record
 toggle` rather than a press/release pair. The daemon auto-promotes
-`push_to_talk` to `toggle` at startup when streaming is enabled and emits
-a warning to the log. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output)
+`push_to_talk` to `toggle` at startup when streaming is enabled, with
+`on_demand_loading` off, and emits a warning to the log. With
+[`[output] streaming_buffer_output = true`](#streaming_buffer_output)
 nothing is typed until you stop, so push-to-talk works and is kept.
 
 **Example:**
@@ -2280,7 +2281,7 @@ When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype set
 **Default:** `false`
 **Required:** No
 
-Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
+Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set with `on_demand_loading` off (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 
 ```toml
 [hotkey]

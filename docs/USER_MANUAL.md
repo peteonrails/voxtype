@@ -1573,8 +1573,9 @@ voxtype types text incrementally while you speak. Streaming requires
 `voxtype record toggle`). Synthetic key events from streaming output
 disrupt libinput's tracking of held physical keys on Wayland compositors,
 so a held PTT key never fires its release event. The daemon auto-promotes
-push-to-talk to toggle at startup when streaming is enabled and logs a
-warning. With `[output] streaming_buffer_output = true` (see
+push-to-talk to toggle at startup when streaming is enabled, with
+`on_demand_loading` off, and logs a warning. With
+`[output] streaming_buffer_output = true` (see
 [Buffered Streaming Output](#buffered-streaming-output)) nothing is typed
 until you stop, so push-to-talk stays.
 

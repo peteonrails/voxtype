@@ -241,50 +241,19 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Returns true if the active engine is configured for streaming output
-    /// that types at the cursor while recording.
+    /// Returns true if the active engine will stream output that types at
+    /// the cursor while recording.
     ///
     /// Used to decide whether to auto-promote push-to-talk to toggle activation:
     /// streaming output types characters at the cursor while the user is still
     /// holding the hotkey, which clobbers libinput's held-key state tracker on
-    /// Hyprland/Sway/River. New streaming backends plug into this gate without
-    /// editing the daemon. Buffered output (`[output] streaming_buffer_output`)
-    /// types nothing until the recording stops, so push-to-talk is safe.
+    /// Hyprland/Sway/River. Which engines stream, and when, is
+    /// [`Config::streaming_enabled`]; a new streaming backend adds an arm to
+    /// [`Config::streaming_requested`], without editing the daemon. Buffered
+    /// output (`[output] streaming_buffer_output`) types nothing until the
+    /// recording stops, so push-to-talk is safe.
     pub fn streaming_active(&self) -> bool {
-        if self.output.streaming_buffer_output {
-            return false;
-        }
-        match self.engine {
-            // Same sliding-window engine and the same libinput held-key
-            // hazard as OpenVino below — this arm was missing until now,
-            // which meant push-to-talk users with `[whisper] streaming =
-            // true` never got auto-promoted to toggle mode and could hit
-            // the exact stuck-recording bug this gate exists to prevent.
-            TranscriptionEngine::Whisper => self.whisper.streaming,
-            TranscriptionEngine::Parakeet => {
-                self.parakeet.as_ref().map(|p| p.streaming).unwrap_or(false)
-            }
-            // Missing [soniox] section → don't auto-promote PTT. The
-            // transcriber will fail to initialize anyway (no api_key); we
-            // shouldn't change hotkey behaviour for a config that can't
-            // run. Same shape as the Parakeet arm: explicit opt-in only.
-            TranscriptionEngine::Soniox => self
-                .soniox
-                .as_ref()
-                .map(|s| s.streaming && !s.async_api)
-                .unwrap_or(false),
-            // Same reasoning as Parakeet/Soniox: an absent [openvino] section
-            // means the transcriber can't initialize anyway, so don't
-            // auto-promote push-to-talk to toggle for a config that can't
-            // run. Missing this arm previously left recording permanently
-            // stuck open on the first real NPU/GPU streaming session, since
-            // typing at the cursor while a key is physically held clobbers
-            // libinput's held-key tracking on Hyprland/Sway/River.
-            TranscriptionEngine::OpenVino => {
-                self.openvino.as_ref().map(|o| o.streaming).unwrap_or(false)
-            }
-            _ => false,
-        }
+        !self.output.streaming_buffer_output && self.streaming_enabled()
     }
 
     /// Clone this config for meeting (long-form) transcription: the
@@ -818,15 +787,16 @@ impl Config {
     }
 
     /// Whether the active engine will run its streaming pipeline: the audio is
-    /// transcribed while it is recorded. False with on-demand loading: nothing
-    /// is preloaded, so the daemon never starts a streaming session and every
-    /// dictation is batch.
+    /// transcribed while it is recorded, whether the text is typed live or held
+    /// until the stop. False with on-demand loading: nothing is preloaded, so
+    /// the daemon never starts a streaming session and every dictation is batch.
     ///
-    /// Streaming types text at the cursor as it is decoded, which means the
-    /// end-of-utterance hooks that reshape a finished transcript never get a
-    /// finished transcript to work on. Callers use this to tell the user which
-    /// of their settings will not apply (#581) rather than letting them
-    /// silently do nothing.
+    /// The Whisper arm of the transcriber factory decides from this; the other
+    /// arms read their engine's own `streaming` flag.
+    ///
+    /// [`Config::streaming_active`] says whether that text is typed while
+    /// recording, which is when the completed-transcript hooks cannot run
+    /// (#581) and push-to-talk is promoted to toggle.
     pub fn streaming_enabled(&self) -> bool {
         !self.on_demand_loading() && self.streaming_requested()
     }
@@ -836,8 +806,8 @@ impl Config {
     /// [`Config::streaming_enabled`] adds the on-demand loading check.
     pub(crate) fn streaming_requested(&self) -> bool {
         match self.engine {
-            // The sliding-window engine. The transcriber factory ignores
-            // `[whisper] streaming` for any mode but local.
+            // The sliding-window engine, which `[whisper]` runs only in
+            // local mode.
             TranscriptionEngine::Whisper => {
                 self.whisper.streaming && self.whisper.effective_mode() == super::WhisperMode::Local
             }
@@ -1103,6 +1073,22 @@ mod tests {
             .unwrap();
         assert_eq!(meeting_cfg.engine, cfg.engine);
         assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
+    }
+
+    /// `[whisper] streaming` only takes effect in local mode: the transcriber
+    /// factory ignores it for a remote or CLI backend, so nothing streams and
+    /// push-to-talk must not be promoted to toggle.
+    #[test]
+    fn push_to_talk_is_promoted_only_when_whisper_streams() {
+        let whisper = |mode: crate::config::WhisperMode| {
+            let mut config = Config::default();
+            config.whisper.streaming = true;
+            config.whisper.mode = Some(mode);
+            config
+        };
+        assert!(whisper(crate::config::WhisperMode::Local).streaming_active());
+        assert!(!whisper(crate::config::WhisperMode::Remote).streaming_active());
+        assert!(!whisper(crate::config::WhisperMode::Cli).streaming_active());
     }
 
     /// Push-to-talk is promoted to toggle for streaming that types while the

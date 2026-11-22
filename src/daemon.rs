@@ -1508,10 +1508,7 @@ impl Daemon {
             );
         }
 
-        if config.streaming_enabled()
-            && config.output.post_process.is_some()
-            && !config.output.streaming_buffer_output
-        {
+        if config.streaming_active() && config.output.post_process.is_some() {
             // [text] rules no longer belong in this warning: since the #669
             // fix they are applied when a streaming segment is committed, and
             // warning that a working setting is ignored is worse than not
@@ -6621,7 +6618,7 @@ impl Daemon {
                 if self.config.whisper.streaming {
                     // Streaming needs the transcriber in `transcriber_preloaded`
                     // so try_start_streaming can find it. The factory returns
-                    // the sliding-window wrapper when [whisper] streaming = true.
+                    // the sliding-window wrapper when `Config::streaming_enabled()`.
                     self.transcriber_preloaded = Some(Arc::from(
                         crate::transcribe::create_transcriber(&self.config)?,
                     ));

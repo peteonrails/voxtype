@@ -1976,7 +1976,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Advanced",
         "Streaming transcription",
-        "Emit text while you speak instead of after you release the key. Forces toggle activation unless output.streaming_buffer_output is on.",
+        "Emit text while you speak instead of after you release the key. Forces toggle activation (with on_demand_loading off) unless output.streaming_buffer_output is on.",
     )
     .for_engine("parakeet")
     .gated("parakeet"),
