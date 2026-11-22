@@ -2324,6 +2324,11 @@ impl Daemon {
         if transcriber.as_streaming().is_none() {
             return false;
         }
+        // For the Whisper engine, prepare_for_recording hands the terms to the
+        // model manager, which keeps them only for a gpu_isolation worker, so
+        // this adapter never gets them there; a recovery may also have left
+        // other terms on it.
+        transcriber.set_vocabulary(&self.recording_vocabulary_terms());
         self.streaming_recovery_audio.clear();
         self.streaming_stop_deadline = None;
         self.streaming_recovery_file_output_path = None;
@@ -8979,6 +8984,91 @@ while True:
                     .contains("name=\"prompt\"\r\n\r\nVoxtype\r\n"),
                 "no vocabulary prompt in the request"
             );
+        }
+
+        /// `probe` as dictation's streaming engine: the sliding-window
+        /// adapter over it, preloaded as `[whisper] streaming = true` has it.
+        fn load_streaming_model(daemon: &mut Daemon, probe: Arc<VocabularyProbe>) {
+            let adapter = crate::transcribe::SlidingWindowStreamingTranscriber::new(
+                probe,
+                crate::transcribe::SlidingWindowConfig::default(),
+            );
+            daemon.transcriber_preloaded = Some(Arc::new(adapter));
+        }
+
+        /// Start a streaming session on a capture that delivers nothing.
+        async fn start_streaming(daemon: &mut Daemon) {
+            daemon.history_test_capture = Some(Box::new(FakeCapture(None)));
+            let mut state = State::Idle;
+            let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
+            assert!(
+                daemon
+                    .try_start_streaming(
+                        &mut state,
+                        &mut capture,
+                        &mut handle,
+                        &mut session,
+                        &mut chain,
+                        None,
+                        false,
+                    )
+                    .await
+            );
+        }
+
+        /// A streaming session on the preloaded engine gets the recording's
+        /// vocabulary.
+        #[tokio::test]
+        async fn streaming_session_gets_the_recording_vocabulary() {
+            if !in_scratch_runtime("streaming_session_gets_the_recording_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_streaming_model(&mut daemon, probe.clone());
+
+            daemon.prepare_for_recording(None);
+            start_streaming(&mut daemon).await;
+
+            assert_eq!(probe.terms(), ["Voxtype"]);
+        }
+
+        /// The terms a recovery sets on the shared streaming engine do not
+        /// carry over to the next session.
+        #[tokio::test]
+        async fn recovery_terms_do_not_reach_the_next_streaming_session() {
+            if !in_scratch_runtime("recovery_terms_do_not_reach_the_next_streaming_session") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let mut config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            config.vad.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_streaming_model(&mut daemon, probe.clone());
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            let mut state = streaming_state(None);
+            daemon
+                .recover_streaming_audio(&mut state, None, vec![0.0; 16_000])
+                .await;
+            let task = daemon.transcription_task.take().expect("recovery started");
+            let _ = task.await;
+            assert_eq!(probe.terms(), ["Voxtype", "PipeWire"], "the recovery");
+            daemon.discard_recording_overrides();
+
+            daemon.prepare_for_recording(None);
+            start_streaming(&mut daemon).await;
+            assert_eq!(probe.terms(), ["Voxtype"], "the next session");
         }
 
         #[tokio::test]
