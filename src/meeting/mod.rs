@@ -1806,9 +1806,11 @@ mod tests {
         assert_eq!(lines[0], id.to_string());
         assert_eq!(lines[1], dir.to_str().unwrap());
         assert_eq!(lines[2], dir.join("meeting.json").to_str().unwrap());
+        // The shell reports its working directory with links resolved
+        // (macOS keeps temporary directories under /private/var).
         assert_eq!(
-            lines[3],
-            dir.to_str().unwrap(),
+            std::fs::canonicalize(lines[3]).unwrap(),
+            std::fs::canonicalize(&dir).unwrap(),
             "runs in the meeting folder"
         );
     }
