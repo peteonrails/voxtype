@@ -33,13 +33,13 @@ pub enum VoxtypeError {
 /// Errors related to hotkey detection
 #[derive(Error, Debug)]
 pub enum HotkeyError {
-    #[error("Cannot open input device '{0}'. Is the user in the 'input' group?\n  Run: sudo usermod -aG input $USER\n  Then log out and back in.\n  Or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
+    #[error("Cannot open input device '{0}': the built-in hotkey needs to read the keyboard directly.\n  Recommended: bind 'voxtype record start'/'record stop' (or 'record toggle') in your compositor and set [hotkey] enabled = false.\n  Joining the 'input' group also works, but lets every program you run read every keystroke. See docs/USER_MANUAL.md, \"The input group trade-off\".")]
     DeviceAccess(String),
 
-    #[error("Cannot open input device '{0}': you are in the 'input' group, but this session started before you were added.\n  Log out completely and back in (or reboot), then restart voxtype.\n  Or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
+    #[error("Cannot open input device '{0}': you are in the 'input' group, but this session started before you were added.\n  Recommended: bind 'voxtype record start'/'record stop' (or 'record toggle') in your compositor and set [hotkey] enabled = false, which needs no group.\n  To keep the built-in hotkey, log out completely and back in (or reboot), then restart voxtype.")]
     InputGroupInactive(String),
 
-    #[error("Permission denied opening input device '{0}', although this process is in the 'input' group.\n  Check the device permissions with: ls -l /dev/input/event*\n  Or bind 'voxtype record toggle' in your compositor and set [hotkey] enabled = false.")]
+    #[error("Permission denied opening input device '{0}', although this process is in the 'input' group.\n  Recommended: bind 'voxtype record start'/'record stop' (or 'record toggle') in your compositor and set [hotkey] enabled = false.\n  To keep the built-in hotkey, check the device permissions with: ls -l /dev/input/event*")]
     DeviceDenied(String),
 
     #[error("Unknown key name: '{0}'. Use evtest or wev to find valid key names.")]
