@@ -153,7 +153,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
-- `deepgram` - Deepgram pre-recorded HTTPS API (batch cloud transcription, built in)
+- `deepgram` - Deepgram cloud transcription: realtime WebSocket streaming or pre-recorded HTTPS (built in)
 - `soniox` - Soniox WebSocket/REST cloud transcription (built in)
 
 **Example:**
@@ -2002,6 +2002,30 @@ language = "en"
 ```
 
 `gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Release packages ship a Vulkan-capable worker beside the `vulkan` and x86_64 ONNX binaries and a CPU worker beside the others. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
+
+---
+
+## [deepgram]
+
+Configuration for the Deepgram cloud engine. This section is only used when `engine = "deepgram"`.
+
+Deepgram is a paid cloud STT provider. No model runs on your machine. With `streaming = true` (the default), dictation streams to Deepgram's realtime API over WebSocket while you speak, and each phrase is typed when Deepgram finalizes it at a pause. A finished recording (`voxtype transcribe`, meeting chunks, and dictation with `streaming = false`) goes to Deepgram's pre-recorded API in one request.
+
+**Privacy:** Audio is sent to a third-party service. Use the local engines (Whisper, Parakeet, etc.) if you cannot send dictation off-device.
+
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `api_key` | `DEEPGRAM_API_KEY`, `VOXTYPE_DEEPGRAM_API_KEY` | none (required) | Deepgram API key. Either variable takes precedence over the config value |
+| `model` | - | `"nova-3"` | Deepgram model |
+| `language` | - | `"en"` | BCP-47 code, `"auto"` (finished recordings only; a streamed dictation is English), or `"multi"` |
+| `smart_format` | - | `true` | Punctuation, numerals, dates and related formatting |
+| `mip_opt_out` | - | `true` | Exclude the audio from Deepgram's Model Improvement Program |
+| `streaming` | - | `true` | Stream while recording; `false` sends the finished recording |
+| `endpointing_ms` | - | unset | Streaming only: milliseconds of silence that end a segment |
+| `timeout_secs` | - | `30` | Wait for Deepgram: the whole request for a finished recording; the connection and the last transcript when streaming |
+| `endpoint` | - | `"https://api.deepgram.com/v1/listen"` | `/v1/listen` endpoint; streaming uses the same URL over `wss://`. HTTPS is required except for localhost |
+
+Profile vocabulary reaches Deepgram as `keyterm` (nova-3, flux) or `keywords` (older models). See [DEEPGRAM.md](DEEPGRAM.md) for credentials and request behavior.
 
 ---
 

@@ -31,6 +31,17 @@ pub fn encode_wav_s16le(samples: &[f32]) -> Result<Vec<u8>, TranscribeError> {
     Ok(buffer.into_inner())
 }
 
+/// Convert 16 kHz mono floating-point samples to raw PCM signed 16-bit
+/// little-endian bytes, the frames a realtime WebSocket API takes.
+pub fn pcm_s16le(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for &sample in samples {
+        let sample = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +60,12 @@ mod tests {
         let wav = encode_wav_s16le(&[-2.0, 2.0]).unwrap();
         assert_eq!(i16::from_le_bytes([wav[44], wav[45]]), i16::MIN + 1);
         assert_eq!(i16::from_le_bytes([wav[46], wav[47]]), i16::MAX);
+    }
+
+    #[test]
+    fn pcm_matches_the_wav_payload() {
+        let samples = [0.0, 0.5, -2.0, 2.0];
+        let wav = encode_wav_s16le(&samples).unwrap();
+        assert_eq!(pcm_s16le(&samples), wav[44..]);
     }
 }

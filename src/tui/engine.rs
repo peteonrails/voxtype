@@ -146,11 +146,12 @@ pub struct AllFields {
     pub ov_on_demand_loading: bool,
     pub ov_section_existed: bool,
 
-    // Deepgram (cloud batch STT)
+    // Deepgram (cloud STT)
     pub dg_model: String,
     pub dg_language: String,
     pub dg_smart_format: bool,
     pub dg_mip_opt_out: bool,
+    pub dg_streaming: bool,
     pub dg_timeout_secs: i64,
     pub dg_endpoint: String,
     pub dg_api_key_in_config: bool,
@@ -248,6 +249,7 @@ pub enum FieldId {
     DgLanguage,
     DgSmartFormat,
     DgMipOptOut,
+    DgStreaming,
     DgTimeout,
     DgEndpoint,
     DgCredential,
@@ -402,6 +404,7 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::DgLanguage,
             FieldId::DgSmartFormat,
             FieldId::DgMipOptOut,
+            FieldId::DgStreaming,
             FieldId::DgTimeout,
             FieldId::DgEndpoint,
             FieldId::DgCredential,
@@ -559,6 +562,7 @@ impl EngineState {
                 .unwrap_or_else(|| "en".to_string()),
             dg_smart_format: ed.get_bool("deepgram", "smart_format").unwrap_or(true),
             dg_mip_opt_out: ed.get_bool("deepgram", "mip_opt_out").unwrap_or(true),
+            dg_streaming: ed.get_bool("deepgram", "streaming").unwrap_or(true),
             dg_timeout_secs: ed.get_int("deepgram", "timeout_secs").unwrap_or(30),
             dg_endpoint: ed
                 .get_string("deepgram", "endpoint")
@@ -566,8 +570,9 @@ impl EngineState {
             dg_api_key_in_config: ed
                 .get_string("deepgram", "api_key")
                 .is_some_and(|key| !key.trim().is_empty()),
-            dg_api_key_in_environment: std::env::var("DEEPGRAM_API_KEY")
-                .is_ok_and(|key| !key.trim().is_empty()),
+            dg_api_key_in_environment: crate::transcribe::deepgram::API_KEY_ENV_VARS
+                .iter()
+                .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty())),
             dg_section_existed: ed.get_string("deepgram", "model").is_some()
                 || ed.get_string("deepgram", "endpoint").is_some(),
         };
@@ -907,6 +912,7 @@ impl EngineState {
             ed.set_string("deepgram", "language", &f.dg_language);
             ed.set_bool("deepgram", "smart_format", f.dg_smart_format);
             ed.set_bool("deepgram", "mip_opt_out", f.dg_mip_opt_out);
+            ed.set_bool("deepgram", "streaming", f.dg_streaming);
             ed.set_int("deepgram", "timeout_secs", f.dg_timeout_secs);
             ed.set_string("deepgram", "endpoint", &f.dg_endpoint);
         }
@@ -1260,6 +1266,7 @@ impl EngineState {
             }
             FieldId::DgSmartFormat => f.dg_smart_format = !f.dg_smart_format,
             FieldId::DgMipOptOut => f.dg_mip_opt_out = !f.dg_mip_opt_out,
+            FieldId::DgStreaming => f.dg_streaming = !f.dg_streaming,
             FieldId::DgTimeout => {
                 f.dg_timeout_secs = (f.dg_timeout_secs + delta as i64 * 5).clamp(5, 300)
             }
@@ -1717,6 +1724,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "Deepgram · model improvement opt-out",
             yesno(f.dg_mip_opt_out),
         ),
+        FieldId::DgStreaming => ("Deepgram · streaming", yesno(f.dg_streaming)),
         FieldId::DgTimeout => ("Deepgram · timeout", format!("{}s", f.dg_timeout_secs)),
         FieldId::DgEndpoint => (
             "Deepgram · endpoint",
@@ -1728,7 +1736,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
         FieldId::DgCredential => (
             "Deepgram · credentials",
             if f.dg_api_key_in_environment {
-                "set via DEEPGRAM_API_KEY".to_string()
+                "set in the environment".to_string()
             } else if f.dg_api_key_in_config {
                 "set in config (plain text)".to_string()
             } else {
@@ -2341,7 +2349,7 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::DgModel => vec![
             heading("Deepgram · model"),
             Line::from(""),
-            Line::from("Deepgram model identifier. nova-3 is the recommended general-purpose batch model."),
+            Line::from("Deepgram model identifier. nova-3 is the recommended general-purpose model."),
             Line::from(""),
             Line::from(Span::styled(
                 "Press Enter to edit.",
@@ -2351,7 +2359,7 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::DgLanguage => vec![
             heading("Deepgram · language"),
             Line::from(""),
-            Line::from("Use a BCP-47 language code, auto to detect one language per recording, or multi for code-switching."),
+            Line::from("Use a BCP-47 language code, auto to detect one language per recording, or multi for code-switching. Deepgram detects the language of finished recordings only: a streamed dictation with auto is English."),
             Line::from(""),
             Line::from("A fixed language such as en usually improves latency and short-utterance accuracy."),
         ],
@@ -2365,22 +2373,29 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from("When enabled, each request sends mip_opt_out=true so dictation is excluded from Deepgram's Model Improvement Program."),
         ],
-        FieldId::DgTimeout => vec![
-            heading("Deepgram · request timeout"),
+        FieldId::DgStreaming => vec![
+            heading("Deepgram · streaming"),
             Line::from(""),
-            Line::from("Maximum time to wait for upload and transcription. Five-second steps; default 30 seconds."),
+            Line::from("When enabled, audio streams to Deepgram's realtime API while you speak, so the transcript is ready when you stop."),
+            Line::from(""),
+            Line::from("When disabled, the finished recording is sent to the pre-recorded API after you stop."),
+        ],
+        FieldId::DgTimeout => vec![
+            heading("Deepgram · timeout"),
+            Line::from(""),
+            Line::from("How long to wait for Deepgram: the whole request for a finished recording, and the connection and last transcript when streaming. Five-second steps; default 30 seconds."),
         ],
         FieldId::DgEndpoint => vec![
             heading("Deepgram · endpoint"),
             Line::from(""),
-            Line::from("Pre-recorded STT endpoint. HTTPS is required except for localhost testing."),
+            Line::from("Deepgram's /v1/listen endpoint; streaming uses the same URL over wss://. HTTPS is required except for localhost testing."),
             Line::from(""),
             Line::from("Use api.eu.deepgram.com or api.au.deepgram.com here when regional processing is required."),
         ],
         FieldId::DgCredential => vec![
             heading("Deepgram · credentials"),
             Line::from(""),
-            Line::from("Set DEEPGRAM_API_KEY in the daemon environment (recommended). The secret is never displayed here."),
+            Line::from("Set DEEPGRAM_API_KEY (or VOXTYPE_DEEPGRAM_API_KEY) in the daemon environment (recommended). The secret is never displayed here."),
             Line::from(""),
             Line::from("An api_key value in [deepgram] is supported as a plain-text fallback."),
         ],

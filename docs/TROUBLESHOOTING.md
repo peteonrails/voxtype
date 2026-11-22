@@ -1975,7 +1975,7 @@ model = "tiny.en"
 
 ### "Deepgram API key required"
 
-Set `DEEPGRAM_API_KEY` in the environment of the Voxtype daemon. An optional `[deepgram] api_key` value is supported as a less-safe fallback. The environment variable wins when both are present.
+Set `DEEPGRAM_API_KEY` (or `VOXTYPE_DEEPGRAM_API_KEY`) in the environment of the Voxtype daemon. An optional `[deepgram] api_key` value is supported as a less-safe fallback. The environment variable wins when both are present.
 
 ### Deepgram authentication, billing, or rate-limit errors
 
@@ -1983,7 +1983,15 @@ HTTP 401/403 means the key was rejected, 402 indicates insufficient credit, and 
 
 ### Deepgram timeout or network error
 
-Confirm the machine can reach `https://api.deepgram.com` over HTTPS. Increase `[deepgram] timeout_secs` if a proxy or slow connection routinely exceeds 30 seconds. Voxtype never retries automatically.
+Confirm the machine can reach `https://api.deepgram.com` over HTTPS (streaming uses `wss://` to the same host). Increase `[deepgram] timeout_secs` if a proxy or slow connection routinely exceeds 30 seconds. Voxtype never retries automatically.
+
+### "Deepgram closed the connection during recording"
+
+Deepgram ended the stream before recording stopped, for example after a network drop or when the key was revoked. The message carries Deepgram's close code and reason. When the stream ended before any text was typed, Voxtype transcribes the recording through the pre-recorded API instead (see `[streaming_recovery]`); otherwise the words after the drop are lost. Set `[deepgram] streaming = false` to always send the finished recording.
+
+### Streamed dictation in the wrong language
+
+Deepgram detects the language of finished recordings only. With `language = "auto"`, a streamed dictation is transcribed as English. Set `[deepgram] language` to the language you speak, or `"multi"` for code-switching.
 
 ### Deepgram returns an empty or malformed result
 

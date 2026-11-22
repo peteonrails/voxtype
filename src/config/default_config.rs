@@ -226,15 +226,18 @@ translate = false
 # enabled = true
 # stop_timeout_secs = 30
 
-# --- Deepgram batch cloud transcription ---
+# --- Deepgram cloud transcription ---
 # Select with the root setting: engine = "deepgram"
 # Credentials: set DEEPGRAM_API_KEY (recommended), or add api_key here.
-# Audio is sent as a completed 16 kHz mono WAV after recording stops.
+# Dictation streams 16 kHz mono audio to Deepgram's realtime API while you
+# speak; with streaming = false, the finished recording is sent as a WAV.
 # [deepgram]
 # model = "nova-3"
-# language = "en"       # BCP-47 code, "auto", or "multi"
+# language = "en"       # BCP-47 code, "auto" (finished recordings only), or "multi"
 # smart_format = true
 # mip_opt_out = true
+# streaming = true
+# endpointing_ms = 300  # streaming: silence that ends a segment (Deepgram's default if unset)
 # timeout_secs = 30
 # endpoint = "https://api.deepgram.com/v1/listen"
 

@@ -547,9 +547,9 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
                 .as_ref()
                 .and_then(|e| e.get_bool("parakeet", "streaming"))
                 .unwrap_or(false),
-            "soniox" => ed
+            "soniox" | "deepgram" => ed
                 .as_ref()
-                .and_then(|e| e.get_bool("soniox", "streaming"))
+                .and_then(|e| e.get_bool(&engine, "streaming"))
                 .unwrap_or(true),
             _ => false,
         }

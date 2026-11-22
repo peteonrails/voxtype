@@ -274,6 +274,10 @@ impl Config {
                 .as_ref()
                 .map(|s| s.streaming && !s.async_api)
                 .unwrap_or(false),
+            // Same as Soniox: Deepgram types each final while recording.
+            TranscriptionEngine::Deepgram => {
+                self.deepgram.as_ref().map(|d| d.streaming).unwrap_or(false)
+            }
             // Same reasoning as Parakeet/Soniox: an absent [openvino] section
             // means the transcriber can't initialize anyway, so don't
             // auto-promote push-to-talk to toggle for a config that can't
@@ -838,6 +842,7 @@ impl Config {
                 .soniox
                 .as_ref()
                 .is_some_and(|s| s.streaming && !s.async_api),
+            TranscriptionEngine::Deepgram => self.deepgram.as_ref().is_some_and(|d| d.streaming),
             _ => false,
         }
     }

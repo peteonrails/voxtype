@@ -1091,7 +1091,9 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     }
 
     let cloud_env_key = match config.engine {
-        TranscriptionEngine::Deepgram => env_set("DEEPGRAM_API_KEY"),
+        TranscriptionEngine::Deepgram => crate::transcribe::deepgram::API_KEY_ENV_VARS
+            .iter()
+            .any(|var| env_set(var)),
         _ => env_set("SONIOX_API_KEY"),
     };
     checks.push(engine_model_check(config, &models_dir, cloud_env_key));

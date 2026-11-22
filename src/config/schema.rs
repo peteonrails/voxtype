@@ -496,13 +496,33 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("deepgram"),
     spec(
+        "deepgram.streaming",
+        "deepgram",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Stream audio to Deepgram's realtime API while recording; off sends the finished recording instead.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.endpointing_ms",
+        "deepgram",
+        "endpointing_ms",
+        KeyType::Int { min: 10, max: 10000 },
+        "Engine",
+        "Endpointing",
+        "Streaming only: milliseconds of silence that end a segment. Unset uses Deepgram's default.",
+    )
+    .for_engine("deepgram"),
+    spec(
         "deepgram.timeout_secs",
         "deepgram",
         "timeout_secs",
         KeyType::Int { min: 1, max: 300 },
         "Engine",
         "Timeout",
-        "Maximum number of seconds to wait for a Deepgram response.",
+        "Seconds to wait for Deepgram: the whole request for a finished recording, the connection and the last transcript when streaming.",
     )
     .for_engine("deepgram"),
     spec(
@@ -512,7 +532,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::String,
         "Engine",
         "Endpoint",
-        "Deepgram pre-recorded transcription endpoint. HTTPS is required except for localhost testing.",
+        "Deepgram /v1/listen endpoint; streaming uses the same URL over wss://. HTTPS is required except for localhost testing.",
     )
     .for_engine("deepgram"),
     // parakeet
@@ -3447,6 +3467,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "deepgram.language" => json!(dg().language),
         "deepgram.smart_format" => json!(dg().smart_format),
         "deepgram.mip_opt_out" => json!(dg().mip_opt_out),
+        "deepgram.streaming" => json!(dg().streaming),
+        "deepgram.endpointing_ms" => match dg().endpointing_ms {
+            Some(ms) => json!(ms),
+            None => Json::Null,
+        },
         "deepgram.timeout_secs" => json!(dg().timeout_secs),
         "deepgram.endpoint" => json!(dg().endpoint),
 

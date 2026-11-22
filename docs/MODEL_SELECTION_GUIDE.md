@@ -2,7 +2,7 @@
 
 This guide helps you choose the right transcription engine and model for voxtype v0.6.0. The choice depends on your language, hardware, and how you use dictation.
 
-Voxtype includes local engines plus two native cloud providers. Whisper, Remote Whisper, Deepgram batch, and Soniox streaming ship in every binary; ONNX engines require an ONNX binary variant.
+Voxtype includes local engines plus two native cloud providers. Whisper, Remote Whisper, Deepgram, and Soniox ship in every binary; ONNX engines require an ONNX binary variant.
 
 ---
 
@@ -19,9 +19,9 @@ Voxtype includes local engines plus two native cloud providers. Whisper, Remote 
 | **Omnilingual** | 1600+ | CTC wav2vec2 | 3.9 GB | Moderate | No | ONNX |
 | **Cohere** | 14 | Encoder-decoder | 1.5 - 3.9 GB | Slow (CPU) | Yes | ONNX |
 | **Soniox** (cloud) | 60+ | Cloud (WebSocket / REST) | n/a (no local model) | Cloud-bound | Yes | Built-in |
-| **Deepgram** (cloud) | Multilingual | Cloud (batch HTTPS) | n/a (no local model) | Cloud-bound | Yes | Built-in |
+| **Deepgram** (cloud) | Multilingual | Cloud (WebSocket / HTTPS) | n/a (no local model) | Cloud-bound | Yes | Built-in |
 
-**Deepgram** sends each completed recording as a WAV and returns one final transcript, making it a simple fit for low-power computers. **Soniox** supports streaming partials as well as REST. Both are paid cloud services and send audio off-device. See [DEEPGRAM.md](DEEPGRAM.md) and [SONIOX.md](SONIOX.md).
+**Deepgram** streams dictation while you speak and types each phrase at a pause, or sends a completed recording as a WAV, which makes it a simple fit for low-power computers. **Soniox** supports streaming partials as well as REST. Both are paid cloud services and send audio off-device. See [DEEPGRAM.md](DEEPGRAM.md) and [SONIOX.md](SONIOX.md).
 
 ---
 
@@ -36,7 +36,7 @@ What language(s) do you speak?
 │   ├─ Want best accuracy + punctuation? → Parakeet TDT (ONNX binary)
 │   ├─ Want smallest/fastest model?      → Moonshine tiny (ONNX binary)
 │   ├─ Want simplest setup?              → Whisper small.en (standard binary)
-│   ├─ Want to offload a slow laptop?     → Deepgram (cloud batch)
+│   ├─ Want to offload a slow laptop?     → Deepgram (cloud)
 │   └─ On a laptop / saving battery?     → Whisper small.en + on_demand_loading
 │
 ├─ Chinese (Mandarin or Cantonese)
