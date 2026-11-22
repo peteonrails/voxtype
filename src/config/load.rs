@@ -163,6 +163,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
                 .stop_timeout_secs = timeout_secs.clamp(1, 120);
         }
     }
+    if let Ok(value) = std::env::var("VOXTYPE_STREAMING_BUFFER_OUTPUT") {
+        config.output.streaming_buffer_output = parse_bool_env(&value);
+    }
 
     // Dictation history
     if let Ok(value) = std::env::var("VOXTYPE_HISTORY_ENABLED") {

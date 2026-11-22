@@ -125,6 +125,19 @@ pub struct Cli {
     )]
     pub streaming_stop_timeout_secs: Option<u64>,
 
+    /// Transcribe a streaming dictation live but type nothing until it stops,
+    /// then process and output the whole transcript once, post-processing
+    /// included. Use --streaming-buffer-output=false to type as you speak.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        help_heading = "Streaming",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub streaming_buffer_output: Option<bool>,
+
     /// GGUF checkpoint path for the shared native engine
     #[arg(
         long,
@@ -1250,6 +1263,18 @@ mod tests {
 
         let cli = Cli::parse_from(["voxtype"]);
         assert_eq!(cli.streaming_recovery, None);
+    }
+
+    #[test]
+    fn streaming_buffer_output_flag_parses() {
+        let cli = Cli::parse_from(["voxtype", "--streaming-buffer-output"]);
+        assert_eq!(cli.streaming_buffer_output, Some(true));
+
+        let cli = Cli::parse_from(["voxtype", "--streaming-buffer-output=false"]);
+        assert_eq!(cli.streaming_buffer_output, Some(false));
+
+        let cli = Cli::parse_from(["voxtype"]);
+        assert_eq!(cli.streaming_buffer_output, None);
     }
 
     #[test]

@@ -474,9 +474,11 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
                  engine first via the Engine section.",
             ),
             Line::from(
-                "  • You use heavy text post-processing (LLM cleanup). \
-                 Streaming types partials before post_process can see the \
-                 final transcript.",
+                "  • You use heavy text post-processing (LLM cleanup) and \
+                 want text at the cursor while you speak. Streaming types \
+                 partials before post_process can see the final transcript; \
+                 [output] streaming_buffer_output instead types nothing until \
+                 you stop, then post-processes the whole transcript.",
             ),
             Line::from(""),
             Line::from(Span::styled(

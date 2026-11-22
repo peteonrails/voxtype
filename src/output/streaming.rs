@@ -34,15 +34,12 @@
 //!
 //! ## Post-process hook
 //!
-//! Each finalized segment is run through the configured post-process
-//! command if any, with `VOXTYPE_CONTEXT` set to the
-//! finalized-text-so-far (everything committed *before* this segment).
-//! This mirrors the eager-mode pattern in
-//! [`crate::output::post_process::PostProcessor::process_with_context`].
-//! Running per-segment preserves the latency win of streaming; running
-//! once at end-of-session would defeat it. Skipping the hook entirely
-//! would silently break users who rely on it for spelling/punctuation
-//! cleanup.
+//! The LLM post-process command does not run on typed segments: it needs
+//! a completed transcript, and running it per segment would rewrite text
+//! already at the cursor. With `[output] streaming_buffer_output`, the
+//! daemon gives the session no output chain: the session holds the whole
+//! raw transcript through the `_silent` methods, and the daemon delivers it
+//! once through the batch result path, post-processing included.
 
 use crate::error::OutputError;
 use crate::output::{deliver_with_fallback, Delivered, OutputOptions, TextOutput};
@@ -348,8 +345,8 @@ impl StreamingSession {
         // intentionally bypassed during streaming. Per-segment cleanup
         // would run only against the final tail (not the cumulative
         // transcript visible at the cursor) and produce inconsistent
-        // output. Users who rely on post_process should disable
-        // streaming for now.
+        // output. Users who rely on post_process should set
+        // `[output] streaming_buffer_output` or disable streaming.
         let history_context = self.history_context.clone();
         let opts = OutputOptions {
             history_context: history_context.as_ref(),

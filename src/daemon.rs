@@ -1262,7 +1262,9 @@ pub struct Daemon {
     /// An absolute deadline survives unrelated select! iterations.
     streaming_stop_deadline: Option<tokio::time::Instant>,
     /// File target selected when the streaming session began. Kept across the
-    /// recovery handoff because the runtime override is consumed at start.
+    /// recovery handoff because a typing session consumes the runtime override
+    /// at start. A buffered session leaves the override unread for the batch
+    /// result path, so this stays `None` for it.
     streaming_recovery_file_output_path: Option<PathBuf>,
 
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
@@ -1306,6 +1308,9 @@ pub struct Daemon {
     /// Stands in for the configured output methods in one batch delivery.
     #[cfg(test)]
     history_test_output_chain: Option<Vec<Box<dyn TextOutput>>>,
+    /// Stands in for the output methods a streaming session types through.
+    #[cfg(test)]
+    history_test_streaming_chain: Option<Vec<Box<dyn TextOutput>>>,
     #[cfg(test)]
     history_test_eager_loop: Option<HistoryTestEagerLoop>,
     #[cfg(test)]
@@ -1503,18 +1508,24 @@ impl Daemon {
             );
         }
 
-        if config.streaming_enabled() && config.output.post_process.is_some() {
+        if config.streaming_enabled()
+            && config.output.post_process.is_some()
+            && !config.output.streaming_buffer_output
+        {
             // [text] rules no longer belong in this warning: since the #669
             // fix they are applied when a streaming segment is committed, and
             // warning that a working setting is ignored is worse than not
             // warning at all. The LLM post_process hook is the one completed-
             // transcript stage streaming still skips (see the note in
             // output::streaming): incremental output would re-run it per
-            // segment and let it rewrite already-typed text.
+            // segment and let it rewrite already-typed text. Buffered output
+            // runs it once, on the whole transcript.
             tracing::warn!(
                 "Streaming is enabled, so output.post_process will NOT run. \
                  The post-process command needs a completed transcript, which \
-                 streaming never produces. Disable streaming to use it."
+                 streaming that types as you speak never produces. Set \
+                 [output] streaming_buffer_output = true, or disable streaming, \
+                 to use it."
             );
         }
 
@@ -1614,6 +1625,8 @@ impl Daemon {
             history_test_capture: None,
             #[cfg(test)]
             history_test_output_chain: None,
+            #[cfg(test)]
+            history_test_streaming_chain: None,
             #[cfg(test)]
             history_test_eager_loop: None,
             #[cfg(test)]
@@ -2363,18 +2376,37 @@ impl Daemon {
         };
 
         // Batch transcription reads the output override when it has a final
-        // transcript. A streaming session needs the same override before it
-        // builds its chain, otherwise --clipboard, --type, and --paste all
-        // silently use the configured default. A `--file=path` (or
-        // `mode = "file"`) session accumulates into `finalized_text` instead
-        // of typing, gated on `file_output_path`; its chain goes unused.
-        let output_override = read_output_mode_override();
-        let file_output_path = self.resolve_file_output_path(&output_override, None);
-        let output_config = apply_output_override(&self.config.output, output_override);
+        // transcript. A streaming session that types needs the same override
+        // before it builds its chain, otherwise --clipboard, --type, and
+        // --paste all silently use the configured default. A `--file=path`
+        // (or `mode = "file"`) session accumulates into `finalized_text`
+        // instead of typing, gated on `file_output_path`; its chain goes
+        // unused.
+        //
+        // A buffered session (`[output] streaming_buffer_output`) types
+        // nothing, so it gets no chain: the session holds every event, as it
+        // does for text that arrives after a stop disowned the chain, and
+        // `end_streaming` hands the whole transcript to the batch result
+        // path. That path reads the override itself, so it stays unread here.
+        let (file_output_path, chain) = if self.config.output.streaming_buffer_output {
+            (None, None)
+        } else {
+            let output_override = read_output_mode_override();
+            let file_output_path = self.resolve_file_output_path(&output_override, None);
+            let output_config = apply_output_override(&self.config.output, output_override);
+            #[cfg(test)]
+            let chain = self
+                .history_test_streaming_chain
+                .take()
+                .unwrap_or_else(|| output::create_output_chain(&output_config));
+            #[cfg(not(test))]
+            let chain = output::create_output_chain(&output_config);
+            (file_output_path, Some(chain))
+        };
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
-        *streaming_chain = Some(output::create_output_chain(&output_config));
+        *streaming_chain = chain;
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
             model_override,
@@ -2649,6 +2681,9 @@ impl Daemon {
                 ..
             }
         );
+        // Without a chain (a buffered session, or one a stop disowned), the
+        // `else` branches hold raw text; `end_streaming` hands it to the batch
+        // result path.
         match event {
             Some(StreamingEvent::Partial { text, .. }) => {
                 if let Some(s) = streaming_session.as_mut() {
@@ -2836,8 +2871,10 @@ impl Daemon {
     ///
     /// A session that typed text finishes as it always has. One that typed
     /// nothing is not thrown away: after a failure its retained audio goes
-    /// through batch transcription, and text that arrived after the stop
-    /// disowned the typing surface goes through the batch output path.
+    /// through batch transcription, and text it held without a typing
+    /// surface (a buffered session's whole transcript, or text that arrived
+    /// after the stop disowned the surface) goes through the batch output
+    /// path.
     async fn end_streaming(
         &mut self,
         state: &mut State,
@@ -2866,7 +2903,7 @@ impl Daemon {
         let typed_chars = streaming_session
             .as_ref()
             .map_or(0, StreamingSession::typed_chars);
-        let buffered = streaming_session
+        let held = streaming_session
             .as_ref()
             .map(|s| s.finalized_text().to_string())
             .unwrap_or_default();
@@ -2889,17 +2926,14 @@ impl Daemon {
                     .await;
                 return;
             }
-            // Only text the session held silently because the stop
-            // disowned the typing surface. With the chain still attached,
-            // the text already went through it, delivered or failed, and
-            // must not be sent again.
-            if file_output_path.is_none()
-                && streaming_chain.is_none()
-                && !buffered.trim().is_empty()
-            {
+            // Only text the session held silently because it had no typing
+            // surface: a buffered session never gets one, and a stop disowns
+            // it. With the chain still attached, the text already went
+            // through it, delivered or failed, and must not be sent again.
+            if file_output_path.is_none() && streaming_chain.is_none() && !held.trim().is_empty() {
                 *streaming_session = None;
                 *streaming_chain = None;
-                self.deliver_buffered_streaming_text(state, buffered);
+                self.deliver_buffered_streaming_text(state, held);
                 return;
             }
         }
@@ -2934,7 +2968,7 @@ impl Daemon {
             let vocabulary = profile
                 .as_ref()
                 .and_then(|name| self.profile_vocabularies.get(name));
-            let raw_text = buffered;
+            let raw_text = held;
             let final_text = self
                 .text_processor
                 .process_with_vocabulary(&raw_text, vocabulary);
@@ -3041,10 +3075,11 @@ impl Daemon {
         self.discard_recording_overrides();
     }
 
-    /// Deliver text a streaming session buffered but never typed (it
-    /// arrived after the stop disowned the typing surface) through the
-    /// ordinary batch result path: text processing, history and the
-    /// output chain, exactly like a batch dictation.
+    /// Deliver text a streaming session held but never typed (a buffered
+    /// session's transcript, or text that arrived after the stop disowned
+    /// the typing surface) through the ordinary batch result path: text
+    /// processing, post-processing, history and the output chain, exactly
+    /// like a batch dictation.
     fn deliver_buffered_streaming_text(&mut self, state: &mut State, text: String) {
         tracing::info!("Delivering buffered streaming text through normal output");
         self.history_note(|p| p.transcribing(0));
@@ -3070,7 +3105,9 @@ impl Daemon {
         samples: Vec<f32>,
     ) {
         // Batch output resolves its file target from one-shot overrides
-        // that the streaming start already consumed; carry it across.
+        // that a typing streaming start already consumed; carry it across.
+        // A buffered session left the override for the batch result path,
+        // and passes `None` here.
         self.streaming_recovery_file_output_path = file_output_path;
         self.history_note(|p| p.transcribing(samples.len()));
 
@@ -8423,6 +8460,34 @@ while True:
         }
     }
 
+    /// Run the calling test (`test_path`, its full path) in a process of its
+    /// own, with scratch home, runtime, state, config and data directories and
+    /// no display or session bus, so per-recording override files and
+    /// anything the daemon writes stay out of the session's. Returns true in
+    /// the child, where the test goes on.
+    fn own_scratch_process(test_path: &str) -> bool {
+        let scratch = TempDir::new().unwrap();
+        crate::test_support::own_process(test_path, |child| {
+            child
+                .env("HOME", scratch.path())
+                .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
+                .env("XDG_STATE_HOME", scratch.path().join("state"))
+                .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+                .env("XDG_DATA_HOME", scratch.path().join("data"))
+                .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                .env_remove("WAYLAND_DISPLAY")
+                .env_remove("DISPLAY");
+        })
+    }
+
+    /// What `voxtype record start|stop --profile <name>` does before it
+    /// signals the daemon.
+    fn cli_names_profile(name: &str) {
+        let dir = Config::runtime_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("profile_override"), name).unwrap();
+    }
+
     /// A recording's `--profile` reaches every stage of the dictation, not
     /// only the first one that reads its override file (#1097). Each test
     /// runs in a process of its own, since the profile travels through the
@@ -8432,21 +8497,7 @@ while True:
         use crate::config::{PostProcessConfig, Profile, VocabularyConfig};
 
         fn in_scratch_runtime(test: &str) -> bool {
-            let scratch = TempDir::new().unwrap();
-            crate::test_support::own_process(
-                &format!("daemon::tests::recording_profile::{test}"),
-                |child| {
-                    child
-                        .env("HOME", scratch.path())
-                        .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
-                        .env("XDG_STATE_HOME", scratch.path().join("state"))
-                        .env("XDG_CONFIG_HOME", scratch.path().join("config"))
-                        .env("XDG_DATA_HOME", scratch.path().join("data"))
-                        .env_remove("DBUS_SESSION_BUS_ADDRESS")
-                        .env_remove("WAYLAND_DISPLAY")
-                        .env_remove("DISPLAY");
-                },
-            )
+            own_scratch_process(&format!("daemon::tests::recording_profile::{test}"))
         }
 
         /// Default post-processing tags text DEFAULT:, the `notes` profile
@@ -8487,14 +8538,6 @@ while True:
                 },
             );
             config
-        }
-
-        /// What `voxtype record start|stop --profile <name>` does before it
-        /// signals the daemon.
-        fn cli_names_profile(name: &str) {
-            let dir = Config::runtime_dir();
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("profile_override"), name).unwrap();
         }
 
         /// Transcriber prep, which reads the profile's vocabulary again
@@ -10707,6 +10750,411 @@ while True:
 
         assert!(daemon.transcription_task.is_none());
         assert!(state.is_idle());
+    }
+
+    /// `[output] streaming_buffer_output`: the engine transcribes live, the
+    /// session types nothing while recording, and the whole transcript goes
+    /// through the batch result path once, on stop. Each test drives the
+    /// real start, event routing, stop and result paths, in a process of its
+    /// own: the per-recording override files live in a scratch runtime
+    /// directory, and with no display or session bus nothing can reach the
+    /// desktop.
+    mod streaming_buffer_output {
+        use super::*;
+        use crate::config::{PostProcessConfig, Profile, VocabularyConfig};
+
+        fn in_scratch_runtime(test: &str) -> bool {
+            own_scratch_process(&format!("daemon::tests::streaming_buffer_output::{test}"))
+        }
+
+        /// Output that records every piece of text it is handed.
+        #[derive(Clone, Default)]
+        struct Deliveries(Arc<std::sync::Mutex<Vec<String>>>);
+
+        impl Deliveries {
+            fn chain(&self) -> Vec<Box<dyn TextOutput>> {
+                vec![Box::new(self.clone())]
+            }
+
+            fn all(&self) -> Vec<String> {
+                self.0.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl TextOutput for Deliveries {
+            async fn output(
+                &self,
+                text: &str,
+            ) -> std::result::Result<(), crate::error::OutputError> {
+                self.0.lock().unwrap().push(text.to_string());
+                Ok(())
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &'static str {
+                "deliveries"
+            }
+        }
+
+        /// The typing surface a streaming session would type through
+        /// (`live`), and the output the batch result path delivers to
+        /// (`delivered`).
+        #[derive(Default)]
+        struct Outputs {
+            live: Deliveries,
+            delivered: Deliveries,
+        }
+
+        fn config(buffered: bool) -> Config {
+            let mut config = Config {
+                state_file: None,
+                ..Default::default()
+            };
+            config.audio.feedback.enabled = false;
+            config.vad.enabled = false;
+            config.osd.enabled = false;
+            config.output.streaming_buffer_output = buffered;
+            config.output.wait_for_modifier_release = false;
+            config.output.fallback_to_clipboard = false;
+            config.output.notification.on_recording_start = false;
+            config.output.notification.on_recording_stop = false;
+            config.output.notification.on_transcription = false;
+            config.output.post_process = Some(PostProcessConfig {
+                command: "sed 's/^/POST:/'".to_string(),
+                timeout_ms: 5000,
+                trim: true,
+                fallback_on_empty: true,
+                edit_list: false,
+                ..Default::default()
+            });
+            config
+                .text
+                .replacements
+                .insert("vox type".to_string(), "voxtype".to_string());
+            config
+        }
+
+        fn daemon(config: Config, outputs: &Outputs) -> Daemon {
+            let mut daemon = Daemon::new(config, None);
+            daemon.transcriber_preloaded = Some(Arc::new(FakeStreamingTranscriber {
+                mode: FakeStreamingMode::NeverEndsAfterStop,
+                recovered_text: "unused",
+                batch_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }));
+            daemon.history_test_capture = Some(Box::new(FakeCapture(Some(recovery_samples()))));
+            daemon.history_test_streaming_chain = Some(outputs.live.chain());
+            daemon.history_test_output_chain = Some(outputs.delivered.chain());
+            daemon
+        }
+
+        fn partial(text: &str) -> StreamingEvent {
+            StreamingEvent::Partial {
+                text: text.to_string(),
+                segment_id: 0,
+            }
+        }
+
+        fn final_(text: &str) -> StreamingEvent {
+            StreamingEvent::Final {
+                text: text.to_string(),
+                segment_id: 0,
+            }
+        }
+
+        /// The streaming locals the event loop keeps for one session.
+        struct Session {
+            state: State,
+            capture: Option<Box<dyn AudioCapture>>,
+            handle: Option<StreamHandle>,
+            session: Option<StreamingSession>,
+            chain: Option<Vec<Box<dyn TextOutput>>>,
+        }
+
+        impl Session {
+            async fn start(daemon: &mut Daemon) -> Self {
+                let mut s = Session {
+                    state: State::Idle,
+                    capture: None,
+                    handle: None,
+                    session: None,
+                    chain: None,
+                };
+                assert!(
+                    daemon
+                        .try_start_streaming(
+                            &mut s.state,
+                            &mut s.capture,
+                            &mut s.handle,
+                            &mut s.session,
+                            &mut s.chain,
+                            None,
+                            false,
+                        )
+                        .await
+                );
+                s
+            }
+
+            async fn event(&mut self, daemon: &mut Daemon, event: StreamingEvent) {
+                daemon
+                    .handle_streaming_event(
+                        Some(event),
+                        &mut self.state,
+                        &mut self.capture,
+                        &mut self.handle,
+                        &mut self.session,
+                        &mut self.chain,
+                    )
+                    .await;
+            }
+
+            /// `voxtype record stop`, the silence timeout's path too.
+            async fn stop(&mut self, daemon: &mut Daemon) {
+                daemon
+                    .stop_active_recording(
+                        &mut self.state,
+                        &mut self.capture,
+                        &mut self.chain,
+                        &mut None,
+                    )
+                    .await;
+            }
+
+            /// The backend's `Ended`, then whatever transcription task the
+            /// end handed to the batch result path, run to completion.
+            async fn end(&mut self, daemon: &mut Daemon) {
+                self.event(daemon, StreamingEvent::Ended).await;
+                if let Some(task) = daemon.transcription_task.take() {
+                    daemon
+                        .handle_transcription_result(&mut self.state, task.await)
+                        .await;
+                }
+                assert!(self.state.is_idle());
+            }
+        }
+
+        /// Partials are held, a Final folds the held partial in, a Replace
+        /// trims the raw partial by its backspace count, and a partial the
+        /// backend never confirms is kept. Nothing is typed until the
+        /// stop; then text processing runs over the whole transcript (the
+        /// "vox type" replacement spans the Final and the Replace), then
+        /// the post-process command, and the result is delivered once.
+        #[tokio::test]
+        async fn holds_the_transcript_and_delivers_it_once_on_stop() {
+            if !in_scratch_runtime("holds_the_transcript_and_delivers_it_once_on_stop") {
+                return;
+            }
+            let outputs = Outputs::default();
+            let mut daemon = daemon(config(true), &outputs);
+            let mut s = Session::start(&mut daemon).await;
+
+            for event in [
+                partial("Hello world"),
+                final_(". I use vox"),
+                partial(" tipe"),
+                StreamingEvent::Replace {
+                    backspace: 4,
+                    text: "type daily.".to_string(),
+                    segment_id: 1,
+                },
+            ] {
+                s.event(&mut daemon, event).await;
+                assert_eq!(
+                    outputs.live.all(),
+                    Vec::<String>::new(),
+                    "typed while recording"
+                );
+                assert_eq!(outputs.delivered.all(), Vec::<String>::new());
+            }
+            s.stop(&mut daemon).await;
+            // The backend drains after the stop: a partial it never confirms.
+            s.event(&mut daemon, partial(" Bye")).await;
+            assert_eq!(outputs.delivered.all(), Vec::<String>::new());
+            s.end(&mut daemon).await;
+
+            assert_eq!(
+                outputs.delivered.all(),
+                vec!["POST:Hello world. I use voxtype daily. Bye".to_string()]
+            );
+            assert_eq!(outputs.live.all(), Vec::<String>::new());
+        }
+
+        /// Control for the test above: with the option off, the same session
+        /// types as it goes, and nothing goes through the batch path.
+        #[tokio::test]
+        async fn incremental_streaming_still_types_as_it_goes() {
+            if !in_scratch_runtime("incremental_streaming_still_types_as_it_goes") {
+                return;
+            }
+            let outputs = Outputs::default();
+            let mut daemon = daemon(config(false), &outputs);
+            let mut s = Session::start(&mut daemon).await;
+
+            s.event(&mut daemon, partial("Hello world")).await;
+            assert_eq!(outputs.live.all(), vec!["Hello world".to_string()]);
+            s.event(&mut daemon, final_(". I use it")).await;
+            s.stop(&mut daemon).await;
+            s.end(&mut daemon).await;
+
+            assert_eq!(outputs.live.all().concat(), "Hello world. I use it");
+            assert_eq!(outputs.delivered.all(), Vec::<String>::new());
+        }
+
+        /// The profile a recording names applies to the buffered transcript:
+        /// its vocabulary joins "pipe" (a partial) and "wire" (the Final),
+        /// and its post-process command replaces the default one.
+        #[tokio::test]
+        async fn applies_the_recording_profile_once_on_stop() {
+            if !in_scratch_runtime("applies_the_recording_profile_once_on_stop") {
+                return;
+            }
+            let mut config = config(true);
+            config.profiles.insert(
+                "calendar".to_string(),
+                Profile {
+                    vocabulary: VocabularyConfig {
+                        terms: vec!["PipeWire".to_string()],
+                        terms_file: None,
+                    },
+                    post_process_command: Some("sed 's/^/CALENDAR:/'".to_string()),
+                    post_process_timeout_ms: Some(5000),
+                    ..Profile::default()
+                },
+            );
+            let outputs = Outputs::default();
+            let mut daemon = daemon(config, &outputs);
+            cli_names_profile("calendar");
+
+            let mut s = Session::start(&mut daemon).await;
+            s.event(&mut daemon, partial("pipe")).await;
+            s.event(&mut daemon, final_(" wire works")).await;
+            s.stop(&mut daemon).await;
+            s.end(&mut daemon).await;
+
+            assert_eq!(
+                outputs.delivered.all(),
+                vec!["CALENDAR:PipeWire works".to_string()]
+            );
+            assert_eq!(outputs.live.all(), Vec::<String>::new());
+        }
+
+        /// `voxtype record start --file=PATH`: the transcript is written to
+        /// the file once, after processing and post-processing, and is not
+        /// typed. Append mode would show a second write.
+        #[tokio::test]
+        async fn a_file_override_is_written_once_and_not_typed() {
+            if !in_scratch_runtime("a_file_override_is_written_once_and_not_typed") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut config = config(true);
+            config.output.file_mode = FileMode::Append;
+            let outputs = Outputs::default();
+            let mut daemon = daemon(config, &outputs);
+            let runtime = Config::runtime_dir();
+            fs::create_dir_all(&runtime).unwrap();
+            fs::write(
+                runtime.join("output_mode_override"),
+                format!("file:{}", target.display()),
+            )
+            .unwrap();
+
+            let mut s = Session::start(&mut daemon).await;
+            s.event(&mut daemon, final_("hello vox")).await;
+            s.event(&mut daemon, final_(" type")).await;
+            s.stop(&mut daemon).await;
+            s.end(&mut daemon).await;
+
+            assert_eq!(fs::read_to_string(&target).unwrap(), "POST:hello voxtype\n");
+            assert_eq!(outputs.live.all(), Vec::<String>::new());
+            assert_eq!(outputs.delivered.all(), Vec::<String>::new());
+            assert!(!runtime.join("output_mode_override").exists());
+        }
+
+        /// Soniox ends an utterance with an empty Final when its finalized
+        /// tokens equal the partial it already sent, as it does at stop. That
+        /// partial is the transcript and must be delivered.
+        #[tokio::test]
+        async fn an_empty_final_keeps_the_partial_it_confirms() {
+            if !in_scratch_runtime("an_empty_final_keeps_the_partial_it_confirms") {
+                return;
+            }
+            let outputs = Outputs::default();
+            let mut daemon = daemon(config(true), &outputs);
+            let mut s = Session::start(&mut daemon).await;
+            s.event(&mut daemon, partial("Hello world")).await;
+            s.event(&mut daemon, final_("")).await;
+            s.stop(&mut daemon).await;
+            s.end(&mut daemon).await;
+
+            assert_eq!(
+                outputs.delivered.all(),
+                vec!["POST:Hello world".to_string()]
+            );
+            assert_eq!(outputs.live.all(), Vec::<String>::new());
+        }
+
+        /// Cancel discards the held transcript: nothing is delivered, and
+        /// since nothing was typed, nothing is backspaced either.
+        #[tokio::test]
+        async fn cancel_discards_the_transcript() {
+            if !in_scratch_runtime("cancel_discards_the_transcript") {
+                return;
+            }
+            let outputs = Outputs::default();
+            let mut daemon = daemon(config(true), &outputs);
+            StreamingSession::take_test_backspaces();
+            let mut s = Session::start(&mut daemon).await;
+            s.event(&mut daemon, partial("Hello")).await;
+            s.event(&mut daemon, final_(" world.")).await;
+
+            daemon
+                .cancel_requested_session(
+                    &mut s.state,
+                    &mut s.capture,
+                    &mut s.handle,
+                    &mut s.session,
+                    &mut s.chain,
+                    &mut None,
+                )
+                .await;
+
+            assert!(s.state.is_idle());
+            assert!(s.session.is_none());
+            assert!(daemon.transcription_task.is_none());
+            assert_eq!(
+                StreamingSession::take_test_backspaces(),
+                Vec::<usize>::new()
+            );
+            assert_eq!(outputs.live.all(), Vec::<String>::new());
+            assert_eq!(outputs.delivered.all(), Vec::<String>::new());
+        }
+
+        /// The startup warning that post-processing does not run while
+        /// streaming holds only for streaming that types as it goes.
+        #[tokio::test]
+        async fn post_process_warning_is_only_for_incremental_streaming() {
+            if !in_scratch_runtime("post_process_warning_is_only_for_incremental_streaming") {
+                return;
+            }
+            for (buffered, warned) in [(false, true), (true, false)] {
+                let log = crate::test_support::LogCapture::at(tracing::Level::WARN);
+                let mut config = config(buffered);
+                config.engine = TranscriptionEngine::Soniox;
+                config.soniox = Some(crate::config::SonioxConfig::default());
+                assert!(config.streaming_enabled());
+                drop(Daemon::new(config, None));
+                assert_eq!(
+                    log.text().contains("output.post_process will NOT run"),
+                    warned,
+                    "streaming_buffer_output = {buffered}: {}",
+                    log.text()
+                );
+            }
+        }
     }
 
     /// #1004: a start sent while the last dictation was being delivered is

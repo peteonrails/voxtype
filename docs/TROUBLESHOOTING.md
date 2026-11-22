@@ -2729,7 +2729,9 @@ journalctl --user -u pulseaudio -n 20
   this stage; startup never tries a download.
 - Streaming partials stay raw. Cleanup runs only at finalization and can revise
   already typed partials only when backspace output succeeds. For cross-segment
-  cleanup, use batch or file output. LLM post-processing is still batch-only.
+  cleanup, use batch or file output, or keep streaming and set
+  `[output] streaming_buffer_output = true`, which also runs LLM
+  post-processing on the whole transcript when you stop.
 
 ### Profile vocabulary does not correct a term
 

@@ -242,6 +242,11 @@ fallback_to_clipboard = true
 # out of the notification; an undelivered dictation is then lost.
 # keep_undelivered_text = true
 
+# Streaming engines only: transcribe while you speak but type nothing until
+# you stop, then process the whole transcript once, like a batch dictation
+# (text cleanup, the post-process command, the output mode).
+# streaming_buffer_output = false
+
 # Custom driver order for type mode (optional)
 # Default order: wtype -> dotool -> ydotool -> clipboard
 # Customize to prefer a specific driver or change the fallback order.
