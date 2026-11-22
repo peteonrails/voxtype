@@ -7,7 +7,9 @@ use std::path::Path;
 pub const PROBE_ENV: &str = "VOXTYPE_TEST_SCRIPT_PROBE";
 
 /// The environment variable that lets tests create real uinput devices or
-/// open real evdev devices. See [`real_input_devices_allowed`].
+/// open real evdev devices. See [`real_input_devices_allowed`]. Linux only,
+/// like the evdev and uinput tests that use it.
+#[cfg(target_os = "linux")]
 pub const REAL_INPUT_DEVICES_ENV: &str = "VOXTYPE_TEST_UINPUT";
 
 /// Whether a test that creates a real uinput device, or opens a real evdev
@@ -17,6 +19,7 @@ pub const REAL_INPUT_DEVICES_ENV: &str = "VOXTYPE_TEST_UINPUT";
 /// writable, the compositor picks it up and the keys a test emits can land
 /// in whatever window has focus. These tests belong in a VM or a session
 /// nobody is typing in, so `cargo test` skips them by default and says why.
+#[cfg(target_os = "linux")]
 pub fn real_input_devices_allowed(test: &str) -> bool {
     if std::env::var(REAL_INPUT_DEVICES_ENV).as_deref() == Ok("1") {
         return true;
