@@ -2282,6 +2282,16 @@ mode = "paste"
 restore_clipboard = true
 ```
 
+**Paste through Hyprland itself**: On Hyprland, paste mode can send the paste keystroke through Hyprland's own dispatcher instead of wtype. Use it when the paste arrives as the wrong key, for example Shift+Insert reaching an XWayland or Electron app as Shift+Escape:
+
+```toml
+[output]
+mode = "paste"
+driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
+```
+
+It is off unless you add it, is skipped outside Hyprland, and needs no uinput access or `input` group. See [Hyprland-native paste](CONFIGURATION.md#hyprland-native-paste).
+
 When enabled, voxtype saves your clipboard content before pasting, then restores it after a brief delay. This works with both text and binary clipboard content (images, files) on Wayland via `wl-paste`, and with text content on X11 via `xclip`. You can also enable it from the command line with `--restore-clipboard` or the `VOXTYPE_RESTORE_CLIPBOARD=true` environment variable.
 
 ### Fallback Behavior
@@ -2309,7 +2319,7 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11), and `hyprland` (paste mode only, see below)
 
 **Examples:**
 

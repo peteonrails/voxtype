@@ -11,6 +11,7 @@
 //!   - ydotool: Works on X11/Wayland/TTY, requires ydotoold daemon
 
 use super::clipboard_restore::{self, Snapshot};
+use super::hyprland::HyprlandDispatch;
 use super::session::{detect, DisplaySession};
 use super::TextOutput;
 use crate::config::OutputDriver;
@@ -31,26 +32,33 @@ const DEFAULT_KEYSTROKE_DRIVER_ORDER: [OutputDriver; 3] = [
 ];
 
 /// Filter a configured `[output] driver_order` down to keystroke-capable
-/// drivers, preserving relative order. Falls back to
-/// `DEFAULT_KEYSTROKE_DRIVER_ORDER` when the configured order is absent or
-/// names none of wtype/eitype/ydotool (e.g. `["dotool", "clipboard"]`),
-/// since paste mode's keystroke step has nothing to run in that case.
+/// drivers, preserving relative order. `hyprland` is keystroke-capable but
+/// opt-in: it is never in the default order, and it only works inside a
+/// Hyprland session. When the configured order names none of
+/// wtype/eitype/ydotool (e.g. `["dotool", "clipboard"]` or `["hyprland"]`),
+/// `DEFAULT_KEYSTROKE_DRIVER_ORDER` is appended, so a session without
+/// Hyprland still pastes the way it did before (#938).
 fn resolve_keystroke_driver_order(configured: Option<&[OutputDriver]>) -> Vec<OutputDriver> {
-    let filtered: Vec<OutputDriver> = configured
+    let mut filtered: Vec<OutputDriver> = configured
         .map(|order| {
             order
                 .iter()
                 .copied()
-                .filter(|d| DEFAULT_KEYSTROKE_DRIVER_ORDER.contains(d))
+                .filter(|d| {
+                    DEFAULT_KEYSTROKE_DRIVER_ORDER.contains(d) || *d == OutputDriver::Hyprland
+                })
                 .collect()
         })
         .unwrap_or_default();
+    filtered.dedup();
 
-    if filtered.is_empty() {
-        DEFAULT_KEYSTROKE_DRIVER_ORDER.to_vec()
-    } else {
-        filtered
+    if !filtered
+        .iter()
+        .any(|d| DEFAULT_KEYSTROKE_DRIVER_ORDER.contains(d))
+    {
+        filtered.extend(DEFAULT_KEYSTROKE_DRIVER_ORDER);
     }
+    filtered
 }
 
 /// `paste_keys` value that picks the keystroke per focused window.
@@ -337,6 +345,8 @@ pub struct PasteOutput {
     /// tried for the paste keystroke and the auto-submit Enter. Derived from
     /// `[output] driver_order`; see [`resolve_keystroke_driver_order`].
     driver_order: Vec<OutputDriver>,
+    /// The `hyprland` driver: Hyprland's own dispatcher via hyprctl.
+    hyprland: HyprlandDispatch,
 }
 
 impl PasteOutput {
@@ -370,6 +380,7 @@ impl PasteOutput {
             restore_clipboard,
             restore_clipboard_delay_ms,
             driver_order,
+            hyprland: HyprlandDispatch::default(),
         }
     }
 
@@ -613,7 +624,8 @@ impl PasteOutput {
                 OutputDriver::Wtype => (self.is_wtype_available().await, "wtype"),
                 OutputDriver::Eitype => (self.is_eitype_available().await, "eitype"),
                 OutputDriver::Ydotool => (self.is_ydotool_available().await, "ydotool"),
-                // driver_order is pre-filtered to the three keystroke-capable
+                OutputDriver::Hyprland => (self.hyprland.is_available(), "hyprland"),
+                // driver_order is pre-filtered to the keystroke-capable
                 // drivers above; nothing else can reach this loop.
                 _ => continue,
             };
@@ -627,6 +639,11 @@ impl PasteOutput {
                 OutputDriver::Wtype => self.simulate_paste_wtype(keystroke).await,
                 OutputDriver::Eitype => self.simulate_paste_eitype(keystroke).await,
                 OutputDriver::Ydotool => self.simulate_paste_ydotool(keystroke).await,
+                OutputDriver::Hyprland => {
+                    self.hyprland
+                        .send_shortcut(&keystroke.modifiers, &keystroke.key)
+                        .await
+                }
                 _ => unreachable!(),
             };
 
@@ -659,10 +676,21 @@ impl PasteOutput {
                 OutputDriver::Wtype => self.is_wtype_available().await,
                 OutputDriver::Eitype => self.is_eitype_available().await,
                 OutputDriver::Ydotool => self.is_ydotool_available().await,
+                OutputDriver::Hyprland => self.hyprland.is_available(),
                 _ => continue,
             };
             if !available {
                 continue;
+            }
+
+            if *driver == OutputDriver::Hyprland {
+                match self.hyprland.send_shortcut(&[], "return").await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        tracing::debug!("hyprland Enter failed: {}", e);
+                        continue;
+                    }
+                }
             }
 
             let output = match driver {
@@ -843,8 +871,10 @@ impl TextOutput for PasteOutput {
         let wtype_available = self.is_wtype_available().await;
         let eitype_available = self.is_eitype_available().await;
         let ydotool_available = self.is_ydotool_available().await;
+        let hyprland_available =
+            self.driver_order.contains(&OutputDriver::Hyprland) && self.hyprland.is_available();
 
-        if !wtype_available && !eitype_available && !ydotool_available {
+        if !wtype_available && !eitype_available && !ydotool_available && !hyprland_available {
             tracing::debug!(
                 "paste mode unavailable: no keystroke tool available \
                 (wtype needs WAYLAND_DISPLAY, eitype needs libei, ydotool needs daemon running)"
@@ -853,10 +883,11 @@ impl TextOutput for PasteOutput {
         }
 
         tracing::debug!(
-            "paste mode available (wtype: {}, eitype: {}, ydotool: {})",
+            "paste mode available (wtype: {}, eitype: {}, ydotool: {}, hyprland: {})",
             wtype_available,
             eitype_available,
-            ydotool_available
+            ydotool_available,
+            hyprland_available
         );
         true
     }
@@ -947,6 +978,39 @@ mod tests {
 
     fn keys(s: &str) -> ParsedKeystroke {
         ParsedKeystroke::parse(s).unwrap()
+    }
+
+    /// #938: hyprland is opt-in, never in the default order.
+    #[test]
+    fn hyprland_is_never_a_default_paste_driver() {
+        assert!(!resolve_keystroke_driver_order(None).contains(&OutputDriver::Hyprland));
+    }
+
+    #[test]
+    fn hyprland_first_keeps_the_named_fallbacks() {
+        assert_eq!(
+            resolve_keystroke_driver_order(Some(&[
+                OutputDriver::Hyprland,
+                OutputDriver::Ydotool,
+                OutputDriver::Clipboard,
+            ])),
+            vec![OutputDriver::Hyprland, OutputDriver::Ydotool]
+        );
+    }
+
+    /// `driver_order = ["hyprland"]` must still paste outside Hyprland, so
+    /// the default keystroke chain follows it.
+    #[test]
+    fn hyprland_alone_falls_back_to_the_default_chain() {
+        assert_eq!(
+            resolve_keystroke_driver_order(Some(&[OutputDriver::Hyprland])),
+            vec![
+                OutputDriver::Hyprland,
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Ydotool
+            ]
+        );
     }
 
     #[test]

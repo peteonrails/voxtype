@@ -448,9 +448,14 @@ pub struct Cli {
         long,
         value_name = "DRIVERS",
         help_heading = "Output",
-        long_help = "Output driver order for type mode (comma-separated).\n\
-        Available: wtype, dotool, ydotool, clipboard.\n\
-        Example: --driver=ydotool,wtype,clipboard"
+        long_help = "Output driver order (comma-separated).\n\
+        Available: wtype, eitype, dotool, ydotool, clipboard, xclip, hyprland.\n\
+        Paste mode uses the keystroke drivers in this order (wtype, eitype,\n\
+        ydotool, hyprland). hyprland sends the paste keystroke through\n\
+        Hyprland's own dispatcher; it is paste-only and opt-in.\n\
+        Env: VOXTYPE_DRIVER_ORDER\n\
+        Example: --driver=ydotool,wtype,clipboard\n\
+        Example: --paste --driver=hyprland,wtype"
     )]
     pub driver: Option<String>,
 

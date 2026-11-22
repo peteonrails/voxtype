@@ -478,8 +478,15 @@ pub fn configured_primary_method(
         OutputMode::File => return Some("file".to_string()),
         OutputMode::Clipboard => return clipboard.then(|| "clipboard".to_string()),
         OutputMode::Paste => {
-            let keystroke =
-                status.wtype.available || status.eitype.available || status.ydotool.available;
+            let hyprland = output
+                .driver_order
+                .as_deref()
+                .is_some_and(|o| o.contains(&OutputDriver::Hyprland))
+                && crate::output::hyprland::available_quick();
+            let keystroke = status.wtype.available
+                || status.eitype.available
+                || status.ydotool.available
+                || hyprland;
             return (clipboard && keystroke).then(|| "paste".to_string());
         }
         OutputMode::Type => {}
@@ -500,6 +507,8 @@ pub fn configured_primary_method(
             OutputDriver::Ydotool => status.ydotool.available,
             OutputDriver::Clipboard => status.wl_copy.available,
             OutputDriver::Xclip => status.xclip.available,
+            // Paste-only; type mode skips it.
+            OutputDriver::Hyprland => false,
         };
         if available {
             return Some(match driver {

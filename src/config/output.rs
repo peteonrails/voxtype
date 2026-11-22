@@ -37,9 +37,10 @@ pub struct OutputConfig {
     ///
     /// Paste mode (`mode = "paste"`) also honours this for its keystroke
     /// step, filtered to the drivers that can simulate a keystroke (wtype,
-    /// eitype, ydotool); dotool/clipboard/xclip entries are ignored there.
-    /// If the order contains none of those three, paste mode falls back to
-    /// wtype -> eitype -> ydotool. See #750: wtype's keymap remapping makes
+    /// eitype, ydotool, hyprland); dotool/clipboard/xclip entries are ignored
+    /// there. If the order contains none of wtype, eitype and ydotool, paste
+    /// mode appends wtype -> eitype -> ydotool after any `hyprland` entry.
+    /// `hyprland` is paste-only and skipped in type mode (#938). See #750: wtype's keymap remapping makes
     /// keycode-based XWayland clients (xfreerdp and similar) receive Escape
     /// instead of the paste keystroke, so putting ydotool first here is the
     /// workaround for that class of client.
@@ -397,6 +398,17 @@ pub enum OutputDriver {
     Clipboard,
     /// Clipboard via xclip (X11)
     Xclip,
+    /// Hyprland's own `send_shortcut` dispatcher via hyprctl. Paste mode
+    /// only: it sends the paste keystroke and the auto-submit Enter, never
+    /// text. Opt-in; never part of a default order.
+    Hyprland,
+}
+
+impl OutputDriver {
+    /// Whether the driver can type text in `mode = "type"`.
+    pub fn types_text(self) -> bool {
+        !matches!(self, OutputDriver::Hyprland)
+    }
 }
 
 impl std::fmt::Display for OutputDriver {
@@ -408,6 +420,7 @@ impl std::fmt::Display for OutputDriver {
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
             OutputDriver::Xclip => write!(f, "xclip"),
+            OutputDriver::Hyprland => write!(f, "hyprland"),
         }
     }
 }
@@ -423,8 +436,9 @@ impl std::str::FromStr for OutputDriver {
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
+            "hyprland" => Ok(OutputDriver::Hyprland),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip, hyprland",
                 s
             )),
         }
