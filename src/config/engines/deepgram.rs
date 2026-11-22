@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::super::default_true;
 
+/// The model a new `[deepgram]` table starts with.
+pub const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
+
 /// Deepgram speech-to-text configuration.
 ///
 /// Credentials are resolved from `VOXTYPE_DEEPGRAM_API_KEY` or
@@ -59,7 +62,7 @@ pub struct DeepgramConfig {
 }
 
 fn default_model() -> String {
-    "nova-3".to_string()
+    DEEPGRAM_DEFAULT_MODEL.to_string()
 }
 
 fn default_language() -> String {

@@ -240,7 +240,7 @@ fn set_engine_with_models(
         .map_err(ConfigSetError::IncompatibleModel)?;
     }
     editor.set_string("", "engine", name);
-    let default = crate::model_catalog::default_model(name);
+    let default = crate::model_catalog::seed_model(name);
     if !default.is_empty() && editor.get_string(name, "model").is_none() {
         editor.set_string(name, "model", default);
     }
@@ -805,6 +805,21 @@ gguf_backend = "cpu"
             ConfigSetError::UnknownEngine(n) => assert_eq!(n, "fakeengine"),
             other => panic!("expected UnknownEngine, got {:?}", other),
         }
+    }
+
+    /// Deepgram has no model catalog, but the transcriber factory needs a
+    /// `[deepgram]` table, so selecting it writes one.
+    #[test]
+    fn selecting_deepgram_writes_the_table_the_daemon_needs() {
+        let (_dir, path) = temp_config("");
+        fs::write(&path, crate::config::default_config_content()).unwrap();
+        set_engine(path.clone(), "deepgram").expect("set deepgram");
+        let config = crate::config::load_config(Some(&path)).unwrap();
+        assert_eq!(config.engine, crate::config::TranscriptionEngine::Deepgram);
+        assert_eq!(
+            config.deepgram.map(|d| d.model).as_deref(),
+            Some(crate::config::DeepgramConfig::default().model.as_str())
+        );
     }
 
     #[test]

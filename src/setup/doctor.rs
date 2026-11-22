@@ -174,7 +174,7 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, env_key: bool) -> 
             format!("Engine is '{name}' but the [{name}] config section is missing"),
             format!(
                 "Run: voxtype config set {name}.model {}",
-                model_catalog::default_model(name)
+                model_catalog::seed_model(name)
             ),
         );
     }

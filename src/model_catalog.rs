@@ -91,6 +91,16 @@ pub const fn default_model(engine: &str) -> &'static str {
     }
 }
 
+/// The model `config set engine <name>` writes when the engine's table has
+/// none, so the table exists. Deepgram has no catalog, since nothing is
+/// downloaded, but the daemon still reads its `[deepgram]` table.
+pub fn seed_model(engine: &str) -> &'static str {
+    match engine {
+        "deepgram" => crate::config::DEEPGRAM_DEFAULT_MODEL,
+        _ => default_model(engine),
+    }
+}
+
 /// Directory a catalog entry occupies under the models dir.
 ///
 /// Most engines name the directory exactly as the catalog (and the config

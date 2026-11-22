@@ -51,7 +51,7 @@ pub fn meeting_transcription_config(
 /// rather than a server, a CLI or the cloud.
 fn needs_local_model(config: &Config) -> bool {
     match config.engine {
-        TranscriptionEngine::Soniox => false,
+        TranscriptionEngine::Soniox | TranscriptionEngine::Deepgram => false,
         TranscriptionEngine::Whisper => config.whisper.effective_mode() == WhisperMode::Local,
         _ => true,
     }
@@ -168,6 +168,20 @@ mod tests {
             .with_meeting_mode_overrides(&MeetingStartOptions::default())
             .unwrap();
         assert!(!shares_dictation_transcriber(&dictation, &meeting));
+    }
+
+    #[test]
+    fn deepgram_meetings_need_no_local_model() {
+        let mut dictation = resident(TranscriptionEngine::Whisper);
+        dictation.deepgram = Some(crate::config::DeepgramConfig {
+            api_key: Some("k".into()),
+            ..Default::default()
+        });
+        let meeting = meeting_transcription_config(&dictation, &opts(Some("deepgram"), None, None));
+        assert_eq!(
+            meeting.map(|config| config.engine),
+            Ok(TranscriptionEngine::Deepgram)
+        );
     }
 
     #[test]

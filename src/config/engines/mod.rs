@@ -15,7 +15,7 @@ mod sensevoice;
 mod soniox;
 
 pub use cohere::CohereConfig;
-pub use deepgram::DeepgramConfig;
+pub use deepgram::{DeepgramConfig, DEEPGRAM_DEFAULT_MODEL};
 pub use dolphin::DolphinConfig;
 pub use gguf::GgufConfig;
 pub use moonshine::MoonshineConfig;
@@ -76,7 +76,7 @@ pub enum TranscriptionEngine {
     OpenVino,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
-    /// Use Deepgram's pre-recorded cloud speech-to-text API.
+    /// Use Deepgram's cloud speech-to-text API, streaming or pre-recorded.
     Deepgram,
 }
 
