@@ -3480,7 +3480,13 @@ Voxtype sends the terms through each backend's native vocabulary mechanism
 when one exists: the local Whisper and whisper-cli prompts, the
 OpenAI-compatible remote `prompt` field, and Soniox `context.terms`. An
 explicit `[whisper] initial_prompt` or `[soniox] terms` list is preserved and
-the terms are appended. `voxtype transcribe` uses them too.
+the terms are appended. `voxtype transcribe` uses them too. Meeting mode does
+not: a meeting starts without the vocabulary, also when it shares dictation's
+loaded model. A dictation made while a meeting runs on the same loaded model
+sets its terms there again, so the meeting's later chunks get them. A meeting
+that starts while a dictation is still being transcribed shares the loaded
+model with it, so the dictation can be decoded without its terms, or the
+meeting can take them.
 
 When text becomes final, Voxtype also corrects only unambiguous phonetic
 near-matches of the terms. Provisional streaming text is not corrected. Exact

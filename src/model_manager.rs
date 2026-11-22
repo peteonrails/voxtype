@@ -347,7 +347,7 @@ impl ModelManager {
     /// tests can exercise cache lifecycle paths without a real model file
     /// on disk.
     #[cfg(test)]
-    fn insert_loaded_model_for_test(
+    pub(crate) fn insert_loaded_model_for_test(
         &mut self,
         name: &str,
         transcriber: Arc<dyn Transcriber>,

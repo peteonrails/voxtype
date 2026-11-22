@@ -4143,16 +4143,19 @@ impl Daemon {
     }
 
     /// Dictation's loaded transcriber, when a meeting configured as `meeting`
-    /// can use it instead of loading its own copy.
+    /// can use it instead of loading its own copy. The vocabulary the last
+    /// dictation set on it is cleared: a meeting has none.
     fn resident_transcriber_for(&mut self, meeting: &Config) -> Option<Arc<dyn Transcriber>> {
         if !meeting::start::shares_dictation_transcriber(&self.config, meeting) {
             return None;
         }
-        if self.config.engine == crate::config::TranscriptionEngine::Whisper {
+        let transcriber = if self.config.engine == crate::config::TranscriptionEngine::Whisper {
             self.model_manager.as_mut()?.get_transcriber(None).ok()
         } else {
             self.transcriber_preloaded.clone()
-        }
+        }?;
+        transcriber.set_vocabulary(&[]);
+        Some(transcriber)
     }
 
     /// Drop a deleted segment from the HUD snapshot and tell meeting.sock
@@ -8775,6 +8778,75 @@ while True:
                 fs::read_to_string(&target).unwrap(),
                 "Voxtype,PipeWire,Tailscale\n",
                 "a profile: global terms, then the profile's"
+            );
+        }
+
+        /// Records the vocabulary it was last given.
+        #[derive(Default)]
+        struct VocabularyProbe {
+            last_set: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl VocabularyProbe {
+            fn terms(&self) -> Vec<String> {
+                self.last_set.lock().unwrap().clone()
+            }
+        }
+
+        impl Transcriber for VocabularyProbe {
+            fn transcribe(
+                &self,
+                _samples: &[f32],
+            ) -> std::result::Result<String, crate::error::TranscribeError> {
+                Ok(String::new())
+            }
+
+            fn set_vocabulary(&self, terms: &[String]) {
+                *self.last_set.lock().unwrap() = terms.to_vec();
+            }
+        }
+
+        /// Load `probe` as dictation's local Whisper model, as `run` does
+        /// with `on_demand_loading = false`.
+        fn load_whisper_model(daemon: &mut Daemon, probe: Arc<VocabularyProbe>) {
+            let mut manager = crate::model_manager::ModelManager::new(&daemon.config.whisper, None);
+            let model = daemon.config.whisper.model.clone();
+            manager.insert_loaded_model_for_test(&model, probe, true);
+            daemon.model_manager = Some(manager);
+        }
+
+        /// A meeting on dictation's loaded model does not inherit the
+        /// vocabulary the last dictation set on it.
+        #[tokio::test]
+        async fn a_meeting_on_the_resident_model_gets_no_dictation_vocabulary() {
+            if !in_scratch_runtime("a_meeting_on_the_resident_model_gets_no_dictation_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_whisper_model(&mut daemon, probe.clone());
+
+            daemon.get_transcriber_for_recording(None).await.unwrap();
+            assert_eq!(
+                probe.terms(),
+                ["Voxtype"],
+                "the dictation set its vocabulary"
+            );
+
+            let meeting = daemon.config.clone();
+            assert!(
+                daemon.resident_transcriber_for(&meeting).is_some(),
+                "the meeting shares dictation's model"
+            );
+            assert!(
+                probe.terms().is_empty(),
+                "the meeting got {:?}",
+                probe.terms()
             );
         }
 
