@@ -114,7 +114,7 @@ pub struct Cli {
     )]
     pub streaming_recovery: Option<bool>,
 
-    /// Maximum seconds (1-120, built-in default 10) to wait for a streaming
+    /// Maximum seconds (1-120, built-in default 30) to wait for a streaming
     /// backend to finish after stop before recovering the dictation.
     #[arg(
         long,

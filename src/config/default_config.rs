@@ -209,7 +209,7 @@ translate = false
 # after stop, Voxtype transcribes the capture with the configured batch backend.
 # [streaming_recovery]
 # enabled = true
-# stop_timeout_secs = 10
+# stop_timeout_secs = 30
 
 [output]
 # Primary output mode: "type" or "clipboard"

@@ -89,7 +89,7 @@ impl Default for StreamingRecoveryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            stop_timeout_secs: 10,
+            stop_timeout_secs: 30,
         }
     }
 }
@@ -163,7 +163,8 @@ mod tests {
     fn recovery_defaults_enable_fallback_and_bound_stop() {
         let serialized = toml::to_string(&StreamingRecoveryConfig::default()).unwrap();
         assert!(serialized.contains("enabled = true"));
-        assert!(serialized.contains("stop_timeout_secs = 10"));
+        assert!(serialized.contains("stop_timeout_secs = 30"));
+        assert_eq!(StreamingRecoveryConfig::default().stop_timeout_secs, 30);
     }
 
     #[test]

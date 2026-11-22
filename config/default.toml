@@ -22,7 +22,7 @@ state_file = "auto"
 # batch backend to deliver undelivered dictation.
 # [streaming_recovery]
 # enabled = true
-# stop_timeout_secs = 10
+# stop_timeout_secs = 30
 
 
 [hotkey]

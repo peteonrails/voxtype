@@ -1802,7 +1802,7 @@ Voxtype retains captured audio and recovers it through the configured batch back
 ```toml
 [streaming_recovery]
 enabled = false
-stop_timeout_secs = 10
+stop_timeout_secs = 30
 ```
 
 ### 401 Unauthorized / 403 Forbidden

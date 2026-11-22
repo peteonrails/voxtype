@@ -1502,14 +1502,14 @@ Controls recovery for every streaming backend, including Parakeet and Soniox. Wh
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | Boolean | `true` | Recover retained audio with the configured batch backend when streaming ends without delivering text |
-| `stop_timeout_secs` | Integer | `10` | Wait this many seconds after microphone stop for the streaming backend to finish, then tear it down and recover the dictation. Range: `1`–`120` |
+| `stop_timeout_secs` | Integer | `30` | Wait this many seconds after microphone stop for the streaming backend to finish, then tear it down and recover the dictation. Range: `1`–`120` |
 
-`VOXTYPE_STREAMING_RECOVERY` and `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` set these values for one process. The matching CLI flags are `--streaming-recovery=false` and `--streaming-stop-timeout-secs 10`.
+`VOXTYPE_STREAMING_RECOVERY` and `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` set these values for one process. The matching CLI flags are `--streaming-recovery=false` and `--streaming-stop-timeout-secs 30`.
 
 ```toml
 [streaming_recovery]
 enabled = true
-stop_timeout_secs = 10
+stop_timeout_secs = 30
 ```
 
 
