@@ -518,6 +518,11 @@ fn print_variants_text(inv: &setup::binary::Inventory, config: &Config) {
     println!("                 {}", workers);
 
     println!();
+    if cfg!(target_os = "macos") {
+        println!("macOS build: variant switching not applicable.");
+        println!("{}.", setup::install_hint::MACOS_ENGINES);
+        return;
+    }
     if matches!(inv.install_kind, InstallKind::Source) {
         if setup::install_hint::is_nix_store_path(&inv.binary_path) {
             let running = setup::install_hint::running_nix_package();

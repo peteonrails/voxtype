@@ -46,6 +46,12 @@ pub fn running_from_nix() -> bool {
     is_nix_store_path(&exe.canonicalize().unwrap_or(exe))
 }
 
+/// What voxtype's macOS release can transcribe with. The macOS workflow
+/// builds with `gpu-metal` alone, so only the engines every binary has are in
+/// it, and there is no variant to switch to (#632).
+pub const MACOS_ENGINES: &str = "The macOS build includes only the Whisper and Soniox engines; \
+     the other engines are Linux-only for now";
+
 /// What the fix has to provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
@@ -77,6 +83,10 @@ pub enum Hint {
         package: Option<&'static str>,
         feature: Option<&'static str>,
     },
+
+    /// voxtype's macOS release, which has neither the engine nor a variant
+    /// that does.
+    MacosLinuxOnly,
 }
 
 impl fmt::Display for Hint {
@@ -133,6 +143,8 @@ impl fmt::Display for Hint {
                 package: None,
                 feature: None,
             } => write!(f, "build voxtype from source"),
+
+            Hint::MacosLinuxOnly => write!(f, "run voxtype on Linux. {MACOS_ENGINES}"),
         }
     }
 }
@@ -393,6 +405,8 @@ pub struct Host<'a> {
     onnx_pick: fn() -> Variant,
     method: OnceCell<InstallMethod>,
     onnx: OnceCell<Variant>,
+    /// The macOS release, where only [`Hint::MacosLinuxOnly`] applies.
+    macos: bool,
 }
 
 impl<'a> Host<'a> {
@@ -421,10 +435,14 @@ impl<'a> Host<'a> {
             onnx_pick,
             method: OnceCell::new(),
             onnx: OnceCell::new(),
+            macos: false,
         }
     }
 
     pub fn hint(&self, need: Need) -> Hint {
+        if self.macos {
+            return Hint::MacosLinuxOnly;
+        }
         if self.nix {
             return Hint::Nix {
                 package: nix_package(need),
@@ -505,12 +523,14 @@ fn system_onnx_pick() -> Variant {
 impl Host<'static> {
     /// This machine: the running executable and the package directory.
     pub fn system() -> Self {
-        Host::new(
+        let mut host = Host::new(
             binary::current_binary_path(),
             PathBuf::from(binary::LIB_DIR),
             &SystemRunner,
             system_onnx_pick,
-        )
+        );
+        host.macos = cfg!(target_os = "macos");
+        host
     }
 }
 
@@ -645,6 +665,63 @@ explicit=
         );
         assert_eq!(hint.to_string(), "run `sudo voxtype setup onnx --enable`");
         assert!(runner.calls.borrow().is_empty());
+    }
+
+    /// #632: the macOS release has no variants and no supported rebuild for
+    /// the other engines, so every hint names the engines it does have.
+    #[test]
+    fn macos_hint_names_the_macos_engines() {
+        let fx = Fixture::new(None, &[], None);
+        let runner = runner(&[]);
+        let mut host = fx.host(&runner);
+        host.macos = true;
+        for need in [
+            Need::Feature("parakeet"),
+            Need::Feature("openvino"),
+            Need::Variant(Variant::OnnxAvx2),
+        ] {
+            assert_eq!(host.hint(need), Hint::MacosLinuxOnly, "{need:?}");
+        }
+        let text = Hint::MacosLinuxOnly.to_string();
+        assert!(text.starts_with("run voxtype on Linux. "), "{text}");
+        assert!(
+            text.contains("only the Whisper and Soniox engines"),
+            "{text}"
+        );
+        assert!(text.contains("Linux-only for now"), "{text}");
+        assert!(!text.contains("--features"), "{text}");
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    /// A Nix build on macOS (nix-darwin) still lacks the engines and the
+    /// Linux flake packages do not apply, so the macOS hint comes first.
+    #[test]
+    fn macos_hint_takes_precedence_over_nix() {
+        let runner = runner(&[]);
+        let mut host = nix_host(&runner, PathBuf::from("/nonexistent/usr/lib/voxtype"));
+        assert!(matches!(
+            host.hint(Need::Feature("parakeet")),
+            Hint::Nix { .. }
+        ));
+        host.macos = true;
+        assert_eq!(host.hint(Need::Feature("parakeet")), Hint::MacosLinuxOnly);
+        assert_eq!(
+            host.hint(Need::Variant(Variant::WhisperVulkan)),
+            Hint::MacosLinuxOnly
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn this_macos_host_gives_the_macos_hint() {
+        assert_eq!(hint(Need::Feature("parakeet")), Hint::MacosLinuxOnly);
+        assert_eq!(onnx_variant_hint(), Hint::MacosLinuxOnly);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn linux_hosts_never_give_the_macos_hint() {
+        assert_ne!(hint(Need::Feature("parakeet")), Hint::MacosLinuxOnly);
     }
 
     #[test]
