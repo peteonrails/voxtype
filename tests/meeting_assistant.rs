@@ -553,3 +553,36 @@ async fn notify_open_defaults_to_the_view_and_empty_turns_it_off() {
         }
     }
 }
+
+/// `meeting assistant status` names the model that actually answers. With
+/// an OpenAI-compatible local server configured, the text status used to
+/// claim Ollama's default model while questions and summaries went to the
+/// configured server (the JSON status was already right).
+#[test]
+fn text_status_names_the_configured_llm_not_ollama() {
+    let w = World::new();
+    let cfg = std::fs::read_to_string(w.p("config.toml")).unwrap();
+    let cfg = cfg.replace(
+        "[meeting.summary]\n",
+        "[meeting.summary]\nbackend = \"openai\"\nopenai_url = \"http://127.0.0.1:9/v1\"\nopenai_model = \"qwen-test\"\n",
+    );
+    std::fs::write(w.p("config.toml"), cfg).unwrap();
+
+    // An agent is on PATH, but the configured local model takes questions.
+    let with_agent = text(&w.run(&["meeting", "assistant", "status"]).stdout);
+    assert!(with_agent.contains("Local (qwen-test)"), "{with_agent}");
+    assert!(
+        with_agent.contains("was found but is not used"),
+        "{with_agent}"
+    );
+    assert!(!with_agent.contains("llama3.2"), "{with_agent}");
+
+    // No agent at all.
+    std::fs::remove_file(w.p("bin").join("claude")).unwrap();
+    let no_agent = text(&w.run(&["meeting", "assistant", "status"]).stdout);
+    assert!(
+        no_agent.contains("no agent found; using Local (qwen-test)"),
+        "{no_agent}"
+    );
+    assert!(!no_agent.contains("llama3.2"), "{no_agent}");
+}
