@@ -61,7 +61,7 @@ impl ModifierGuard {
                 tracing::debug!(
                     error = %e,
                     "modifier_guard: /dev/input not readable, disabling \
-                     (likely missing 'input' group membership)"
+                     (no 'input' group membership, normal with compositor keybindings)"
                 );
                 return Self::Disabled;
             }

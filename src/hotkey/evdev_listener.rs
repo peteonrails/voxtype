@@ -6,7 +6,9 @@
 //! Uses inotify to detect device changes (hotplug, screenlock, suspend/resume)
 //! and automatically re-enumerates devices when needed.
 //!
-//! The user must be in the 'input' group to access /dev/input/* devices.
+//! Reading /dev/input/* needs the `input` group, a grant with a real security
+//! cost (any program can then read every keystroke), so this listener is the
+//! fallback to compositor keybindings, not the default recommendation.
 
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;

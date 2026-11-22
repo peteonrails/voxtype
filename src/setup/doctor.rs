@@ -415,11 +415,12 @@ pub fn parse_show_environment(text: &str) -> (bool, bool) {
 
 /// evdev hotkey: the daemon needs to read at least one /dev/input/event*.
 ///
-/// With the built-in hotkey off, the same access powers the modifier-release
-/// guard, so its absence is a warning rather than an error.
+/// With the built-in hotkey off, the same access only powers the
+/// modifier-release guard. Its absence is then informational: compositor
+/// submaps do the guard's job, and the `input` group it would need lets every
+/// program read every keystroke.
 pub fn input_access_check(hotkey_enabled: bool, total: usize, readable: usize) -> Check {
     const ID: &str = "input.evdev";
-    const FIX: &str = "sudo usermod -aG input $USER, then log out and back in";
     match (hotkey_enabled, readable > 0) {
         (true, true) => Check::ok(
             ID,
@@ -433,17 +434,22 @@ pub fn input_access_check(hotkey_enabled: bool, total: usize, readable: usize) -
         (true, false) => Check::error(
             ID,
             "Built-in hotkey is enabled but no input device is readable (not in the 'input' group?)",
-            format!("{FIX}, or use compositor keybindings with [hotkey] enabled = false"),
+            "Bind `voxtype record toggle` in your compositor and set [hotkey] enabled = false. \
+             The 'input' group also works but exposes every keystroke to every program \
+             (docs/USER_MANUAL.md, \"The input group trade-off\")",
         ),
         (false, true) => Check::ok(
             ID,
             "Input devices readable (modifier-release guard available)",
         ),
-        (false, false) => Check::warn(
+        // The normal state with compositor keybindings, and the safer one:
+        // no group grant just for the guard. Submaps cover what it did.
+        (false, false) => Check::ok(
             ID,
-            "Input devices not readable: modifier-release guard unavailable, so text typed while \
-             a modifier is still held may trigger shortcuts",
-            FIX,
+            "Input devices not readable, as expected with compositor keybindings; the \
+             modifier-release guard is off. If held modifiers trigger shortcuts while text is \
+             typed, `voxtype setup compositor <hyprland|sway|river>` adds submaps that prevent \
+             it, with no input group needed",
         ),
     }
 }
@@ -1552,7 +1558,16 @@ mod tests {
         assert_eq!(input_access_check(true, 10, 3).severity, Severity::Ok);
         assert_eq!(input_access_check(true, 10, 0).severity, Severity::Error);
         assert_eq!(input_access_check(true, 0, 0).severity, Severity::Error);
-        assert_eq!(input_access_check(false, 10, 0).severity, Severity::Warn);
+        // Compositor keybindings without the input group: fine, and the
+        // message points at submaps rather than the group.
+        let off = input_access_check(false, 10, 0);
+        assert_eq!(off.severity, Severity::Ok);
+        assert!(off.message.contains("voxtype setup compositor"));
+        assert!(!off.message.contains("usermod"));
+        let on = input_access_check(true, 10, 0);
+        let fix = on.fix.unwrap();
+        assert!(fix.starts_with("Bind `voxtype record toggle`"), "{fix}");
+        assert!(!fix.contains("usermod"), "{fix}");
         assert_eq!(input_access_check(false, 10, 1).severity, Severity::Ok);
     }
 

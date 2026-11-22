@@ -191,9 +191,9 @@ pub struct OutputConfig {
     /// with held modifiers and triggering compositor or application
     /// keybindings (e.g. Super+X, Ctrl+W).
     ///
-    /// Requires `/dev/input` access (typically `input` group membership).
-    /// Silently disabled when access is unavailable; output proceeds as
-    /// before in that case.
+    /// Needs to read `/dev/input` (the `input` group); without it the guard
+    /// is skipped and output proceeds as before. Compositor submaps
+    /// (`voxtype setup compositor`) avoid the problem without that access.
     #[serde(default = "default_true")]
     pub wait_for_modifier_release: bool,
 

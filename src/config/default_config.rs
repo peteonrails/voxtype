@@ -300,10 +300,10 @@ type_delay_ms = 0
 
 # Wait for modifier keys to be released before typing (default: true)
 # Prevents transcribed letters from combining with held modifiers (Ctrl/Alt/
-# Shift/Super) and triggering compositor or application keybindings. Reads
-# modifier state via evdev; requires user to be in the 'input' group.
-# Silently disabled when /dev/input is unreadable, so output proceeds as
-# before in that case.
+# Shift/Super) and triggering compositor or application keybindings. Needs to
+# read /dev/input (the 'input' group); without it the guard is skipped and
+# output proceeds as before. Compositor submaps (voxtype setup compositor)
+# avoid the problem without that access.
 # wait_for_modifier_release = true
 
 # Maximum milliseconds to wait for modifier release before falling back to

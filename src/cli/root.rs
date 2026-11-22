@@ -646,8 +646,9 @@ pub struct Cli {
         hide_short_help = true,
         long_help = "Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before typing.\n\
         Prevents transcribed text from triggering compositor or application keybindings\n\
-        when the hotkey is still held. Requires user to be in the 'input' group;\n\
-        silently disabled otherwise."
+        when the hotkey is still held. Needs to read /dev/input (the 'input' group);\n\
+        without it the guard is skipped. Compositor submaps (voxtype setup compositor)\n\
+        avoid the problem without that access."
     )]
     pub wait_for_modifier_release: bool,
 
