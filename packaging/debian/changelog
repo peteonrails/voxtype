@@ -29,6 +29,19 @@ voxtype (1.3.2-1) unstable; urgency=medium
     bare whisper on PATH is never used as whisper-cli
   * Meeting summaries, Ask and dictation cleanup can use Omarchy's local
     model or any OpenAI-compatible server
+  * Dictation history works on atomic Fedora, where /home is a link to
+    /var/home and history recorded nothing before
+  * Whisper retries with beam search when the decoder loops on a phrase,
+    and drops the repeated copy when a reduced audio context restarts
+    the transcript (#827, #898)
+  * info variants recommends the baseline build on a CPU without AVX2, and
+    no longer the AVX2, Vulkan or ONNX builds that crash there
+  * The /usr/bin/voxtype wrapper in the release .deb and .rpm runs
+    voxtype-baseline on a CPU without AVX2 instead of crashing in the AVX2
+    build, and source package installs warn on such a CPU
+  * Release .deb and .rpm, the source .rpm and install-arch.sh lead their
+    setup steps with compositor keybindings; the input group is only the
+    fallback for the built-in hotkey
 
  -- Peter Jackson <pete@peteonrails.com>  Sat, 21 Nov 2026 18:00:00 +0000
 

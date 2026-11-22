@@ -355,13 +355,39 @@ fn print_status(settings: &AssistantSettings) {
         "path" => "found on PATH",
         _ => "",
     };
+    // Name the model that actually answers, from the same resolution the
+    // JSON status uses: an Omarchy or OpenAI-compatible endpoint when one is
+    // configured, Ollama otherwise.
+    let status = assistant::status_json(settings);
+    let local_name = status["backend_name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{} at {}",
+                settings.summary.ollama_model, settings.summary.ollama_url
+            )
+        });
     if settings.local_only {
-        println!(
-            "Assistant: local model only ({} at {})",
-            settings.summary.ollama_model, settings.summary.ollama_url
-        );
+        println!("Assistant: local model only ({local_name})");
     } else {
+        // A configured Omarchy or OpenAI-compatible model takes questions
+        // ahead of any agent found, so say that instead of the agent.
+        let llm_overrides_agent = res
+            .agent
+            .as_ref()
+            .is_some_and(|a| status["backend_name"].as_str().is_some_and(|n| n != a.name));
         match &res.agent {
+            Some(a) if llm_overrides_agent => {
+                println!(
+                    "Assistant: {local_name} ([meeting.summary] backend = \"{}\")",
+                    settings.summary_backend
+                );
+                println!(
+                    "           {} was found but is not used while that backend is set.",
+                    a.name
+                );
+            }
             Some(a) => {
                 println!(
                     "Assistant: {} ({}) at {}",
@@ -386,13 +412,13 @@ fn print_status(settings: &AssistantSettings) {
                 if let Some(p) = &res.problem {
                     println!("Assistant: none: {p}");
                 } else {
-                    println!(
-                        "Assistant: no agent found; using the local model ({} at {})",
-                        settings.summary.ollama_model, settings.summary.ollama_url
-                    );
+                    println!("Assistant: no agent found; using {local_name}");
                 }
             }
         }
+    }
+    if let Some(note) = status["summary_note"].as_str() {
+        println!("           {note}");
     }
     if res.choice_required {
         println!("           Several agents were found; allow the one you want to use.");

@@ -668,7 +668,13 @@ fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
     ]);
 
     let line2 = match &m.remediation {
-        Remediation::SwitchToVariant { target } => Line::from(vec![
+        Remediation::SwitchToVariant { target: None } => Line::from(vec![Span::styled(
+            "   No prebuilt variant with this engine runs on this CPU (it lacks AVX2)",
+            dim,
+        )]),
+        Remediation::SwitchToVariant {
+            target: Some(target),
+        } => Line::from(vec![
             Span::styled("   Fix: press ", dim),
             Span::styled("F2", warn),
             Span::styled(" to open the variant picker, or run ", dim),

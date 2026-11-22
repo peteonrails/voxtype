@@ -21,6 +21,19 @@ case "$1" in
         fi
         VARIANT=$(basename "$(readlink -f /usr/bin/voxtype)")
 
+        # Both builds in this package are compiled for Haswell (AVX2). The
+        # x86-64-v2 baseline build that runs without AVX2 ships only in the
+        # prebuilt release packages.
+        if [ "$(uname -m)" = "x86_64" ] && [ -r /proc/cpuinfo ] \
+            && ! grep -qw avx2 /proc/cpuinfo; then
+            echo ""
+            echo "WARNING: This CPU has no AVX2, and the voxtype builds in this"
+            echo "package need it: they stop with an illegal instruction error."
+            echo "Install the prebuilt .deb from"
+            echo "https://github.com/peteonrails/voxtype/releases instead; it"
+            echo "includes voxtype-baseline, which runs on this CPU."
+        fi
+
         # The setup instructions are for a fresh install only
         if [ -z "$2" ]; then
             # Detect GPU for Vulkan acceleration recommendation

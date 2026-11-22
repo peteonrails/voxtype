@@ -233,6 +233,19 @@ export CARGO_HOME=%{_builddir}/cargo
 %post
 %systemd_user_post voxtype.service
 
+# Both builds in this package are compiled for Haswell (AVX2). The x86-64-v2
+# baseline build that runs without AVX2 ships only in the prebuilt release
+# packages.
+if [ "$(uname -m)" = "x86_64" ] && [ -r /proc/cpuinfo ] \
+    && ! grep -qw avx2 /proc/cpuinfo; then
+    echo ""
+    echo "WARNING: This CPU has no AVX2, and the voxtype builds in this"
+    echo "package need it: they stop with an illegal instruction error."
+    echo "Install the prebuilt .rpm from"
+    echo "https://github.com/peteonrails/voxtype/releases instead; it"
+    echo "includes voxtype-baseline, which runs on this CPU."
+fi
+
 if [ "$1" -eq 1 ]; then
     # Detect GPU for Vulkan acceleration recommendation
     GPU_DETECTED=""
@@ -263,15 +276,20 @@ if [ "$1" -eq 1 ]; then
     echo ""
     echo "To complete setup:"
     echo ""
-    echo "  1. Add your user to the 'input' group:"
-    echo "     sudo usermod -aG input \$USER"
+    echo "  1. Bind push-to-talk in your compositor (no special permissions):"
+    echo "       voxtype setup compositor hyprland   (or sway, river)"
+    echo "     or bind 'voxtype record toggle' in your desktop's keyboard shortcuts,"
+    echo "     then set enabled = false under [hotkey] in ~/.config/voxtype/config.toml"
     echo ""
-    echo "  2. Log out and back in for group changes to take effect"
+    echo "     If you can't bind keys in your desktop, the built-in hotkey can"
+    echo "     read the keyboard instead if you join the 'input' group, but that"
+    echo "     lets every program read every keystroke:"
+    echo "       sudo usermod -aG input \$USER   (then log out and back in)"
     echo ""
-    echo "  3. Download a whisper model:"
+    echo "  2. Download a whisper model:"
     echo "     voxtype setup --download"
     echo ""
-    echo "  4. Start voxtype:"
+    echo "  3. Start voxtype:"
     echo "     systemctl --user enable --now voxtype"
     echo ""
 fi
@@ -374,6 +392,19 @@ fi
   bare whisper on PATH is never used as whisper-cli
 - Meeting summaries, Ask and dictation cleanup can use Omarchy's local
   model or any OpenAI-compatible server
+- Dictation history works on atomic Fedora, where /home is a link to
+  /var/home and history recorded nothing before
+- Whisper retries with beam search when the decoder loops on a phrase,
+  and drops the repeated copy when a reduced audio context restarts
+  the transcript (#827, #898)
+- info variants recommends the baseline build on a CPU without AVX2, and
+  no longer the AVX2, Vulkan or ONNX builds that crash there
+- The /usr/bin/voxtype wrapper in the release .deb and .rpm runs
+  voxtype-baseline on a CPU without AVX2 instead of crashing in the AVX2
+  build, and source package installs warn on such a CPU
+- Release .deb and .rpm, the source .rpm and install-arch.sh lead their
+  setup steps with compositor keybindings; the input group is only the
+  fallback for the built-in hotkey
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including

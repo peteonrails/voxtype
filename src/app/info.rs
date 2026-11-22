@@ -471,16 +471,33 @@ fn print_variants_text(inv: &setup::binary::Inventory, config: &Config) {
 
     println!();
     println!("Recommended for this hardware");
+    let rec = &inv.recommendation;
     println!(
         "  Whisper:       ★ {}  — {}",
-        inv.recommendation.whisper.display(),
-        inv.recommendation.whisper_reason
+        rec.whisper.display(),
+        rec.whisper_reason
     );
-    println!(
-        "  ONNX:          ★ {}  — {}",
-        inv.recommendation.onnx.display(),
-        inv.recommendation.onnx_reason
-    );
+    // A CPU without AVX2 gets the baseline whether or not it is installed,
+    // since nothing else runs there, so say how to get it when it is missing.
+    let whisper_missing = inv
+        .variants
+        .iter()
+        .any(|s| s.variant == rec.whisper && !s.installed);
+    if rec.whisper == setup::binary::Variant::WhisperBaseline && whisper_missing {
+        use setup::install_hint::{hint, Need};
+        println!(
+            "                 To install it, {}.",
+            hint(Need::Variant(rec.whisper))
+        );
+    }
+    match rec.onnx {
+        Some(onnx) => println!(
+            "  ONNX:          ★ {}  — {}",
+            onnx.display(),
+            rec.onnx_reason
+        ),
+        None => println!("  ONNX:          none for this CPU  — {}", rec.onnx_reason),
+    }
     let [gguf, workers] = gguf_variant_note(config);
     println!("  GGUF:          {}", gguf);
     println!("                 {}", workers);
