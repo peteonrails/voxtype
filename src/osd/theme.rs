@@ -739,6 +739,11 @@ mod tests {
             .expect("rewriting theme.name beside the theme dir should trigger the callback");
     }
 
+    // Linux only: it asserts that nothing fires for a few debounce intervals
+    // after re-arming, and macOS's FSEvents can deliver this test's own setup
+    // writes late, inside that window. The watcher follows Omarchy themes,
+    // which exist only on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_watcher_that_loses_its_event_loop_is_replaced() {
         let (_tmp, current, theme_a, _b) = fake_omarchy();
