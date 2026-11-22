@@ -104,8 +104,8 @@ impl CliTranscriber {
         // Verify cli exists and is executable
         if !cli_path.exists() {
             return Err(TranscribeError::InitFailed(format!(
-                "whisper-cli not found at {:?}",
-                cli_path
+                "whisper-cli not found at {:?}. {}",
+                cli_path, MISSING_CLI_FIX
             )));
         }
 
@@ -292,21 +292,22 @@ impl CliTranscriber {
     }
 }
 
-/// Resolve whisper-cli path
-fn resolve_cli_path(configured_path: Option<&str>) -> Result<PathBuf, TranscribeError> {
-    // If explicitly configured, use that
-    if let Some(path) = configured_path {
+/// The two ways out of `[whisper] mode = "cli"` without `whisper-cli`,
+/// shown wherever that is reported: the daemon's error, `voxtype doctor`,
+/// `voxtype config set` and `voxtype configure`. Omarchy #18694 reached the
+/// cli mode by accident, and the old message only offered the install.
+pub const MISSING_CLI_FIX: &str = "Install whisper.cpp's whisper-cli (the whisper-cpp \
+     package on Arch and Omarchy), or transcribe in-process instead: \
+     voxtype config set whisper.mode local";
+
+/// Find the whisper-cli binary: `configured` when set (and only then), else
+/// PATH and the usual install locations. `None` when there is none.
+pub fn find_whisper_cli(configured: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = configured {
         let p = PathBuf::from(path);
-        if p.exists() {
-            return Ok(p);
-        }
-        return Err(TranscribeError::InitFailed(format!(
-            "Configured whisper-cli path not found: {}",
-            path
-        )));
+        return p.exists().then_some(p);
     }
 
-    // Check common locations
     let candidates = [
         // In PATH
         which::which("whisper-cli").ok(),
@@ -320,16 +321,41 @@ fn resolve_cli_path(configured_path: Option<&str>) -> Result<PathBuf, Transcribe
         // Home directory
         directories::BaseDirs::new().map(|d| d.home_dir().join(".local/bin/whisper-cli")),
     ];
+    candidates.into_iter().flatten().find(|c| c.exists())
+}
 
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
+/// What is wrong with `config` running in cli mode on this machine, or
+/// `None` when it is not in cli mode or whisper-cli is there. The fix is
+/// [`MISSING_CLI_FIX`].
+pub fn cli_mode_problem(config: &WhisperConfig) -> Option<String> {
+    if config.effective_mode() != crate::config::WhisperMode::Cli {
+        return None;
     }
+    let configured = config.whisper_cli_path.as_deref();
+    if find_whisper_cli(configured).is_some() {
+        return None;
+    }
+    Some(match configured {
+        Some(path) => {
+            format!("[whisper] mode = \"cli\" but whisper_cli_path ({path}) does not exist")
+        }
+        None => "[whisper] mode = \"cli\" runs whisper-cli for every transcription, \
+                 and whisper-cli is not installed or not on PATH"
+            .to_string(),
+    })
+}
 
-    Err(TranscribeError::InitFailed(
-        "whisper-cli not found. Install from https://github.com/ggerganov/whisper.cpp or set whisper_cli_path in config.".to_string()
-    ))
+/// Resolve whisper-cli path
+fn resolve_cli_path(configured_path: Option<&str>) -> Result<PathBuf, TranscribeError> {
+    if let Some(path) = find_whisper_cli(configured_path) {
+        return Ok(path);
+    }
+    Err(TranscribeError::InitFailed(match configured_path {
+        Some(path) => format!(
+            "Configured whisper_cli_path not found: {path}. Fix the path, or: {MISSING_CLI_FIX}"
+        ),
+        None => format!("whisper-cli not found. {MISSING_CLI_FIX}"),
+    }))
 }
 
 /// Resolve model name to file path
@@ -445,6 +471,55 @@ mod tests {
         let bare: WhisperCliOutput =
             serde_json::from_str(r#"{"transcription": [{"text": " Hi."}]}"#).unwrap();
         assert_eq!(spans(&bare.timed(3.0)), vec![("Hi.", 0.0, 3.0)]);
+    }
+
+    fn cli_config(path: Option<&str>) -> WhisperConfig {
+        WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Cli),
+            whisper_cli_path: path.map(str::to_string),
+            ..WhisperConfig::default()
+        }
+    }
+
+    /// Omarchy #18694: the error has to offer switching back to local, not
+    /// only installing whisper-cli.
+    #[test]
+    fn a_missing_configured_whisper_cli_names_both_fixes() {
+        let err = resolve_cli_path(Some("/nonexistent/voxtype-test/whisper-cli"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("whisper-cpp"), "{err}");
+        assert!(
+            err.contains("voxtype config set whisper.mode local"),
+            "{err}"
+        );
+
+        let problem = cli_mode_problem(&cli_config(Some("/nonexistent/voxtype-test/whisper-cli")))
+            .expect("missing binary in cli mode is a problem");
+        assert!(
+            problem.contains("/nonexistent/voxtype-test/whisper-cli"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn cli_mode_with_whisper_cli_present_or_other_modes_are_fine() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cli = dir.path().join("whisper-cli");
+        std::fs::write(&cli, "").unwrap();
+        assert_eq!(cli_mode_problem(&cli_config(cli.to_str())), None);
+
+        for mode in [
+            crate::config::WhisperMode::Local,
+            crate::config::WhisperMode::Remote,
+        ] {
+            let config = WhisperConfig {
+                mode: Some(mode),
+                whisper_cli_path: Some("/nonexistent/voxtype-test/whisper-cli".into()),
+                ..WhisperConfig::default()
+            };
+            assert_eq!(cli_mode_problem(&config), None, "{mode:?}");
+        }
     }
 
     /// A fake whisper-cli writes the JSON where it is told to; the meeting

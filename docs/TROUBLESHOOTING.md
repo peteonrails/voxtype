@@ -883,6 +883,32 @@ sudo pacman -S cudnn
 sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cuda-13
 ```
 
+### "whisper-cli not found": dictation records but nothing is typed
+
+**Symptom:** Recording works, but nothing is typed, and the log or a
+notification says `whisper-cli not found` (Omarchy #18694).
+
+**Cause:** `[whisper] mode = "cli"` runs a separate `whisper-cli` program
+for every transcription, and no voxtype package installs it. Most people
+never meant to choose cli mode: it is a workaround for one kind of crash
+(below), and `mode = "local"`, the default, transcribes inside voxtype with
+the same models, GPU included.
+
+**Solution:** Switch back to local mode, which needs nothing extra:
+
+```bash
+voxtype config set whisper.mode local
+systemctl --user restart voxtype
+```
+
+If you do want cli mode, install whisper.cpp's `whisper-cli` (the
+`whisper-cpp` package on Arch and Omarchy, or build it as shown below), or
+point `[whisper] whisper_cli_path` at your build.
+
+`voxtype doctor`, `voxtype setup check` and `voxtype config set` all report
+cli mode without `whisper-cli`. `voxtype configure` only offers cli mode once
+`whisper-cli` is installed, and warns when you save it without one.
+
 ### Voxtype crashes during transcription (Linux)
 
 **Cause:** On some Linux systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.
@@ -894,7 +920,7 @@ sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cud
 backend = "cli"
 ```
 
-This requires `whisper-cli` to be installed. Build it from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
+This requires `whisper-cli` to be installed: the `whisper-cpp` package on Arch, or build it from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
 
 ```bash
 git clone https://github.com/ggerganov/whisper.cpp

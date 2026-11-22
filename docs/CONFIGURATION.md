@@ -778,7 +778,7 @@ Selects the transcription backend.
 **When to use `cli` backend (Linux only):**
 The `cli` backend is a workaround for systems where the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary. This affects some systems with glibc 2.42+ (e.g., Ubuntu 25.10). If voxtype crashes during transcription, try the `cli` backend.
 
-Requires `whisper-cli` from [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
+Requires `whisper-cli` from [whisper.cpp](https://github.com/ggerganov/whisper.cpp), which no voxtype package installs (it is the `whisper-cpp` package on Arch). Without it, every transcription fails; `voxtype doctor` reports this. Use `local` unless you hit the crash above. See [Troubleshooting](TROUBLESHOOTING.md#whisper-cli-not-found-dictation-records-but-nothing-is-typed).
 
 **Examples:**
 ```toml

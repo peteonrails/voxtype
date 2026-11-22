@@ -300,6 +300,24 @@ pub fn vad_check(config: &Config, models_dir: &Path) -> Option<Check> {
     })
 }
 
+/// `[whisper] mode = "cli"` needs the whisper-cli binary, which no voxtype
+/// package installs. `problem` is [`crate::transcribe::cli::cli_mode_problem`].
+///
+/// The id sits under `transcription.` so the daemon's startup summary leaves
+/// it to the model-load notice, which says the same thing (Omarchy #18694).
+pub fn whisper_cli_check(config: &Config, problem: Option<String>) -> Option<Check> {
+    const ID: &str = "transcription.whisper_cli";
+    if config.engine != TranscriptionEngine::Whisper
+        || config.whisper.effective_mode() != WhisperMode::Cli
+    {
+        return None;
+    }
+    Some(match problem {
+        None => Check::ok(ID, "Whisper cli mode: whisper-cli found"),
+        Some(problem) => Check::error(ID, problem, crate::transcribe::cli::MISSING_CLI_FIX),
+    })
+}
+
 /// LARD disfluency cleanup, when `text.lard_disfluency` is on.
 ///
 /// The stage fails open: with no model, or a language that is not explicit
@@ -910,6 +928,10 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     checks.extend(secondary_model_check(config, &models_dir));
     checks.extend(vad_check(config, &models_dir));
     checks.extend(lard_check(config, super::lard::problem(config).as_ref()));
+    checks.extend(whisper_cli_check(
+        config,
+        crate::transcribe::cli::cli_mode_problem(&config.whisper),
+    ));
 
     if scope == Scope::Full {
         // Probed in a child process that is killed if the sound server hangs.
@@ -1481,6 +1503,34 @@ mod tests {
             marker_action(Some("text.lard_disfluency"), &notifiable_errors(&fixed)),
             MarkerAction::Clear
         );
+    }
+
+    /// Omarchy #18694: cli mode without whisper-cli must show up in doctor
+    /// and `setup check` with both fixes, and only in cli mode.
+    #[test]
+    fn whisper_cli_check_reports_cli_mode_without_the_binary() {
+        let mut config = Config::default();
+        assert!(whisper_cli_check(&config, Some("x".into())).is_none());
+
+        config.whisper.mode = Some(WhisperMode::Cli);
+        let check = whisper_cli_check(&config, Some("whisper-cli missing".into())).unwrap();
+        assert_eq!(check.severity, Severity::Error);
+        assert_eq!(heading(check.id), "Transcription");
+        let fix = check.fix.unwrap();
+        assert!(fix.contains("whisper-cpp"), "{fix}");
+        assert!(
+            fix.contains("voxtype config set whisper.mode local"),
+            "{fix}"
+        );
+        // The model-load notice reports it at startup, so the grouped
+        // startup notification must not repeat it.
+        assert!(notified_elsewhere(check.id));
+
+        let ok = whisper_cli_check(&config, None).unwrap();
+        assert_eq!(ok.severity, Severity::Ok);
+
+        config.engine = TranscriptionEngine::Parakeet;
+        assert!(whisper_cli_check(&config, Some("x".into())).is_none());
     }
 
     #[test]
