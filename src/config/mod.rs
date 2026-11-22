@@ -58,7 +58,7 @@ pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
 pub(crate) use root::EngineLanguage;
 pub use root::{ActiveGguf, Config, OmarchyConfig, TextLanguageSource, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
-pub use streaming::StreamingConfig;
+pub use streaming::{StreamingConfig, StreamingRecoveryConfig};
 pub use text::TextConfig;
 pub use vad::{VadBackend, VadConfig};
 pub use whisper::{WhisperConfig, WhisperMode};

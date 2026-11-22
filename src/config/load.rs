@@ -131,6 +131,21 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(value) = std::env::var("VOXTYPE_OMARCHY_LINK_SETTINGS_PLUGIN") {
         config.omarchy.link_settings_plugin = parse_bool_env(&value);
     }
+    if let Ok(value) = std::env::var("VOXTYPE_STREAMING_RECOVERY") {
+        config
+            .streaming_recovery
+            .get_or_insert_with(Default::default)
+            .enabled = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_STREAMING_STOP_TIMEOUT_SECS") {
+        if let Ok(timeout_secs) = value.parse::<u64>() {
+            // Same range as --streaming-stop-timeout-secs and `config set`.
+            config
+                .streaming_recovery
+                .get_or_insert_with(Default::default)
+                .stop_timeout_secs = timeout_secs.clamp(1, 120);
+        }
+    }
 
     // Dictation history
     if let Ok(value) = std::env::var("VOXTYPE_HISTORY_ENABLED") {
