@@ -277,7 +277,12 @@ impl<'a> Host<'a> {
 /// pick resolved to the CUDA major the host runs (13 when unknown, as
 /// `setup onnx --enable` assumes).
 fn system_onnx_pick() -> Variant {
-    let pick = binary::recommend(&binary::detect_cpu(), &binary::detect_gpus()).onnx;
+    // No ONNX build runs on a CPU without AVX2, so there is no right answer
+    // there; keep naming the AVX2 build as before. `info variants` and
+    // `setup onnx --enable` both tell that user why it will not run.
+    let pick = binary::recommend(&binary::detect_cpu(), &binary::detect_gpus(), false)
+        .onnx
+        .unwrap_or(Variant::OnnxAvx2);
     if pick == Variant::OnnxCuda {
         match super::parakeet::detect_cuda_runtime_major() {
             Some(12) => Variant::OnnxCuda12,

@@ -602,15 +602,19 @@ pub struct Inventory {
 pub struct Recommendation {
     pub whisper: Variant,
     pub whisper_reason: &'static str,
-    pub onnx: Variant,
+    /// `None` when no ONNX build runs on this CPU (no AVX2). The baseline
+    /// build still serves Parakeet and Cohere through GGUF there.
+    pub onnx: Option<Variant>,
     pub onnx_reason: &'static str,
     /// Single overall pick when the user has no engine preference. Defaults to
     /// the Whisper recommendation since voxtype's default engine is Whisper.
     pub primary: Variant,
 }
 
-pub fn recommend(cpu: &Cpu, gpus: &Gpus) -> Recommendation {
-    let whisper = recommend_whisper(cpu, gpus);
+/// `baseline_installed` only changes the wording: a CPU without AVX2 is
+/// pointed at the baseline build either way, since nothing else runs there.
+pub fn recommend(cpu: &Cpu, gpus: &Gpus, baseline_installed: bool) -> Recommendation {
+    let whisper = recommend_whisper(cpu, gpus, baseline_installed);
     let onnx = recommend_onnx(cpu, gpus);
     Recommendation {
         whisper: whisper.0,
@@ -621,38 +625,89 @@ pub fn recommend(cpu: &Cpu, gpus: &Gpus) -> Recommendation {
     }
 }
 
-fn recommend_whisper(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
-    if gpus.nvidia || gpus.amd {
+/// Packaged x86_64 builds other than the baseline are compiled for Haswell,
+/// so a CPU without AVX2 can run none of them.
+fn lacks_avx2(cpu: &Cpu) -> bool {
+    cfg!(target_arch = "x86_64") && !cpu.avx2
+}
+
+/// Asks the same questions `setup gpu` does: [`super::vulkan_check::blocker`]
+/// for whether Vulkan would start, and [`super::gpu::pick_cpu_backend`] for
+/// the CPU build, so the recommendation never names a build those commands
+/// refuse or would not pick.
+fn recommend_whisper(cpu: &Cpu, gpus: &Gpus, baseline_installed: bool) -> (Variant, &'static str) {
+    use super::gpu::{pick_cpu_backend, Backend};
+    use super::vulkan_check::{blocker, Storage16, VulkanFacts};
+
+    let has_gpu = gpus.nvidia || gpus.amd;
+    // 16-bit storage needs vulkaninfo, which `info variants` does not run;
+    // Unknown never blocks, so only the AVX2 floor can rule Vulkan out here.
+    let vulkan_runs = blocker(&VulkanFacts {
+        binary_needs_avx2: cfg!(target_arch = "x86_64"),
+        cpu_has_avx2: cpu.avx2,
+        storage16: Storage16::Unknown,
+    })
+    .is_none();
+    if has_gpu && vulkan_runs {
         // Vulkan covers all GPU vendors and is the most reliable Whisper GPU path.
         return (
             Variant::WhisperVulkan,
             "GPU detected; Vulkan covers NVIDIA, AMD, and Intel in one binary.",
         );
     }
-    if cpu.avx512 {
-        return (
+    // Every build counts as installed here: a machine without AVX2 is sent to
+    // the baseline even when it is missing, with the reason saying so.
+    match pick_cpu_backend(cpu.avx2, cpu.avx512, |_| true) {
+        Backend::Baseline => (
+            Variant::WhisperBaseline,
+            match (has_gpu, baseline_installed) {
+                (false, true) => {
+                    "No AVX2 on this CPU; the baseline build is the only one that runs here."
+                }
+                (true, true) => {
+                    "No AVX2 on this CPU; the baseline build is the only one that runs here. \
+                     The Vulkan build needs AVX2 too, so the GPU cannot be used."
+                }
+                (false, false) => {
+                    "No AVX2 on this CPU; only the baseline build runs here, and it is not \
+                     installed."
+                }
+                (true, false) => {
+                    "No AVX2 on this CPU; only the baseline build runs here, and it is not \
+                     installed. The Vulkan build needs AVX2 too, so the GPU cannot be used."
+                }
+            },
+        ),
+        Backend::Avx512 => (
             Variant::WhisperAvx512,
             "AVX-512 CPU, no GPU; this is the fastest CPU-only Whisper build.",
-        );
+        ),
+        _ => (
+            Variant::WhisperAvx2,
+            "AVX2-only CPU, no GPU; the safe default for Whisper.",
+        ),
     }
-    (
-        Variant::WhisperAvx2,
-        "AVX2-only CPU, no GPU; the safe default for Whisper.",
-    )
 }
 
-fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
+fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Option<Variant>, &'static str) {
+    if lacks_avx2(cpu) {
+        return (
+            None,
+            "No ONNX build runs without AVX2. The baseline build runs Parakeet and Cohere \
+             GGUF models; the other ONNX engines need a CPU with AVX2.",
+        );
+    }
     // CUDA/MIGraphX bundles ship with AVX-512 ONNX Runtime, so the CPU has to
     // support it before we can recommend a GPU variant.
     if gpus.nvidia && cpu.avx512 {
         return (
-            Variant::OnnxCuda,
+            Some(Variant::OnnxCuda),
             "NVIDIA GPU + AVX-512 CPU; CUDA execution provider is the fastest Parakeet path.",
         );
     }
     if gpus.amd && cpu.avx512 {
         return (
-            Variant::OnnxAvx512,
+            Some(Variant::OnnxAvx512),
             "AMD GPU detected. The MIGraphX execution provider is new and may not register on \
              every driver version; ONNX (AVX-512) on CPU is the safe default. Try ONNX (MIGraphX) \
              once you've verified it works on your card.",
@@ -660,12 +715,12 @@ fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
     }
     if cpu.avx512 {
         return (
-            Variant::OnnxAvx512,
+            Some(Variant::OnnxAvx512),
             "AVX-512 CPU, no compatible GPU; this is the fastest CPU-only ONNX build.",
         );
     }
     (
-        Variant::OnnxAvx2,
+        Some(Variant::OnnxAvx2),
         "AVX2-only CPU; ONNX (AVX2) keeps Parakeet/Moonshine/etc. available without GPU.",
     )
 }
@@ -954,7 +1009,13 @@ pub fn inventory() -> Inventory {
         None
     };
 
-    let recommendation = recommend(&cpu, &gpus);
+    let recommendation = recommend(
+        &cpu,
+        &gpus,
+        Path::new(LIB_DIR)
+            .join(Variant::WhisperBaseline.binary_name())
+            .exists(),
+    );
 
     Inventory {
         install_kind,
@@ -1193,9 +1254,10 @@ mod tests {
                 nvidia: false,
                 amd: false,
             },
+            true,
         );
         assert_eq!(r.whisper, Variant::WhisperAvx2);
-        assert_eq!(r.onnx, Variant::OnnxAvx2);
+        assert_eq!(r.onnx, Some(Variant::OnnxAvx2));
         assert_eq!(r.primary, Variant::WhisperAvx2);
 
         // No GPU, AVX-512 → Whisper AVX-512 + ONNX AVX-512.
@@ -1208,9 +1270,10 @@ mod tests {
                 nvidia: false,
                 amd: false,
             },
+            true,
         );
         assert_eq!(r.whisper, Variant::WhisperAvx512);
-        assert_eq!(r.onnx, Variant::OnnxAvx512);
+        assert_eq!(r.onnx, Some(Variant::OnnxAvx512));
 
         // NVIDIA + AVX-512 → Whisper Vulkan + ONNX CUDA.
         let r = recommend(
@@ -1222,9 +1285,10 @@ mod tests {
                 nvidia: true,
                 amd: false,
             },
+            true,
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
-        assert_eq!(r.onnx, Variant::OnnxCuda);
+        assert_eq!(r.onnx, Some(Variant::OnnxCuda));
 
         // NVIDIA but no AVX-512 → CUDA bundle won't load, fall back to ONNX AVX2.
         let r = recommend(
@@ -1236,9 +1300,10 @@ mod tests {
                 nvidia: true,
                 amd: false,
             },
+            true,
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
-        assert_eq!(r.onnx, Variant::OnnxAvx2);
+        assert_eq!(r.onnx, Some(Variant::OnnxAvx2));
 
         // AMD + AVX-512 → Vulkan for Whisper, AVX-512 (not MIGraphX) for ONNX.
         let r = recommend(
@@ -1250,9 +1315,97 @@ mod tests {
                 nvidia: false,
                 amd: true,
             },
+            true,
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
-        assert_eq!(r.onnx, Variant::OnnxAvx512);
+        assert_eq!(r.onnx, Some(Variant::OnnxAvx512));
+    }
+
+    fn no_avx2() -> Cpu {
+        Cpu {
+            avx2: false,
+            avx512: false,
+        }
+    }
+
+    /// Ivy Bridge and older: `info variants` used to recommend the AVX2,
+    /// ONNX (AVX2) and, with a GPU, Vulkan builds, all of which SIGILL there.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn no_avx2_recommends_baseline_without_a_gpu() {
+        let none = Gpus {
+            nvidia: false,
+            amd: false,
+        };
+        let r = recommend(&no_avx2(), &none, true);
+        assert_eq!(r.whisper, Variant::WhisperBaseline);
+        assert_eq!(r.primary, Variant::WhisperBaseline);
+        assert_eq!(r.onnx, None);
+        assert!(!r.whisper_reason.contains("not installed"));
+        assert!(r.onnx_reason.contains("AVX2"), "{}", r.onnx_reason);
+
+        // Not installed: still the baseline, and the reason says so.
+        let r = recommend(&no_avx2(), &none, false);
+        assert_eq!(r.whisper, Variant::WhisperBaseline);
+        assert_eq!(r.onnx, None);
+        assert!(
+            r.whisper_reason.contains("not installed"),
+            "{}",
+            r.whisper_reason
+        );
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn no_avx2_never_recommends_vulkan_or_onnx_with_a_gpu() {
+        for gpus in [
+            Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            Gpus {
+                nvidia: false,
+                amd: true,
+            },
+        ] {
+            for baseline_installed in [true, false] {
+                let r = recommend(&no_avx2(), &gpus, baseline_installed);
+                assert_eq!(r.whisper, Variant::WhisperBaseline, "{gpus:?}");
+                assert_eq!(r.onnx, None, "{gpus:?}");
+                assert!(
+                    r.whisper_reason.contains("Vulkan build needs AVX2"),
+                    "{}",
+                    r.whisper_reason
+                );
+                assert_eq!(
+                    r.whisper_reason.contains("not installed"),
+                    !baseline_installed,
+                    "{}",
+                    r.whisper_reason
+                );
+                // Whatever is recommended must be a build that runs here.
+                assert!(variant_runs_on_cpu(r.whisper, &no_avx2()));
+                assert_eq!(cpu_floor_blocker(r.whisper, &no_avx2()), None);
+            }
+        }
+    }
+
+    /// The answers for AVX2 machines do not depend on the baseline being
+    /// installed.
+    #[test]
+    fn avx2_answers_ignore_baseline_presence() {
+        for avx512 in [false, true] {
+            for nvidia in [false, true] {
+                let cpu = Cpu { avx2: true, avx512 };
+                let gpus = Gpus { nvidia, amd: false };
+                let a = recommend(&cpu, &gpus, true);
+                let b = recommend(&cpu, &gpus, false);
+                assert_eq!(a.whisper, b.whisper);
+                assert_eq!(a.onnx, b.onnx);
+                assert_ne!(a.whisper, Variant::WhisperBaseline);
+                assert!(a.onnx.is_some());
+            }
+        }
     }
 
     #[test]
