@@ -109,7 +109,7 @@ fn history_view_json_is_noninteractive_and_uses_the_same_authoritative_entries()
     assert_eq!(value["enabled"], true);
 }
 
-/// A scratch PATH holding a fake `wl-copy` and `which`, plus fake typing
+/// A scratch PATH holding a fake `wl-copy` (`pbcopy` on macOS) and `which`, plus fake typing
 /// tools, all of which log their arguments and stdin instead of touching
 /// the real clipboard or keyboard.
 struct FakeTools {
@@ -139,7 +139,7 @@ impl FakeTools {
             .find(|path| path.is_file())
             .unwrap_or_else(|| std::path::PathBuf::from("/bin/cat"));
         for tool in [
-            "wl-copy", "wtype", "dotool", "ydotool", "eitype", "xclip", "xsel",
+            "wl-copy", "pbcopy", "wtype", "dotool", "ydotool", "eitype", "xclip", "xsel",
         ] {
             write(
                 tool,
@@ -199,8 +199,14 @@ fn copy_runs_the_clipboard_command_with_the_entry_text() {
     );
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["copied"], f.id);
+    // macOS copies with pbcopy, everything else with wl-copy here.
+    let clipboard = if cfg!(target_os = "macos") {
+        "pbcopy"
+    } else {
+        "wl-copy"
+    };
     assert!(
-        tools.log().contains("wl-copy") && tools.log().contains("<Synthetic invoice.>"),
+        tools.log().contains(clipboard) && tools.log().contains("<Synthetic invoice.>"),
         "{}",
         tools.log()
     );
