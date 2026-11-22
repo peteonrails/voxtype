@@ -1264,6 +1264,9 @@ pub struct Daemon {
     /// File target selected when the streaming session began. Kept across the
     /// recovery handoff because the runtime override is consumed at start.
     streaming_recovery_file_output_path: Option<PathBuf>,
+    /// The output chain a stop disowned, kept to type what the backend
+    /// sends after the stop once the session ends (see `end_streaming`).
+    disowned_streaming_chain: Option<Vec<Box<dyn TextOutput>>>,
 
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
@@ -1596,6 +1599,7 @@ impl Daemon {
             streaming_recovery_audio: Vec::new(),
             streaming_stop_deadline: None,
             streaming_recovery_file_output_path: None,
+            disowned_streaming_chain: None,
 
             osd_supervisor_task: None,
             #[cfg(target_os = "linux")]
@@ -2343,6 +2347,7 @@ impl Daemon {
         self.streaming_recovery_audio.clear();
         self.streaming_stop_deadline = None;
         self.streaming_recovery_file_output_path = None;
+        self.disowned_streaming_chain = None;
 
         let (capture, samples_rx) = match self.start_streaming_capture(track_silence).await {
             Ok(v) => v,
@@ -2624,10 +2629,11 @@ impl Daemon {
     }
 
     /// Stop the microphone for a streaming session and arm the stop
-    /// watchdog. With `disown_output`, drop the typing surface so anything
-    /// the backend still sends lands in the session silently instead of
-    /// typing into whatever window has focus by then; `end_streaming`
-    /// delivers it through the batch output path if nothing was typed.
+    /// watchdog. With `disown_output`, take the typing surface away so
+    /// anything the backend still sends lands in the session silently
+    /// instead of typing into whatever window has focus by then.
+    /// `end_streaming` delivers it once, when the session ends: through the
+    /// batch output path if nothing was typed, else after the typed text.
     async fn request_streaming_stop(
         &mut self,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
@@ -2636,8 +2642,12 @@ impl Daemon {
     ) {
         self.stop_streaming_capture(audio_capture).await;
         self.arm_streaming_stop_watchdog();
+        // A repeated stop while the backend drains has no chain left to
+        // take; it must not drop the one the first stop kept.
         if disown_output {
-            *streaming_chain = None;
+            if let Some(chain) = streaming_chain.take() {
+                self.disowned_streaming_chain = Some(chain);
+            }
         }
     }
 
@@ -2666,10 +2676,12 @@ impl Daemon {
     /// task; it is cancelled and aborted, so a backend stuck on a dead
     /// socket cannot hold the daemon.
     ///
-    /// A session that typed text finishes as it always has. One that typed
-    /// nothing is not thrown away: after a failure its retained audio goes
-    /// through batch transcription, and text that arrived after the stop
-    /// disowned the typing surface goes through the batch output path.
+    /// A session that typed text types what arrived after a stop disowned
+    /// the typing surface, once, after the typed text (see
+    /// `StreamingSession::deliver_held`). One that typed nothing is not
+    /// thrown away: after a failure its retained audio goes through batch
+    /// transcription, and text that arrived after the stop goes through
+    /// the batch output path.
     async fn end_streaming(
         &mut self,
         state: &mut State,
@@ -2687,6 +2699,7 @@ impl Daemon {
         self.stop_streaming_drain_pump();
         self.streaming_stop_deadline = None;
         let samples = std::mem::take(&mut self.streaming_recovery_audio);
+        let disowned_chain = self.disowned_streaming_chain.take();
 
         // Fold any leftover `partial` in first: the sliding-window engine
         // can confirm a whole short utterance as a single Partial and leave
@@ -2733,6 +2746,36 @@ impl Daemon {
                 *streaming_chain = None;
                 self.deliver_buffered_streaming_text(state, buffered);
                 return;
+            }
+        }
+        // Text the backend sent after a stop disowned the typing surface,
+        // following text that was typed: type it now, once, after that
+        // text. The stop watchdog bounds when this runs, as it bounds the
+        // batch delivery above. Deepgram sends the segment spoken last only
+        // in answer to the stop, so without this the end of a dictation
+        // stopped by `voxtype record stop` would never be typed.
+        if file_output_path.is_none() {
+            if let (Some(chain), Some(session)) =
+                (disowned_chain.as_deref(), streaming_session.as_mut())
+            {
+                let profile = self.recording_profile();
+                let vocabulary = profile
+                    .as_ref()
+                    .and_then(|name| self.profile_vocabularies.get(name));
+                let output = &self.config.output;
+                if let Err(e) = session
+                    .deliver_held(
+                        chain,
+                        Some((&self.text_processor, vocabulary)),
+                        output.pre_output_command.as_deref(),
+                        output.post_output_command.as_deref(),
+                        output.wait_for_modifier_release,
+                        Duration::from_millis(output.modifier_release_timeout_ms),
+                    )
+                    .await
+                {
+                    tracing::error!("Streaming held text delivery failed: {}", e);
+                }
             }
         }
         if let Some(Some(error)) = failure {
@@ -3165,6 +3208,7 @@ impl Daemon {
         self.streaming_recovery_audio.clear();
         self.streaming_stop_deadline = None;
         self.streaming_recovery_file_output_path = None;
+        self.disowned_streaming_chain = None;
 
         self.restore_recording_media();
         if streaming_chain.is_some() {
@@ -10651,6 +10695,62 @@ while True:
             )
             .await;
 
+        assert!(daemon.transcription_task.is_none());
+        assert!(state.is_idle());
+    }
+
+    /// A stop that disowns the typing surface holds what the backend sends
+    /// after it. When earlier text was typed, the held tail must still be
+    /// typed after it, once, when the session ends. Deepgram sends the
+    /// segment spoken last only in answer to the stop, so `voxtype record
+    /// stop` hits this on every dictation with a pause in it.
+    #[tokio::test]
+    async fn text_held_after_a_disowning_stop_follows_the_typed_text() {
+        let dir = TempDir::new().unwrap();
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "unused",
+            batch_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let mut daemon = recovery_test_daemon(fake, &dir.path().join("out.txt"));
+        let mut state = non_file_streaming_state();
+        let typed = Arc::new(std::sync::Mutex::new(None));
+        let mut chain: Option<Vec<Box<dyn TextOutput>>> = Some(vec![Box::new(RecordingOutput {
+            got: typed.clone(),
+            succeed: true,
+        })]);
+        let mut session = Some(StreamingSession::new());
+        session
+            .as_mut()
+            .unwrap()
+            .commit_segment(chain.as_ref().unwrap(), "Hello world.", None, None, None)
+            .await
+            .unwrap();
+        // A second stop while the backend drains (record stop pressed
+        // twice, or silence auto-stop then record stop) must not lose it.
+        for _ in 0..2 {
+            daemon
+                .request_streaming_stop(&mut None, &mut chain, true)
+                .await;
+        }
+        assert!(chain.is_none());
+        session
+            .as_mut()
+            .unwrap()
+            .commit_segment_silent(" How are you?");
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut None,
+                &mut None,
+                &mut session,
+                &mut chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+
+        assert_eq!(typed.lock().unwrap().as_deref(), Some(" How are you?"));
         assert!(daemon.transcription_task.is_none());
         assert!(state.is_idle());
     }
