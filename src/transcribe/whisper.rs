@@ -13,7 +13,9 @@ use crate::error::TranscribeError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
@@ -40,6 +42,9 @@ pub struct WhisperTranscriber {
     runtime: RuntimeMetadata,
     cpu_context: bool,
     decoded: AtomicBool,
+    /// Kept between transcriptions, since creating one allocates the KV
+    /// caches and compute buffers again.
+    state: Mutex<Option<WhisperState>>,
 }
 
 impl WhisperTranscriber {
@@ -121,6 +126,7 @@ impl WhisperTranscriber {
             runtime,
             cpu_context,
             decoded: AtomicBool::new(false),
+            state: Mutex::new(None),
         })
     }
 
@@ -216,10 +222,6 @@ impl WhisperTranscriber {
         retry: bool,
         timed: bool,
     ) -> Result<Vec<RawSegment>, TranscribeError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
         let vocabulary = self
             .active_vocabulary
             .lock()
@@ -234,23 +236,40 @@ impl WhisperTranscriber {
             prompt.as_deref(),
         );
 
-        state
-            .full(params, samples)
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-        self.decoded.store(true, Ordering::Relaxed);
+        self.with_state(|state| {
+            state
+                .full(params, samples)
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+            self.decoded.store(true, Ordering::Relaxed);
 
-        let mut segments = Vec::new();
-        for segment in state.as_iter() {
-            segments.push(RawSegment {
-                start_cs: segment.start_timestamp(),
-                end_cs: segment.end_timestamp(),
-                text: segment
-                    .to_str()
-                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
-                    .to_string(),
-            });
-        }
-        Ok(segments)
+            let mut segments = Vec::new();
+            for segment in state.as_iter() {
+                segments.push(RawSegment {
+                    start_cs: segment.start_timestamp(),
+                    end_cs: segment.end_timestamp(),
+                    text: segment
+                        .to_str()
+                        .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
+                        .to_string(),
+                });
+            }
+            Ok(segments)
+        })
+    }
+
+    fn with_state<R>(
+        &self,
+        f: impl FnOnce(&mut WhisperState) -> Result<R, TranscribeError>,
+    ) -> Result<R, TranscribeError> {
+        with_cached(
+            &self.state,
+            || {
+                self.ctx
+                    .create_state()
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))
+            },
+            f,
+        )
     }
 
     /// The language to decode in, per the configured mode, recorded for
@@ -261,18 +280,12 @@ impl WhisperTranscriber {
             tracing::debug!("Using unconstrained language auto-detection");
             None
         } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only.
-            // The detection state is scoped to this branch so it is freed
-            // before run_full() allocates its own. Each state carries its own
-            // GPU compute buffers, so creating one up front for every request
-            // doubled per-request GPU allocations for no use (#814).
+            // Constrained auto-detection: detect from allowed set only
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
-            let mut state = self
-                .ctx
-                .create_state()
-                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+            let lang = self
+                .with_state(|state| self.select_language_from_allowed(state, samples, &allowed))?;
+            Some(lang)
         } else {
             // Single language: use it directly
             let lang = self.language.primary().to_string();
@@ -353,6 +366,20 @@ impl WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    /// Creates the Whisper state while the user speaks. A state in use
+    /// already exists, so a busy lock is left alone.
+    fn prepare(&self) {
+        let Ok(mut state) = self.state.try_lock() else {
+            return;
+        };
+        if state.is_none() {
+            match self.ctx.create_state() {
+                Ok(created) => *state = Some(created),
+                Err(e) => tracing::warn!("Failed to create the Whisper state: {}", e),
+            }
+        }
+    }
+
     fn set_vocabulary(&self, terms: &[String]) {
         if let Ok(mut active) = self.active_vocabulary.lock() {
             active.clear();
@@ -496,6 +523,28 @@ pub(super) fn timed_segments(raw: &[RawSegment], duration_secs: f32) -> Vec<Time
             })
         })
         .collect()
+}
+
+/// Runs `f` on the value in `slot`, creating it first if the slot is empty.
+/// A caller that finds the slot in use, as parallel eager chunks do, gets a
+/// fresh value instead of waiting. The value is dropped if `f` fails, since a
+/// failed run can leave it half-updated.
+fn with_cached<T, R>(
+    slot: &Mutex<Option<T>>,
+    create: impl FnOnce() -> Result<T, TranscribeError>,
+    f: impl FnOnce(&mut T) -> Result<R, TranscribeError>,
+) -> Result<R, TranscribeError> {
+    let Ok(mut cached) = slot.try_lock() else {
+        return f(&mut create()?);
+    };
+    if cached.is_none() {
+        *cached = Some(create()?);
+    }
+    let result = f(cached.as_mut().unwrap());
+    if result.is_err() {
+        *cached = None;
+    }
+    result
 }
 
 fn is_degenerate_transcript(text: &str) -> bool {
@@ -792,6 +841,125 @@ mod tests {
             end_cs,
             text: text.to_string(),
         }
+    }
+
+    /// What keeping the state saves, measured on a real model. Ignored by
+    /// default because it needs one:
+    ///
+    /// VOXTYPE_BENCH_MODEL=/path/ggml-base.en.bin VOXTYPE_BENCH_WAV=/path/clip.wav \
+    ///   cargo test --release --lib whisper_state_reuse_timing -- --ignored --nocapture
+    ///
+    /// Each "fresh" run drops the cached state first, which is what every
+    /// transcription paid before the state was kept.
+    #[test]
+    #[ignore]
+    fn whisper_state_reuse_timing() {
+        let model = std::env::var("VOXTYPE_BENCH_MODEL").expect("VOXTYPE_BENCH_MODEL");
+        let wav = std::env::var("VOXTYPE_BENCH_WAV").expect("VOXTYPE_BENCH_WAV");
+        let runs: usize = std::env::var("VOXTYPE_BENCH_RUNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(5);
+        let reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.sample_rate, spec.channels),
+            (16_000, 1),
+            "16 kHz mono WAV"
+        );
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => {
+                let max = (1_i64 << (spec.bits_per_sample - 1)) as f32;
+                reader
+                    .into_samples::<i32>()
+                    .map(|s| s.unwrap() as f32 / max)
+                    .collect()
+            }
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+            }
+        };
+        let config = WhisperConfig {
+            model,
+            ..Default::default()
+        };
+        let t = WhisperTranscriber::new(&config).unwrap();
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let time = |f: &dyn Fn()| {
+            let start = std::time::Instant::now();
+            f();
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        // Warm up once so file caches and the first allocation are paid.
+        t.transcribe(&samples).unwrap();
+        let mut fresh = Vec::new();
+        let mut reused = Vec::new();
+        let mut create = Vec::new();
+        for _ in 0..runs {
+            *t.state.lock().unwrap() = None;
+            fresh.push(time(&|| {
+                t.transcribe(&samples).unwrap();
+            }));
+            reused.push(time(&|| {
+                t.transcribe(&samples).unwrap();
+            }));
+            *t.state.lock().unwrap() = None;
+            create.push(time(&|| t.prepare()));
+        }
+        eprintln!(
+            "whisper state timing ({} runs, {:.2}s clip): fresh state median {:.1} ms, \
+             reused state median {:.1} ms, state creation median {:.1} ms",
+            runs,
+            samples.len() as f32 / 16_000.0,
+            median(fresh),
+            median(reused),
+            median(create),
+        );
+    }
+
+    #[test]
+    fn with_cached_reuses_the_value() {
+        let slot = Mutex::new(None);
+        let mut created = 0;
+        for _ in 0..3 {
+            with_cached(
+                &slot,
+                || {
+                    created += 1;
+                    Ok(0)
+                },
+                |n: &mut i32| {
+                    *n += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(created, 1);
+        assert_eq!(*slot.lock().unwrap(), Some(3));
+    }
+
+    #[test]
+    fn with_cached_drops_the_value_after_an_error() {
+        let slot = Mutex::new(Some(1));
+        let result: Result<(), _> = with_cached(
+            &slot,
+            || Ok(0),
+            |_| Err(TranscribeError::InferenceFailed("failed".into())),
+        );
+        assert!(result.is_err());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn with_cached_uses_a_fresh_value_while_the_slot_is_busy() {
+        let slot = Mutex::new(Some(1));
+        let _busy = slot.lock().unwrap();
+        let value = with_cached(&slot, || Ok(7), |n: &mut i32| Ok(*n)).unwrap();
+        assert_eq!(value, 7);
     }
 
     #[test]
