@@ -1528,6 +1528,15 @@ impl Daemon {
                  to use it."
             );
         }
+        if config.on_demand_loading() && config.streaming_requested() {
+            // Streaming needs the transcriber loaded at startup:
+            // try_start_streaming only uses the preloaded one.
+            tracing::warn!(
+                "Streaming is enabled, but on_demand_loading = true loads the model \
+                 for each recording, so every dictation is transcribed after it ends. \
+                 Set on_demand_loading = false for the active engine to stream."
+            );
+        }
 
         // Initialize post-processor if configured
         let post_processor = config.output.active_post_process().map(|cfg| {
@@ -2313,8 +2322,8 @@ impl Daemon {
     ///
     /// Returns `true` and populates the streaming locals on success. Returns
     /// `false` (and does nothing) when:
-    /// - the preloaded transcriber is `None` (e.g., on_demand_loading without
-    ///   a successful background load yet);
+    /// - the preloaded transcriber is `None` (always with on_demand_loading:
+    ///   nothing is preloaded, see `Config::streaming_enabled`);
     /// - the preloaded transcriber's `as_streaming()` returns `None`;
     /// - audio capture or `start_stream` fail.
     ///
@@ -6613,12 +6622,6 @@ impl Daemon {
                     // Streaming needs the transcriber in `transcriber_preloaded`
                     // so try_start_streaming can find it. The factory returns
                     // the sliding-window wrapper when [whisper] streaming = true.
-                    if self.config.whisper.on_demand_loading {
-                        tracing::warn!(
-                            "[whisper] streaming requires on_demand_loading = false; \
-                             streaming will be unavailable"
-                        );
-                    }
                     self.transcriber_preloaded = Some(Arc::from(
                         crate::transcribe::create_transcriber(&self.config)?,
                     ));
@@ -8487,6 +8490,34 @@ while True:
         let dir = Config::runtime_dir();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("profile_override"), name).unwrap();
+    }
+
+    /// Streaming needs the model loaded at startup. With on-demand loading
+    /// the daemon records every dictation in batch, and says so at startup.
+    #[tokio::test]
+    async fn streaming_with_on_demand_loading_is_reported_at_startup() {
+        if !own_scratch_process(
+            "daemon::tests::streaming_with_on_demand_loading_is_reported_at_startup",
+        ) {
+            return;
+        }
+        for (on_demand, warned) in [(true, true), (false, false)] {
+            let log = crate::test_support::LogCapture::at(tracing::Level::WARN);
+            let mut config = Config {
+                state_file: None,
+                ..Default::default()
+            };
+            config.whisper.streaming = true;
+            config.whisper.on_demand_loading = on_demand;
+            drop(Daemon::new(config, None));
+            assert_eq!(
+                log.text()
+                    .contains("on_demand_loading = true loads the model"),
+                warned,
+                "on_demand_loading = {on_demand}: {}",
+                log.text()
+            );
+        }
     }
 
     /// A recording's `--profile` reaches every stage of the dictation, not

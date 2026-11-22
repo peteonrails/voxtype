@@ -1204,6 +1204,8 @@ No longer used. Earlier versions overlapped adjacent chunks by this much and rem
 
 Enables live streaming transcription via the sliding-window engine: text lands at the cursor incrementally as you speak instead of only after the hotkey is released. Only applies to `mode = "local"`.
 
+Streaming needs `on_demand_loading = false` for the active engine; with on-demand loading every dictation is transcribed after it ends, and the daemon says so at startup.
+
 Tuning (re-transcription interval, buffer size, etc.) lives in the shared `[streaming]` section below, since `[openvino] streaming` wraps the same engine. `[whisper]` also still accepts its own `streaming_interval_secs` / `streaming_max_buffer_secs` / `streaming_min_speech_rms` / `streaming_min_audio_secs` / `streaming_partial_min_words` / `streaming_type_partials` / `streaming_revision_mode` fields for backward compatibility — they're used only when config.toml has no `[streaming]` section.
 
 **Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled.
@@ -1700,6 +1702,10 @@ instead of waiting for hotkey release. Uses the parakeet-rs cache-aware
 streaming pipeline and a TDT v3 family model with `tokenizer.model` — a
 different mechanism from the shared `[streaming]` section used by
 `[whisper] streaming` and `[openvino] streaming`, and not configured by it.
+
+Streaming needs `on_demand_loading = false` for the active engine; with
+on-demand loading every dictation is transcribed after it ends, and the
+daemon says so at startup.
 
 **Skips `post_process` unless output is buffered.** The `post_process`
 command operates on a finished transcript, which streaming that types as you
@@ -2282,6 +2288,8 @@ mode = "toggle"
 [openvino]
 streaming = true
 ```
+
+Streaming needs `on_demand_loading = false` for the active engine; with on-demand loading every dictation is transcribed after it ends, and the daemon says so at startup.
 
 ### openvino.streaming_revision_mode
 

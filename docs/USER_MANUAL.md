@@ -1574,6 +1574,10 @@ so a held PTT key never fires its release event. The daemon auto-promotes
 push-to-talk to toggle at startup when streaming is enabled and logs a
 warning.
 
+Streaming needs `on_demand_loading = false` for the active engine; with
+on-demand loading every dictation is transcribed after it ends, and the
+daemon says so at startup.
+
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 
 ### Moonshine

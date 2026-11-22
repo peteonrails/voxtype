@@ -812,7 +812,10 @@ impl Config {
         }
     }
 
-    /// Whether the active engine will run its streaming pipeline.
+    /// Whether the active engine will run its streaming pipeline: the audio is
+    /// transcribed while it is recorded. False with on-demand loading: nothing
+    /// is preloaded, so the daemon never starts a streaming session and every
+    /// dictation is batch.
     ///
     /// Streaming types text at the cursor as it is decoded, which means the
     /// end-of-utterance hooks that reshape a finished transcript never get a
@@ -820,12 +823,25 @@ impl Config {
     /// of their settings will not apply (#581) rather than letting them
     /// silently do nothing.
     pub fn streaming_enabled(&self) -> bool {
+        !self.on_demand_loading() && self.streaming_requested()
+    }
+
+    /// Whether the active engine would stream with its model loaded: its
+    /// section turns streaming on and, for Whisper, the mode is local.
+    /// [`Config::streaming_enabled`] adds the on-demand loading check.
+    pub(crate) fn streaming_requested(&self) -> bool {
         match self.engine {
+            // The sliding-window engine. The transcriber factory ignores
+            // `[whisper] streaming` for any mode but local.
+            TranscriptionEngine::Whisper => {
+                self.whisper.streaming && self.whisper.effective_mode() == super::WhisperMode::Local
+            }
             TranscriptionEngine::Parakeet => self.parakeet.as_ref().is_some_and(|p| p.streaming),
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()
                 .is_some_and(|s| s.streaming && !s.async_api),
+            TranscriptionEngine::OpenVino => self.openvino.as_ref().is_some_and(|o| o.streaming),
             _ => false,
         }
     }
@@ -1090,8 +1106,46 @@ mod tests {
     /// positive tells someone their working config is broken.
     #[test]
     fn streaming_enabled_tracks_the_engine_that_will_actually_run() {
-        // Whisper has no streaming pipeline.
+        // Whisper streams only when asked to, and only locally: the factory
+        // ignores `streaming` for a remote backend.
         assert!(!Config::default().streaming_enabled());
+        let whisper = |mode: crate::config::WhisperMode| {
+            let mut config = Config::default();
+            config.whisper.streaming = true;
+            config.whisper.mode = Some(mode);
+            config
+        };
+        assert!(whisper(crate::config::WhisperMode::Local).streaming_enabled());
+        assert!(!whisper(crate::config::WhisperMode::Remote).streaming_enabled());
+
+        // OpenVINO wraps the same sliding-window engine.
+        let openvino = |streaming: bool| Config {
+            engine: TranscriptionEngine::OpenVino,
+            openvino: Some(crate::config::OpenVinoConfig {
+                streaming,
+                ..crate::config::OpenVinoConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert!(openvino(true).streaming_enabled());
+        assert!(!openvino(false).streaming_enabled());
+
+        // With on-demand loading nothing is preloaded, so the daemon never
+        // starts a streaming session and every dictation is batch.
+        let mut on_demand = whisper(crate::config::WhisperMode::Local);
+        on_demand.whisper.on_demand_loading = true;
+        assert!(!on_demand.streaming_enabled());
+        let parakeet = |on_demand_loading: bool| Config {
+            engine: TranscriptionEngine::Parakeet,
+            parakeet: Some(crate::config::ParakeetConfig {
+                streaming: true,
+                on_demand_loading,
+                ..crate::config::ParakeetConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert!(parakeet(false).streaming_enabled());
+        assert!(!parakeet(true).streaming_enabled());
 
         // Soniox streams by default, but the async API is batch: it uploads a
         // finished recording and polls, so the completed-transcript hooks do
