@@ -3848,6 +3848,9 @@ impl Daemon {
                 // now, so the next startup failure is news again.
                 self.model_failed_at_startup = false;
                 let _ = std::fs::remove_file(Config::runtime_dir().join(STARTUP_FAILURE_MARKER));
+                let _ = std::fs::remove_file(
+                    Config::runtime_dir().join(crate::status_json::MODEL_UNAVAILABLE_FILE),
+                );
             }
         } else {
             self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
@@ -6482,6 +6485,10 @@ impl Daemon {
             return;
         };
         self.model_failed_at_startup = true;
+        let _ = std::fs::write(
+            Config::runtime_dir().join(crate::status_json::MODEL_UNAVAILABLE_FILE),
+            format!("{e}\n"),
+        );
         tracing::error!("Failed to preload model: {}", e);
         tracing::warn!(
             "Voxtype keeps running without a loaded model; the next recording tries to load it again"
@@ -6881,6 +6888,11 @@ impl Daemon {
 
         // Initialize model manager for multi-model support (Whisper only)
         let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
+
+        // A previous daemon's verdict on the model is not this one's.
+        let _ = std::fs::remove_file(
+            Config::runtime_dir().join(crate::status_json::MODEL_UNAVAILABLE_FILE),
+        );
 
         // Pre-load transcription model if on_demand_loading is disabled
         if !self.config.on_demand_loading() {
