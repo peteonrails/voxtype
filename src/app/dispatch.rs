@@ -551,6 +551,8 @@ pub(crate) async fn dispatch(
                     .map_err(anyhow::Error::msg)?;
                 voxtype::model_selection::validate_ready(config.engine.name(), config.model_name())
                     .map_err(anyhow::Error::msg)?;
+                voxtype::model_selection::validate_gguf_backend(&config)
+                    .map_err(anyhow::Error::msg)?;
                 if require_idle {
                     voxtype::model_selection::validate_idle_for_restart(&config)
                         .map_err(anyhow::Error::msg)?;

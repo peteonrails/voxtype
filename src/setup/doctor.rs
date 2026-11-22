@@ -970,6 +970,24 @@ pub fn variant_check(mismatch: Option<&super::variant_check::VariantMismatch>) -
     }
 }
 
+/// Turn a GGUF `gguf_backend` the running build's worker lacks into a check.
+/// `vulkan_build` says how to get onto the Vulkan build, asked only when
+/// there is a mismatch.
+pub fn gguf_backend_check(
+    mismatch: Option<&super::variant_check::GgufBackendMismatch>,
+    section: &str,
+    vulkan_build: impl FnOnce() -> super::install_hint::Hint,
+) -> Check {
+    const ID: &str = "binary.gguf_backend";
+    match mismatch {
+        None => Check::ok(
+            ID,
+            format!("GGUF worker supports the configured {section}.gguf_backend"),
+        ),
+        Some(m) => Check::error(ID, m.summary(), m.fix_with(&vulkan_build())),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Gathering
 // ---------------------------------------------------------------------------
@@ -1050,6 +1068,17 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
         checks.push(variant_check(
             super::variant_check::detect_mismatch(config, &inventory).as_ref(),
         ));
+        if let Some(active) = config.active_gguf() {
+            checks.push(gguf_backend_check(
+                super::variant_check::gguf_backend_mismatch(config).as_ref(),
+                active.section,
+                || {
+                    super::install_hint::hint(super::install_hint::Need::Variant(
+                        super::binary::Variant::WhisperVulkan,
+                    ))
+                },
+            ));
+        }
 
         if linux {
             // What `/usr/bin/voxtype` dispatches to. Source builds have no
@@ -2192,5 +2221,33 @@ mod tests {
         let checks = omarchy_checks(&missing);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn gguf_backend_the_worker_lacks_is_an_error_with_a_fix() {
+        let mismatch = super::super::variant_check::GgufBackendMismatch {
+            section: "cohere",
+            requested: "vulkan".to_string(),
+            worker: "voxtype-gguf-worker-avx512".to_string(),
+            worker_gpu_backends: &[],
+        };
+        let switch = || super::super::install_hint::Hint::Switch {
+            command: "sudo voxtype setup gpu --enable",
+        };
+        let check = gguf_backend_check(Some(&mismatch), "cohere", switch);
+        assert_eq!(check.id, "binary.gguf_backend");
+        assert_eq!(check.severity, Severity::Error);
+        assert!(
+            check.message.contains("runs on the CPU only"),
+            "{}",
+            check.message
+        );
+        let fix = check.fix.unwrap();
+        assert!(fix.contains("cohere.gguf_backend auto"), "{fix}");
+        assert!(fix.contains("sudo voxtype setup gpu --enable"), "{fix}");
+
+        let ok = gguf_backend_check(None, "cohere", || unreachable!());
+        assert_eq!(ok.severity, Severity::Ok);
+        assert!(ok.message.contains("cohere.gguf_backend"));
     }
 }

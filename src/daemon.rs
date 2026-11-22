@@ -6514,12 +6514,15 @@ impl Daemon {
     /// the configured engine (e.g. `engine = "parakeet"` but the wrapper
     /// dispatches to a CPU Whisper variant — the Ryan case from #450).
     /// Logged at WARN regardless, so journalctl users see it too.
+    /// Also covers a GGUF model whose `gguf_backend` this build's worker
+    /// lacks (`gguf_backend = "vulkan"` on voxtype-avx512), which otherwise
+    /// surfaces only as a worker "backend error" in the journal.
     /// Returns whether it notified.
     fn warn_on_variant_mismatch(&self) -> bool {
         let inventory = crate::setup::binary::inventory();
         let Some(mismatch) = crate::setup::variant_check::detect_mismatch(&self.config, &inventory)
         else {
-            return false;
+            return self.warn_on_gguf_backend_mismatch();
         };
 
         let active = mismatch
@@ -6534,6 +6537,26 @@ impl Daemon {
             feature = mismatch.required_feature,
             active = active,
             "Variant mismatch at daemon startup: {}",
+            body
+        );
+        crate::notification::send_sync(&title, &body);
+        true
+    }
+
+    /// The GGUF half of [`Self::warn_on_variant_mismatch`]. Returns whether
+    /// it notified.
+    fn warn_on_gguf_backend_mismatch(&self) -> bool {
+        let Some(mismatch) = crate::setup::variant_check::gguf_backend_mismatch(&self.config)
+        else {
+            return false;
+        };
+        let title = format!("Voxtype: {} unavailable", mismatch.backend_label());
+        let body = mismatch.explanation();
+        tracing::warn!(
+            section = mismatch.section,
+            backend = %mismatch.requested,
+            worker = %mismatch.worker,
+            "GGUF backend mismatch at daemon startup: {}",
             body
         );
         crate::notification::send_sync(&title, &body);

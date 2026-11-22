@@ -408,6 +408,9 @@ fi
 - A model that fails to load at startup no longer stops the daemon and
   restart-loops it: the tray, status, meetings and history keep working,
   the tray shows an error, and the next recording loads the model again
+- config validate-selection, doctor and the daemon's startup check catch
+  a GGUF gguf_backend the active build's worker lacks, such as vulkan on
+  the avx512 build, and name the fix
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
