@@ -1954,6 +1954,30 @@ Prefer the env var so the key never lands in shell history or a checked-in confi
 export SONIOX_API_KEY="your-key-here"
 ```
 
+Voxtype sends the key in the WebSocket handshake's `Authorization: Bearer` header, as Soniox requires for server-side clients from 15 January 2027. It is never part of the session's first message.
+
+### region
+
+**Type:** String
+**Default:** `"us"`
+**Required:** No
+
+The data-residency region of the Soniox project your API key belongs to: `"us"`, `"eu"`, `"jp"` or `"in"`. A Soniox project is created in one region, and its keys only work on that region's hosts, so a key from an EU project gets `401` until you set `region = "eu"`. The region applies to the realtime WebSocket (streaming and batch) and to the async REST API.
+
+| Region | Realtime WebSocket | Async REST API |
+|--------|--------------------|----------------|
+| `us` | `stt-rt.soniox.com` | `api.soniox.com` |
+| `eu` | `stt-rt.eu.soniox.com` | `api.eu.soniox.com` |
+| `jp` | `stt-rt.jp.soniox.com` | `api.jp.soniox.com` |
+| `in` | `stt-rt.in.soniox.com` | `api.in.soniox.com` |
+
+An unknown region is a config error raised when the engine is set up (at daemon startup, unless `on_demand_loading` is on), before any audio is sent. The daemon's startup log line shows the host in use (`host=stt-rt.eu.soniox.com`). See [Soniox data residency](https://docs.soniox.com/data-residency).
+
+```toml
+[soniox]
+region = "eu"
+```
+
 ### model
 
 **Type:** String
@@ -2085,6 +2109,7 @@ Maximum total wait time (seconds) for an async API job to complete. If exceeded,
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
 | `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
+| `region` | `--soniox-region` | `VOXTYPE_SONIOX_REGION` | `"us"` | Data-residency region of the key's project (`us`, `eu`, `jp`, `in`) |
 | `model` | - | - | `"stt-rt-v6"` | Soniox model (`stt-async-v6` when `async_api = true`) |
 | `language_hints` | - | - | `["hu", "en"]` | Language preference |
 | `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |

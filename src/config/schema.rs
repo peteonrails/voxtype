@@ -939,6 +939,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("soniox"),
     spec(
+        "soniox.region",
+        "soniox",
+        "region",
+        closed(super::SONIOX_REGIONS),
+        "Engine",
+        "Region",
+        "Data-residency region of the Soniox project your API key belongs to. A key only works in its own region.",
+    )
+    .for_engine("soniox"),
+    spec(
         "soniox.model",
         "soniox",
         "model",
@@ -3322,6 +3332,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "openvino.streaming" => json!(ov().streaming),
 
         "soniox.api_key" => opt_str(so().api_key.as_ref()),
+        "soniox.region" => json!(so().region),
         "soniox.model" => json!(so().model),
         "soniox.language_hints_strict" => json!(so().language_hints_strict),
         "soniox.streaming" => json!(so().streaming),

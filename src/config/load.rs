@@ -385,6 +385,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             .get_or_insert_with(SonioxConfig::default)
             .api_key = Some(key);
     }
+    if let Ok(region) = std::env::var("VOXTYPE_SONIOX_REGION") {
+        config
+            .soniox
+            .get_or_insert_with(SonioxConfig::default)
+            .region = region;
+    }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);
     }

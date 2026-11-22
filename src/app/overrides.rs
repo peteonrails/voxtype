@@ -282,6 +282,12 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             .get_or_insert_with(config::SonioxConfig::default)
             .api_key = Some(key.clone());
     }
+    if let Some(ref region) = cli.soniox_region {
+        config
+            .soniox
+            .get_or_insert_with(config::SonioxConfig::default)
+            .region = region.clone();
+    }
 
     // Audio overrides
     if let Some(ref device) = cli.audio_device {

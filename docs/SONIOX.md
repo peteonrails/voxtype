@@ -47,6 +47,7 @@ No local model files. No GPU.
 
    [soniox]
    language_hints = ["en"]   # adjust for your languages
+   # region = "eu"           # if your Soniox project is in the EU, Japan ("jp") or India ("in")
    ```
 4. Run voxtype, press the hotkey, dictate, press again to stop.
 
@@ -143,6 +144,7 @@ See [CONFIGURATION.md → [soniox]](CONFIGURATION.md#soniox) for the full field-
 | Field | Default | Notes |
 |---|---|---|
 | `api_key` | env: `SONIOX_API_KEY` | Required |
+| `region` | `us` | Region of the key's Soniox project: `us`, `eu`, `jp`, `in` |
 | `model` | `stt-rt-v6` (or `stt-async-v6` if `async_api`) | Advanced override |
 | `language_hints` | `["hu", "en"]` | Empty = auto-detect |
 | `language_hints_strict` | `true` | Restrict output to hinted languages (no-op if hints empty) |

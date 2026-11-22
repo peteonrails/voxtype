@@ -47,7 +47,7 @@
 
 use super::streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 use super::Transcriber;
-use crate::config::SonioxConfig;
+use crate::config::{SonioxConfig, SONIOX_REGIONS};
 use crate::error::TranscribeError;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -58,13 +58,70 @@ use tokio_tungstenite::tungstenite::Message;
 const SAMPLE_RATE: u32 = 16_000;
 const AUDIO_FORMAT: &str = "pcm_s16le";
 
-/// Production WebSocket endpoint. Soniox doesn't offer regional alternates;
-/// the only realistic override would be a local mock during testing, which
-/// the tests construct directly without touching this constant.
-const SONIOX_WS_ENDPOINT: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
+/// The realtime WebSocket URL and async REST base URL for one Soniox
+/// region, per https://docs.soniox.com/data-residency. US keeps the
+/// unprefixed hosts; every other region inserts its code as a subdomain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SonioxEndpoints {
+    ws: String,
+    rest: String,
+}
 
-/// Base URL for the Soniox async transcription REST API.
-const SONIOX_ASYNC_BASE: &str = "https://api.soniox.com/v1";
+impl SonioxEndpoints {
+    /// Resolve a region name. A named region rather than a free-form URL
+    /// means a typo can't send audio to an unexpected host.
+    fn for_region(region: &str) -> Result<Self, TranscribeError> {
+        let region = region.trim().to_ascii_lowercase();
+        let prefix = match region.as_str() {
+            "us" | "" => String::new(),
+            r if SONIOX_REGIONS.contains(&r) => format!("{r}."),
+            _ => {
+                return Err(TranscribeError::ConfigError(format!(
+                    "Unknown Soniox region '{}'. Use one of: {}.\n  \
+                     Set [soniox] region to the region of the Soniox project that issued your API key.",
+                    region,
+                    SONIOX_REGIONS.join(", ")
+                )))
+            }
+        };
+        Ok(Self {
+            ws: format!("wss://stt-rt.{prefix}soniox.com/transcribe-websocket"),
+            rest: format!("https://api.{prefix}soniox.com/v1"),
+        })
+    }
+}
+
+/// The host part of a URL, for the startup log line.
+fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or(rest)
+}
+
+/// Build the realtime WebSocket handshake with the API key in an
+/// `Authorization: Bearer` header. Soniox refuses keys sent in the first
+/// (config) message from 2027-01-15; see
+/// https://docs.soniox.com/authentication/websocket-authentication.
+fn ws_request(
+    endpoint: &str,
+    api_key: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, TranscribeError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    let mut request = endpoint.into_client_request().map_err(|e| {
+        TranscribeError::InferenceFailed(format!("Soniox: bad WebSocket URL {}: {}", endpoint, e))
+    })?;
+    let mut auth = HeaderValue::from_str(&format!("Bearer {}", api_key)).map_err(|_| {
+        TranscribeError::ConfigError(
+            "Soniox API key contains characters that can't be sent in an HTTP header. \
+             Check [soniox] api_key or SONIOX_API_KEY for stray quotes or newlines."
+                .into(),
+        )
+    })?;
+    auth.set_sensitive(true);
+    request.headers_mut().insert("Authorization", auth);
+    Ok(request)
+}
 
 /// WS connect / batch-request timeout. Fixed because the only failure
 /// mode it covers (connect or one-shot request stalls) is a flat network
@@ -86,6 +143,9 @@ const FINALIZE_FRAME: &str = r#"{"type":"finalize"}"#;
 pub struct SonioxTranscriber {
     config: SonioxConfig,
     api_key: String,
+    /// Hosts for `config.region`, resolved once so a bad region fails at
+    /// startup instead of on the first dictation.
+    endpoints: SonioxEndpoints,
     /// Merged vocabulary-boost terms from `config.terms` + `config.terms_file`.
     /// Loaded once at construction so we don't hit disk per session.
     context_terms: Vec<String>,
@@ -162,10 +222,12 @@ impl SonioxTranscriber {
         }
 
         let context_terms = load_context_terms(&config)?;
+        let endpoints = SonioxEndpoints::for_region(&config.region)?;
 
         if config.async_api {
             tracing::info!(
-                "Soniox backend configured: mode=async, model={}, language_hints={:?} (strict={}), context_terms={}",
+                "Soniox backend configured: mode=async, host={}, model={}, language_hints={:?} (strict={}), context_terms={}",
+                url_host(&endpoints.rest),
                 config.model,
                 config.language_hints,
                 config.language_hints_strict,
@@ -173,7 +235,8 @@ impl SonioxTranscriber {
             );
         } else {
             tracing::info!(
-                "Soniox backend configured: mode=realtime, model={}, streaming={}, language_hints={:?} (strict={}), context_terms={}",
+                "Soniox backend configured: mode=realtime, host={}, model={}, streaming={}, language_hints={:?} (strict={}), context_terms={}",
+                url_host(&endpoints.ws),
                 config.model,
                 config.streaming,
                 config.language_hints,
@@ -184,6 +247,7 @@ impl SonioxTranscriber {
         Ok(Self {
             config,
             api_key,
+            endpoints,
             context_terms,
             active_vocabulary: std::sync::Mutex::new(Vec::new()),
             async_client: std::sync::OnceLock::new(),
@@ -228,8 +292,11 @@ impl SonioxTranscriber {
         // is strictly worse — mid-stream segment finals don't fire on
         // natural pauses, so partials churn more. The stop pipeline still
         // works either way because we drive `{"type":"finalize"}` explicitly.
+        //
+        // The API key is deliberately absent: it travels in the handshake's
+        // Authorization header (see `ws_request`), so the frame carries no
+        // secret and can be logged verbatim.
         let mut obj = serde_json::json!({
-            "api_key": self.api_key,
             "model": self.config.model,
             "audio_format": AUDIO_FORMAT,
             "sample_rate": SAMPLE_RATE,
@@ -323,24 +390,6 @@ fn f32_to_s16le_bytes(samples: &[f32]) -> Vec<u8> {
 /// for tail revisions.
 fn common_prefix_char_count(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
-}
-
-/// Replace the `api_key` value in a Soniox init-frame JSON string with
-/// `***` so the wire-trace log doesn't leak credentials. Parses + re-emits
-/// via serde_json so the result handles any formatting variation.
-/// Returns the original frame unchanged if it doesn't parse or has no
-/// api_key field (logging shouldn't crash on edge cases).
-fn redact_api_key(frame: &str) -> String {
-    let mut value: serde_json::Value = match serde_json::from_str(frame) {
-        Ok(v) => v,
-        Err(_) => return frame.to_string(),
-    };
-    if let Some(obj) = value.as_object_mut() {
-        if obj.contains_key("api_key") {
-            obj.insert("api_key".into(), serde_json::Value::String("***".into()));
-        }
-    }
-    value.to_string()
 }
 
 /// Soniox emits special control tokens such as `<end>` (endpoint
@@ -564,20 +613,19 @@ impl Transcriber for SonioxTranscriber {
 
 impl SonioxTranscriber {
     async fn batch_transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
-        let (ws_stream, _) = tokio::time::timeout(
-            SONIOX_TIMEOUT,
-            tokio_tungstenite::connect_async(SONIOX_WS_ENDPOINT),
-        )
-        .await
-        .map_err(|_| TranscribeError::InferenceFailed("Soniox: connect timeout".into()))?
-        .map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Soniox: WS connect failed: {}", e))
-        })?;
+        let request = ws_request(&self.endpoints.ws, &self.api_key)?;
+        let (ws_stream, _) =
+            tokio::time::timeout(SONIOX_TIMEOUT, tokio_tungstenite::connect_async(request))
+                .await
+                .map_err(|_| TranscribeError::InferenceFailed("Soniox: connect timeout".into()))?
+                .map_err(|e| {
+                    TranscribeError::InferenceFailed(format!("Soniox: WS connect failed: {}", e))
+                })?;
 
         let (mut write, mut read) = ws_stream.split();
 
         let init = self.init_frame();
-        tracing::debug!(target: "voxtype::soniox::wire", "-> init {}", redact_api_key(&init));
+        tracing::debug!(target: "voxtype::soniox::wire", "-> init {}", init);
         write.send(Message::Text(init)).await.map_err(|e| {
             TranscribeError::InferenceFailed(format!("Soniox: send init failed: {}", e))
         })?;
@@ -745,7 +793,7 @@ impl SonioxTranscriber {
             .map_err(|e| TranscribeError::InferenceFailed(format!("mime build failed: {}", e)))?;
         let form = reqwest::multipart::Form::new().part("file", file_part);
         let resp = client
-            .post(format!("{}/files", SONIOX_ASYNC_BASE))
+            .post(format!("{}/files", self.endpoints.rest))
             .header("Authorization", &auth)
             .multipart(form)
             .send()
@@ -809,7 +857,7 @@ impl SonioxTranscriber {
             body["context"] = serde_json::Value::Object(ctx_obj);
         }
         let resp = client
-            .post(format!("{}/transcriptions", SONIOX_ASYNC_BASE))
+            .post(format!("{}/transcriptions", self.endpoints.rest))
             .header("Authorization", &auth)
             .header("Content-Type", "application/json")
             .body(body.to_string())
@@ -856,7 +904,7 @@ impl SonioxTranscriber {
                 }
                 tokio::time::sleep(poll_interval).await;
                 let resp = client
-                    .get(format!("{}/transcriptions/{}", SONIOX_ASYNC_BASE, job_id))
+                    .get(format!("{}/transcriptions/{}", self.endpoints.rest, job_id))
                     .header("Authorization", &auth)
                     .send()
                     .await
@@ -914,7 +962,7 @@ impl SonioxTranscriber {
             let resp = client
                 .get(format!(
                     "{}/transcriptions/{}/transcript",
-                    SONIOX_ASYNC_BASE, job_id
+                    self.endpoints.rest, job_id
                 ))
                 .header("Authorization", &auth)
                 .send()
@@ -970,7 +1018,7 @@ impl SonioxTranscriber {
         self.async_delete_with_retry(
             client,
             auth,
-            format!("{}/files/{}", SONIOX_ASYNC_BASE, file_id),
+            format!("{}/files/{}", self.endpoints.rest, file_id),
         )
         .await;
     }
@@ -991,7 +1039,7 @@ impl SonioxTranscriber {
         self.async_delete_with_retry(
             client,
             auth,
-            format!("{}/transcriptions/{}", SONIOX_ASYNC_BASE, job_id),
+            format!("{}/transcriptions/{}", self.endpoints.rest, job_id),
         )
         .await;
         self.async_delete_file(client, auth, file_id).await;
@@ -1054,11 +1102,20 @@ impl StreamingTranscriber for SonioxTranscriber {
         let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
 
+        let request = ws_request(&self.endpoints.ws, &self.api_key)?;
         let init = self.init_frame();
         let type_partials = self.config.type_partials;
 
         let task = tokio::spawn(async move {
-            run_streaming_session(init, type_partials, samples_rx, events_tx, cancel_rx).await
+            run_streaming_session(
+                request,
+                init,
+                type_partials,
+                samples_rx,
+                events_tx,
+                cancel_rx,
+            )
+            .await
         });
 
         Ok(StreamHandle {
@@ -1080,6 +1137,7 @@ async fn send_fatal(events_tx: &mpsc::Sender<StreamingEvent>, msg: String) {
 }
 
 async fn run_streaming_session(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
     init_frame: String,
     type_partials: bool,
     mut samples_rx: mpsc::Receiver<Vec<f32>>,
@@ -1087,11 +1145,8 @@ async fn run_streaming_session(
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> Result<(), TranscribeError> {
     // Connect.
-    let ws_result = tokio::time::timeout(
-        SONIOX_TIMEOUT,
-        tokio_tungstenite::connect_async(SONIOX_WS_ENDPOINT),
-    )
-    .await;
+    let ws_result =
+        tokio::time::timeout(SONIOX_TIMEOUT, tokio_tungstenite::connect_async(request)).await;
     let ws_stream = match ws_result {
         Ok(Ok((s, _))) => s,
         Ok(Err(e)) => {
@@ -1106,7 +1161,7 @@ async fn run_streaming_session(
     let (mut write, mut read) = ws_stream.split();
 
     // Send init.
-    tracing::debug!(target: "voxtype::soniox::wire", "-> init {}", redact_api_key(&init_frame));
+    tracing::debug!(target: "voxtype::soniox::wire", "-> init {}", init_frame);
     if let Err(e) = write.send(Message::Text(init_frame)).await {
         send_fatal(&events_tx, format!("Soniox: send init failed: {}", e)).await;
         return Ok(());
@@ -1281,6 +1336,7 @@ mod tests {
     fn cfg_with_key(key: Option<&str>) -> SonioxConfig {
         SonioxConfig {
             api_key: key.map(|s| s.to_string()),
+            region: "us".into(),
             model: "stt-rt-v6".into(),
             language_hints: vec!["hu".into(), "en".into()],
             language_hints_strict: true,
@@ -1353,7 +1409,9 @@ mod tests {
     fn init_frame_contains_required_fields() {
         let t = SonioxTranscriber::new(cfg_with_key(Some("my-key"))).unwrap();
         let frame: serde_json::Value = serde_json::from_str(&t.init_frame()).unwrap();
-        assert_eq!(frame["api_key"], "my-key");
+        // #864: the key rides in the handshake header, never in the frame.
+        assert!(frame.get("api_key").is_none(), "{frame}");
+        assert!(!t.init_frame().contains("my-key"));
         assert_eq!(frame["model"], "stt-rt-v6");
         assert_eq!(frame["audio_format"], "pcm_s16le");
         assert_eq!(frame["sample_rate"], 16000);
@@ -1846,5 +1904,208 @@ mod tests {
         let out = r.process(&msg(vec![("world", false)], false), true);
         assert_eq!(extract(&out.events), vec![("Partial", "world".to_string())]);
         assert_eq!(r.typed_partial, "world");
+    }
+
+    // === #864 header auth and #871 regions ===
+
+    #[test]
+    fn region_hosts_follow_the_data_residency_table() {
+        let us = SonioxEndpoints::for_region("us").unwrap();
+        assert_eq!(us.ws, "wss://stt-rt.soniox.com/transcribe-websocket");
+        assert_eq!(us.rest, "https://api.soniox.com/v1");
+        for (region, ws_host, rest_host) in [
+            ("eu", "stt-rt.eu.soniox.com", "api.eu.soniox.com"),
+            ("jp", "stt-rt.jp.soniox.com", "api.jp.soniox.com"),
+            ("in", "stt-rt.in.soniox.com", "api.in.soniox.com"),
+        ] {
+            let e = SonioxEndpoints::for_region(region).unwrap();
+            assert_eq!(e.ws, format!("wss://{ws_host}/transcribe-websocket"));
+            assert_eq!(e.rest, format!("https://{rest_host}/v1"));
+            assert_eq!(url_host(&e.ws), ws_host);
+            assert_eq!(url_host(&e.rest), rest_host);
+        }
+    }
+
+    #[test]
+    fn region_is_case_and_whitespace_tolerant() {
+        assert_eq!(
+            SonioxEndpoints::for_region(" EU ").unwrap(),
+            SonioxEndpoints::for_region("eu").unwrap()
+        );
+    }
+
+    #[test]
+    fn default_config_region_keeps_the_us_hosts() {
+        let cfg = SonioxConfig {
+            api_key: Some("k".into()),
+            ..SonioxConfig::default()
+        };
+        assert_eq!(cfg.region, "us");
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        assert_eq!(t.endpoints, SonioxEndpoints::for_region("us").unwrap());
+    }
+
+    #[test]
+    fn old_config_without_region_parses_to_us() {
+        let cfg: SonioxConfig = toml::from_str("api_key = \"k\"").unwrap();
+        assert_eq!(cfg.region, "us");
+    }
+
+    #[test]
+    fn unknown_region_fails_at_construction() {
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.region = "mars".into();
+        let err = SonioxTranscriber::new(cfg).unwrap_err();
+        match err {
+            TranscribeError::ConfigError(msg) => {
+                assert!(msg.contains("mars"), "{msg}");
+                assert!(msg.contains("us, eu, jp, in"), "{msg}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eu_region_routes_both_apis_to_eu_hosts() {
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.region = "eu".into();
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        assert_eq!(url_host(&t.endpoints.ws), "stt-rt.eu.soniox.com");
+        assert_eq!(url_host(&t.endpoints.rest), "api.eu.soniox.com");
+    }
+
+    #[test]
+    fn ws_request_carries_bearer_header() {
+        let req = ws_request("wss://stt-rt.soniox.com/transcribe-websocket", "abc123").unwrap();
+        let auth = req.headers().get("Authorization").unwrap();
+        assert_eq!(auth.to_str().unwrap(), "Bearer abc123");
+        assert!(auth.is_sensitive());
+        assert_eq!(req.uri().host(), Some("stt-rt.soniox.com"));
+    }
+
+    #[test]
+    fn ws_request_rejects_key_with_newline() {
+        let err = ws_request("wss://stt-rt.soniox.com/transcribe-websocket", "abc\n").unwrap_err();
+        assert!(matches!(err, TranscribeError::ConfigError(_)), "{err:?}");
+    }
+
+    /// What the fake server saw during one session.
+    #[derive(Default, Debug)]
+    struct FakeSession {
+        authorization: Option<String>,
+        init_frame: Option<serde_json::Value>,
+        audio_bytes: usize,
+    }
+
+    /// Start a one-connection fake Soniox realtime server on localhost. It
+    /// records the handshake's Authorization header and the init frame,
+    /// counts audio bytes until the empty end-of-audio frame, then replies
+    /// with one final token and `finished: true`. No network beyond
+    /// loopback, no real key.
+    // tungstenite's handshake callback signature returns its large
+    // `ErrorResponse`; not ours to shrink.
+    #[allow(clippy::result_large_err)]
+    async fn fake_soniox_server() -> (String, tokio::task::JoinHandle<FakeSession>) {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/transcribe-websocket",
+            listener.local_addr().unwrap()
+        );
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut seen = FakeSession::default();
+            let auth = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let auth_cb = auth.clone();
+            let mut ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |req: &Request, resp: Response| {
+                    *auth_cb.lock().unwrap() = req
+                        .headers()
+                        .get("Authorization")
+                        .map(|v| v.to_str().unwrap().to_string());
+                    Ok(resp)
+                },
+            )
+            .await
+            .unwrap();
+            seen.authorization = auth.lock().unwrap().take();
+            while let Some(Ok(msg)) = ws.next().await {
+                match msg {
+                    Message::Text(t) if seen.init_frame.is_none() => {
+                        seen.init_frame = Some(serde_json::from_str(&t).unwrap());
+                    }
+                    Message::Binary(b) => seen.audio_bytes += b.len(),
+                    Message::Text(t) if t.is_empty() => {
+                        ws.send(Message::Text(
+                            r#"{"tokens":[{"text":"hello there","is_final":true}],"finished":true}"#
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                        let _ = ws.close(None).await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            seen
+        });
+        (url, handle)
+    }
+
+    fn transcriber_against(url: &str, key: &str) -> SonioxTranscriber {
+        let mut t = SonioxTranscriber::new(cfg_with_key(Some(key))).unwrap();
+        t.endpoints.ws = url.to_string();
+        t
+    }
+
+    #[tokio::test]
+    async fn batch_session_authenticates_in_the_handshake() {
+        let (url, server) = fake_soniox_server().await;
+        let t = transcriber_against(&url, "secret-key-864");
+        let text = t.batch_transcribe(&vec![0.0_f32; 1600]).await.unwrap();
+        assert_eq!(text, "hello there");
+
+        let seen = server.await.unwrap();
+        assert_eq!(seen.authorization.as_deref(), Some("Bearer secret-key-864"));
+        let init = seen.init_frame.expect("init frame");
+        assert!(init.get("api_key").is_none(), "{init}");
+        assert!(!init.to_string().contains("secret-key-864"));
+        assert_eq!(init["model"], "stt-rt-v6");
+        assert_eq!(seen.audio_bytes, 3200);
+    }
+
+    #[tokio::test]
+    async fn streaming_session_authenticates_in_the_handshake() {
+        let (url, server) = fake_soniox_server().await;
+        let t = transcriber_against(&url, "stream-key-864");
+        let (samples_tx, samples_rx) = mpsc::channel(4);
+        let mut handle = t.start_stream(samples_rx).unwrap();
+        samples_tx.send(vec![0.0_f32; 800]).await.unwrap();
+        drop(samples_tx);
+
+        let mut finals = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, handle.events.recv())
+                .await
+                .expect("stream ended in time");
+            match ev {
+                Some(StreamingEvent::Final { text, .. })
+                | Some(StreamingEvent::Replace { text, .. }) => finals.push_str(&text),
+                Some(StreamingEvent::Error(e)) => panic!("stream error: {e}"),
+                Some(StreamingEvent::Ended) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(finals.trim(), "hello there");
+
+        let seen = server.await.unwrap();
+        assert_eq!(seen.authorization.as_deref(), Some("Bearer stream-key-864"));
+        let init = seen.init_frame.expect("init frame");
+        assert!(init.get("api_key").is_none(), "{init}");
+        assert_eq!(seen.audio_bytes, 1600);
     }
 }
