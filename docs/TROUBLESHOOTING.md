@@ -2731,19 +2731,22 @@ journalctl --user -u pulseaudio -n 20
   already typed partials only when backspace output succeeds. For cross-segment
   cleanup, use batch or file output. LLM post-processing is still batch-only.
 
-### Profile vocabulary does not correct a term
+### Vocabulary does not correct a term
 
-- Start or toggle the recording with the profile that owns the vocabulary:
-  `voxtype record start --profile code`.
+- Terms in the top-level `[vocabulary]` apply to every recording. Terms in a
+  profile's vocabulary apply only when you start or toggle the recording with
+  that profile: `voxtype record start --profile code`.
 - Restart the daemon after changing `terms` or `terms_file`; vocabulary files
   are loaded at startup.
-- Run `voxtype -vv` and look for `Profile vocabulary disabled`. The warning
-  names unreadable files and JSON that is not an array of strings.
+- Run `voxtype -vv` and look for `Global vocabulary disabled` or
+  `Profile vocabulary disabled`. The warning names unreadable files and JSON
+  that is not an array of strings.
 - Use `[text.replacements]` for short terms, distant spellings, or an exact
   correction. Vocabulary intentionally leaves uncertain matches unchanged.
-- Profile terms are appended to an explicit Whisper prompt or Soniox terms
-  list, not substituted for it. Enable `-vv` logging to inspect which profile
-  is active without logging private term values.
+- Vocabulary terms (top-level, then the profile's) are appended to an explicit
+  Whisper prompt or Soniox terms list, not substituted for it. Run with `-vv`
+  to see which profile is active and the prompt Whisper gets; that log holds
+  the terms.
 - Streaming correction applies only to finalized segments. A provisional word
   can remain misspelled until the backend marks that segment final.
 

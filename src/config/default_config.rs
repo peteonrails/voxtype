@@ -540,6 +540,13 @@ enabled = true
 # transcribing = "⏳"
 # stopped = ""
 
+# [vocabulary]
+# Names and jargon for every recording, with or without a profile: they bias
+# the engine and correct the final text. A profile's own vocabulary is added
+# after these terms.
+# terms = ["Voxtype", "Hyprland", "PipeWire"]
+# terms_file = "~/.config/voxtype/vocabulary.json"
+
 # [profiles]
 # Named profiles for context-specific vocabulary and post-processing
 # Use with: voxtype record start --profile slack
@@ -552,7 +559,7 @@ enabled = true
 # output_mode = "clipboard"
 #
 # [profiles.code.vocabulary]
-# terms = ["Voxtype", "Hyprland", "PipeWire"]
+# terms = ["Tokio", "serde", "rustfmt"]
 # terms_file = "/path/to/team-terms.json"
 "#;
 

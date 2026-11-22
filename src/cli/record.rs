@@ -44,8 +44,9 @@ pub enum RecordAction {
 
         /// Use a named profile for vocabulary and post-processing (e.g., --profile code)
         ///
-        /// Profile terms bias Whisper-compatible and Soniox transcription,
-        /// then conservatively correct finalized text before user replacements.
+        /// Profile terms follow the top-level [vocabulary] terms; together they
+        /// bias Whisper-compatible and Soniox transcription, then conservatively
+        /// correct finalized text before user replacements.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -150,8 +151,9 @@ pub enum RecordAction {
 
         /// Use a named profile for vocabulary and post-processing (e.g., --profile code)
         ///
-        /// Profile terms bias Whisper-compatible and Soniox transcription,
-        /// then conservatively correct finalized text before user replacements.
+        /// Profile terms follow the top-level [vocabulary] terms; together they
+        /// bias Whisper-compatible and Soniox transcription, then conservatively
+        /// correct finalized text before user replacements.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 

@@ -65,7 +65,7 @@ pub struct SubprocessTranscriber {
     config: WhisperConfig,
     /// Path to the config file (if any)
     config_path: Option<std::path::PathBuf>,
-    /// Profile vocabulary selected before the worker is spawned.
+    /// Vocabulary selected before the worker is spawned.
     active_vocabulary: Mutex<Vec<String>>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,

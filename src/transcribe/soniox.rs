@@ -148,7 +148,7 @@ pub struct SonioxTranscriber {
     /// Merged vocabulary-boost terms from `config.terms` + `config.terms_file`.
     /// Loaded once at construction so we don't hit disk per session.
     context_terms: Vec<String>,
-    /// Profile vocabulary selected for the current recording.
+    /// Vocabulary selected for the current recording.
     active_vocabulary: std::sync::Mutex<Vec<String>>,
     /// Lazy reqwest client for the async REST path. Built on first use
     /// via `OnceLock` so we don't pay TLS/DNS-pool init per dictation

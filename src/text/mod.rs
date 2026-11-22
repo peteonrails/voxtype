@@ -282,7 +282,7 @@ impl TextProcessor {
         self.process_with_vocabulary(text, None)
     }
 
-    /// Process text with the vocabulary selected by the active profile.
+    /// Process text with the vocabulary of the recording.
     pub fn process_with_vocabulary(&self, text: &str, vocabulary: Option<&Vocabulary>) -> String {
         self.process_recording(text, vocabulary, true)
     }

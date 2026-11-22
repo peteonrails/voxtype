@@ -217,7 +217,7 @@ pub trait Transcriber: Send + Sync {
     }
 }
 
-/// Append profile vocabulary to an explicitly configured Whisper prompt.
+/// Append the recording's vocabulary to an explicitly configured Whisper prompt.
 /// The configured prompt always remains first and unchanged.
 pub(crate) fn prompt_with_vocabulary(configured: Option<&str>, terms: &[String]) -> Option<String> {
     let configured = configured.filter(|prompt| !prompt.trim().is_empty());

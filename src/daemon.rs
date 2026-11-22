@@ -23,11 +23,10 @@ use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
-use crate::text::vocabulary::Vocabulary;
+use crate::text::vocabulary::Vocabularies;
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1217,8 +1216,8 @@ pub struct Daemon {
     /// that is not known to be English, so English-only cleanup is skipped
     /// for it. See `override_text_is_english`.
     session_text_is_english: bool,
-    /// Vocabulary matchers prepared once at startup, keyed by profile name.
-    profile_vocabularies: HashMap<String, Vocabulary>,
+    /// The top-level and profile vocabularies, prepared once at startup.
+    vocabularies: Vocabularies,
     /// The `--profile` of the current recording, kept from its override
     /// file for every stage of the dictation. See `recording_profile`.
     recording_profile: Option<String>,
@@ -1477,22 +1476,7 @@ impl Daemon {
         // and English-only cleanup runs only on English (#696).
         let text_processor =
             TextProcessor::new_for_config(&config.text, config.text_language(), &config);
-        let profile_vocabularies = config
-            .profiles
-            .iter()
-            .filter(|(_, profile)| {
-                !profile.vocabulary.terms.is_empty() || profile.vocabulary.terms_file.is_some()
-            })
-            .filter_map(
-                |(name, profile)| match Vocabulary::load(&profile.vocabulary) {
-                    Ok(vocabulary) => Some((name.clone(), vocabulary)),
-                    Err(error) => {
-                        tracing::warn!(profile = %name, %error, "Profile vocabulary disabled");
-                        None
-                    }
-                },
-            )
-            .collect();
+        let vocabularies = Vocabularies::load(&config);
         if config.text.spoken_punctuation {
             tracing::info!("Spoken punctuation enabled");
         }
@@ -1581,7 +1565,7 @@ impl Daemon {
             audio_feedback,
             text_processor,
             session_text_is_english: true,
-            profile_vocabularies,
+            vocabularies,
             recording_profile: None,
             post_processor,
             last_dictation: None,
@@ -2763,9 +2747,7 @@ impl Daemon {
             // apply replacements and spoken punctuation over the whole
             // text, same as the batch path does before writing (#669).
             let profile = self.recording_profile();
-            let vocabulary = profile
-                .as_ref()
-                .and_then(|name| self.profile_vocabularies.get(name));
+            let vocabulary = self.vocabularies.for_profile(profile.as_deref());
             let raw_text = buffered;
             let final_text = self
                 .text_processor
@@ -3407,10 +3389,12 @@ impl Daemon {
         self.recording_profile = None;
     }
 
-    fn active_profile_vocabulary_terms(&mut self) -> Vec<String> {
-        self.recording_profile()
-            .as_ref()
-            .and_then(|name| self.profile_vocabularies.get(name))
+    /// The terms the engine gets for the current recording: the top-level
+    /// vocabulary, then its profile's.
+    fn recording_vocabulary_terms(&mut self) -> Vec<String> {
+        let profile = self.recording_profile();
+        self.vocabularies
+            .for_profile(profile.as_deref())
             .map(|vocabulary| vocabulary.terms().map(str::to_string).collect())
             .unwrap_or_default()
     }
@@ -3421,7 +3405,7 @@ impl Daemon {
     fn prepare_for_recording(&mut self, model_override: Option<&str>) {
         // A new recording carries only the profile its own override names.
         self.recording_profile = read_profile_override();
-        let vocabulary = self.active_profile_vocabulary_terms();
+        let vocabulary = self.recording_vocabulary_terms();
         if let Some(name) = model_override {
             if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
                 model_catalog::override_route(&self.config, name)
@@ -3837,7 +3821,7 @@ impl Daemon {
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
-        let vocabulary = self.active_profile_vocabulary_terms();
+        let vocabulary = self.recording_vocabulary_terms();
         if let Some(name) = model_override {
             match model_catalog::override_route(&self.config, name) {
                 Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
@@ -5896,9 +5880,7 @@ impl Daemon {
                     }
 
                     // Apply text processing (replacements, punctuation)
-                    let vocabulary = profile_override
-                        .as_ref()
-                        .and_then(|name| self.profile_vocabularies.get(name));
+                    let vocabulary = self.vocabularies.for_profile(profile_override.as_deref());
                     let processed_text = self.text_processor.process_recording(
                         &text,
                         vocabulary,
@@ -7733,9 +7715,8 @@ impl Daemon {
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
                                     let profile = self.recording_profile();
-                                    let vocabulary = profile
-                                        .as_ref()
-                                        .and_then(|name| self.profile_vocabularies.get(name));
+                                    let vocabulary =
+                                        self.vocabularies.for_profile(profile.as_deref());
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
@@ -7763,9 +7744,8 @@ impl Daemon {
                                     s.replace_and_commit_silent(backspace, &text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
                                     let profile = self.recording_profile();
-                                    let vocabulary = profile
-                                        .as_ref()
-                                        .and_then(|name| self.profile_vocabularies.get(name));
+                                    let vocabulary =
+                                        self.vocabularies.for_profile(profile.as_deref());
                                     if let Err(e) = s.replace_and_commit(
                                         chain,
                                         backspace,
@@ -8366,9 +8346,11 @@ while True:
     }
 
     /// A recording's `--profile` reaches every stage of the dictation, not
-    /// only the first one that reads its override file (#1097). Each test
-    /// runs in a process of its own, since the profile travels through the
-    /// runtime directory, which must be a scratch one.
+    /// only the first one that reads its override file (#1097), and so does
+    /// its vocabulary: the top-level `[vocabulary]`, then the profile's, for
+    /// the engine and the text correction. Each test runs in a process of its
+    /// own, since the profile travels through the runtime directory, which
+    /// must be a scratch one.
     mod recording_profile {
         use super::*;
         use crate::config::{PostProcessConfig, Profile, VocabularyConfig};
@@ -8431,6 +8413,18 @@ while True:
             config
         }
 
+        /// `config(target)` with more top-level tables, written as a user
+        /// writes them in config.toml. `config(target)` serializes an empty
+        /// `[vocabulary]` table; it is removed, so `tables` alone decides
+        /// whether the config has one. A table in `tables` replaces the
+        /// base's table of that name whole; it is not merged.
+        fn config_with(target: &Path, tables: &str) -> Config {
+            let mut document = toml::Table::try_from(config(target)).unwrap();
+            document.remove("vocabulary");
+            document.extend(tables.parse::<toml::Table>().unwrap());
+            document.try_into().unwrap()
+        }
+
         /// What `voxtype record start|stop --profile <name>` does before it
         /// signals the daemon.
         fn cli_names_profile(name: &str) {
@@ -8439,10 +8433,10 @@ while True:
             fs::write(dir.join("profile_override"), name).unwrap();
         }
 
-        /// Transcriber prep, which reads the profile's vocabulary again
+        /// Transcriber prep, which reads the recording's vocabulary again
         /// once the recording stops.
         fn prepare_transcriber(daemon: &mut Daemon) -> Vec<String> {
-            daemon.active_profile_vocabulary_terms()
+            daemon.recording_vocabulary_terms()
         }
 
         async fn deliver(daemon: &mut Daemon, spoken: &str) {
@@ -8573,9 +8567,7 @@ while True:
             // The event pump looks the vocabulary up for each final segment.
             for segment in ["pipe wire starts", "pipe wire stops"] {
                 let profile = daemon.recording_profile();
-                let vocabulary = profile
-                    .as_ref()
-                    .and_then(|name| daemon.profile_vocabularies.get(name));
+                let vocabulary = daemon.vocabularies.for_profile(profile.as_deref());
                 session
                     .commit_segment(
                         &chain,
@@ -8635,6 +8627,108 @@ while True:
             assert!(state.is_idle());
             assert_eq!(fs::read_to_string(&target).unwrap(), "PipeWire works\n");
             assert_eq!(daemon.recording_profile(), None, "outlived its dictation");
+        }
+
+        #[tokio::test]
+        async fn global_vocabulary_applies_without_a_profile() {
+            if !in_scratch_runtime("global_vocabulary_applies_without_a_profile") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let config = config_with(&target, "[vocabulary]\nterms = [\"Voxtype\"]");
+            let mut daemon = Daemon::new(config, None);
+
+            daemon.prepare_for_recording(None);
+            assert_eq!(prepare_transcriber(&mut daemon), vec!["Voxtype"]);
+            deliver(&mut daemon, "vox type works").await;
+
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "DEFAULT:Voxtype works\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn global_terms_come_first_and_profile_repeats_drop() {
+            if !in_scratch_runtime("global_terms_come_first_and_profile_repeats_drop") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut config =
+                config_with(&target, "[vocabulary]\nterms = [\"Voxtype\", \"PipeWire\"]");
+            config
+                .profiles
+                .get_mut("calendar")
+                .unwrap()
+                .vocabulary
+                .terms = vec!["Tailscale".to_string(), "pipewire".to_string()];
+            let mut daemon = Daemon::new(config, None);
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            assert_eq!(
+                prepare_transcriber(&mut daemon),
+                vec!["Voxtype", "PipeWire", "Tailscale"]
+            );
+            deliver(&mut daemon, "vox type and pipe wire over tail scale").await;
+
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "CALENDAR:Voxtype and PipeWire over Tailscale\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn absent_or_empty_global_vocabulary_changes_nothing() {
+            if !in_scratch_runtime("absent_or_empty_global_vocabulary_changes_nothing") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            for (name, tables) in [("absent", ""), ("empty", "[vocabulary]\nterms = []")] {
+                let target = dir.path().join(format!("{name}.txt"));
+                let mut daemon = Daemon::new(config_with(&target, tables), None);
+
+                daemon.prepare_for_recording(None);
+                assert!(prepare_transcriber(&mut daemon).is_empty(), "{name}");
+                deliver(&mut daemon, "vox type works").await;
+
+                assert_eq!(
+                    fs::read_to_string(&target).unwrap(),
+                    "DEFAULT:vox type works\n",
+                    "{name}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn streamed_file_output_gets_the_global_vocabulary() {
+            if !in_scratch_runtime("streamed_file_output_gets_the_global_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let config = config_with(&target, "[vocabulary]\nterms = [\"Voxtype\"]");
+            let mut daemon = Daemon::new(config, None);
+
+            daemon.prepare_for_recording(None);
+            let mut state = streaming_state(Some(target.clone()));
+            let mut session = StreamingSession::new();
+            session.commit_segment_silent("vox type works");
+            daemon
+                .end_streaming(
+                    &mut state,
+                    &mut None,
+                    &mut None,
+                    &mut Some(session),
+                    &mut None,
+                    StreamingEndReason::Completed,
+                )
+                .await;
+
+            assert!(state.is_idle());
+            assert_eq!(fs::read_to_string(&target).unwrap(), "Voxtype works\n");
         }
 
         #[tokio::test]
