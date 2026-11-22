@@ -3951,6 +3951,48 @@ impl Daemon {
         }
     }
 
+    /// The transcriber eager processing sends a recording's chunks to; it
+    /// also transcribes what is left at stop.
+    async fn select_eager_transcriber(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> Option<Arc<dyn Transcriber>> {
+        let separate_override = model_override.is_some_and(|name| {
+            matches!(
+                model_catalog::override_route(&self.config, name),
+                Ok(model_catalog::OverrideRoute::Separate { .. })
+            )
+        });
+        let mut selected = None;
+        if separate_override {
+            // Chunks wait until the override model has loaded; whatever is
+            // left over is transcribed at stop.
+            if let Some(name) = model_override {
+                selected = self.ready_override(name).await;
+            }
+        } else {
+            selected = self.transcriber_preloaded.clone();
+        }
+        if !separate_override
+            && selected.is_none()
+            && self.config.engine == crate::config::TranscriptionEngine::Whisper
+        {
+            // Whisper engine: get from model manager
+            if let Some(mm) = &mut self.model_manager {
+                match mm.get_prepared_transcriber(model_override) {
+                    Ok(t) => {
+                        tracing::debug!("Created eager transcriber for chunk dispatch");
+                        selected = Some(t);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create eager transcriber: {}", e);
+                    }
+                }
+            }
+        }
+        selected
+    }
+
     /// Update the meeting state file if configured
     fn update_meeting_state(&mut self, state_name: &str, meeting_id: Option<&str>) {
         if let Some(ref path) = self.meeting_state_file_path {
@@ -7319,40 +7361,9 @@ impl Daemon {
                             State::EagerRecording { model_override, .. } => model_override.clone(),
                             _ => None,
                         };
-                        let separate_override = model_override.as_deref().is_some_and(|name| {
-                            matches!(
-                                model_catalog::override_route(&self.config, name),
-                                Ok(model_catalog::OverrideRoute::Separate { .. })
-                            )
-                        });
-                        let model_override = model_override.as_deref();
-                        if separate_override {
-                            // Chunks wait until the override model has loaded;
-                            // whatever is left over is transcribed at stop.
-                            if let Some(name) = model_override {
-                                eager_transcriber = self.ready_override(name).await;
-                            }
-                        } else {
-                            eager_transcriber = self.transcriber_preloaded.clone();
-                        }
-                        if !separate_override
-                            && eager_transcriber.is_none()
-                            && self.config.engine
-                                == crate::config::TranscriptionEngine::Whisper
-                        {
-                            // Whisper engine: get from model manager
-                            if let Some(ref mut mm) = self.model_manager {
-                                match mm.get_prepared_transcriber(model_override) {
-                                    Ok(t) => {
-                                        tracing::debug!("Created eager transcriber for chunk dispatch");
-                                        eager_transcriber = Some(t);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to create eager transcriber: {}", e);
-                                    }
-                                }
-                            }
-                        }
+                        eager_transcriber = self
+                            .select_eager_transcriber(model_override.as_deref())
+                            .await;
                     }
 
                     if let State::EagerRecording {
