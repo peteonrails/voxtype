@@ -203,7 +203,9 @@ fn the_terminal_view_meters_a_sound_check() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        if screen.contains("Sound check") {
+        // The mic and call levels arrive as separate events, so wait for the
+        // call meter too; breaking on the label alone raced the second event.
+        if screen.contains("Sound check") && screen.contains("call ▮") {
             break;
         }
     }
