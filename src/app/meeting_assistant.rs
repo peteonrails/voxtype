@@ -9,6 +9,7 @@ use voxtype::meeting::{self, MeetingConfig, MeetingData, MeetingSummary};
 use voxtype::{config, AssistantAction};
 
 /// How long `ask --notify` waits for the notification to be answered.
+#[cfg(target_os = "linux")]
 const NOTIFY_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// `meeting show --json`: the meeting plus its saved questions and answers.
