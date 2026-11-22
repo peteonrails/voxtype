@@ -2623,6 +2623,174 @@ impl Daemon {
         .await;
     }
 
+    /// Apply one event from the streaming backend: type its text or hold it
+    /// in the session, or end the session on `Ended`, an error, or a closed
+    /// channel. The event pump calls this for every event, and tests drive
+    /// the same routing through it.
+    async fn handle_streaming_event(
+        &mut self,
+        event: Option<StreamingEvent>,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        // File-output sessions (`--file=path`) accumulate into
+        // finalized_text via the `_silent` session methods
+        // instead of typing through `chain` — there's no
+        // cursor/focused window to type into, and doing so
+        // anyway is exactly the leak this branch exists to
+        // avoid (see the SIGUSR2 handler in `run`).
+        let file_output = matches!(
+            state,
+            State::Streaming {
+                file_output_path: Some(_),
+                ..
+            }
+        );
+        match event {
+            Some(StreamingEvent::Partial { text, .. }) => {
+                if let Some(s) = streaming_session.as_mut() {
+                    if file_output {
+                        s.observe_partial_delta(&text);
+                    } else if let Some(chain) = streaming_chain.as_ref() {
+                        if let Err(e) = s
+                            .type_partial_delta(
+                                chain,
+                                text,
+                                self.config.output.pre_output_command.as_deref(),
+                                self.config.output.post_output_command.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Streaming partial delta type failed: {}", e);
+                        }
+                    } else {
+                        s.observe_partial_delta(&text);
+                    }
+                    if let State::Streaming { typed_chars, .. } = state {
+                        *typed_chars = s.typed_chars();
+                    }
+                }
+            }
+            Some(StreamingEvent::Final { text, .. }) => {
+                if let Some(s) = streaming_session.as_mut() {
+                    if file_output {
+                        // Raw on purpose: file-mode text is
+                        // processed once, whole, at write time
+                        // in end_streaming — that also catches
+                        // matches spanning segment boundaries.
+                        s.commit_segment_silent(&text);
+                    } else if let Some(chain) = streaming_chain.as_ref() {
+                        let profile = self.recording_profile();
+                        let vocabulary = profile
+                            .as_ref()
+                            .and_then(|name| self.profile_vocabularies.get(name));
+                        if let Err(e) = s
+                            .commit_segment(
+                                chain,
+                                &text,
+                                Some((&self.text_processor, vocabulary)),
+                                self.config.output.pre_output_command.as_deref(),
+                                self.config.output.post_output_command.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::error!("Streaming commit_segment failed: {}", e);
+                        }
+                    } else {
+                        s.commit_segment_silent(&text);
+                    }
+                    // Mirror typed_chars onto the state for cancel-rewind.
+                    if let State::Streaming {
+                        typed_chars,
+                        finalized_text,
+                        ..
+                    } = state
+                    {
+                        *typed_chars = s.typed_chars();
+                        finalized_text.clear();
+                        finalized_text.push_str(s.finalized_text());
+                    }
+                }
+            }
+            Some(StreamingEvent::Replace {
+                backspace, text, ..
+            }) => {
+                if let Some(s) = streaming_session.as_mut() {
+                    if file_output {
+                        // Raw on purpose — see the Final arm.
+                        s.replace_and_commit_silent(backspace, &text);
+                    } else if let Some(chain) = streaming_chain.as_ref() {
+                        let profile = self.recording_profile();
+                        let vocabulary = profile
+                            .as_ref()
+                            .and_then(|name| self.profile_vocabularies.get(name));
+                        if let Err(e) = s
+                            .replace_and_commit(
+                                chain,
+                                backspace,
+                                &text,
+                                Some((&self.text_processor, vocabulary)),
+                                self.config.output.pre_output_command.as_deref(),
+                                self.config.output.post_output_command.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::error!("Streaming replace_and_commit failed: {}", e);
+                        }
+                    } else {
+                        s.replace_and_commit_silent(backspace, &text);
+                    }
+                    if let State::Streaming {
+                        typed_chars,
+                        finalized_text,
+                        ..
+                    } = state
+                    {
+                        *typed_chars = s.typed_chars();
+                        finalized_text.clear();
+                        finalized_text.push_str(s.finalized_text());
+                    }
+                }
+            }
+            Some(StreamingEvent::Error(err)) => {
+                self.end_streaming_with_error(
+                    err,
+                    state,
+                    audio_capture,
+                    streaming_handle,
+                    streaming_session,
+                    streaming_chain,
+                )
+                .await;
+            }
+            Some(StreamingEvent::Ended) => {
+                self.end_streaming(
+                    state,
+                    audio_capture,
+                    streaming_handle,
+                    streaming_session,
+                    streaming_chain,
+                    StreamingEndReason::Completed,
+                )
+                .await;
+            }
+            None => {
+                self.end_streaming(
+                    state,
+                    audio_capture,
+                    streaming_handle,
+                    streaming_session,
+                    streaming_chain,
+                    StreamingEndReason::Failed(None),
+                )
+                .await;
+            }
+        }
+    }
+
     /// Stop the microphone for a streaming session and arm the stop
     /// watchdog. With `disown_output`, drop the typing surface so anything
     /// the backend still sends lands in the session silently instead of
@@ -7691,125 +7859,15 @@ impl Daemon {
                         None => std::future::pending().await,
                     }
                 }, if state.is_streaming() && streaming_handle.is_some() => {
-                    // File-output sessions (`--file=path`) accumulate into
-                    // finalized_text via the `_silent` session methods
-                    // instead of typing through `chain` — there's no
-                    // cursor/focused window to type into, and doing so
-                    // anyway is exactly the leak this branch exists to
-                    // avoid (see the SIGUSR2 handler below).
-                    let file_output = matches!(
-                        &state,
-                        State::Streaming { file_output_path: Some(_), .. }
-                    );
-                    match event {
-                        Some(StreamingEvent::Partial { text, .. }) => {
-                            if let Some(s) = streaming_session.as_mut() {
-                                if file_output {
-                                    s.observe_partial_delta(&text);
-                                } else if let Some(chain) = streaming_chain.as_ref() {
-                                    if let Err(e) = s.type_partial_delta(
-                                        chain,
-                                        text,
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
-                                        tracing::warn!("Streaming partial delta type failed: {}", e);
-                                    }
-                                } else {
-                                    s.observe_partial_delta(&text);
-                                }
-                                if let State::Streaming { typed_chars, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Final { text, .. }) => {
-                            if let Some(s) = streaming_session.as_mut() {
-                                if file_output {
-                                    // Raw on purpose: file-mode text is
-                                    // processed once, whole, at write time
-                                    // in end_streaming — that also catches
-                                    // matches spanning segment boundaries.
-                                    s.commit_segment_silent(&text);
-                                } else if let Some(chain) = streaming_chain.as_ref() {
-                                    let profile = self.recording_profile();
-                                    let vocabulary = profile
-                                        .as_ref()
-                                        .and_then(|name| self.profile_vocabularies.get(name));
-                                    if let Err(e) = s.commit_segment(
-                                        chain,
-                                        &text,
-                                        Some((&self.text_processor, vocabulary)),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
-                                        tracing::error!("Streaming commit_segment failed: {}", e);
-                                    }
-                                } else {
-                                    s.commit_segment_silent(&text);
-                                }
-                                // Mirror typed_chars onto the state for cancel-rewind.
-                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                    finalized_text.clear();
-                                    finalized_text.push_str(s.finalized_text());
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Replace { backspace, text, .. }) => {
-                            if let Some(s) = streaming_session.as_mut() {
-                                if file_output {
-                                    // Raw on purpose — see the Final arm.
-                                    s.replace_and_commit_silent(backspace, &text);
-                                } else if let Some(chain) = streaming_chain.as_ref() {
-                                    let profile = self.recording_profile();
-                                    let vocabulary = profile
-                                        .as_ref()
-                                        .and_then(|name| self.profile_vocabularies.get(name));
-                                    if let Err(e) = s.replace_and_commit(
-                                        chain,
-                                        backspace,
-                                        &text,
-                                        Some((&self.text_processor, vocabulary)),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
-                                        tracing::error!("Streaming replace_and_commit failed: {}", e);
-                                    }
-                                } else {
-                                    s.replace_and_commit_silent(backspace, &text);
-                                }
-                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                    finalized_text.clear();
-                                    finalized_text.push_str(s.finalized_text());
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Error(err)) => {
-                            self.end_streaming_with_error(
-                                err,
-                                &mut state,
-                                &mut audio_capture,
-                                &mut streaming_handle,
-                                &mut streaming_session,
-                                &mut streaming_chain,
-                            ).await;
-                        }
-                        Some(StreamingEvent::Ended) => {
-                            self.end_streaming(&mut state, &mut audio_capture, &mut streaming_handle, &mut streaming_session, &mut streaming_chain, StreamingEndReason::Completed, ).await;
-                        }
-                        None => {
-                            self.end_streaming(
-                                &mut state,
-                                &mut audio_capture,
-                                &mut streaming_handle,
-                                &mut streaming_session,
-                                &mut streaming_chain,
-                                StreamingEndReason::Failed(None),
-                            ).await;
-                        }
-                    }
+                    self.handle_streaming_event(
+                        event,
+                        &mut state,
+                        &mut audio_capture,
+                        &mut streaming_handle,
+                        &mut streaming_session,
+                        &mut streaming_chain,
+                    )
+                    .await;
                 }
 
                 _ = async {
