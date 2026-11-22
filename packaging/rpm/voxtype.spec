@@ -276,15 +276,20 @@ if [ "$1" -eq 1 ]; then
     echo ""
     echo "To complete setup:"
     echo ""
-    echo "  1. Add your user to the 'input' group:"
-    echo "     sudo usermod -aG input \$USER"
+    echo "  1. Bind push-to-talk in your compositor (no special permissions):"
+    echo "       voxtype setup compositor hyprland   (or sway, river)"
+    echo "     or bind 'voxtype record toggle' in your desktop's keyboard shortcuts,"
+    echo "     then set enabled = false under [hotkey] in ~/.config/voxtype/config.toml"
     echo ""
-    echo "  2. Log out and back in for group changes to take effect"
+    echo "     If you can't bind keys in your desktop, the built-in hotkey can"
+    echo "     read the keyboard instead if you join the 'input' group, but that"
+    echo "     lets every program read every keystroke:"
+    echo "       sudo usermod -aG input \$USER   (then log out and back in)"
     echo ""
-    echo "  3. Download a whisper model:"
+    echo "  2. Download a whisper model:"
     echo "     voxtype setup --download"
     echo ""
-    echo "  4. Start voxtype:"
+    echo "  3. Start voxtype:"
     echo "     systemctl --user enable --now voxtype"
     echo ""
 fi
@@ -397,6 +402,9 @@ fi
 - The /usr/bin/voxtype wrapper in the release .deb and .rpm runs
   voxtype-baseline on a CPU without AVX2 instead of crashing in the AVX2
   build, and source package installs warn on such a CPU
+- Release .deb and .rpm, the source .rpm and install-arch.sh lead their
+  setup steps with compositor keybindings; the input group is only the
+  fallback for the built-in hotkey
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
