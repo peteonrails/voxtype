@@ -14,8 +14,10 @@
 //! - [`StreamingTranscriber::start_stream`] — live streaming session.
 //!   Exposed only when `[soniox] streaming = true` (the default). The
 //!   daemon's `streaming_active()` gate auto-promotes push-to-talk to
-//!   toggle when this is the active engine, matching the constraint
-//!   documented in the v0.7.2 release notes.
+//!   toggle when this is the active engine and output is typed live,
+//!   matching the constraint documented in the v0.7.2 release notes.
+//!   With `[output] streaming_buffer_output` nothing is typed until the
+//!   stop, so push-to-talk stays.
 //!
 //! ## Token reconciliation
 //!

@@ -1208,7 +1208,7 @@ Streaming needs `on_demand_loading = false` for the active engine; with on-deman
 
 Tuning (re-transcription interval, buffer size, etc.) lives in the shared `[streaming]` section below, since `[openvino] streaming` wraps the same engine. `[whisper]` also still accepts its own `streaming_interval_secs` / `streaming_max_buffer_secs` / `streaming_min_speech_rms` / `streaming_min_audio_secs` / `streaming_partial_min_words` / `streaming_type_partials` / `streaming_revision_mode` fields for backward compatibility — they're used only when config.toml has no `[streaming]` section.
 
-**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled.
+**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 
 **Example:**
 ```toml
@@ -1724,7 +1724,8 @@ key never fires `bindrd` and the daemon gets stuck in streaming. Use
 `[hotkey] mode = "toggle"`, or bind your compositor to `voxtype record
 toggle` rather than a press/release pair. The daemon auto-promotes
 `push_to_talk` to `toggle` at startup when streaming is enabled and emits
-a warning to the log.
+a warning to the log. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output)
+nothing is typed until you stop, so push-to-talk works and is kept.
 
 **Example:**
 ```toml
@@ -2112,7 +2113,7 @@ language_hints_strict = false   # allow occasional third-language tokens
 
 Activation mode for the Soniox backend:
 
-- `true` — Live WebSocket session. Tokens stream back during recording and are typed at the cursor as they arrive (or only on finalization if `type_partials = false`). **Requires `[hotkey] mode = "toggle"`.** Push-to-talk is auto-promoted to toggle for the running session with a warning, because typing characters while the PTT key is still held clobbers libinput's held-key state on Hyprland/Sway/River.
+- `true` — Live WebSocket session. Tokens stream back during recording and are typed at the cursor as they arrive (or only on finalization if `type_partials = false`). **Requires `[hotkey] mode = "toggle"`.** Push-to-talk is auto-promoted to toggle for the running session with a warning, because typing characters while the PTT key is still held clobbers libinput's held-key state on Hyprland/Sway/River. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 - `false` — Batch mode. Audio buffered while the hotkey is held; on release one WebSocket session opens, the entire buffer is sent + finalized, and the resulting transcript is typed in one shot. Push-to-talk compatible. Loses live partials but keeps Soniox's accuracy.
 
 ### type_partials
@@ -2279,7 +2280,7 @@ When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype set
 **Default:** `false`
 **Required:** No
 
-Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River.
+Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 
 ```toml
 [hotkey]
@@ -2568,6 +2569,8 @@ By default a streaming engine types each segment at the cursor as soon as it is 
 When `true`, the audio is still transcribed live while you record, but nothing is typed until you stop. The session keeps the raw transcript, including words the engine sent as partials and never confirmed, and corrections the engine made to them. On stop, Voxtype handles the whole transcript once, the same way as a batch dictation: `[text]` processing with the recording's profile vocabulary (so a replacement that spans two segments still matches), then the post-processing command, then the output mode (`type`, `clipboard`, `paste` or `file`, a profile's `output_mode`, or a `--clipboard`/`--paste`/`--file` override). A file is written once and nothing is typed. When the engine keeps up with live audio, the text arrives soon after you stop. If the streaming backend fails, [streaming recovery](#streaming_recovery) (on by default) transcribes the recording again with the batch backend, and the held transcript is not used.
 
 Cancelling the recording discards the transcript. Nothing was typed, so nothing is erased.
+
+Push-to-talk works with this option. A streaming engine that types as you speak needs toggle activation, so the daemon switches push-to-talk to toggle at startup: typing while the key is held makes libinput compositors (Hyprland, Sway, River) lose the key's release. With `streaming_buffer_output = true` nothing is typed until you stop, so the daemon keeps push-to-talk.
 
 ```toml
 [output]

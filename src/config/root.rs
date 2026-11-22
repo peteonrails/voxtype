@@ -241,14 +241,19 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Returns true if the active engine is configured for streaming output.
+    /// Returns true if the active engine is configured for streaming output
+    /// that types at the cursor while recording.
     ///
     /// Used to decide whether to auto-promote push-to-talk to toggle activation:
     /// streaming output types characters at the cursor while the user is still
     /// holding the hotkey, which clobbers libinput's held-key state tracker on
     /// Hyprland/Sway/River. New streaming backends plug into this gate without
-    /// editing the daemon.
+    /// editing the daemon. Buffered output (`[output] streaming_buffer_output`)
+    /// types nothing until the recording stops, so push-to-talk is safe.
     pub fn streaming_active(&self) -> bool {
+        if self.output.streaming_buffer_output {
+            return false;
+        }
         match self.engine {
             // Same sliding-window engine and the same libinput held-key
             // hazard as OpenVino below — this arm was missing until now,
@@ -1098,6 +1103,45 @@ mod tests {
             .unwrap();
         assert_eq!(meeting_cfg.engine, cfg.engine);
         assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
+    }
+
+    /// Push-to-talk is promoted to toggle for streaming that types while the
+    /// key is held. Buffered streaming output types nothing until the stop,
+    /// so it keeps push-to-talk.
+    #[test]
+    fn buffered_streaming_output_keeps_push_to_talk() {
+        let mut whisper = Config::default();
+        whisper.whisper.streaming = true;
+        let parakeet = Config {
+            engine: TranscriptionEngine::Parakeet,
+            parakeet: Some(ParakeetConfig {
+                streaming: true,
+                ..ParakeetConfig::default()
+            }),
+            ..Config::default()
+        };
+        let soniox = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                streaming: true,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
+        let openvino = Config {
+            engine: TranscriptionEngine::OpenVino,
+            openvino: Some(OpenVinoConfig {
+                streaming: true,
+                ..OpenVinoConfig::default()
+            }),
+            ..Config::default()
+        };
+        for mut config in [whisper, parakeet, soniox, openvino] {
+            assert!(config.streaming_active(), "{:?} unbuffered", config.engine);
+            config.output.streaming_buffer_output = true;
+            assert!(!config.streaming_active(), "{:?} buffered", config.engine);
+        }
     }
 
     /// #581: the daemon has to know whether the streaming path is active so

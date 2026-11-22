@@ -6788,8 +6788,9 @@ impl Daemon {
         // (Hyprland, Sway, River) those synthetic key events clobber the held-
         // key state tracker, so the physical key release never fires bindrd and
         // the daemon gets stuck in streaming. Force toggle activation when
-        // streaming is enabled. The user's config file is left untouched; this
-        // override only applies to the running daemon.
+        // streaming types while recording (`Config::streaming_active`). The
+        // user's config file is left untouched; this override only applies to
+        // the running daemon.
         if self.config.streaming_active()
             && self.config.hotkey.mode == crate::config::ActivationMode::PushToTalk
         {
@@ -6799,7 +6800,9 @@ impl Daemon {
                  Streaming output types characters at the cursor while you dictate; if your \
                  PTT key is held during typing, libinput-based compositors (Hyprland, Sway, \
                  River) lose track of the held-key state and the release event never fires. \
-                 Update your config to set [hotkey] mode = \"toggle\" to silence this warning."
+                 Set [hotkey] mode = \"toggle\" to silence this warning, or set \
+                 [output] streaming_buffer_output = true to keep push-to-talk: it types \
+                 nothing until you stop."
             );
             self.config.hotkey.mode = crate::config::ActivationMode::Toggle;
         }
