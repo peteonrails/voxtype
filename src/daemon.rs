@@ -9251,8 +9251,11 @@ while True:
                         .unwrap();
                 }
                 let shell = which::which("sh").unwrap();
-                crate::test_support::write_script(&bin.join("wl-copy"), &format!(
-                "#!{}\ncat \"$HOME/focus\" > \"$HOME/delivered-app\"\ncat > \"$HOME/captured-text\"\n", shell.display()));
+                // The clipboard tool: wl-copy on Linux, pbcopy on macOS.
+                for name in ["wl-copy", "pbcopy"] {
+                    crate::test_support::write_script(&bin.join(name), &format!(
+                    "#!{}\ncat \"$HOME/focus\" > \"$HOME/delivered-app\"\ncat > \"$HOME/captured-text\"\n", shell.display()));
+                }
                 let result = tokio::process::Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", NAME, "--nocapture"])
                     .env_clear()
