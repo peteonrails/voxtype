@@ -552,9 +552,10 @@ fn apply_output_override(
 }
 
 /// Every override file a single recording can carry, in the runtime dir.
-const RECORDING_OVERRIDE_FILES: [&str; 6] = [
+const RECORDING_OVERRIDE_FILES: [&str; 7] = [
     "output_mode_override",
     "model_override",
+    "language_override",
     "profile_override",
     "auto_submit_override",
     "shift_enter_override",
@@ -1174,6 +1175,31 @@ fn read_model_override() -> Option<String> {
     }
 }
 
+/// Read and consume the language override file written by
+/// `voxtype record start --language` (#484).
+fn read_language_override() -> Option<String> {
+    let override_file = Config::runtime_dir().join("language_override");
+    let language = std::fs::read_to_string(&override_file).ok()?;
+    if let Err(e) = std::fs::remove_file(&override_file) {
+        tracing::warn!("Failed to remove language override file: {}", e);
+    }
+    let language = language.trim().to_string();
+    (!language.is_empty()).then(|| {
+        tracing::info!("Language override requested: {}", language);
+        language
+    })
+}
+
+/// The transcriber configuration a `record start --language` recording
+/// runs with, and the name its transcriber is cached under.
+#[derive(Clone)]
+struct LanguageOverride {
+    /// Model and language, e.g. "large-v3-turbo (language de)". Keys the
+    /// override cache and names the transcriber in messages.
+    key: String,
+    config: Config,
+}
+
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
 
@@ -1222,6 +1248,10 @@ pub struct Daemon {
     /// The `--profile` of the current recording, kept from its override
     /// file for every stage of the dictation. See `recording_profile`.
     recording_profile: Option<String>,
+    /// The `--language` of the current recording, resolved against the
+    /// engine and model it records with when it starts. `None` when the
+    /// recording uses the configured language. See `prepare_for_recording`.
+    recording_language: Option<LanguageOverride>,
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
@@ -1583,6 +1613,7 @@ impl Daemon {
             session_text_is_english: true,
             profile_vocabularies,
             recording_profile: None,
+            recording_language: None,
             post_processor,
             last_dictation: None,
             level_hub: None,
@@ -1733,7 +1764,12 @@ impl Daemon {
             let (engine, model) = self.recording_engine_and_model(model_override);
             p.entry.engine = engine;
             p.entry.model = model;
-            p.entry.language = self.config.active_language().map(str::to_string);
+            p.entry.language = match &self.recording_language {
+                Some(language) if !state.is_streaming() => {
+                    language.config.active_language().map(str::to_string)
+                }
+                _ => self.config.active_language().map(str::to_string),
+            };
             p.entry.streaming = state.is_streaming();
             p.entry.trigger = if self.is_external_trigger {
                 Trigger::Record
@@ -1974,11 +2010,16 @@ impl Daemon {
     /// OSD reads.
     fn begin_osd_session(&mut self, state: &State) {
         self.active_transcriber = None;
-        self.session_text_is_english = match state {
-            State::Recording { model_override, .. }
-            | State::EagerRecording { model_override, .. } => {
-                self.override_text_is_english(model_override.as_deref())
+        self.session_text_is_english = match (state, &self.recording_language) {
+            // A recording in another language asks its own configuration.
+            (State::Recording { .. } | State::EagerRecording { .. }, Some(language)) => {
+                crate::setup::lard::is_english(language.config.text_language())
             }
+            (
+                State::Recording { model_override, .. }
+                | State::EagerRecording { model_override, .. },
+                None,
+            ) => self.override_text_is_english(model_override.as_deref()),
             // Streaming always runs the configured model.
             _ => true,
         };
@@ -2322,8 +2363,12 @@ impl Daemon {
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
         discard_stale_cancel(self.start_request);
-        // An override model has its own transcriber, which records in batch
-        // mode; streaming would run the default model instead.
+        // An override model, or an override language (#484), has its own
+        // transcriber, which records in batch mode; streaming would run the
+        // default model in the configured language instead.
+        if self.recording_language.is_some() {
+            return false;
+        }
         if let Some(name) = model_override.as_deref() {
             if matches!(
                 model_catalog::override_route(&self.config, name),
@@ -3399,6 +3444,7 @@ impl Daemon {
     fn discard_recording_overrides(&mut self) {
         discard_recording_overrides_in(&Config::runtime_dir());
         self.recording_profile = None;
+        self.recording_language = None;
     }
 
     /// Forget the profile of a recording whose capture failed to start.
@@ -3422,6 +3468,12 @@ impl Daemon {
         // A new recording carries only the profile its own override names.
         self.recording_profile = read_profile_override();
         let vocabulary = self.active_profile_vocabulary_terms();
+        self.recording_language = read_language_override()
+            .and_then(|language| self.resolve_language_override(model_override, &language));
+        if let Some(language) = self.recording_language.clone() {
+            self.start_override_load_with(&language.key, language.config, vocabulary);
+            return;
+        }
         if let Some(name) = model_override {
             if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
                 model_catalog::override_route(&self.config, name)
@@ -3500,6 +3552,30 @@ impl Daemon {
                         });
                     }
                 }
+            }
+        }
+    }
+
+    /// The transcriber configuration for a recording started with
+    /// `record start --language`, or `None` when the language changes
+    /// nothing (the engine already writes it) or cannot apply. The CLI
+    /// refuses a language that cannot apply before it signals; this daemon
+    /// may run with other settings than the CLI saw, so it logs and records
+    /// in the configured language instead.
+    fn resolve_language_override(
+        &self,
+        model_override: Option<&str>,
+        language: &str,
+    ) -> Option<LanguageOverride> {
+        match model_catalog::language_override_config(&self.config, model_override, language) {
+            Ok(Some(config)) => Some(LanguageOverride {
+                key: format!("{} (language {language})", config.model_name()),
+                config,
+            }),
+            Ok(None) => None,
+            Err(why) => {
+                tracing::warn!("Language override ignored for this recording: {why}");
+                None
             }
         }
     }
@@ -3704,6 +3780,14 @@ impl Daemon {
         model: &str,
         vocabulary: Vec<String>,
     ) {
+        let config = override_config(&self.config, engine, model);
+        self.start_override_load_with(name, config, vocabulary);
+    }
+
+    /// [`Self::start_override_load`] for a transcriber built from `config`
+    /// and cached under `name`: a `--model` override, or a `--language`
+    /// one (#484).
+    fn start_override_load_with(&mut self, name: &str, config: Config, vocabulary: Vec<String>) {
         if let Some((cached, transcriber)) = &self.override_cache {
             if cached == name {
                 let transcriber = transcriber.clone();
@@ -3715,8 +3799,12 @@ impl Daemon {
         if matches!(&self.override_load_task, Some((pending, _)) if pending == name) {
             return;
         }
-        tracing::info!("Loading {:?} model '{}' for this recording", engine, model);
-        let config = override_config(&self.config, engine, model);
+        tracing::info!(
+            "Loading {:?} model '{}' for this recording ({})",
+            config.engine,
+            config.model_name(),
+            name
+        );
         self.override_load_task = Some((
             name.to_string(),
             tokio::task::spawn_blocking(move || {
@@ -3770,6 +3858,17 @@ impl Daemon {
         engine: crate::config::TranscriptionEngine,
         model: &str,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let config = override_config(&self.config, engine, model);
+        self.override_transcriber_with(name, config).await
+    }
+
+    /// [`Self::override_transcriber`] for a transcriber built from
+    /// `config` and cached under `name`.
+    async fn override_transcriber_with(
+        &mut self,
+        name: &str,
+        config: Config,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
         let on_demand = self.config.on_demand_loading();
         if matches!(&self.override_cache, Some((cached, _)) if cached == name) {
             let (key, transcriber) = self.override_cache.take().expect("matched above");
@@ -3780,12 +3879,9 @@ impl Daemon {
         }
         let task = match self.override_load_task.take() {
             Some((pending, task)) if pending == name => task,
-            _ => {
-                let config = override_config(&self.config, engine, model);
-                tokio::task::spawn_blocking(move || {
-                    crate::transcribe::create_transcriber(&config).map(Arc::from)
-                })
-            }
+            _ => tokio::task::spawn_blocking(move || {
+                crate::transcribe::create_transcriber(&config).map(Arc::from)
+            }),
         };
         match task.await {
             Ok(Ok(transcriber)) => {
@@ -3838,6 +3934,14 @@ impl Daemon {
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
         let vocabulary = self.active_profile_vocabulary_terms();
+        if let Some(language) = self.recording_language.clone() {
+            let transcriber = self
+                .override_transcriber_with(&language.key, language.config)
+                .await?;
+            tracing::info!("Transcribing with {}", language.key);
+            transcriber.set_vocabulary(&vocabulary);
+            return Ok(transcriber);
+        }
         if let Some(name) = model_override {
             match model_catalog::override_route(&self.config, name) {
                 Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
@@ -7325,14 +7429,21 @@ impl Daemon {
                             State::EagerRecording { model_override, .. } => model_override.clone(),
                             _ => None,
                         };
-                        let separate_override = model_override.as_deref().is_some_and(|name| {
-                            matches!(
-                                model_catalog::override_route(&self.config, name),
-                                Ok(model_catalog::OverrideRoute::Separate { .. })
-                            )
-                        });
+                        let language_key =
+                            self.recording_language.as_ref().map(|l| l.key.clone());
+                        let separate_override = language_key.is_some()
+                            || model_override.as_deref().is_some_and(|name| {
+                                matches!(
+                                    model_catalog::override_route(&self.config, name),
+                                    Ok(model_catalog::OverrideRoute::Separate { .. })
+                                )
+                            });
                         let model_override = model_override.as_deref();
-                        if separate_override {
+                        if let Some(key) = language_key {
+                            // Same as a separate model: chunks wait for the
+                            // transcriber in this recording's language.
+                            eager_transcriber = self.ready_override(&key).await;
+                        } else if separate_override {
                             // Chunks wait until the override model has loaded;
                             // whatever is left over is transcribed at stop.
                             if let Some(name) = model_override {
@@ -9589,6 +9700,46 @@ while True:
         // Starting another recording with the same override doesn't reload.
         daemon.start_override_load("base.en", TranscriptionEngine::Whisper, "base.en", vec![]);
         assert!(daemon.override_load_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_language_override_transcribes_with_its_own_cached_transcriber() {
+        let mut daemon = parakeet_daemon(false);
+        let mut config = daemon.config.clone();
+        config.set_model_for(TranscriptionEngine::Cohere, "cohere-transcribe-q4f16");
+        config.set_engine_language("de").unwrap();
+        let key = "cohere-transcribe-q4f16 (language de)".to_string();
+        daemon.recording_language = Some(LanguageOverride {
+            key: key.clone(),
+            config,
+        });
+        let cached: Arc<dyn Transcriber> = Arc::new(FixedTranscriber("de"));
+        daemon.override_cache = Some((key.clone(), cached.clone()));
+
+        let got = daemon.get_transcriber_for_recording(None).await.unwrap();
+        assert!(Arc::ptr_eq(&got, &cached));
+        // Kept for the next recording in that language.
+        assert!(matches!(&daemon.override_cache, Some((name, _)) if *name == key));
+    }
+
+    #[test]
+    fn a_language_the_engine_already_writes_needs_no_second_transcriber() {
+        let mut daemon = parakeet_daemon(false);
+        daemon
+            .config
+            .set_model_for(TranscriptionEngine::Whisper, "large-v3-turbo");
+        daemon.config.whisper.language = crate::config::LanguageConfig::Single("es".into());
+        assert!(daemon.resolve_language_override(None, "es").is_none());
+        let english = daemon.resolve_language_override(None, "en").unwrap();
+        assert_eq!(english.key, "large-v3-turbo (language en)");
+        assert_eq!(english.config.active_language(), Some("en"));
+        // The daemon's own config is untouched.
+        assert_eq!(daemon.config.active_language(), Some("es"));
+        // An engine with no language setting records in the configured way.
+        daemon
+            .config
+            .set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
+        assert!(daemon.resolve_language_override(None, "de").is_none());
     }
 
     #[tokio::test]

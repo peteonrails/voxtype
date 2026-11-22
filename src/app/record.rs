@@ -1,6 +1,7 @@
 //! `voxtype record start|stop|toggle|cancel` — write override files for the
 //! daemon and send the appropriate signal. The override files (model,
-//! output_mode, profile, smart_auto_submit, auto_submit, shift_enter_newlines)
+//! language, output_mode, profile, smart_auto_submit, auto_submit,
+//! shift_enter_newlines)
 //! are intentionally separate sentinels under `runtime_dir/`; merging them
 //! would invent write-race surface that doesn't exist today (see
 //! `docs/REFACTORING.md`).
@@ -16,6 +17,7 @@ pub(crate) fn send_record_command(
     config: &config::Config,
     action: RecordAction,
     top_level_model: Option<&str>,
+    top_level_language: Option<&str>,
 ) -> anyhow::Result<()> {
     use voxtype::OutputModeOverride;
 
@@ -69,6 +71,30 @@ pub(crate) fn send_record_command(
         }
     }
 
+    // The language for this one recording (#484). Checked against the
+    // engine and model the recording will use before anything is written.
+    // `record start --language` fails on a language that cannot apply. The
+    // top-level `voxtype --language X record start` was accepted and ignored
+    // before, so there it only warns, and existing keybindings keep working.
+    let language_override = match (action.language_override(), top_level_language) {
+        (Some(language), _) => {
+            voxtype::model_catalog::language_override_config(config, model_override, language)
+                .map_err(|why| anyhow::anyhow!("--language: {why}"))?;
+            Some(language)
+        }
+        (None, Some(language)) => {
+            match voxtype::model_catalog::language_override_config(config, model_override, language)
+            {
+                Ok(_) => Some(language),
+                Err(why) => {
+                    eprintln!("Warning: --language is ignored for this recording: {why}");
+                    None
+                }
+            }
+        }
+        (None, None) => None,
+    };
+
     // Write output mode override file if specified
     // For file mode, format is "file" or "file:/path/to/file"
     if let Some(mode_override) = action.output_mode_override() {
@@ -94,6 +120,13 @@ pub(crate) fn send_record_command(
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
+    }
+
+    // Write language override file if specified
+    if let Some(language) = language_override {
+        let override_file = config::Config::runtime_dir().join("language_override");
+        std::fs::write(&override_file, language)
+            .map_err(|e| anyhow::anyhow!("Failed to write language override: {}", e))?;
     }
 
     // Write smart auto-submit override file if specified

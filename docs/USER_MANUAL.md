@@ -939,6 +939,25 @@ The override works on any engine, and it can name another engine's model: with P
 
 With Whisper as your engine, a Whisper override must be configured as `model`, `secondary_model`, or listed in `available_models`. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
 
+**Language override:** Use `--language` to transcribe one recording in another language. The next recording uses your configured language again:
+
+```bash
+voxtype record start --language en      # This recording in English
+voxtype record toggle --language de     # Works with toggle too
+voxtype record start --model large-v3-turbo --language fr   # Combines with --model
+```
+
+It sets the language of the engine the recording uses, the way the global `--language` does (see [Language from the command line](#language-from-the-command-line)): Whisper takes a code, `auto` or a set such as `en,fr`, Cohere one of its 14 codes, GGUF, SenseVoice and OpenVINO one code or `auto`, and Soniox reads it as its language hints. A language that cannot apply fails at once, before anything is recorded: an engine with no language setting (Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual), a value the engine cannot take, or a language an English-only model such as `base.en` cannot write. `voxtype --language de record start` also applies to that one recording; there a language that cannot apply only prints a warning, since earlier versions accepted and ignored it.
+
+The recording is transcribed by a second instance of the model set to that language. The daemon starts loading it when the recording starts, so the load overlaps your speech, and keeps it next to your default model for the next recording in that language (unless `on_demand_loading` is set), so switching between your default language and one other language does not reload either. It shares the slot `--model` overrides use: an override in a third language, or another model, replaces it. Streaming engines transcribe a language override recording in one pass at stop rather than live.
+
+This suits compositor keybindings, for example a second binding that dictates in English while the default dictates in Spanish:
+
+```
+bind = SUPER, V, exec, voxtype record toggle
+bind = SUPER SHIFT, V, exec, voxtype record toggle --language en
+```
+
 **Output mode override:** Use `--type`, `--clipboard`, or `--paste` to override the output mode:
 
 ```bash
