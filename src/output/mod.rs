@@ -42,6 +42,7 @@ pub mod session;
 pub mod streaming;
 pub mod wtype;
 pub mod xclip;
+pub mod xdotool;
 pub mod ydotool;
 
 pub use streaming::StreamingSession;
@@ -311,7 +312,9 @@ pub trait TextOutput: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// Default driver order for type mode
+/// Default driver order for type mode. New drivers (xdotool) are opt-in
+/// through `driver_order` and never added here, so an upgrade does not
+/// change which driver types a user's text.
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
     OutputDriver::Wtype,
@@ -355,6 +358,12 @@ fn create_driver_output(
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
             config.shift_enter_newlines,
+        )),
+        OutputDriver::Xdotool => Box::new(xdotool::XdotoolOutput::new(
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            config.auto_submit,
+            config.append_text.clone(),
         )),
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
@@ -635,7 +644,8 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+    matches!(name, "wtype" | "eitype" | "dotool" | "xdotool" | "ydotool")
+        || name.starts_with("paste")
 }
 
 /// True when any method in the chain synthesizes keystrokes, so the
@@ -858,12 +868,32 @@ mod tests {
         assert_eq!(result, "Café ' emoji 😀");
     }
 
+    /// New drivers are opt-in: an upgrade must never change which driver
+    /// types a user's text.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn xdotool_is_opt_in_and_never_in_the_default_chain() {
+        assert!(!DEFAULT_DRIVER_ORDER.contains(&OutputDriver::Xdotool));
+        assert_eq!(
+            DEFAULT_DRIVER_ORDER,
+            &[
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Dotool,
+                OutputDriver::Ydotool,
+                OutputDriver::Clipboard,
+                OutputDriver::Xclip,
+            ]
+        );
+    }
+
     #[test]
     fn test_is_keystroke_method_classification() {
         assert!(is_keystroke_method("wtype"));
         assert!(is_keystroke_method("eitype"));
         assert!(is_keystroke_method("dotool"));
         assert!(is_keystroke_method("ydotool"));
+        assert!(is_keystroke_method("xdotool"));
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
         assert!(!is_keystroke_method("clipboard (xclip/xsel)"));

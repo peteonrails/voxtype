@@ -449,7 +449,7 @@ pub struct Cli {
         value_name = "DRIVERS",
         help_heading = "Output",
         long_help = "Output driver order (comma-separated).\n\
-        Available: wtype, eitype, dotool, ydotool, clipboard, xclip, hyprland.\n\
+        Available: wtype, eitype, dotool, xdotool, ydotool, clipboard, xclip, hyprland.\n\
         Paste mode uses the keystroke drivers in this order (wtype, eitype,\n\
         ydotool, hyprland). hyprland sends the paste keystroke through\n\
         Hyprland's own dispatcher; it is paste-only and opt-in.\n\

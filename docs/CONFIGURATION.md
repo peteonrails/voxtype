@@ -2557,6 +2557,7 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
 - `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
 - `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster when no per-call layout or variant hint is needed — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
+- `xdotool` - X11 typing through the XTEST extension, no daemon needed. Needs an X display (`DISPLAY` set). Under Wayland it only reaches X11 (XWayland) windows, so pick it for an X11 session or an X11-only app. Never in the default chain: name it in `driver_order` to use it.
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
@@ -2564,6 +2565,8 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 
 **Default behavior (no driver_order set):**
 The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
+
+New drivers such as `xdotool` are opt-in and are never added to the default chain, so upgrading never changes which driver types your text.
 
 **Examples:**
 
@@ -2579,6 +2582,9 @@ driver_order = ["dotool", "ydotool", "xclip"]
 
 # Force single driver (no fallback)
 driver_order = ["ydotool"]
+
+# Plain X11 session: xdotool, then the X11 clipboard
+driver_order = ["xdotool", "xclip"]
 
 # GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
 driver_order = ["eitype", "dotool", "clipboard"]

@@ -2319,7 +2319,7 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11), and `hyprland` (paste mode only, see below)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `xdotool` (X11, opt-in), `ydotool`, `clipboard` (wl-copy), `xclip` (X11), and `hyprland` (paste mode only, see below)
 
 **Examples:**
 
