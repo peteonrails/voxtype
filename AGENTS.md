@@ -407,6 +407,7 @@ Prerequisite: profiles have to reach `TextProcessor`, which they do not today - 
 **2.0 (major):** Remove ONNX Runtime support entirely, once every ONNX-backed engine that's staying either has a native ggml/GGUF port (Cohere via #792 lands first, in 1.2.0; parakeet.cpp via #483 in 1.3.0) or is dropped. Moonshine/SenseVoice/Paraformer/Dolphin/Omnilingual still need an explicit per-engine port-or-retire call - not yet made. This also retires the ONNX-specific build/packaging burden: the onnx-avx2/onnx-avx512/onnx-cuda-12/onnx-cuda-13/onnx-migraphx binary targets, the AVX-512-instruction-leakage checks that exist only because of bundled ONNX Runtime prebuilts, and both open items under Blocked/Waiting below become moot rather than needing to be solved.
 
 **Near Term (unscheduled):**
+- **Graphical settings on GTK desktops** - A settings window for GNOME, KDE and other desktops that do not run the Omarchy shell. Today the tray's Settings entry opens `voxtype configure` in a terminal there; the only graphical settings screen is the Omarchy panel. The window is built from the same config schema (`voxtype config schema --json`) and written through the same `voxtype config set` as the TUI and the panel, so a new setting appears in all three without separate work. It lives in the GTK4 app that already hosts the meetings and history windows. Requested in [#188](https://github.com/peteonrails/voxtype/issues/188).
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
 - **Meeting echo cancellation edge trimming** - Remove residual bleed-through words at segment boundaries when loopback audio is active. GTCRN handles the bulk of echo removal, but 1-2 stray words can appear at the start/end of mic segments where the STFT window crosses a chunk boundary.
 
@@ -426,10 +427,12 @@ Prerequisite: profiles have to reach `TextProcessor`, which they do not today - 
 ### Non-Goals
 
 - Windows support (Linux-first, Wayland-native)
-- GUI configuration (GTK/Qt/web). A TUI (`voxtype configure`) is supported and
-  surfaced as a desktop-file launcher entry; CLI and config file remain the
-  primary interfaces for scripting and headless setups.
 - Continuous dictation mode (push-to-talk is the paradigm)
+
+Graphical settings used to be listed here. They are now on the roadmap (see
+"Graphical settings on GTK desktops" above). The CLI and the config file stay
+the primary interfaces for scripting and headless setups, and every setting
+stays reachable from them.
 
 ---
 
