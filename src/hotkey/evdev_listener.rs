@@ -436,9 +436,15 @@ impl DeviceManager {
             })
             .collect();
         let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        // EINTR and other errors just end the wait early; the loop rechecks
-        // everything anyway.
-        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+        // SAFETY: fds is a valid pollfd slice for the duration of the call,
+        // and every descriptor in it is owned by self.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+        // EINTR just ends the wait early; the loop rechecks everything anyway.
+        // Any other error returns at once on every call, so sleep instead of
+        // letting the loop spin at full speed.
+        if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Check if we have any devices
