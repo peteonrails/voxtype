@@ -53,6 +53,10 @@ pub enum WorkerResponse {
         error: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<super::RuntimeMetadata>,
+        /// Set when `[whisper] gpu_required` refused the load, so the parent
+        /// can tell the user why instead of reporting a generic failure.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        gpu_unavailable: bool,
     },
 }
 
@@ -87,6 +91,16 @@ impl WorkerResponse {
             ok: false,
             error: msg.into(),
             metadata: None,
+            gpu_unavailable: false,
+        }
+    }
+
+    pub fn gpu_unavailable(reason: impl Into<String>) -> Self {
+        WorkerResponse::Error {
+            ok: false,
+            error: reason.into(),
+            metadata: None,
+            gpu_unavailable: true,
         }
     }
 
@@ -118,10 +132,13 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
         Ok(t) => t,
         Err(e) => {
             // Write error and exit - parent will see no READY signal
-            write_response_to(
-                &mut stdout_lock,
-                WorkerResponse::error(format!("Failed to load model: {}", e)),
-            );
+            let response = match e {
+                crate::error::TranscribeError::GpuUnavailable(reason) => {
+                    WorkerResponse::gpu_unavailable(reason)
+                }
+                e => WorkerResponse::error(format!("Failed to load model: {}", e)),
+            };
+            write_response_to(&mut stdout_lock, response);
             return Ok(());
         }
     };
@@ -383,6 +400,14 @@ mod tests {
             "{json}"
         );
         assert!(TIMED_FLAG as usize > 16000 * 60 * 10);
+    }
+
+    #[test]
+    fn gpu_unavailable_is_flagged_and_other_errors_are_not() {
+        let json = serde_json::to_string(&WorkerResponse::gpu_unavailable("No GPU found")).unwrap();
+        assert!(json.contains(r#""gpu_unavailable":true"#), "{json}");
+        let json = serde_json::to_string(&WorkerResponse::error("Model not found")).unwrap();
+        assert!(!json.contains("gpu_unavailable"), "{json}");
     }
 
     #[test]

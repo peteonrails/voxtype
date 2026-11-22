@@ -266,6 +266,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             config.whisper.gpu_device = Some(n);
         }
     }
+    if let Ok(val) = std::env::var("VOXTYPE_GPU_REQUIRED") {
+        config.whisper.gpu_required = parse_bool_env(&val);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_FLASH_ATTENTION") {
         config.whisper.flash_attention = parse_bool_env(&val);
     }
