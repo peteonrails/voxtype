@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::super::default_true;
 
+/// Region names accepted by `[soniox] region`, in the order Soniox's
+/// data-residency docs list them. A project is pinned to one region and its
+/// keys are refused (401) by every other region's hosts.
+pub const SONIOX_REGIONS: &[&str] = &["us", "eu", "jp", "in"];
+
 /// Soniox cloud streaming WebSocket STT configuration
 ///
 /// Soniox is a paid cloud STT provider. API key required:
@@ -13,6 +18,13 @@ pub struct SonioxConfig {
     /// API key. If unset, falls back to the SONIOX_API_KEY env var.
     #[serde(default)]
     pub api_key: Option<String>,
+
+    /// Data-residency region of the Soniox project the API key belongs to:
+    /// "us" (default), "eu", "jp" or "in". A key only works on its own
+    /// region's hosts, so a key from an EU project needs `region = "eu"`.
+    /// See https://docs.soniox.com/data-residency.
+    #[serde(default = "default_soniox_region")]
+    pub region: String,
 
     /// Soniox model name. Default: "stt-rt-v6".
     #[serde(default = "default_soniox_model")]
@@ -77,6 +89,10 @@ pub struct SonioxConfig {
     pub async_max_wait_secs: u64,
 }
 
+fn default_soniox_region() -> String {
+    "us".to_string()
+}
+
 fn default_soniox_model() -> String {
     "stt-rt-v6".to_string()
 }
@@ -93,6 +109,7 @@ impl Default for SonioxConfig {
     fn default() -> Self {
         Self {
             api_key: None,
+            region: default_soniox_region(),
             model: default_soniox_model(),
             language_hints: default_soniox_language_hints(),
             language_hints_strict: true,

@@ -314,9 +314,12 @@ Item {
         _frame++;
     }
 
-    function _tick() {
+    // `frameSeconds` is the time since the previous rendered frame, from
+    // the frame clock. Without it (a direct call) the wall clock is used.
+    function _tick(frameSeconds) {
         const now = Date.now();
-        const dt = Math.min(0.05, Math.max(0.001, (now - _lastTick) / 1000));
+        const elapsed = frameSeconds !== undefined ? frameSeconds : (now - _lastTick) / 1000;
+        const dt = Math.min(0.05, Math.max(0.001, elapsed));
         _lastTick = now;
 
         const idle = !_live();
@@ -356,12 +359,14 @@ Item {
         _frame++;
     }
 
-    Timer {
-        interval: 16
-        repeat: true
+    // Ticks once per rendered frame, on the display's own clock. A 16 ms
+    // Timer is not tied to vsync: on a 120 Hz output it lands on an uneven
+    // cadence, each state shown for one or two refreshes, which reads as
+    // judder, and it caps motion at about 60 Hz (#1078).
+    FrameAnimation {
+        id: frameClock
         running: root.active && root.visible && root.daemonState !== "idle"
-        triggeredOnStart: true
-        onTriggered: root._tick()
+        onTriggered: root._tick(frameTime)
     }
 
     Repeater {

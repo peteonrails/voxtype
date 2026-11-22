@@ -300,6 +300,24 @@ pub fn vad_check(config: &Config, models_dir: &Path) -> Option<Check> {
     })
 }
 
+/// `[whisper] mode = "cli"` needs the whisper-cli binary, which no voxtype
+/// package installs. `problem` is [`crate::transcribe::cli::cli_mode_problem`].
+///
+/// The id sits under `transcription.` so the daemon's startup summary leaves
+/// it to the model-load notice, which says the same thing (Omarchy #18694).
+pub fn whisper_cli_check(config: &Config, problem: Option<String>) -> Option<Check> {
+    const ID: &str = "transcription.whisper_cli";
+    if config.engine != TranscriptionEngine::Whisper
+        || config.whisper.effective_mode() != WhisperMode::Cli
+    {
+        return None;
+    }
+    Some(match problem {
+        None => Check::ok(ID, "Whisper cli mode: whisper-cli found"),
+        Some(problem) => Check::error(ID, problem, crate::transcribe::cli::MISSING_CLI_FIX),
+    })
+}
+
 /// LARD disfluency cleanup, when `text.lard_disfluency` is on.
 ///
 /// The stage fails open: with no model, or a language that is not explicit
@@ -415,11 +433,12 @@ pub fn parse_show_environment(text: &str) -> (bool, bool) {
 
 /// evdev hotkey: the daemon needs to read at least one /dev/input/event*.
 ///
-/// With the built-in hotkey off, the same access powers the modifier-release
-/// guard, so its absence is a warning rather than an error.
+/// With the built-in hotkey off, the same access only powers the
+/// modifier-release guard. Its absence is then informational: compositor
+/// submaps do the guard's job, and the `input` group it would need lets every
+/// program read every keystroke.
 pub fn input_access_check(hotkey_enabled: bool, total: usize, readable: usize) -> Check {
     const ID: &str = "input.evdev";
-    const FIX: &str = "sudo usermod -aG input $USER, then log out and back in";
     match (hotkey_enabled, readable > 0) {
         (true, true) => Check::ok(
             ID,
@@ -433,17 +452,22 @@ pub fn input_access_check(hotkey_enabled: bool, total: usize, readable: usize) -
         (true, false) => Check::error(
             ID,
             "Built-in hotkey is enabled but no input device is readable (not in the 'input' group?)",
-            format!("{FIX}, or use compositor keybindings with [hotkey] enabled = false"),
+            "Bind `voxtype record toggle` in your compositor and set [hotkey] enabled = false. \
+             The 'input' group also works but exposes every keystroke to every program \
+             (docs/USER_MANUAL.md, \"The input group trade-off\")",
         ),
         (false, true) => Check::ok(
             ID,
             "Input devices readable (modifier-release guard available)",
         ),
-        (false, false) => Check::warn(
+        // The normal state with compositor keybindings, and the safer one:
+        // no group grant just for the guard. Submaps cover what it did.
+        (false, false) => Check::ok(
             ID,
-            "Input devices not readable: modifier-release guard unavailable, so text typed while \
-             a modifier is still held may trigger shortcuts",
-            FIX,
+            "Input devices not readable, as expected with compositor keybindings; the \
+             modifier-release guard is off. If held modifiers trigger shortcuts while text is \
+             typed, `voxtype setup compositor <hyprland|sway|river>` adds submaps that prevent \
+             it, with no input group needed",
         ),
     }
 }
@@ -577,6 +601,153 @@ pub fn meeting_check(config: &Config, has_tool: impl Fn(&str) -> bool) -> Option
              or set [meeting.audio] loopback_device = \"disabled\"",
         )
     })
+}
+
+/// What `voxtype doctor` saw of Omarchy's local text models.
+#[derive(Debug, Clone, Default)]
+pub struct OmarchyObservation {
+    /// `omarchy-models` (or `omarchy`) was found.
+    pub detected: bool,
+    /// The settings that choose Omarchy's model, e.g. `[meeting.summary] backend`.
+    pub used_by: Vec<&'static str>,
+    /// The running model (`recipe at endpoint`), or why there is none.
+    pub model: Option<Result<String, String>>,
+    /// The key file, or why it cannot be opened.
+    pub key: Option<Result<PathBuf, String>>,
+    /// Whether the model's endpoint answered `/v1/models` with the key.
+    pub endpoint: Option<Result<(), String>>,
+}
+
+/// Omarchy's local model: found, running, key readable, endpoint answering.
+/// Shown on an Omarchy install, or when config chooses Omarchy anywhere.
+pub fn omarchy_checks(obs: &OmarchyObservation) -> Vec<Check> {
+    let used = !obs.used_by.is_empty();
+    if !obs.detected && !used {
+        return Vec::new();
+    }
+    let used_by = obs.used_by.join(" and ");
+    let mut checks = Vec::new();
+    if !obs.detected {
+        checks.push(Check::error(
+            "omarchy.detected",
+            format!("Omarchy's model command was not found, but {used_by} = \"omarchy\""),
+            "Choose another backend there, e.g. `voxtype config set meeting.summary.backend disabled`",
+        ));
+        return checks;
+    }
+    checks.push(Check::ok(
+        "omarchy.detected",
+        if used {
+            format!("Omarchy detected; {used_by} uses its local model")
+        } else {
+            "Omarchy detected; voxtype is not set to use its local model".to_string()
+        },
+    ));
+    match &obs.model {
+        Some(Ok(model)) => checks.push(Check::ok(
+            "omarchy.model",
+            format!("Omarchy text model running: {model}"),
+        )),
+        Some(Err(why)) if used => checks.push(Check::warn(
+            "omarchy.model",
+            why.clone(),
+            "Start a text model with `omarchy models start <recipe>` or from the local models \
+             panel. Until then voxtype falls back as if Omarchy were not chosen.",
+        )),
+        Some(Err(_)) | None => checks.push(Check::ok(
+            "omarchy.model",
+            "No Omarchy text model is running",
+        )),
+    }
+    match &obs.key {
+        Some(Ok(path)) => checks.push(Check::ok(
+            "omarchy.key",
+            format!("Omarchy API key file is readable ({})", path.display()),
+        )),
+        Some(Err(why)) if used => checks.push(Check::warn(
+            "omarchy.key",
+            why.clone(),
+            "Omarchy writes the key when a model is first set up (`omarchy models use best text`)",
+        )),
+        _ => {}
+    }
+    match &obs.endpoint {
+        Some(Ok(())) => checks.push(Check::ok(
+            "omarchy.endpoint",
+            "Omarchy model endpoint answers with the key",
+        )),
+        Some(Err(why)) => checks.push(Check::warn(
+            "omarchy.endpoint",
+            why.clone(),
+            "Restart the model from Omarchy's local models panel, or see `omarchy models status`",
+        )),
+        None => {}
+    }
+    checks
+}
+
+/// Look at Omarchy's local model the way voxtype uses it. Runs
+/// `omarchy-models status --json` and one `/v1/models` request; never
+/// starts a model or runs one.
+fn observe_omarchy(config: &Config) -> OmarchyObservation {
+    use crate::llm::{omarchy, Provider};
+    let mut used_by = Vec::new();
+    let summary = config.meeting.summary.llm();
+    if summary
+        .as_ref()
+        .is_some_and(|c| c.provider == Provider::Omarchy)
+    {
+        used_by.push("[meeting.summary] backend");
+    }
+    let cleanup = config.output.post_process.as_ref().and_then(|p| p.llm());
+    if cleanup
+        .as_ref()
+        .is_some_and(|c| c.provider == Provider::Omarchy)
+    {
+        used_by.push("[output.post_process] backend");
+    }
+    let env = omarchy::OmarchyEnv::from_process();
+    let detected = env.models_command.is_some() || omarchy::is_omarchy_install();
+    if !detected {
+        return OmarchyObservation {
+            detected,
+            used_by,
+            ..Default::default()
+        };
+    }
+    let wanted = summary
+        .into_iter()
+        .chain(cleanup)
+        .find(|c| c.provider == Provider::Omarchy)
+        .and_then(|c| c.model);
+    let key = Some(omarchy::key_readable(&env).map_err(|e| e.to_string()));
+    let found = omarchy::discover(&env, wanted.as_deref());
+    let endpoint = found.as_ref().ok().map(|e| {
+        crate::llm::list_models(e, std::time::Duration::from_secs(3))
+            .map_err(|err| err.to_string())
+            .and_then(|ids| {
+                if ids.contains(&e.model) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} answers but does not list {}",
+                        e.label(),
+                        e.model
+                    ))
+                }
+            })
+    });
+    OmarchyObservation {
+        detected,
+        used_by,
+        model: Some(
+            found
+                .map(|e| format!("{} at {}", e.model, e.base_url))
+                .map_err(|e| e.to_string()),
+        ),
+        key,
+        endpoint,
+    }
 }
 
 /// The configured capture device, matched the way the daemon matches it
@@ -910,6 +1081,10 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     checks.extend(secondary_model_check(config, &models_dir));
     checks.extend(vad_check(config, &models_dir));
     checks.extend(lard_check(config, super::lard::problem(config).as_ref()));
+    checks.extend(whisper_cli_check(
+        config,
+        crate::transcribe::cli::cli_mode_problem(&config.whisper),
+    ));
 
     if scope == Scope::Full {
         // Probed in a child process that is killed if the sound server hangs.
@@ -986,6 +1161,13 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     if linux {
         checks.extend(meeting_check(config, on_path));
     }
+    if scope == Scope::Full && linux {
+        let config = config.clone();
+        let observed = tokio::task::spawn_blocking(move || observe_omarchy(&config))
+            .await
+            .unwrap_or_default();
+        checks.extend(omarchy_checks(&observed));
+    }
 
     if let Some(unit) = &unit {
         checks.push(systemd_unit_check(
@@ -1019,6 +1201,7 @@ fn heading(id: &str) -> &'static str {
         "notifications" => "Notifications",
         "osd" => "OSD",
         "meeting" => "Meeting mode",
+        "omarchy" => "Omarchy local AI",
         "service" => "Service",
         "agents" => "Coding agents",
         _ => "Other",
@@ -1483,6 +1666,34 @@ mod tests {
         );
     }
 
+    /// Omarchy #18694: cli mode without whisper-cli must show up in doctor
+    /// and `setup check` with both fixes, and only in cli mode.
+    #[test]
+    fn whisper_cli_check_reports_cli_mode_without_the_binary() {
+        let mut config = Config::default();
+        assert!(whisper_cli_check(&config, Some("x".into())).is_none());
+
+        config.whisper.mode = Some(WhisperMode::Cli);
+        let check = whisper_cli_check(&config, Some("whisper-cli missing".into())).unwrap();
+        assert_eq!(check.severity, Severity::Error);
+        assert_eq!(heading(check.id), "Transcription");
+        let fix = check.fix.unwrap();
+        assert!(fix.contains("whisper-cpp"), "{fix}");
+        assert!(
+            fix.contains("voxtype config set whisper.mode local"),
+            "{fix}"
+        );
+        // The model-load notice reports it at startup, so the grouped
+        // startup notification must not repeat it.
+        assert!(notified_elsewhere(check.id));
+
+        let ok = whisper_cli_check(&config, None).unwrap();
+        assert_eq!(ok.severity, Severity::Ok);
+
+        config.engine = TranscriptionEngine::Parakeet;
+        assert!(whisper_cli_check(&config, Some("x".into())).is_none());
+    }
+
     #[test]
     fn lard_check_has_its_own_heading() {
         let r = report(vec![Check::error(
@@ -1552,7 +1763,16 @@ mod tests {
         assert_eq!(input_access_check(true, 10, 3).severity, Severity::Ok);
         assert_eq!(input_access_check(true, 10, 0).severity, Severity::Error);
         assert_eq!(input_access_check(true, 0, 0).severity, Severity::Error);
-        assert_eq!(input_access_check(false, 10, 0).severity, Severity::Warn);
+        // Compositor keybindings without the input group: fine, and the
+        // message points at submaps rather than the group.
+        let off = input_access_check(false, 10, 0);
+        assert_eq!(off.severity, Severity::Ok);
+        assert!(off.message.contains("voxtype setup compositor"));
+        assert!(!off.message.contains("usermod"));
+        let on = input_access_check(true, 10, 0);
+        let fix = on.fix.unwrap();
+        assert!(fix.starts_with("Bind `voxtype record toggle`"), "{fix}");
+        assert!(!fix.contains("usermod"), "{fix}");
         assert_eq!(input_access_check(false, 10, 1).severity, Severity::Ok);
     }
 
@@ -1913,5 +2133,64 @@ mod tests {
         assert!(v["checks"][0].get("fix").is_none());
         assert_eq!(v["checks"][1]["id"], "vad.model");
         assert_eq!(v["checks"][1]["fix"], "Run: voxtype setup vad");
+    }
+
+    #[test]
+    fn omarchy_checks_report_the_four_lines() {
+        // Not Omarchy and not chosen: nothing to say.
+        assert!(omarchy_checks(&OmarchyObservation::default()).is_empty());
+
+        let healthy = OmarchyObservation {
+            detected: true,
+            used_by: vec!["[meeting.summary] backend"],
+            model: Some(Ok("qwen at http://127.0.0.1:11435/v1".into())),
+            key: Some(Ok(PathBuf::from("/home/u/.config/omarchy/agent-local/key"))),
+            endpoint: Some(Ok(())),
+        };
+        let checks = omarchy_checks(&healthy);
+        let ids: Vec<&str> = checks.iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "omarchy.detected",
+                "omarchy.model",
+                "omarchy.key",
+                "omarchy.endpoint"
+            ]
+        );
+        assert!(checks.iter().all(|c| c.severity == Severity::Ok));
+        assert_eq!(heading("omarchy.model"), "Omarchy local AI");
+
+        // Chosen but nothing running: a warning that says how to start one.
+        let stopped = OmarchyObservation {
+            model: Some(Err("No Omarchy text model is running".into())),
+            endpoint: None,
+            ..healthy.clone()
+        };
+        let model = omarchy_checks(&stopped)
+            .into_iter()
+            .find(|c| c.id == "omarchy.model")
+            .unwrap();
+        assert_eq!(model.severity, Severity::Warn);
+        assert!(model.fix.unwrap().contains("omarchy models start"));
+
+        // Not chosen: a stopped model is no problem.
+        let unused = OmarchyObservation {
+            used_by: Vec::new(),
+            ..stopped
+        };
+        assert!(omarchy_checks(&unused)
+            .iter()
+            .all(|c| c.severity == Severity::Ok));
+
+        // Chosen without Omarchy: an error.
+        let missing = OmarchyObservation {
+            detected: false,
+            used_by: vec!["[output.post_process] backend"],
+            ..Default::default()
+        };
+        let checks = omarchy_checks(&missing);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].severity, Severity::Error);
     }
 }

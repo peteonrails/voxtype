@@ -339,13 +339,10 @@ skill already sits at that path.
 After installation, you need to complete the initial setup:
 
 ```bash
-# 1. Ensure you're in the input group
-groups | grep input
-
-# 2. Run the setup wizard
+# 1. Run the setup wizard
 voxtype setup --download
 
-# 3. Start voxtype
+# 2. Start voxtype
 voxtype
 
 # If something doesn't work, ask voxtype what is wrong
@@ -357,6 +354,8 @@ The setup command will:
 - Verify permissions
 - Download the default Whisper model (base.en)
 - Create your configuration file
+
+Then bind `voxtype record start` and `voxtype record stop` (or `voxtype record toggle`) to a key in your compositor or desktop and set `[hotkey] enabled = false`. See [Compositor Keybindings](#compositor-keybindings). This needs no extra permissions. The built-in hotkey is the fallback for desktops without keybindings, and it needs `input` group access with a real security cost; see [The `input` group trade-off](#the-input-group-trade-off).
 
 ---
 
@@ -524,7 +523,7 @@ sets the window class to `voxtype` so compositors can float it.
 | General | Active engine, variant binary, daemon status, hardware-aware variant recommendation |
 | Engine | Per-engine tuning for Whisper / Parakeet / Moonshine / SenseVoice / Paraformer / Dolphin / Omnilingual / Cohere |
 | Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
-| Audio | Input device, max recording length, MPRIS pause/ducking, audio feedback theme/volume |
+| Audio | Input device, max recording length, silent-input guard, MPRIS pause/ducking, audio feedback theme/volume |
 | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
 | Text Cleanup | Independent deterministic stages, opt-in LARD cleanup/model path, learned punctuation/casing, smart auto-submit, replacements editor |
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
@@ -998,6 +997,15 @@ max_duration_secs = 60
 # duck_media = false
 # duck_media_volume_percent = 70
 
+# Stop a capture that opens but delivers only exact digital silence. If no
+# sample is non-zero within the first 5 seconds, Voxtype stops the recording,
+# plays the error cue, and names the source in a notification.
+[audio.dead_input]
+# enabled = true
+# window_ms = 5000
+# threshold_dbfs = -100.0
+
+
 [whisper]
 # Model to use for transcription
 # Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3
@@ -1063,6 +1071,17 @@ language_hints = ["en"]
 ```
 
 See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, performance tips with dotoold, privacy considerations).
+
+### Streaming Recovery
+
+Voxtype retains the capture while streaming. If a backend errors before delivering the dictation or does not finish after stop, it transcribes the retained audio with the configured batch backend and sends a **Dictation Recovered** notification. The default stop deadline is 30 seconds: well above Soniox's five-second drain timeout, and long enough for a slow CPU to finish the last window of local streaming transcription.
+
+```toml
+[streaming_recovery]
+enabled = true
+stop_timeout_secs = 30
+```
+
 
 ### Creating a Custom Configuration
 
@@ -1215,7 +1234,7 @@ If you prefer to use your compositor's native keybindings instead of voxtype's b
 
 ### Why Use Compositor Keybindings?
 
-- **No `input` group membership required** - Voxtype's evdev-based hotkey detection requires being in the `input` group
+- **No `input` group membership required** - Voxtype's evdev-based hotkey detection requires the `input` group, which lets any program you run read every keystroke (see [The `input` group trade-off](#the-input-group-trade-off))
 - **Native feel** - Use familiar keybinding configuration patterns
 - **Modifier support** - Use any key combination your compositor supports (e.g., Super+V)
 
@@ -1308,6 +1327,16 @@ enabled = false
 
 Restart the voxtype daemon after changing the config.
 
+### niri
+
+niri binds run on key press only, so use toggle mode. In `~/.config/niri/config.kdl`:
+
+```kdl
+binds {
+    Mod+V { spawn "voxtype" "record" "toggle"; }
+}
+```
+
 ### Other Compositors/Desktops
 
 For other compositors without key release support (GNOME, etc.), use toggle mode:
@@ -1317,12 +1346,45 @@ For other compositors without key release support (GNOME, etc.), use toggle mode
 voxtype record toggle
 ```
 
+On GNOME, add it under **Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts**.
+
 ### Trade-offs
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| Built-in hotkey (evdev) | Universal, no config needed | Requires `input` group |
-| Compositor keybindings | Native feel, no `input` group | Compositor-specific config |
+| Compositor keybindings (recommended) | Native feel, no extra permissions | Compositor-specific config; toggle only where the compositor has no key-release binds |
+| Built-in hotkey (evdev) | Works without compositor support, including X11 and the TTY | Requires `input` group membership, which lets any of your programs read every keystroke |
+
+### The `input` group trade-off
+
+Use compositor keybindings whenever your desktop has them. That covers Hyprland, Sway, River, niri, KDE Plasma and GNOME. Only fall back to the built-in evdev hotkey when nothing else can trigger voxtype, such as on X11 window managers without a key-binding tool, the Linux console, or when you need hold-to-talk on a desktop that has only press bindings.
+
+The built-in hotkey reads `/dev/input/event*` directly, which only members of the `input` group may do. Membership is not limited to voxtype: every program you run, including a compromised browser extension helper or a malicious package script, can then read every key you press, passwords included. That is why some distributions remove users from the group on purpose. Omarchy did so in 4.0.2 as hardening, so on Omarchy and other Hyprland setups use a keybinding and leave the group alone.
+
+If you decide the evdev hotkey is worth that cost on your machine, add yourself to the group, then log out and back in:
+
+```bash
+sudo usermod -aG input $USER
+```
+
+To undo it later, run `sudo gpasswd -d $USER input` and log out.
+
+### Giving dotool and ydotool access to uinput
+
+dotool and ydotool type by creating a virtual keyboard through `/dev/uinput`. Many guides grant that by adding you to the `input` group, which also lets your programs read every keystroke (see above). Writing to `/dev/uinput` only needs a narrower grant. Prefer, in order:
+
+1. A driver that needs no device access: wtype on wlroots compositors (Hyprland, Sway, River, niri), eitype on GNOME and KDE.
+2. A dedicated group that can write to `/dev/uinput` and read nothing:
+
+```bash
+sudo groupadd -f uinput
+echo 'KERNEL=="uinput", GROUP="uinput", MODE="0660", OPTIONS+="static_node=uinput"' \
+  | sudo tee /etc/udev/rules.d/99-voxtype-uinput.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput
+sudo usermod -aG uinput $USER   # then log out and back in
+```
+
+This still lets your programs type into any window, so it is not free, but they can no longer read what you type. The `99-` prefix makes the rule apply after packaged rules (dotool ships one that hands uinput to `input`).
 
 ### Modifier Key Issues
 
@@ -2175,13 +2237,7 @@ For eitype (recommended for GNOME/KDE):
 cargo install eitype
 ```
 
-For dotool (recommended for non-US keyboards):
-```bash
-# Install dotool (check your distribution's package manager)
-# User must be in 'input' group for uinput access
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
-```
+For dotool (recommended for non-US keyboards), install it from your distribution's package manager, then give it write access to `/dev/uinput` through a dedicated group rather than the `input` group. See [Giving dotool and ydotool access to uinput](#giving-dotool-and-ydotool-access-to-uinput).
 
 For ydotool:
 
@@ -2262,6 +2318,16 @@ mode = "paste"
 restore_clipboard = true
 ```
 
+**Paste through Hyprland itself**: On Hyprland, paste mode can send the paste keystroke through Hyprland's own dispatcher instead of wtype. Use it when the paste arrives as the wrong key, for example Shift+Insert reaching an XWayland or Electron app as Shift+Escape:
+
+```toml
+[output]
+mode = "paste"
+driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
+```
+
+It is off unless you add it, is skipped outside Hyprland, and needs no uinput access or `input` group. See [Hyprland-native paste](CONFIGURATION.md#hyprland-native-paste).
+
 When enabled, voxtype saves your clipboard content before pasting, then restores it after a brief delay. This works with both text and binary clipboard content (images, files) on Wayland via `wl-paste`, and with text content on X11 via `xclip`. You can also enable it from the command line with `--restore-clipboard` or the `VOXTYPE_RESTORE_CLIPBOARD=true` environment variable.
 
 ### Fallback Behavior
@@ -2289,7 +2355,7 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `xdotool` (X11, opt-in), `ydotool`, `clipboard` (wl-copy), `xclip` (X11), and `hyprland` (paste mode only, see below)
 
 **Examples:**
 
@@ -2750,6 +2816,27 @@ command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove 
 timeout_ms = 30000  # 30 second timeout (generous for LLM)
 ```
 
+### Cleanup with Omarchy's Local Model or an OpenAI-Compatible Server
+
+Instead of a command, a chat model can do the cleanup directly. On Omarchy, voxtype can use the text model Omarchy runs on your machine (`omarchy models`):
+
+```toml
+[output.post_process]
+backend = "omarchy"   # or "openai" with url, model and api_key_file
+timeout_ms = 15000
+```
+
+**This adds roughly 2 to 6 seconds to every dictation**, because the text is typed only once the model has answered. It is off unless you choose it, and it is separate from the meeting summary model. Voxtype never starts a model: with none running, or on a timeout or any error, the original text is typed and a notification says what happened. The daemon log repeats the latency warning when it starts with a model backend on. Meeting transcripts are never sent through it. `backend = "openai"` works the same with llama-server, LM Studio, vLLM or Ollama's `/v1`:
+
+```toml
+[output.post_process]
+backend = "openai"
+url = "http://127.0.0.1:8080/v1"
+model = "qwen3-4b"
+```
+
+The model gets a built-in prompt that fixes errors and keeps your wording; `prompt` replaces it. See [CONFIGURATION.md](CONFIGURATION.md#outputpost_process) for every option, and `voxtype --help` for the `--post-process-*` flags. If all you want is fewer fillers, LARD does that in milliseconds without a model (see [Dictation Cleanup](#dictation-cleanup)).
+
 To keep an LLM from replacing the whole transcript, enable the edit-list
 contract and ask your script to return only JSON edits:
 
@@ -3198,6 +3285,16 @@ voxtype meeting ask latest "What did Steve just say?" --last 2m
 ```
 
 Once an agent is allowed, each meeting is also summarized when it stops (`summary.md` in the meeting folder). See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) for agent selection, consent and where transcripts go.
+
+On Omarchy, summaries and questions can use the text model Omarchy runs on your machine instead, with no agent and no consent prompt, since nothing leaves the machine. A config written by `voxtype setup` on Omarchy chooses it already; in an older config, set it:
+
+```toml
+[meeting.summary]
+backend = "omarchy"
+auto = true   # optional: also summarize each meeting when it stops
+```
+
+Voxtype only uses a model that is already running (start one with `omarchy models start <recipe>` or the local models panel). When none is, summaries and questions go to your allowed agent or Ollama as before, and `voxtype doctor` shows what it found. Any OpenAI-compatible server works too with `backend = "openai"`; see [MEETING_MODE.md](MEETING_MODE.md#omarchys-local-model).
 
 ### Echo Cancellation
 

@@ -483,8 +483,10 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         Line::from(""),
         Line::from(
             "When enabled, voxtype reads keyboard events directly from \
-             /dev/input/event* (your user must be in the `input` group). It \
-             owns the chosen PTT key globally — no compositor binding needed.",
+             /dev/input/event* (this needs the `input` group, which lets \
+             every program read your keystrokes; prefer a compositor \
+             binding). It owns the chosen PTT key globally, so no compositor \
+             binding is needed.",
         ),
         Line::from(""),
         Line::from(

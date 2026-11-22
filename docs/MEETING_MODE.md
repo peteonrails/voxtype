@@ -1125,7 +1125,7 @@ voxtype config set meeting.actions.todoist_token_file ~/.config/voxtype/todoist-
 |-------|---------|
 | Claude Code (`claude`) | Supported, no tools: `claude -p --tools "" --strict-mcp-config ...` |
 | Codex (`codex`) | Supported when named in config or as the Omarchy default, and only with bubblewrap (`bwrap`) installed: `codex exec` with its shell and app tools disabled and a read-only sandbox, run inside a bwrap jail. Its command tool cannot be switched off, so the jail is what keeps it away from your files: it sees `/usr`, the codex install, a few `/etc` files for DNS and TLS, and `~/.codex/auth.json` read-only, and nothing else from your home. It is never picked from PATH on its own |
-| Pi (`pi`) | Supported, no tools: `pi --print --no-tools --no-mcp --no-extensions --no-skills --no-context-files --no-session ...`, with the prompt attached as a file. Its answer arrives whole rather than streaming |
+| Pi (`pi`) | Supported, no tools: `pi --print --no-tools --no-mcp --no-extensions --no-skills --no-context-files --no-session ...`, with the prompt attached as a file. Its answer arrives whole rather than streaming. When pi's default model is on Omarchy's `omarchy-local` provider, voxtype also passes `--extension ~/.pi/agent/extensions/omarchy-local.ts`, the one extension Omarchy writes to register that provider; every other extension stays off |
 | OpenCode (`opencode`) | Not supported: `opencode run` has no flag that turns its tools off, and its agents allow shell commands and web fetches, so even a filesystem jail could not keep a transcript from leaving the machine |
 | Hermes (`hermes`) | Not supported: its one-shot mode loads tools and auto-approves them, with no documented way to turn them all off |
 
@@ -1138,12 +1138,32 @@ voxtype meeting assistant revoke claude   # stop
 voxtype meeting assistant status --json   # for the meeting view and Settings panel
 ```
 
+#### Omarchy's local model
+
+On Omarchy, meeting summaries and Ask can use the text model Omarchy runs on your machine (`omarchy models`), with no agent and no consent prompt, since the transcript never leaves the machine:
+
+```toml
+[meeting.summary]
+backend = "omarchy"
+# omarchy_model = "qwen3.8-27b-gufo"   # optional; unset uses the last started model
+```
+
+A config that `voxtype setup` writes on an Omarchy install already has this. An existing config keeps whatever it chose.
+
+Voxtype uses only what Omarchy documents for third-party clients: `omarchy-models status --json` for the running model and its loopback address, the recipe name as the model, and the key in `~/.config/omarchy/agent-local/key`, which is read for each request and never logged. It never starts, installs or downloads a model: a text model is usually not running (it stops at logout, and it takes most of the machine's memory). When none is running, the log says how to start one (`omarchy models start <recipe>`, or the local models panel), and questions and summaries go the way the table below describes, as if Omarchy were not chosen. If the model fails while writing a summary, the summary is written the same way instead, and `meeting summarize` names the model that failed.
+
+`[meeting.summary] backend = "openai"` does the same with any OpenAI-compatible server (`openai_url`, `openai_model`, `openai_api_key_file`). It answers questions only when its URL is on this machine; a server elsewhere writes summaries only. See [CONFIGURATION.md](CONFIGURATION.md#meetingsummary).
+
+`voxtype doctor` reports whether Omarchy was found, whether a text model is running, whether the key file can be read, and whether the model answers.
+
 #### Which backend answers
 
 Questions and summaries follow the same order, top row first. "The agent" is the one picked above, and "the local model" is Ollama at `[meeting.summary] ollama_url` with `ollama_model`.
 
 | Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
 |-----------|-------------------------------|--------------------------------------------|
+| `[meeting.summary] backend = "omarchy"`, a model is running, and no `--agent` | Omarchy's model | Omarchy's model |
+| `[meeting.summary] backend = "openai"`, and no `--agent` | That server, when it is on this machine | That server (a local one only, with `local_only` or `--local`) |
 | `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
 | `--agent <id>` | That agent, once allowed | That agent, once allowed |
 | The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
@@ -1164,6 +1184,8 @@ Recording and transcription stay on your machine. The assistant is the one part 
 
 - **An agent** (`claude`, `codex`, `pi`) sends the prompt to whichever account that CLI is signed in to, usually the vendor's cloud service, under that account's terms. That prompt holds the meeting title, date, speaker names, the transcript (or the part of it that fits, plus a summary of the rest), your notes and annotations, and your question. Nothing goes to an agent until you allow it for that agent, and `voxtype meeting assistant revoke <agent>` stops it.
 - **The local model** (Ollama at `ollama_url`, `localhost` by default) keeps everything on your machine. `local_only = true` makes it the only option.
+- **Omarchy's local model** (`[meeting.summary] backend = "omarchy"`) keeps everything on your machine too: voxtype only talks to the loopback address Omarchy reports and refuses any other. The model runs in Omarchy's container with no network access.
+- **An `"openai"` server** gets the prompt at `openai_url`. Only one on a loopback address counts as local.
 - The agent runs in an empty temporary directory with its tools off, so it does not read your files or project instructions, and its session is not saved (`--no-session-persistence` for Claude, `--ephemeral` for Codex, `--no-session` for Pi). The prompt reaches it through a file in a private temporary directory that is removed when the agent exits.
 - Codex keeps a command tool that cannot be turned off, and a transcript is untrusted text: anyone on the call can say something meant for the model. So codex runs in a bubblewrap jail where your home holds nothing but its `auth.json` (read-only), and without `bwrap` voxtype does not use codex at all.
 - Consent is stored in `$XDG_STATE_HOME/voxtype/assistant-consent.json` (default `~/.local/state/voxtype/`).

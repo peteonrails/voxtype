@@ -1,4 +1,4 @@
-//! Shared sliding-window streaming tuning config.
+//! Shared `[streaming]` tuning and `[streaming_recovery]` safety config.
 //!
 //! `transcribe::sliding_window::SlidingWindowStreamingTranscriber` wraps any
 //! batch `Transcriber` (whisper.cpp, OpenVINO GenAI, …) to add live
@@ -17,6 +17,9 @@
 //! `streaming_*`). Those per-engine fields are kept — unchanged, still
 //! read straight out of `config.toml` — purely as a fallback for old
 //! configs; see [`StreamingConfig::resolve`].
+//!
+//! Streaming recovery is configured separately so a user can opt out or tune
+//! its deadline without changing the legacy tuning precedence.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +68,28 @@ impl Default for StreamingConfig {
             partial_min_words: 1,
             type_partials: true,
             revision_mode: false,
+        }
+    }
+}
+
+/// Recovery settings shared by every streaming backend.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StreamingRecoveryConfig {
+    /// Recover a dictation with the configured batch transcriber when a
+    /// streaming backend ends before delivering text.
+    pub enabled: bool,
+
+    /// Maximum number of seconds to wait for a streaming backend after the
+    /// microphone stops before tearing it down and recovering the dictation.
+    pub stop_timeout_secs: u64,
+}
+
+impl Default for StreamingRecoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stop_timeout_secs: 30,
         }
     }
 }
@@ -132,6 +157,24 @@ mod tests {
         };
         let resolved = StreamingConfig::resolve(None, legacy, "whisper");
         assert_eq!(resolved, legacy);
+    }
+
+    #[test]
+    fn recovery_defaults_enable_fallback_and_bound_stop() {
+        let serialized = toml::to_string(&StreamingRecoveryConfig::default()).unwrap();
+        assert!(serialized.contains("enabled = true"));
+        assert!(serialized.contains("stop_timeout_secs = 30"));
+        assert_eq!(StreamingRecoveryConfig::default().stop_timeout_secs, 30);
+    }
+
+    #[test]
+    fn recovery_config_does_not_change_streaming_tuning_precedence() {
+        let config: crate::config::Config =
+            toml::from_str("[streaming_recovery]\nenabled = false\nstop_timeout_secs = 15\n")
+                .unwrap();
+        assert!(config.streaming.is_none());
+        assert_eq!(config.streaming_recovery.unwrap().stop_timeout_secs, 15);
+        assert!(!config.streaming_recovery.unwrap().enabled);
     }
 
     #[test]

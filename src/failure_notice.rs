@@ -118,6 +118,24 @@ pub fn model_load_failed(
         };
     }
 
+    // cli mode without whisper-cli: no model download helps, and the mode
+    // is easy to land in by accident (Omarchy #18694), so offer both ways out.
+    let message = err.to_string();
+    if config.engine == TranscriptionEngine::Whisper
+        && config.whisper.effective_mode() == WhisperMode::Cli
+        && (message.contains("whisper-cli not found")
+            || message.contains("whisper_cli_path not found"))
+    {
+        return Notice {
+            title: "Voxtype: whisper-cli not found".to_string(),
+            body: format!(
+                "[whisper] mode = \"cli\" runs whisper-cli for every transcription, and it \
+                 is not installed. {consequence} {}, then restart voxtype.",
+                crate::transcribe::cli::MISSING_CLI_FIX
+            ),
+        };
+    }
+
     if is_remote(config) {
         return Notice {
             title: format!("Voxtype: {label} engine failed to start"),
@@ -191,6 +209,29 @@ impl NoticeGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Omarchy #18694: cli mode without whisper-cli was reported as a model
+    /// that failed to load, with re-download advice that cannot help.
+    #[test]
+    fn missing_whisper_cli_offers_install_and_local_mode() {
+        let mut config = Config::default();
+        config.whisper.mode = Some(WhisperMode::Cli);
+        let err = TranscribeError::InitFailed(format!(
+            "whisper-cli not found. {}",
+            crate::transcribe::cli::MISSING_CLI_FIX
+        ));
+        let notice = model_load_failed(&config, "large-v3-turbo", &err, false);
+        assert_eq!(notice.title, "Voxtype: whisper-cli not found");
+        assert!(notice.body.contains("whisper-cpp"), "{}", notice.body);
+        assert!(
+            notice
+                .body
+                .contains("voxtype config set whisper.mode local"),
+            "{}",
+            notice.body
+        );
+        assert!(!notice.body.contains("--download"), "{}", notice.body);
+    }
 
     #[test]
     fn missing_default_source_names_the_source_tools() {

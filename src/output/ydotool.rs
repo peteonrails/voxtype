@@ -6,7 +6,9 @@
 //! Requires:
 //! - ydotool installed
 //! - ydotoold daemon running (systemctl --user start ydotool)
-//! - User in 'input' group
+//! - Write access to /dev/uinput for ydotoold, preferably through a dedicated
+//!   `uinput` group rather than `input` (docs/USER_MANUAL.md, "Giving dotool
+//!   and ydotool access to uinput")
 
 use super::TextOutput;
 use crate::error::OutputError;

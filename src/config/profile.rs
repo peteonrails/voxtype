@@ -51,6 +51,63 @@ pub struct PostProcessConfig {
     /// unambiguous edits (default: false).
     #[serde(default)]
     pub edit_list: bool,
+
+    /// Who cleans the text up: "command" (default, runs `command`),
+    /// "omarchy" (the text model Omarchy runs locally) or "openai" (any
+    /// OpenAI-compatible server). The two model backends add roughly 2 to
+    /// 6 seconds to every dictation.
+    #[serde(default = "default_post_process_backend")]
+    pub backend: String,
+
+    /// Model id for "openai", or the Omarchy recipe for "omarchy" (unset:
+    /// the last started text model that is running).
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Base URL of the server for "openai", including `/v1`.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// File holding the API key for "openai". The key itself never goes in
+    /// config.toml.
+    #[serde(default)]
+    pub api_key_file: Option<String>,
+
+    /// Instructions for the model backends. Unset uses a built-in cleanup
+    /// prompt that keeps the wording and only fixes errors.
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+fn default_post_process_backend() -> String {
+    "command".to_string()
+}
+
+impl PostProcessConfig {
+    /// The LLM client settings when `backend` is "omarchy" or "openai".
+    pub fn llm(&self) -> Option<crate::llm::LlmConfig> {
+        let provider = crate::llm::Provider::parse(&self.backend)?;
+        Some(crate::llm::LlmConfig {
+            provider,
+            url: self.url.clone(),
+            model: self.model.clone(),
+            api_key_file: self
+                .api_key_file
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .map(crate::llm::expand_home),
+            settings: crate::llm::SettingNames {
+                table: "output.post_process",
+                url: "url",
+                model: "model",
+            },
+        })
+    }
+
+    /// Whether this table turns cleanup on: a model backend, or a command.
+    pub fn is_active(&self) -> bool {
+        self.llm().is_some() || !self.command.trim().is_empty()
+    }
 }
 
 impl Default for PostProcessConfig {
@@ -61,6 +118,11 @@ impl Default for PostProcessConfig {
             trim: true,
             fallback_on_empty: true,
             edit_list: false,
+            backend: default_post_process_backend(),
+            model: None,
+            url: None,
+            api_key_file: None,
+            prompt: None,
         }
     }
 }

@@ -6,6 +6,9 @@
 //! - [`consent`] keeps the per-agent "send transcripts to X" answer.
 //! - [`runner`] runs the agent's print mode with tools off.
 //! - [`local`] is the fallback: the Ollama model from `[meeting.summary]`.
+//! - `[meeting.summary] backend = "omarchy"` (or `"openai"` on this
+//!   machine) answers through [`crate::llm`] instead, ahead of any agent and
+//!   without agent consent, since the transcript stays on the machine.
 //! - [`prompt`] builds the prompt shared by ask and summary.
 //! - [`asks`] stores each question and answer in `asks.jsonl`.
 //! - [`summarize`] writes the meeting summary, by hand or at stop.
@@ -113,6 +116,8 @@ pub struct AssistantEnv {
     pub omarchy_command: String,
     /// codex's CODEX_HOME, where its `auth.json` is.
     pub codex_home: PathBuf,
+    /// Where Omarchy's local text model is found.
+    pub omarchy: crate::llm::omarchy::OmarchyEnv,
 }
 
 impl AssistantEnv {
@@ -125,6 +130,7 @@ impl AssistantEnv {
                 .map(PathBuf::from)
                 .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
                 .unwrap_or_else(|| PathBuf::from(".codex")),
+            omarchy: crate::llm::omarchy::OmarchyEnv::from_process(),
         }
     }
 }
@@ -144,6 +150,8 @@ pub struct AssistantSettings {
     /// summarizers for `meeting summarize` and auto-summary.
     pub summary_backend: String,
     pub summary: crate::meeting::summary::SummaryConfig,
+    /// `[meeting.summary] backend = "omarchy"` or `"openai"`.
+    pub llm: Option<crate::llm::LlmConfig>,
     pub env: AssistantEnv,
     /// `[meeting] my_name`: who the user is, shown for "You" in prompts.
     pub my_name: Option<String>,
@@ -169,6 +177,7 @@ impl AssistantSettings {
                 remote_api_key: s.remote_api_key.clone(),
                 timeout_secs: s.timeout_secs,
             },
+            llm: s.llm(),
             env: AssistantEnv::from_process(),
             my_name: cfg
                 .meeting
@@ -182,6 +191,34 @@ impl AssistantSettings {
 
     pub fn consent(&self) -> ConsentStore {
         ConsentStore::load(&self.env.consent_file)
+    }
+
+    /// The chosen LLM backend, when `[meeting.summary] backend` names one.
+    /// `None` when none is chosen, or when `require_local` and the server
+    /// is not on this machine. Asking Omarchy may take a moment: it runs
+    /// `omarchy-models status --json`.
+    pub fn llm_backend(
+        &self,
+        require_local: bool,
+    ) -> Option<Result<Backend, crate::llm::LlmError>> {
+        let config = self.llm.as_ref()?;
+        match config.resolve(&self.env.omarchy) {
+            Ok(endpoint) if require_local && !endpoint.is_local() => None,
+            Ok(endpoint) => Some(Ok(Backend::Llm(endpoint))),
+            // A server that is not on this machine is no concern of a
+            // caller that needs a local one, even when misconfigured.
+            Err(_)
+                if require_local
+                    && config.provider == crate::llm::Provider::OpenAi
+                    && !config
+                        .url
+                        .as_deref()
+                        .is_some_and(crate::llm::is_loopback_url) =>
+            {
+                None
+            }
+            Err(e) => Some(Err(e)),
+        }
     }
 
     pub fn resolve(&self, agent_override: Option<&str>) -> Resolution {
@@ -252,10 +289,12 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-/// What answers: an agent CLI or the local model.
+/// What answers: an agent CLI, the local model, or a chat endpoint.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Backend {
     Agent(ResolvedAgent),
+    /// `[meeting.summary] backend = "omarchy"` or `"openai"`.
+    Llm(crate::llm::Endpoint),
     Local {
         url: String,
         model: String,
@@ -269,6 +308,7 @@ impl Backend {
     pub fn id(&self) -> String {
         match self {
             Backend::Agent(a) => a.id.clone(),
+            Backend::Llm(e) => e.id(),
             Backend::Local { model, .. } => format!("local:{model}"),
         }
     }
@@ -277,6 +317,7 @@ impl Backend {
     pub fn display_name(&self) -> String {
         match self {
             Backend::Agent(a) => a.name.clone(),
+            Backend::Llm(e) => e.display_name(),
             Backend::Local { model, .. } => format!("Local ({model})"),
         }
     }
@@ -291,6 +332,24 @@ impl Backend {
     ) -> Result<String, AssistantError> {
         match self {
             Backend::Agent(a) => runner::run_agent(a, prompt, timeout, on_text),
+            // The prompt asks for JSON already; a `response_format` field is
+            // not sent, since not every local runtime takes one.
+            Backend::Llm(endpoint) => crate::llm::chat(
+                endpoint,
+                &crate::llm::ChatRequest {
+                    system: runner::SYSTEM_PROMPT,
+                    user: prompt,
+                    timeout,
+                    stream: true,
+                },
+                on_text,
+            )
+            .map_err(|e| match e {
+                crate::llm::LlmError::Timeout { label, secs } => {
+                    AssistantError::Timeout { name: label, secs }
+                }
+                other => AssistantError::Local(other.to_string()),
+            }),
             Backend::Local {
                 url,
                 model,
@@ -322,6 +381,11 @@ pub struct Overrides {
 ///
 /// One order for asks and summaries (see [`choose_summary_backend`]):
 ///
+/// 0. Unless `--agent` names an agent: `[meeting.summary] backend =
+///    "omarchy"` (or `"openai"` on this machine) when its model answers.
+///    It needs no consent, since the transcript stays on the machine. When
+///    Omarchy has no model running, the log says how to start one and the
+///    order below decides as if it were not chosen.
 /// 1. `local_only` or `--local`: the local model.
 /// 2. The agent (`--agent`, `[meeting.assistant] agent`, the Omarchy
 ///    default, or one on PATH), when it has consent. Allowing an agent is
@@ -332,6 +396,21 @@ pub struct Overrides {
 /// 4. Otherwise: an agent without consent needs it, and with no agent at all
 ///    the local model is the fallback.
 pub fn choose_backend(
+    settings: &AssistantSettings,
+    overrides: &Overrides,
+) -> Result<Backend, AssistantError> {
+    if overrides.agent.is_none() {
+        match settings.llm_backend(true) {
+            Some(Ok(backend)) => return Ok(backend),
+            Some(Err(e)) => tracing::warn!("{e} Answering the usual way instead."),
+            None => {}
+        }
+    }
+    choose_backend_without_llm(settings, overrides)
+}
+
+/// [`choose_backend`] from step 1: the order before the LLM backends.
+fn choose_backend_without_llm(
     settings: &AssistantSettings,
     overrides: &Overrides,
 ) -> Result<Backend, AssistantError> {
@@ -389,6 +468,8 @@ impl SummaryBackend {
     pub fn kind(&self) -> &'static str {
         match self {
             SummaryBackend::Assistant(Backend::Agent(_)) => "agent",
+            SummaryBackend::Assistant(Backend::Llm(e)) if e.is_local() => "local",
+            SummaryBackend::Assistant(Backend::Llm(_)) => "remote",
             SummaryBackend::Assistant(Backend::Local { .. }) => "local",
             SummaryBackend::Legacy(kind) if kind == "local" => "local",
             SummaryBackend::Legacy(_) => "remote",
@@ -424,8 +505,27 @@ pub fn choose_summary_backend(
     settings: &AssistantSettings,
     overrides: &Overrides,
 ) -> Result<SummaryBackend, AssistantError> {
+    if overrides.agent.is_none() {
+        // A summary may go to a remote "openai" server, unless only local
+        // models may be used.
+        let require_local = settings.local_only || overrides.local;
+        match settings.llm_backend(require_local) {
+            Some(Ok(backend)) => return Ok(SummaryBackend::Assistant(backend)),
+            Some(Err(e)) => tracing::warn!("{e} Summarizing the usual way instead."),
+            None => {}
+        }
+    }
+    summary_backend_without_llm(settings, overrides)
+}
+
+/// [`choose_summary_backend`] without the LLM backends: what a summary
+/// falls back to when the chosen model is not running or fails.
+pub fn summary_backend_without_llm(
+    settings: &AssistantSettings,
+    overrides: &Overrides,
+) -> Result<SummaryBackend, AssistantError> {
     if settings.local_only || overrides.local || overrides.agent.is_some() {
-        return choose_backend(settings, overrides).map(SummaryBackend::Assistant);
+        return choose_backend_without_llm(settings, overrides).map(SummaryBackend::Assistant);
     }
     let res = settings.resolve(None);
     if let Some(agent) = res.agent {
@@ -436,7 +536,7 @@ pub fn choose_summary_backend(
     if matches!(settings.summary_backend.as_str(), "local" | "remote") {
         return Ok(SummaryBackend::Legacy(settings.summary_backend.clone()));
     }
-    choose_backend(settings, overrides).map(SummaryBackend::Assistant)
+    choose_backend_without_llm(settings, overrides).map(SummaryBackend::Assistant)
 }
 
 /// The meeting's folder, when it has one.
@@ -686,14 +786,45 @@ pub fn ask(
 pub fn status_json(settings: &AssistantSettings) -> serde_json::Value {
     let consent = settings.consent();
     let res = settings.resolve(None);
-    let backend = choose_backend(settings, &Overrides::default());
+    // Omarchy is asked once here, for both answers below.
+    let llm = settings
+        .llm
+        .as_ref()
+        .map(|c| (c, c.resolve(&settings.env.omarchy)));
+    let llm_ask = llm.as_ref().and_then(|(_, r)| match r {
+        Ok(e) if e.is_local() => Some(Backend::Llm(e.clone())),
+        _ => None,
+    });
+    let backend = match llm_ask.clone() {
+        Some(b) => Ok(b),
+        None => choose_backend_without_llm(settings, &Overrides::default()),
+    };
     let (backend_kind, blocked) = match &backend {
         Ok(Backend::Agent(_)) => ("agent", None),
-        Ok(Backend::Local { .. }) => ("local", None),
+        Ok(Backend::Llm(e)) if !e.is_local() => ("remote", None),
+        Ok(Backend::Local { .. } | Backend::Llm(_)) => ("local", None),
         Err(e) => ("none", Some(e.code())),
     };
     let agent = res.agent.as_ref();
-    let summary = choose_summary_backend(settings, &Overrides::default());
+    let llm_summary = llm.as_ref().and_then(|(_, r)| match r {
+        Ok(e) if e.is_local() || !settings.local_only => Some(Backend::Llm(e.clone())),
+        _ => None,
+    });
+    let summary = match llm_summary {
+        Some(b) => Ok(SummaryBackend::Assistant(b)),
+        None => summary_backend_without_llm(settings, &Overrides::default()),
+    };
+    let llm_status = llm.as_ref().map(|(c, r)| {
+        serde_json::json!({
+            "provider": c.provider.as_str(),
+            "available": r.is_ok(),
+            "name": r.as_ref().ok().map(crate::llm::Endpoint::display_name),
+            "model": r.as_ref().ok().map(|e| e.model.clone()),
+            "endpoint": r.as_ref().ok().map(|e| e.base_url.clone()),
+            "local": r.as_ref().ok().map(crate::llm::Endpoint::is_local),
+            "problem": r.as_ref().err().map(ToString::to_string),
+        })
+    });
     let summary_name = summary.as_ref().ok().map(|b| b.display_name(settings));
     let ask_name = backend.as_ref().ok().map(Backend::display_name);
     // Said out loud when questions and summaries go different ways, which
@@ -731,6 +862,7 @@ pub fn status_json(settings: &AssistantSettings) -> serde_json::Value {
         "auto_summary_configured": settings.summary_auto,
         "consent_file": consent.path(),
         "candidates": res.candidates,
+        "llm": llm_status,
     })
 }
 
@@ -1216,5 +1348,140 @@ mod tests {
         assert_eq!(human_duration(Duration::from_secs(60)), "1 minute");
         assert_eq!(human_duration(Duration::from_secs(90)), "90 seconds");
         assert_eq!(human_duration(Duration::from_secs(5400)), "1h 30m");
+    }
+
+    // -- Omarchy's local model ----------------------------------------------
+
+    use crate::llm::fake_server::{FakeServer, Reply};
+
+    /// Ask counts Omarchy's local model as local: no agent-allow prompt,
+    /// even with an agent on PATH that has no consent, and the agent is
+    /// never run.
+    #[test]
+    fn omarchy_answers_without_agent_consent() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        let m = steve_meeting(&sb);
+        let server = FakeServer::start(vec![Reply::stream(&["Steve said ", "Friday [00:41]."])]);
+        let mut s = sb.settings();
+        sb.use_omarchy(&mut s, "active", &server.base_url());
+
+        let backend = choose_backend(&s, &Overrides::default()).unwrap();
+        assert!(matches!(&backend, Backend::Llm(e) if e.model == "qwen-test" && e.is_local()));
+        assert_eq!(backend.display_name(), "Omarchy (qwen-test)");
+
+        let (r, streamed) = collect(&s, &m, "When do we ship?", None);
+        let record = r.unwrap();
+        assert_eq!(record.answer, "Steve said Friday [00:41].");
+        assert_eq!(streamed, "Steve said Friday [00:41].");
+        assert_eq!(record.agent, "omarchy:qwen-test");
+        assert_eq!(sb.claude_calls(), 0);
+        let req = &server.requests()[0];
+        assert_eq!(req.authorization.as_deref(), Some("Bearer fixture-key"));
+        assert!(req.body.contains("We ship on Friday."));
+
+        let v = status_json(&s);
+        assert_eq!(v["backend"], "local");
+        assert_eq!(v["blocked"], serde_json::Value::Null);
+        assert_eq!(v["llm"]["available"], true);
+        assert_eq!(v["llm"]["model"], "qwen-test");
+    }
+
+    /// `local_only` keeps transcripts off agents; Omarchy's model is local,
+    /// so it answers rather than Ollama.
+    #[test]
+    fn local_only_prefers_omarchy_over_ollama() {
+        let sb = Sandbox::new();
+        let server = FakeServer::start(vec![]);
+        let mut s = sb.settings();
+        s.local_only = true;
+        sb.use_omarchy(&mut s, "active", &server.base_url());
+        assert!(matches!(
+            choose_backend(&s, &Overrides::default()).unwrap(),
+            Backend::Llm(_)
+        ));
+    }
+
+    /// With no Omarchy model running, Ask decides as if Omarchy were not
+    /// chosen: an allowed agent answers, an unallowed one still needs
+    /// consent, and with none at all the Ollama fallback is used.
+    #[test]
+    fn no_omarchy_model_running_falls_back_to_the_usual_order() {
+        let sb = Sandbox::new();
+        let mut s = sb.settings();
+        sb.use_omarchy(&mut s, "inactive", "http://127.0.0.1:9/v1");
+        assert!(matches!(
+            choose_backend(&s, &Overrides::default()).unwrap(),
+            Backend::Local { fallback: true, .. }
+        ));
+        let v = status_json(&s);
+        assert_eq!(v["llm"]["available"], false);
+        assert!(v["llm"]["problem"]
+            .as_str()
+            .unwrap()
+            .contains("omarchy models start qwen-test"));
+
+        sb.fake_claude();
+        let err = choose_backend(&s, &Overrides::default()).unwrap_err();
+        assert_eq!(err.code(), "consent_required");
+        sb.allow("claude");
+        assert!(matches!(
+            choose_backend(&s, &Overrides::default()).unwrap(),
+            Backend::Agent(_)
+        ));
+    }
+
+    /// `--agent` is an explicit choice for one call and wins over Omarchy.
+    #[test]
+    fn an_explicit_agent_wins_over_omarchy() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        let server = FakeServer::start(vec![]);
+        let mut s = sb.settings();
+        sb.use_omarchy(&mut s, "active", &server.base_url());
+        let b = choose_backend(
+            &s,
+            &Overrides {
+                agent: Some("claude".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(b, Backend::Agent(a) if a.id == "claude"));
+        assert!(server.requests().is_empty());
+    }
+
+    /// A remote "openai" server writes summaries when chosen, but never
+    /// answers asks and never serves `local_only`.
+    #[test]
+    fn a_remote_openai_server_is_for_summaries_only() {
+        let sb = Sandbox::new();
+        let mut s = sb.settings();
+        s.summary_backend = "openai".into();
+        s.llm = Some(crate::llm::LlmConfig {
+            provider: crate::llm::Provider::OpenAi,
+            url: Some("https://llm.example.com/v1".into()),
+            model: Some("big".into()),
+            api_key_file: None,
+            settings: crate::llm::SettingNames {
+                table: "meeting.summary",
+                url: "openai_url",
+                model: "openai_model",
+            },
+        });
+        assert!(matches!(
+            choose_backend(&s, &Overrides::default()).unwrap(),
+            Backend::Local { .. }
+        ));
+        match choose_summary_backend(&s, &Overrides::default()).unwrap() {
+            SummaryBackend::Assistant(Backend::Llm(e)) => assert!(!e.is_local()),
+            other => panic!("{other:?}"),
+        }
+        s.local_only = true;
+        assert!(matches!(
+            choose_summary_backend(&s, &Overrides::default()).unwrap(),
+            SummaryBackend::Assistant(Backend::Local { .. })
+        ));
     }
 }
