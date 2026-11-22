@@ -689,6 +689,59 @@ pub(crate) struct GgufModelInfo {
     /// Weights license, shown before the download is confirmed.
     pub license: &'static str,
     pub description: &'static str,
+    /// How the checkpoint decodes, read from its GGUF metadata
+    /// (`stt.<arch>.head_kind`, or its decoder layers). Shown in model lists
+    /// so a GGUF Parakeet reads as TDT the way the ONNX entries do.
+    pub decoder: GgufDecoder,
+}
+
+/// The decoder a curated GGUF checkpoint uses. Informational only: unlike
+/// ONNX Parakeet's `parakeet.model_type`, nothing is configured from it,
+/// because a GGUF file carries its own architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GgufDecoder {
+    /// Token-and-Duration Transducer (Parakeet TDT, Parakeet Ultra).
+    Tdt,
+    /// RNN Transducer (GigaAM, Nemotron streaming).
+    Rnnt,
+    /// Connectionist Temporal Classification (SenseVoice).
+    Ctc,
+    /// Autoregressive transformer decoder (Cohere Transcribe, Moonshine).
+    Transformer,
+    /// Language-model decoder (Qwen3 ASR).
+    Llm,
+}
+
+impl GgufDecoder {
+    pub fn label(self) -> &'static str {
+        match self {
+            GgufDecoder::Tdt => "TDT",
+            GgufDecoder::Rnnt => "RNN-T",
+            GgufDecoder::Ctc => "CTC",
+            GgufDecoder::Transformer => "transformer",
+            GgufDecoder::Llm => "LLM",
+        }
+    }
+
+    /// Lowercase name for JSON.
+    pub fn id(self) -> &'static str {
+        match self {
+            GgufDecoder::Tdt => "tdt",
+            GgufDecoder::Rnnt => "rnnt",
+            GgufDecoder::Ctc => "ctc",
+            GgufDecoder::Transformer => "transformer",
+            GgufDecoder::Llm => "llm",
+        }
+    }
+}
+
+/// The decoder of a curated GGUF model, by file name.
+pub fn gguf_decoder(name: &str) -> Option<GgufDecoder> {
+    let basename = std::path::Path::new(name)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or(name);
+    find_gguf_model(basename).map(|model| model.decoder)
 }
 
 /// Durable origin and readiness inventory for every approved Handy conversion.
@@ -865,6 +918,7 @@ static COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "0ea56826d8bd5d74b7143a4a04e022dc1bb75452cfae49d98b6acb0c1d16a1fb",
         license: "Apache-2.0",
         description: "Q4_K_M, smaller and tested on Intel Vulkan",
+        decoder: GgufDecoder::Transformer,
     },
     GgufModelInfo {
         engine: "cohere",
@@ -875,6 +929,7 @@ static COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
         license: "Apache-2.0",
         description: "Q8_0, larger reference quantization",
+        decoder: GgufDecoder::Transformer,
     },
 ];
 
@@ -897,6 +952,7 @@ static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "d9ec7e2c39da7b4fec3e01e71e82c7f7bbe97741e08c0c054091bf3d520a41d3",
         license: "CC-BY-4.0",
         description: "F16, reference precision for Vulkan GPUs",
+        decoder: GgufDecoder::Tdt,
     },
     GgufModelInfo {
         engine: "parakeet",
@@ -907,6 +963,7 @@ static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
         license: "CC-BY-4.0",
         description: "Q8_0, smaller with the same accuracy in our tests",
+        decoder: GgufDecoder::Tdt,
     },
     GgufModelInfo {
         engine: "parakeet",
@@ -917,6 +974,7 @@ static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
         license: "CC-BY-4.0",
         description: "Ultra F16, full precision; 25 European languages, automatic language",
+        decoder: GgufDecoder::Tdt,
     },
     GgufModelInfo {
         engine: "parakeet",
@@ -927,6 +985,7 @@ static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
         license: "CC-BY-4.0",
         description: "Ultra Q8_0, recommended for new GGUF selections; 25 European languages",
+        decoder: GgufDecoder::Tdt,
     },
     GgufModelInfo {
         engine: "parakeet",
@@ -937,6 +996,7 @@ static PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
         license: "CC-BY-4.0",
         description: "Ultra Q4_K_M, smaller quantization; 25 European languages",
+        decoder: GgufDecoder::Tdt,
     },
 ];
 
@@ -950,6 +1010,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
         license: "Apache-2.0",
         description: "Qwen3 ASR 0.6B Q8, multilingual",
+        decoder: GgufDecoder::Llm,
     },
     GgufModelInfo {
         engine: "gguf",
@@ -960,6 +1021,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
         license: "Apache-2.0",
         description: "Qwen3 ASR 1.7B Q8, multilingual",
+        decoder: GgufDecoder::Llm,
     },
     GgufModelInfo {
         engine: "gguf",
@@ -970,6 +1032,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
         license: "MIT",
         description: "Moonshine Streaming Small Q8, offline English inference",
+        decoder: GgufDecoder::Transformer,
     },
     GgufModelInfo {
         engine: "gguf",
@@ -980,6 +1043,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "78d63b47723b7f8d78c6113a6ef983b5a86e2a86f6c273e1f5cb6967b1c4467a",
         license: "MIT",
         description: "GigaAM v3 Q8, Russian only",
+        decoder: GgufDecoder::Rnnt,
     },
     GgufModelInfo {
         engine: "gguf",
@@ -990,6 +1054,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
         license: "OpenMDW-1.1",
         description: "Nemotron 3.5 ASR 0.6B Q8, offline multilingual inference",
+        decoder: GgufDecoder::Rnnt,
     },
     GgufModelInfo {
         engine: "gguf",
@@ -1000,6 +1065,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
         license: "Moonshine AI Community License",
         description: "Moonshine Base Japanese Q8, Japanese",
+        decoder: GgufDecoder::Transformer,
     },
     GgufModelInfo {
         engine: "gguf",
@@ -1010,6 +1076,7 @@ static HANDY_GGUF_MODELS: &[GgufModelInfo] = &[
         sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
         license: "FunASR Model Open Source License 1.1",
         description: "SenseVoice Small Q8, Chinese, Cantonese, English, Japanese, Korean",
+        decoder: GgufDecoder::Ctc,
     },
 ];
 
@@ -2787,26 +2854,35 @@ fn print_gguf_section(
     for (i, model) in models.iter().enumerate() {
         let path = models_dir.join(model.name);
         let installed = validate_gguf_model(&path, model).is_ok();
-        let star = if current == Some(model.name) {
-            "*"
-        } else {
-            " "
-        };
-        let status = if installed {
-            "\x1b[32m[installed]\x1b[0m"
-        } else {
-            ""
-        };
-        println!(
-            " {}[{:>2}] {:<44} ({:.2} GB) {} {}",
-            star,
+        let row = gguf_picker_row(
+            model,
             offset + i + 1,
-            model.name,
-            model.size as f64 / 1_000_000_000.0,
-            model.description,
-            status
+            current == Some(model.name),
+            installed,
         );
+        println!("{row}");
     }
+}
+
+/// One GGUF row of the interactive picker: number, file, size, description
+/// and the decoder the checkpoint uses.
+fn gguf_picker_row(model: &GgufModelInfo, number: usize, current: bool, installed: bool) -> String {
+    let star = if current { "*" } else { " " };
+    let status = if installed {
+        "\x1b[32m[installed]\x1b[0m"
+    } else {
+        ""
+    };
+    format!(
+        " {}[{:>2}] {:<44} ({:.2} GB) {} ({} decoder) {}",
+        star,
+        number,
+        model.name,
+        model.size as f64 / 1_000_000_000.0,
+        model.description,
+        model.decoder.label(),
+        status
+    )
 }
 
 /// Handle Whisper model selection (download/config)
@@ -6185,6 +6261,65 @@ mode = "type"
         }
     }
 
+    /// #1047: a GGUF model's list row says which decoder it uses, the way
+    /// the ONNX Parakeet descriptions say TDT.
+    #[test]
+    fn gguf_picker_row_shows_the_decoder_type() {
+        let ultra = PARAKEET_GGUF_MODELS
+            .iter()
+            .find(|model| model.name == "parakeet-ultra-Q8_0.gguf")
+            .unwrap();
+        let row = gguf_picker_row(ultra, 17, true, false);
+        assert_eq!(
+            row,
+            format!(
+                " *[17] {:<44} (0.74 GB) {} (TDT decoder) ",
+                "parakeet-ultra-Q8_0.gguf", ultra.description
+            )
+        );
+
+        let qwen = HANDY_GGUF_MODELS
+            .iter()
+            .find(|model| model.name == "Qwen3-ASR-0.6B-Q8_0.gguf")
+            .unwrap();
+        let row = gguf_picker_row(qwen, 3, false, true);
+        assert!(row.contains("(LLM decoder)"), "{row}");
+        assert!(row.ends_with("\x1b[32m[installed]\x1b[0m"), "{row}");
+    }
+
+    /// The decoder each curated GGUF declares in its own metadata
+    /// (`stt.<arch>.head_kind`, or decoder layers for the attention models).
+    #[test]
+    fn every_curated_gguf_has_its_decoder() {
+        let expect = |name: &str| match name {
+            n if n.starts_with("parakeet-tdt-") || n.starts_with("parakeet-ultra-") => {
+                GgufDecoder::Tdt
+            }
+            n if n.starts_with("gigaam-") || n.starts_with("nemotron-") => GgufDecoder::Rnnt,
+            n if n.starts_with("SenseVoice") => GgufDecoder::Ctc,
+            n if n.starts_with("Qwen3-ASR-") => GgufDecoder::Llm,
+            n if n.starts_with("cohere-") || n.starts_with("moonshine-") => {
+                GgufDecoder::Transformer
+            }
+            other => panic!("no expected decoder for {other}"),
+        };
+        for model in COHERE_GGUF_MODELS
+            .iter()
+            .chain(PARAKEET_GGUF_MODELS)
+            .chain(HANDY_GGUF_MODELS)
+        {
+            assert_eq!(model.decoder, expect(model.name), "{}", model.name);
+            assert_eq!(gguf_decoder(model.name), Some(model.decoder));
+        }
+        assert_eq!(
+            gguf_decoder("/home/u/.local/share/voxtype/models/parakeet-tdt-0.6b-v3-F16.gguf"),
+            Some(GgufDecoder::Tdt)
+        );
+        assert_eq!(gguf_decoder("custom.gguf"), None);
+        assert_eq!(GgufDecoder::Rnnt.label(), "RNN-T");
+        assert_eq!(GgufDecoder::Rnnt.id(), "rnnt");
+    }
+
     #[test]
     fn cohere_gguf_validation_checks_size_magic_and_publisher_hash() {
         let dir = tempfile::tempdir().unwrap();
@@ -6198,6 +6333,7 @@ mode = "type"
             sha256: "70d5523972d92139e4d1f62ee3d7cd79054f08ac90b5ba3b87df19c08adb3b17",
             license: "test",
             description: "test fixture",
+            decoder: GgufDecoder::Transformer,
         };
 
         std::fs::write(&path, b"GGUFpayload").unwrap();

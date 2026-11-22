@@ -78,17 +78,68 @@ pub fn validate_gguf_choice(
         ));
     }
     if !checkpoint.languages.contains(&language) {
-        let scope = if checkpoint.name == "moonshine-base-ja-Q8_0.gguf" {
-            "Japanese only".to_string()
-        } else {
-            format!("supports {}", checkpoint.languages.join(", "))
-        };
-        return Err(format!(
-            "Model '{}' is {scope}; language '{language}' is unsupported. Config unchanged.",
-            checkpoint.name
-        ));
+        return Err(unsupported_language_message(checkpoint, language));
     }
     Ok(())
+}
+
+/// Plain-English name for a single-language checkpoint's language.
+fn language_display(code: &str) -> Option<&'static str> {
+    match code {
+        "ja" => Some("Japanese"),
+        "ru" => Some("Russian"),
+        "en" => Some("English"),
+        "zh" => Some("Chinese"),
+        _ => None,
+    }
+}
+
+/// Why a curated GGUF checkpoint refuses `language`, and the two ways out:
+/// a language the checkpoint has, or a runnable curated model that has the
+/// requested one.
+fn unsupported_language_message(
+    checkpoint: &crate::setup::model::PendingGgufModelInfo,
+    language: &str,
+) -> String {
+    let own: Vec<&str> = checkpoint
+        .languages
+        .iter()
+        .copied()
+        .filter(|code| *code != "auto")
+        .collect();
+    let scope = match own.as_slice() {
+        [only] => match language_display(only) {
+            Some(name) => format!("transcribes {name} ('{only}') only"),
+            None => format!("transcribes '{only}' only"),
+        },
+        _ => format!("supports {}", checkpoint.languages.join(", ")),
+    };
+    let first = own.first().copied().unwrap_or("auto");
+    let keep = if checkpoint.languages.contains(&"auto") {
+        format!("Use language '{first}' or 'auto' (`voxtype config set gguf.language {first}`)")
+    } else {
+        format!("Use language '{first}' (`voxtype config set gguf.language {first}`)")
+    };
+    let alternative = crate::setup::model::handy_pending_gguf_models()
+        .iter()
+        .filter(|model| model.runnable && model.name != checkpoint.name)
+        .filter(|model| crate::setup::model::find_gguf_model(model.name).is_some())
+        .find(|model| model.languages.contains(&language));
+    let switch = match alternative {
+        Some(model) => format!(
+            "or choose a model that supports '{language}', such as {} \
+             (`voxtype config set gguf.model {}`)",
+            model.name, model.name
+        ),
+        None => format!(
+            "or choose another engine or model for '{language}' (`voxtype models` lists them)"
+        ),
+    };
+    format!(
+        "Model '{}' {scope}, so language '{language}' is unsupported. {keep}, {switch}. \
+         Config unchanged.",
+        checkpoint.name
+    )
 }
 
 pub fn validate_backend(engine: &str, model: &str) -> Result<(), String> {
@@ -390,6 +441,9 @@ mod tests {
                 .unwrap_err()
                 .contains("Japanese")
         );
+        assert!(
+            validate_gguf_choice("moonshine-base-ja-Q8_0.gguf", "moonshine", "ja", false).is_ok()
+        );
         assert!(validate_gguf_choice(
             "moonshine-streaming-small-Q8_0.gguf",
             "moonshine_streaming",
@@ -405,5 +459,34 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn japanese_moonshine_says_what_is_missing_and_what_to_do() {
+        let message = validate_gguf_choice("moonshine-base-ja-Q8_0.gguf", "moonshine", "en", false)
+            .unwrap_err();
+        assert_eq!(
+            message,
+            "Model 'moonshine-base-ja-Q8_0.gguf' transcribes Japanese ('ja') only, so \
+             language 'en' is unsupported. Use language 'ja' or 'auto' \
+             (`voxtype config set gguf.language ja`), or choose a model that supports 'en', \
+             such as Qwen3-ASR-0.6B-Q8_0.gguf \
+             (`voxtype config set gguf.model Qwen3-ASR-0.6B-Q8_0.gguf`). Config unchanged."
+        );
+    }
+
+    #[test]
+    fn unsupported_language_without_a_curated_alternative_points_at_the_list() {
+        let message = validate_gguf_choice("gigaam-v3-e2e-rnnt-Q8_0.gguf", "gigaam", "xx", false)
+            .unwrap_err();
+        assert!(
+            message.starts_with(
+                "Model 'gigaam-v3-e2e-rnnt-Q8_0.gguf' transcribes Russian ('ru') only, \
+                 so language 'xx' is unsupported. Use language 'ru' or 'auto'"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("`voxtype models` lists them"), "{message}");
+        assert!(message.ends_with("Config unchanged."), "{message}");
     }
 }

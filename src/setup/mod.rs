@@ -796,6 +796,36 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
 /// the interactive picker (#687): the same registry lookup, R2 download, and
 /// post-download validator, addressed by function pointer so one branch
 /// serves every such engine.
+/// The problem and the fix `voxtype setup --model` prints when this binary
+/// was built without the engine a model needs. The fix comes from
+/// [`install_hint`]: switch to an installed variant, add one to an AUR
+/// build, reinstall a package, install another Nix flake package, or, only
+/// for a source build, rebuild with the feature.
+fn missing_engine_lines(
+    display: &str,
+    model: &str,
+    feature: &str,
+    hint: &install_hint::Hint,
+) -> (String, String) {
+    (
+        format!(
+            "{display} model '{model}' needs the '{feature}' feature, \
+             which this voxtype binary was built without"
+        ),
+        format!("       To fix this, {hint}."),
+    )
+}
+
+/// Print [`missing_engine_lines`] for this machine's install and return the
+/// error that ends the setup run.
+fn report_missing_engine(display: &str, model: &str, feature: &'static str) -> anyhow::Error {
+    let hint = install_hint::hint(install_hint::Need::Feature(feature));
+    let (problem, fix) = missing_engine_lines(display, model, feature, &hint);
+    print_failure(&problem);
+    println!("{fix}");
+    anyhow::anyhow!("{feature} feature not enabled")
+}
+
 struct OnnxSetupRoute {
     /// Name shown in status lines.
     display: &'static str,
@@ -972,15 +1002,11 @@ pub async fn run_setup(
         }
 
         if !route.enabled {
-            print_failure(&format!(
-                "{} model '{}' requires the '{}' feature",
-                route.display, model_name, route.feature
+            return Err(report_missing_engine(
+                route.display,
+                model_name,
+                route.feature,
             ));
-            println!(
-                "       Rebuild with: cargo build --features {}",
-                route.feature
-            );
-            anyhow::bail!("{} feature not enabled", route.feature);
         }
 
         let dir_name = (route.dir_name)(model_name).unwrap(); // Safe: classifier matched
@@ -1034,11 +1060,9 @@ pub async fn run_setup(
         let model = model::find_gguf_model(name).unwrap();
         let path = models_dir.join(model.name);
         if !model.compiled() {
-            anyhow::bail!(
-                "GGUF model '{}' requires the '{}' feature",
-                name,
-                model.feature()
-            );
+            let hint = install_hint::hint(install_hint::Need::Feature(model.feature()));
+            let (problem, fix) = missing_engine_lines("GGUF", name, model.feature(), &hint);
+            anyhow::bail!("{problem}.\n{}", fix.trim_start());
         }
         let verification = model::verify_gguf_model(&path, model);
         match &verification {
@@ -1086,12 +1110,11 @@ pub async fn run_setup(
 
         #[cfg(not(feature = "openvino-whisper"))]
         {
-            print_failure(&format!(
-                "OpenVINO model '{}' requires the 'openvino-whisper' feature",
-                model_name
+            return Err(report_missing_engine(
+                "OpenVINO",
+                model_name,
+                "openvino-whisper",
             ));
-            println!("       Rebuild with: cargo build --features openvino-whisper");
-            anyhow::bail!("openvino-whisper feature not enabled");
         }
 
         #[cfg(feature = "openvino-whisper")]
@@ -1161,12 +1184,11 @@ pub async fn run_setup(
 
         #[cfg(not(feature = "sensevoice"))]
         {
-            print_failure(&format!(
-                "SenseVoice model '{}' requires the 'sensevoice' feature",
-                model_name
+            return Err(report_missing_engine(
+                "SenseVoice",
+                model_name,
+                "sensevoice",
             ));
-            println!("       Rebuild with: cargo build --features sensevoice");
-            anyhow::bail!("SenseVoice feature not enabled");
         }
 
         #[cfg(feature = "sensevoice")]
@@ -1211,12 +1233,7 @@ pub async fn run_setup(
         // Check if parakeet feature is enabled
         #[cfg(not(feature = "parakeet"))]
         {
-            print_failure(&format!(
-                "Parakeet model '{}' requires the 'parakeet' feature",
-                model_name
-            ));
-            println!("       Rebuild with: cargo build --features parakeet");
-            anyhow::bail!("Parakeet feature not enabled");
+            return Err(report_missing_engine("Parakeet", model_name, "parakeet"));
         }
 
         #[cfg(feature = "parakeet")]
@@ -1443,6 +1460,106 @@ pub async fn run_checks(
 
 #[cfg(test)]
 mod tests {
+
+    mod missing_engine {
+        use super::super::{install_hint::Hint, missing_engine_lines};
+        use crate::model_upgrade::InstallMethod;
+
+        fn lines(hint: Hint) -> (String, String) {
+            missing_engine_lines("Parakeet", "parakeet-tdt-0.6b-v3", "parakeet", &hint)
+        }
+
+        #[test]
+        fn names_the_engine_and_the_feature() {
+            let (problem, _) = lines(Hint::Rebuild {
+                feature: Some("parakeet"),
+            });
+            assert_eq!(
+                problem,
+                "Parakeet model 'parakeet-tdt-0.6b-v3' needs the 'parakeet' feature, \
+                 which this voxtype binary was built without"
+            );
+        }
+
+        #[test]
+        fn installed_variant_is_switched_to() {
+            let (_, fix) = lines(Hint::Switch {
+                command: "sudo voxtype setup onnx --enable",
+            });
+            assert_eq!(
+                fix,
+                "       To fix this, run `sudo voxtype setup onnx --enable`."
+            );
+        }
+
+        #[test]
+        fn aur_build_adds_the_variant() {
+            let (_, fix) = lines(Hint::AurVariant {
+                token: "onnx-avx2".into(),
+            });
+            assert!(
+                fix.contains("VOXTYPE_VARIANTS=onnx-avx2 yay -S --rebuild voxtype-bin"),
+                "{fix}"
+            );
+            assert!(!fix.contains("cargo"), "{fix}");
+        }
+
+        #[test]
+        fn deb_and_rpm_reinstall_the_package() {
+            let (_, fix) = lines(Hint::Reinstall {
+                method: InstallMethod::Dpkg("voxtype".into()),
+            });
+            assert_eq!(
+                fix,
+                "       To fix this, reinstall the voxtype package \
+                 (`sudo apt install --reinstall voxtype`)."
+            );
+            let (_, fix) = lines(Hint::Reinstall {
+                method: InstallMethod::Rpm("voxtype".into()),
+            });
+            assert!(fix.contains("sudo dnf reinstall voxtype"), "{fix}");
+        }
+
+        #[test]
+        fn nix_installs_another_flake_package() {
+            let (_, fix) = lines(Hint::Nix {
+                package: Some("onnx"),
+                feature: Some("parakeet"),
+            });
+            assert!(fix.contains("voxtype.packages.${system}.onnx"), "{fix}");
+            assert!(
+                fix.contains("nix profile install github:peteonrails/voxtype#onnx"),
+                "{fix}"
+            );
+            assert!(!fix.contains("cargo"), "{fix}");
+        }
+
+        #[test]
+        fn only_a_source_build_is_told_to_rebuild() {
+            let (_, fix) = lines(Hint::Rebuild {
+                feature: Some("parakeet"),
+            });
+            assert_eq!(fix, "       To fix this, rebuild with --features parakeet.");
+            for hint in [
+                Hint::Switch {
+                    command: "sudo voxtype setup onnx --enable",
+                },
+                Hint::AurVariant {
+                    token: "onnx-avx2".into(),
+                },
+                Hint::Reinstall {
+                    method: InstallMethod::Pacman("voxtype-bin".into()),
+                },
+                Hint::Nix {
+                    package: Some("onnx"),
+                    feature: Some("parakeet"),
+                },
+            ] {
+                let (_, fix) = lines(hint);
+                assert!(!fix.contains("--features"), "{fix}");
+            }
+        }
+    }
 
     /// #507/#650: wtype needs zwp_virtual_keyboard_manager_v1, which KWin and
     /// Mutter do not implement, so being on Wayland is not enough.

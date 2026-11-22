@@ -81,7 +81,9 @@ no selectable language hint for Parakeet. No translation or streaming is added.
 ## "not available" next to an engine in `voxtype setup model`
 
 The binary you are running was built without that engine. Voxtype prints the
-fix for your install:
+fix for your install, here and when `voxtype setup --model <name>` names a
+model of that engine ("needs the '<feature>' feature, which this voxtype binary
+was built without"):
 
 - **`run sudo voxtype setup onnx --enable`**: the ONNX build is already
   installed. This switches to it; switch back with `sudo voxtype setup onnx --disable`.
@@ -856,6 +858,17 @@ or model change. Download the named model first with
 the same Voxtype build. `streaming = true` is intentionally unsupported. An
 explicit `vulkan` backend also fails when no hardware Vulkan device is visible;
 use `auto` or `cpu` only when that is the backend you intend.
+
+A curated checkpoint also refuses a language it was not trained on. The error
+names the languages it has and both ways out, for example for the Japanese
+Moonshine model with `gguf.language = "en"`: set `voxtype config set
+gguf.language ja` (or `auto`), or switch to a model that supports English,
+such as `voxtype config set gguf.model Qwen3-ASR-0.6B-Q8_0.gguf`.
+
+`voxtype models` and `voxtype setup model` list each GGUF model's decoder
+(TDT, RNN-T, CTC, transformer or LLM). It is information only: Parakeet's
+**Decoder type** setting (`parakeet.model_type`) applies to ONNX models and is
+hidden for a `.gguf` file, which carries its own architecture.
 
 ### GGUF worker selection
 
