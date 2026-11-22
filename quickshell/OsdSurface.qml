@@ -142,7 +142,7 @@ PanelWindow {
         // Outcome/state FileViews may settle in either order. Queue the matching
         // result until idle instead of covering the microphone indicator.
         if (live || o.session_started_at_ms < _chipShownFor) return;
-        const shown = { ok: 1, no_speech: 1, empty: 1, error: 1, output_failed: 1 };
+        const shown = { ok: 1, no_speech: 1, no_input: 1, empty: 1, error: 1, output_failed: 1 };
         if (!shown[o.outcome] || _sessionSuppressed || !activeOutput) return;
         _lastOutcomeAt = o.at_ms;
         flash = { kind: o.outcome, chars: o.chars || 0, limit: !!o.limit_reached };
@@ -162,6 +162,7 @@ PanelWindow {
         if (!flash) return "";
         let text = flash.kind === "ok" ? (flash.chars === 1 ? "1 character" : flash.chars + " characters")
             : flash.kind === "no_speech" ? "No speech detected"
+            : flash.kind === "no_input" ? "Microphone silent"
             : flash.kind === "empty" ? "Nothing transcribed"
             : flash.kind === "output_failed" ? "Couldn't type the text"
             : "Transcription failed";

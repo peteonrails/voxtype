@@ -62,6 +62,9 @@ pub struct AllFields {
     // Whisper
     pub w_model: String,
     pub w_mode: String,
+    /// `[whisper] whisper_cli_path`, not editable here; read so cli mode
+    /// is judged against the binary the daemon would actually run.
+    pub w_cli_path: Option<String>,
     pub w_language: String,
     pub w_translate: bool,
     pub w_threads: Option<i64>,
@@ -238,6 +241,40 @@ const CO_LANG_CHOICES: &[&str] = &[
 ];
 
 const MODE_CHOICES: &[&str] = &["local", "remote", "cli"];
+
+/// The Whisper modes the picker cycles through. `cli` needs a whisper-cli
+/// binary no package installs, and cycling left from `local` used to wrap
+/// straight onto it (Omarchy #18694), so it is offered only when whisper-cli
+/// is there or `cli` is already selected. This follows the engine picker,
+/// which offers only engines an installed binary can run, and the model
+/// picker, which keeps a legacy model reachable only while it is selected.
+/// Other cycled fields keep wrapping; none of them can select something
+/// missing.
+fn mode_choices(current: &str, cli_available: bool) -> Vec<&'static str> {
+    MODE_CHOICES
+        .iter()
+        .copied()
+        .filter(|m| *m != "cli" || cli_available || current == "cli")
+        .collect()
+}
+
+/// The save-time warning for `cli` without whisper-cli, if any.
+fn whisper_cli_save_warning(engine: &str, mode: &str, cli_path: Option<&str>) -> Option<String> {
+    if engine != "whisper" || mode != "cli" {
+        return None;
+    }
+    let config = crate::config::WhisperConfig {
+        mode: Some(crate::config::WhisperMode::Cli),
+        whisper_cli_path: cli_path.map(str::to_string),
+        ..crate::config::WhisperConfig::default()
+    };
+    crate::transcribe::cli::cli_mode_problem(&config).map(|problem| {
+        format!(
+            "{problem}. Set Mode back to local, or install whisper.cpp's \
+             whisper-cli (the whisper-cpp package)."
+        )
+    })
+}
 const LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
@@ -362,6 +399,7 @@ impl EngineState {
             w_mode: ed
                 .get_string("whisper", "mode")
                 .unwrap_or_else(|| "local".to_string()),
+            w_cli_path: ed.get_string("whisper", "whisper_cli_path"),
             w_language: ed
                 .get_string("whisper", "language")
                 .unwrap_or_else(|| "auto".to_string()),
@@ -842,6 +880,17 @@ impl EngineState {
                         _ => format!("Saved to {}", ed.path().display()),
                     },
                 });
+                if let Some(message) = whisper_cli_save_warning(
+                    &self.engine,
+                    &self.fields.w_mode,
+                    self.fields.w_cli_path.as_deref(),
+                ) {
+                    let saved = self.feedback.take().map(|f| f.message).unwrap_or_default();
+                    self.feedback = Some(Feedback {
+                        level: FeedbackLevel::Err,
+                        message: format!("{saved}, but {message}"),
+                    });
+                }
 
                 return next_action;
             }
@@ -1014,7 +1063,11 @@ impl EngineState {
                 self.refresh_binary_match();
             }
             FieldId::WModel => f.w_model = cycle_model("whisper", &f.w_model, delta),
-            FieldId::WMode => f.w_mode = cycle_str(MODE_CHOICES, &f.w_mode, delta),
+            FieldId::WMode => {
+                let cli =
+                    crate::transcribe::cli::find_whisper_cli(f.w_cli_path.as_deref()).is_some();
+                f.w_mode = cycle_str(&mode_choices(&f.w_mode, cli), &f.w_mode, delta);
+            }
             FieldId::WLanguage => f.w_language = cycle_str(LANG_CHOICES, &f.w_language, delta),
             FieldId::WTranslate => f.w_translate = !f.w_translate,
             FieldId::WThreads => f.w_threads = cycle_threads(f.w_threads, delta),
@@ -1858,8 +1911,11 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(
-                "Shell out to a `whisper` CLI binary. Useful for testing \
-                 custom builds without rebuilding voxtype.",
+                "Shell out to whisper.cpp's `whisper-cli` for every \
+                 transcription. No voxtype package installs it, so this is \
+                 offered only once whisper-cli is on PATH (or \
+                 whisper_cli_path is set). Useful for testing custom \
+                 builds without rebuilding voxtype.",
             ),
         ],
         FieldId::WLanguage => vec![
@@ -2556,6 +2612,61 @@ mod tests {
         let rows = state.rows();
         assert!(!rows.contains(&FieldId::PkModelType), "{:?}", rows);
         assert!(rows.contains(&FieldId::PkModel) && rows.contains(&FieldId::PkThreads));
+    }
+
+    /// Omarchy #18694: cycling left from `local` wrapped onto `cli`, which
+    /// needs a binary nothing installs.
+    #[test]
+    fn whisper_mode_offers_cli_only_when_it_can_run() {
+        assert_eq!(mode_choices("local", false), ["local", "remote"]);
+        assert_eq!(
+            cycle_str(&mode_choices("local", false), "local", -1),
+            "remote"
+        );
+        assert_eq!(mode_choices("local", true), ["local", "remote", "cli"]);
+        // Already on cli: still shown, so the row can display and leave it.
+        assert_eq!(mode_choices("cli", false), ["local", "remote", "cli"]);
+        assert_eq!(cycle_str(&mode_choices("cli", false), "cli", 1), "local");
+    }
+
+    #[test]
+    fn saving_cli_mode_without_whisper_cli_saves_and_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "engine = \"whisper\"\n[whisper]\nmode = \"cli\"\n\
+             whisper_cli_path = \"/nonexistent/voxtype-test/whisper-cli\"\n",
+        )
+        .unwrap();
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        assert_eq!(state.fields.w_mode, "cli");
+        state.save_to_editor(&mut ed);
+        let feedback = state.feedback.clone().expect("save feedback");
+        assert!(matches!(feedback.level, FeedbackLevel::Err));
+        assert!(
+            feedback.message.starts_with("Saved"),
+            "{}",
+            feedback.message
+        );
+        assert!(
+            feedback.message.contains("Mode back to local"),
+            "{}",
+            feedback.message
+        );
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("mode = \"cli\""));
+
+        assert_eq!(
+            whisper_cli_save_warning("whisper", "local", Some("/nonexistent/x")),
+            None
+        );
+        assert_eq!(
+            whisper_cli_save_warning("parakeet", "cli", Some("/nonexistent/x")),
+            None
+        );
     }
 
     #[test]

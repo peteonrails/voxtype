@@ -112,6 +112,29 @@ If `voxtype setup onnx --enable` (or `setup gpu --enable`) says the variant is
 not installed, check `/usr/lib/voxtype/package-variants` and rebuild with the
 one you need, for example `VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin`.
 
+## "Illegal CPU instruction (SIGILL)" from voxtype, the OSD or the audio bridge
+
+voxtype prints one of three messages instead of a bare "Illegal instruction":
+
+- **"This CPU does not support AVX2"**: the daemon variant needs a newer CPU
+  than you have. Switch to the baseline build, which needs only x86-64-v2:
+  `sudo voxtype setup variant --to voxtype-baseline`, then
+  `systemctl --user restart voxtype`.
+- **"This CPU is below x86-64-v2"**: the CPU lacks SSE4.2 or POPCNT (Intel
+  Core 2 and older, AMD before Bulldozer). Every prebuilt binary, including
+  the baseline daemon, the OSD and the audio bridge, is built for
+  x86-64-v2, so none of them can run there. Check with
+  `grep -o -w -e sse4_2 -e popcnt /proc/cpuinfo | sort -u`; both must be
+  listed. Building from source with `RUSTFLAGS="-C target-cpu=native"` may
+  work. If only the OSD crashes, set `[osd] enabled = false`. In a VM, enable
+  CPU passthrough first: the host often meets the floor when the guest's CPU
+  model does not.
+- **"This binary is built for x86-64-v2 ... should run on your CPU"**: a
+  build bug. Please report it with your `lscpu` output.
+
+The CPU requirements for each binary are in
+[INSTALL.md](INSTALL.md#cpu-prebuilt-linux-binaries).
+
 ## Status reports an ONNX backend for a GGUF model
 
 Upgrade to a build where `voxtype status --format json --extended` reports
@@ -553,32 +576,33 @@ Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout
 
 ### "Cannot open input device" or "Permission denied"
 
-**Cause:** User is not in the `input` group, required for evdev access.
+**Cause:** The built-in evdev hotkey reads `/dev/input/event*` directly, and only members of the `input` group may. Your user is not one, which is the safer state: membership lets every program you run read every keystroke. Some distributions, Omarchy among them, remove users from the group on purpose.
 
-**Solution:**
-```bash
-# Add user to input group
-sudo usermod -aG input $USER
+**Solution (recommended):** trigger voxtype from a compositor or desktop keybinding instead. Bind `voxtype record start` and `voxtype record stop` (or `voxtype record toggle` where the desktop has no key-release binds), then turn the built-in hotkey off:
 
-# IMPORTANT: Log out and back in for changes to take effect
-# Verify membership
-groups | grep input
+```toml
+[hotkey]
+enabled = false
 ```
+
+This works on Hyprland, Sway, River, niri, KDE Plasma and GNOME without any extra permissions. See [Compositor Keybindings](USER_MANUAL.md#compositor-keybindings).
+
+**Only if nothing can run `voxtype record`** (some X11 window managers, the console): adding yourself to the `input` group makes the built-in hotkey work, at the cost described above. Read [The `input` group trade-off](USER_MANUAL.md#the-input-group-trade-off) before you decide. Never do this on Hyprland or Omarchy, where a keybinding does the same job.
 
 When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: built-in hotkey unavailable" desktop notification. It is shown once, not on every start, and again only if the cause changes or the built-in hotkey breaks after having worked; the daemon log has the warning on every start. The notification names the cause:
 
-- **Not in the `input` group:** run `sudo usermod -aG input $USER`, then log out and back in.
+- **Not in the `input` group:** bind `voxtype record` in your compositor and set `[hotkey] enabled = false`, as above. The group is a deliberate trade-off, not the default fix.
 - **In the group, but this session started before you were added:** `/etc/group` lists you, but the running daemon does not have the group yet. Log out completely and back in, or reboot. A systemd user service keeps the old groups until every session of yours has ended.
 - **In the group and still denied:** the device nodes have unusual ownership or permissions. Check `ls -l /dev/input/event*`.
 - **No keyboard found:** nothing in `/dev/input` looks like a keyboard. Plug one in and restart voxtype.
 
-If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`. If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
+If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
 
 ### "Failed to access /dev/input/event*"
 
-**Cause:** udev rules preventing access, or input group not applied.
+**Cause:** The built-in evdev hotkey cannot read the keyboard: you are not in the `input` group, the membership has not reached this session yet, or udev rules give the devices an unusual owner.
 
-**Solution:**
+**Solution:** Prefer a compositor keybinding and `[hotkey] enabled = false` (see above). If you have deliberately chosen the `input` group ([trade-off](USER_MANUAL.md#the-input-group-trade-off)):
 1. Verify group membership: `groups | grep input`
 2. If not shown, log out and back in completely
 3. If still failing, check udev rules:
@@ -602,6 +626,8 @@ echo "uinput" | sudo tee /etc/modules-load.d/uinput.conf
 # Check ydotool daemon
 systemctl --user status ydotool
 ```
+
+If the module is loaded and ydotoold still cannot open `/dev/uinput`, give it write access through a dedicated group rather than the `input` group: see [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 ---
 
@@ -669,6 +695,36 @@ voxtype info devices
 
 If `info devices` lists your microphone again, recording works too; the daemon does not need a restart.
 
+### "Microphone silent" notification stops a recording
+
+**Cause:** Every sample the input delivered for the first 5 seconds of the
+recording was exactly zero. This usually means the
+selected microphone is off, muted in hardware, or asleep. The notification
+names the audio source that stayed silent.
+
+**Solution:** Turn the microphone on, unmute it, or select another source:
+
+```bash
+pactl get-default-source
+pactl list sources short
+pavucontrol
+```
+
+If the source is noise-gated and you often wait more than 5 seconds before
+speaking, or it takes longer than that to wake, increase `window_ms` or
+disable the guard. The threshold cannot change the verdict: only exact
+digital silence stops a recording.
+
+```toml
+[audio.dead_input]
+window_ms = 10000
+# enabled = false
+```
+
+A source stuck on a DC offset is not stopped: its samples are not zero. If a
+dictation still produces no text without this alert, record the source with
+`arecord` and check the playback.
+
 ### "Audio format not supported"
 
 **Cause:** Audio device doesn't support 16kHz sample rate.
@@ -679,6 +735,23 @@ If `info devices` lists your microphone again, recording works too; the daemon d
 arecord -d 2 test.wav
 aplay test.wav
 ```
+
+### Feedback cues: start cue clipped on Bluetooth headphones
+
+**Cause:** Since 1.3.2 voxtype opens an audio output only while a feedback cue plays, and closes it afterwards. Earlier versions held one output open for the daemon's lifetime, which broke after suspend and resume (cues went silent) and could spin a CPU core on `alsa::poll() returned POLLERR`. With nothing open while idle, PipeWire suspends the sink, and a Bluetooth sink can take a moment to wake, so the first part of the start cue may be lost. The same change lets multipoint headphones hand off to another device while voxtype is idle.
+
+**Solution:** If the clipping bothers you more than the idle sink suspending, tell WirePlumber not to suspend sinks. For example, in `~/.config/wireplumber/wireplumber.conf.d/51-no-suspend.conf`:
+
+```
+monitor.bluez.rules = [
+  {
+    matches = [ { node.name = "~bluez_output.*" } ]
+    actions = { update-props = { session.suspend-timeout-seconds = 0 } }
+  }
+]
+```
+
+Then `systemctl --user restart wireplumber`. A warning `Audio output stalled, feedback cue abandoned` in the log means the output device stopped accepting audio; voxtype gives up on that cue after its length plus one second and opens a fresh output for the next one.
 
 ### Recording stops unexpectedly
 
@@ -912,6 +985,32 @@ sudo pacman -S cudnn
 sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cuda-13
 ```
 
+### "whisper-cli not found": dictation records but nothing is typed
+
+**Symptom:** Recording works, but nothing is typed, and the log or a
+notification says `whisper-cli not found` (Omarchy #18694).
+
+**Cause:** `[whisper] mode = "cli"` runs a separate `whisper-cli` program
+for every transcription, and no voxtype package installs it. Most people
+never meant to choose cli mode: it is a workaround for one kind of crash
+(below), and `mode = "local"`, the default, transcribes inside voxtype with
+the same models, GPU included.
+
+**Solution:** Switch back to local mode, which needs nothing extra:
+
+```bash
+voxtype config set whisper.mode local
+systemctl --user restart voxtype
+```
+
+If you do want cli mode, install whisper.cpp's `whisper-cli` (the
+`whisper-cpp` package on Arch and Omarchy, or build it as shown below), or
+point `[whisper] whisper_cli_path` at your build.
+
+`voxtype doctor`, `voxtype setup check` and `voxtype config set` all report
+cli mode without `whisper-cli`. `voxtype configure` only offers cli mode once
+`whisper-cli` is installed, and warns when you save it without one.
+
 ### Voxtype crashes during transcription (Linux)
 
 **Cause:** On some Linux systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.
@@ -923,7 +1022,7 @@ sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cud
 backend = "cli"
 ```
 
-This requires `whisper-cli` to be installed. Build it from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
+This requires `whisper-cli` to be installed: the `whisper-cpp` package on Arch, or build it from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
 
 ```bash
 git clone https://github.com/ggerganov/whisper.cpp
@@ -1094,7 +1193,9 @@ Look for log messages about speech detection to understand what VAD is doing wit
 
 **What happens:** Voxtype detects this failure and automatically falls back to dotool, then ydotool. If neither is set up, it falls back to clipboard mode.
 
-**Solution 1 (Recommended):** Install dotool. Unlike ydotool, direct dotool fallback does not require a daemon and supports keyboard layouts for non-US keyboards:
+**Solution 1 (Recommended):** Install dotool. Unlike ydotool, direct dotool fallback does not require a daemon and supports keyboard layouts for non-US keyboards. eitype needs no device access at all and is the simpler choice on a US layout.
+
+dotool needs write access to `/dev/uinput`. Grant it with a dedicated `uinput` group, not the `input` group, which would also let your programs read every keystroke. The commands are in [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 ```bash
 # 1. Install dotool (check your distribution's package manager)
@@ -1102,9 +1203,7 @@ Look for log messages about speech detection to understand what VAD is doing wit
 yay -S dotool
 # From source: https://sr.ht/~geb/dotool/
 
-# 2. Add user to input group (required for uinput access)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
+# 2. Give your user write access to /dev/uinput (dedicated group, see link above)
 
 # 3. Configure keyboard layout if needed (non-US keyboards)
 # Add to config.toml:
@@ -1179,11 +1278,9 @@ cd dotool && ./build.sh && sudo cp dotool /usr/local/bin/
 
 # Arch (AUR):
 yay -S dotool
-
-# Add user to input group
-sudo usermod -aG input $USER
-# Log out and back in
 ```
+
+Then give your user write access to `/dev/uinput` through a dedicated group, not the `input` group: see [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 **Option 2: Install ydotool**
 
@@ -1240,9 +1337,9 @@ yay -S dotool
 # Fedora (from source):
 # See https://sr.ht/~geb/dotool/ for instructions
 
-# 2. Add user to input group (required for uinput access)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
+# 2. Give your user write access to /dev/uinput through a dedicated
+#    group, not the input group (which would also expose every keystroke):
+#    see USER_MANUAL.md, "Giving dotool and ydotool access to uinput"
 
 # 3. Configure your keyboard layout in config.toml:
 ```
@@ -1576,6 +1673,37 @@ On desktops without detection (GNOME, KDE, X11), pick one keystroke that
 works in both places, such as `paste_keys = "shift+insert"` if your
 terminals map it to the clipboard, or switch to type mode.
 
+### Paste arrives as Escape, digits or an app shortcut (XWayland and Electron apps)
+
+**Symptom:** In paste mode, an XWayland or Electron app (Codex, Slack, some
+Chromium builds) does something other than paste: a confirmation dialog
+opens, the field loses focus, or digits appear. With
+`paste_keys = "shift+insert"`, Codex opens its "Mark all as read" dialog,
+which is bound to Shift+Escape.
+
+**Cause:** wtype sends keys through its own temporary keymap and puts the
+first one on keycode 1. Apps that read raw keycodes, as XWayland apps do,
+see keycode 1 as Escape, so Shift+Insert arrives as Shift+Escape (#938).
+
+**Solution on Hyprland:** send the paste keystroke through Hyprland's
+dispatcher, which uses the real keymap:
+
+```toml
+[output]
+mode = "paste"
+driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
+```
+
+Run `voxtype -vv` and look for `Paste keystroke sent via hyprland`. If it
+says `hyprctl dispatch failed`, check that `hyprctl version` works in the
+same session voxtype runs in (the systemd user service needs
+`HYPRLAND_INSTANCE_SIGNATURE` in its environment, which Hyprland and UWSM
+sessions import).
+
+**Elsewhere:** put `ydotool` first (`driver_order = ["ydotool", "wtype"]`).
+It sends real evdev keycodes, but needs the `ydotoold` daemon and uinput
+access.
+
 ### Clipboard not restored after paste
 
 **Cause:** The restore delay may be too short for your application, or `wl-paste` is not installed.
@@ -1597,6 +1725,14 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 3. On X11, make sure `xclip` is installed for clipboard restoration support.
 
+4. If you copied something after the paste and before the restore, the restore is skipped on purpose so your newer copy is kept.
+
+5. If the log says "Could not save the clipboard", the clipboard could not be read before the paste, usually because the app that owns it stopped responding (each read gives up after 2 seconds). The dictation is still pasted, and the clipboard keeps it. Copy the original again from its source.
+
+### Formatted text comes back as plain text after a paste
+
+With `restore_clipboard = true`, only one representation of the clipboard can be put back, and voxtype keeps the plain-text one. If you copied formatted text (HTML from a browser, for example), pasting it after a dictation gives the plain text. Copy it again from the source to get the formatting back.
+
 ### "Post-processing failed", "timed out", "command not found", "returned nothing" or "edit list rejected"
 
 **Cause:** The `[output.post_process]` command (or a profile's `post_process_command`) didn't produce cleaned text, so Voxtype typed the original transcription instead. The notification says which case it was.
@@ -1611,6 +1747,16 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service -f` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 
 Meeting mode never shows these notifications, so a failing command can't pop up over a call. During a meeting the failure is only logged, and the transcript keeps the original text.
+
+### "Text cleanup by the model failed" or "text cleanup timed out"
+
+**Cause:** `[output.post_process] backend` is `"omarchy"` or `"openai"`, and the model did not answer in time or at all. Voxtype typed the original transcription.
+
+**Solution:**
+- **No Omarchy text model is running:** voxtype never starts one. Start it with `omarchy models start <recipe>` or from the local models panel, or set `backend = "command"` to turn model cleanup off. `voxtype doctor` shows whether Omarchy, a running model, its key and its endpoint were found.
+- **Timed out:** a chat model adds roughly 2 to 6 seconds per dictation, more for a long one or a cold start. Raise `timeout_ms` (`voxtype config set output.post_process.timeout_ms 15000`) or pin a smaller model with `model`.
+- **Refused the API key:** for `"openai"`, check the file in `api_key_file`. For Omarchy, restart the model from the local models panel.
+- **Every dictation is slow:** that is the cost of the model backends. LARD (`voxtype setup lard`, `[text] lard_disfluency = true`) removes fillers in milliseconds without a model.
 
 ### "pre_output hook failed" or "post_output hook failed"
 
@@ -1719,6 +1865,31 @@ systemctl --user restart voxtype
 voxtype info accel
 ```
 
+### `setup gpu --enable` says Vulkan is not available on this machine
+
+**Cause:** `voxtype setup gpu --enable` checks that the Vulkan build can run before switching to it, because a build that cannot run crashes on every start and systemd restarts it in a loop. It refuses in two cases:
+
+- **The CPU has no AVX2.** The packaged `voxtype-vulkan` is compiled for Haswell-class CPUs and later. On an older CPU it would stop with an illegal instruction.
+- **The GPU has no 16-bit storage.** Whisper's Vulkan backend requires 16-bit storage buffers. Intel Haswell graphics on Mesa's `hasvk` driver (Iris Pro 5200, HD 4600 and similar) do not have them, and the Vulkan build aborts when it loads a model. voxtype reads this from `vulkaninfo` (package `vulkan-tools`). Without `vulkaninfo` it recognises Haswell graphics by PCI ID and otherwise allows the switch.
+
+`voxtype setup gpu --status` shows the same verdict next to the Vulkan backend.
+
+**Solution:** Stay on the CPU build. On a CPU without AVX2, use the baseline build:
+
+```bash
+sudo voxtype setup variant --to baseline
+systemctl --user restart voxtype
+```
+
+If an earlier version already switched you to Vulkan and the daemon is crash-looping, switch back:
+
+```bash
+sudo voxtype setup gpu --disable
+systemctl --user restart voxtype
+```
+
+A machine with a second GPU that does support 16-bit storage is not refused: Whisper's Vulkan backend skips the unsupported GPU and uses the other one.
+
 ### "OpenVINO fell back to GPU/CPU" notification
 
 **Cause:** `[openvino] device` names a device (usually `NPU`) that failed to initialize, so Voxtype fell back to the next device in the chain (GPU, then CPU). The notification names the packages for the configured device.
@@ -1821,16 +1992,35 @@ The env var is preferred (no key in shell history, no key in config backups).
 
 ### "Soniox: WS connect failed: ..." or "connect timeout"
 
-Network or DNS issue reaching `wss://stt-rt.soniox.com`. Check:
+Network or DNS issue reaching the Soniox realtime host (`wss://stt-rt.soniox.com`, or `stt-rt.<region>.soniox.com` when `[soniox] region` is set). Check:
 - Internet connectivity (`curl https://api.soniox.com`)
 - Firewall / corporate proxy blocking outbound 443
 - VPN that mangles WebSocket handshakes
 
-Voxtype emits one `Streaming Error` notification and returns to idle. Press the hotkey again to retry once the network is back.
+Voxtype retains captured audio and recovers it through the configured batch backend when streaming fails before delivery. It notifies you with **Dictation Recovered**. To disable this fallback or change its stop deadline:
+
+```toml
+[streaming_recovery]
+enabled = false
+stop_timeout_secs = 30
+```
 
 ### 401 Unauthorized / 403 Forbidden
 
 API key is invalid, revoked, or out of credit. Check the dashboard at https://console.soniox.com.
+
+A key that works in the Soniox console but gets `401` from voxtype usually belongs to a project in another region. Soniox projects are pinned to one region (US, EU, Japan or India) and their keys are refused by every other region's hosts. Set the region to match the project:
+
+```toml
+[soniox]
+region = "eu"   # or "jp", "in"; "us" is the default
+```
+
+Voxtype 1.3.2 and later send the key in the WebSocket `Authorization` header. Older versions send it in the session's first message, which Soniox stops accepting on 15 January 2027; upgrade if Soniox starts refusing a key that used to work.
+
+### "Unknown Soniox region '...'"
+
+`[soniox] region` (or `--soniox-region`, or `VOXTYPE_SONIOX_REGION`) must be one of `us`, `eu`, `jp` or `in`. Use the region the Soniox project that issued your key was created in.
 
 ### Soniox typed text occasionally diverges from spoken words (realtime mode)
 
@@ -2290,6 +2480,12 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 
 **Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
 
+**"No Omarchy text model is running" in the log, and the summary came from my agent or Ollama.** `[meeting.summary] backend = "omarchy"` uses Omarchy's text model only while one is running, and voxtype never starts one. Start it with `omarchy models start <recipe>` or from the local models panel (Super + Ctrl + Alt + X); `omarchy models list` shows which models fit your machine, and many machines are offered no text model at all. `voxtype doctor` shows what voxtype sees under "Omarchy local AI". With `omarchy_model` set, that exact recipe must be running.
+
+**"Omarchy (...) refused the API key (HTTP 401)".** Voxtype reads `~/.config/omarchy/agent-local/key` for each request. If Omarchy set the model up again, the running model may still hold the old key: restart it from the local models panel.
+
+**Ask through Pi fails when Pi's default model is an Omarchy one.** Voxtype runs Pi with `--no-extensions`, and loads Omarchy's `~/.pi/agent/extensions/omarchy-local.ts` back in only when `defaultProvider` in `~/.pi/agent/settings.json` is `omarchy-local` (or `defaultModel` is `omarchy-local/<recipe>`). A default on a paired machine (`omarchy-local-<host>`) is not supported this way. `[meeting.summary] backend = "omarchy"` reaches the same model without Pi.
+
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 
 ---
@@ -2339,7 +2535,8 @@ journalctl --user -u voxtype -n 50
 # If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50
 
 # Common issues:
-# - Not in input group (log out/in after adding)
+# - Built-in hotkey can't read the keyboard (use a compositor keybinding
+#   and [hotkey] enabled = false; the daemon keeps running either way)
 # - Model not downloaded
 # - ydotool not running
 ```

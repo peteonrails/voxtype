@@ -22,7 +22,7 @@ pub use openvino::{driver_packages as openvino_driver_packages, OpenVinoConfig};
 pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
 pub use sensevoice::SenseVoiceConfig;
-pub use soniox::SonioxConfig;
+pub use soniox::{SonioxConfig, SONIOX_REGIONS};
 
 /// Transcription engine selection (which ASR technology to use)
 #[derive(

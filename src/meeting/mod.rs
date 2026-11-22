@@ -290,7 +290,16 @@ impl MeetingDaemon {
         let model_name = Some(meeting_app_config.model_name().to_string());
         let app_config = meeting_app_config;
 
-        let post_processor = app_config.output.active_post_process().map(|cfg| {
+        // A model backend would add seconds to every segment of every chunk
+        // and compete with the summary for the same model, so meetings run
+        // only a post-process command.
+        let post_process = app_config.output.active_post_process();
+        if post_process.is_some_and(|cfg| cfg.llm().is_some()) {
+            tracing::info!(
+                "Meeting transcripts are not cleaned up by the [output.post_process] model backend"
+            );
+        }
+        let post_processor = post_process.filter(|cfg| cfg.llm().is_none()).map(|cfg| {
             tracing::info!(
                 "Meeting post-processing enabled: command={:?}, timeout={}ms",
                 cfg.command,

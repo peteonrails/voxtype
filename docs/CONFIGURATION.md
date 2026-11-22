@@ -287,7 +287,7 @@ key = "BTN_SIDE"
 
 The `BTN_` prefix is optional, so `side` and `btn-extra` also work. Primary and secondary click (`BTN_LEFT`, `BTN_RIGHT`) are not accepted: binding push-to-talk to them makes the desktop unusable.
 
-Voxtype opens the mouse's event device automatically when the hotkey is a button, so no extra configuration is needed. Your user still needs to be in the `input` group, the same as for keyboard hotkeys. Run `evtest` to confirm which button your mouse reports; some mice send a keyboard keycode from a second interface rather than a `BTN_` event, in which case use that key name instead.
+Voxtype opens the mouse's event device automatically when the hotkey is a button, so no extra configuration is needed. Like keyboard hotkeys, this needs `input` group membership, with the same security cost ([trade-off](USER_MANUAL.md#the-input-group-trade-off)). Compositors that bind mouse buttons can run `voxtype record` without it, for example Hyprland's `mouse:276`. Run `evtest` to confirm which button your mouse reports; some mice send a keyboard keycode from a second interface rather than a `BTN_` event, in which case use that key name instead.
 
 **Numeric keycodes:**
 
@@ -362,7 +362,7 @@ When set to `false`, voxtype will not listen for keyboard events via evdev. Inst
 
 **When to disable:**
 - You prefer using your compositor's native keybindings (Hyprland, Sway)
-- You don't want to add your user to the `input` group
+- You don't want to add your user to the `input` group, which lets every program you run read every keystroke ([trade-off](USER_MANUAL.md#the-input-group-trade-off))
 - You want to use key combinations not supported by evdev (e.g., Super+V)
 
 **Example:**
@@ -708,6 +708,58 @@ duck_media_fade_ms = 150
 
 ---
 
+## [audio.dead_input]
+
+Stops a recording whose input device delivers no sound.
+
+A microphone that is off, muted in hardware, or asleep can still open and
+stream. The guard checks the beginning of every recording and stops a capture
+that has delivered nothing but exact digital silence (every sample zero) for
+the whole window. Any sample that is not zero, however quiet, counts as input,
+so a noise-gated microphone that stays at zero until you speak is only stopped
+if you say nothing for the whole window. It plays the error cue and shows a
+notification naming the audio source.
+
+```toml
+[audio.dead_input]
+enabled = true
+window_ms = 5000
+threshold_dbfs = -100.0
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Set to `false` to record regardless of the input level. Use
+`--dead-input-check` or `--no-dead-input-check` to override this for one run.
+
+### window_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `5000`
+**Required:** No
+
+How long the guard waits, after its 100 ms settling period, for a sample that
+is not zero. A source that produces one at any point, including during the
+settling period, is live. Values below `300` are raised to
+`300`. Use `--dead-input-window <MS>` to override it for one run.
+
+### threshold_dbfs
+
+**Type:** Float (dBFS)
+**Default:** `-100.0`
+**Required:** No
+
+A frame at or above this level (measured through a 150 Hz high-pass filter)
+ends the check early as live. It cannot make the guard stop a recording: only
+exact silence is dead, whatever the threshold. Use
+`--dead-input-threshold <DBFS>` to override it for one run.
+
+---
+
 ## [audio.feedback]
 
 Controls audio feedback sounds (beeps when recording starts/stops).
@@ -783,7 +835,7 @@ Selects the transcription backend.
 **When to use `cli` backend (Linux only):**
 The `cli` backend is a workaround for systems where the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary. This affects some systems with glibc 2.42+ (e.g., Ubuntu 25.10). If voxtype crashes during transcription, try the `cli` backend.
 
-Requires `whisper-cli` from [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
+Requires `whisper-cli` from [whisper.cpp](https://github.com/ggerganov/whisper.cpp), which no voxtype package installs (it is the `whisper-cpp` package on Arch). Without it, every transcription fails; `voxtype doctor` reports this. Use `local` unless you hit the crash above. See [Troubleshooting](TROUBLESHOOTING.md#whisper-cli-not-found-dictation-records-but-nothing-is-typed).
 
 **Examples:**
 ```toml
@@ -1433,7 +1485,7 @@ remote_send_auto_language = true
 
 Path to the `whisper-cli` binary. Only used when `backend = "cli"`.
 
-If not specified, voxtype searches for `whisper-cli` or `whisper` in:
+If not specified, voxtype searches for `whisper-cli` in the places below. It never uses a program named plain `whisper`: that name belongs to OpenAI's Python CLI, which voxtype cannot drive.
 1. Your `$PATH`
 2. Common system locations (`/usr/local/bin`, `/usr/bin`)
 3. Current directory
@@ -1462,9 +1514,9 @@ sudo cp build/bin/whisper-cli /usr/local/bin/
 
 ## [streaming]
 
-Tuning for the sliding-window streaming engine (`transcribe::sliding_window`): a rolling audio buffer is re-transcribed on an interval and stable-prefix deltas are emitted as you speak. Shared by every engine that wraps itself in this engine — currently `[whisper] streaming` and `[openvino] streaming` — so it's configured once here instead of once per engine. It has nothing to do with Parakeet's own cache-aware streaming pipeline (`[parakeet] streaming`) or Soniox's cloud WebSocket streaming (`[soniox] streaming`), which are different mechanisms that happen to share the word "streaming".
+Tuning for the sliding-window streaming engine (`transcribe::sliding_window`): a rolling audio buffer is re-transcribed on an interval and stable-prefix deltas are emitted as you speak. These values apply only to `[whisper] streaming` and `[openvino] streaming`.
 
-This section is entirely optional. Omitting it (or omitting individual fields inside it) falls back to each engine's own deprecated `streaming_*` fields — see the compatibility note at the end of this section.
+This section is entirely optional. Omitting it falls back to each engine's own deprecated `streaming_*` tuning fields.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -1499,6 +1551,24 @@ Before this section existed, `[whisper]` and `[openvino]` each carried their own
 - The first time an old per-engine field is actually carrying a non-default value and gets used as a fallback, the daemon logs a one-time warning suggesting the migration. An old config that never touched these fields sees no warning and no behavior change.
 
 There's no need to migrate an existing config that already works the way you want — the old fields aren't going away.
+
+## [streaming_recovery]
+
+Controls recovery for every streaming backend, including Parakeet and Soniox. When a backend errors, ends without text, or exceeds the stop deadline, Voxtype uses the audio retained by the capture and the configured batch backend to deliver the dictation through the normal output path.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | Boolean | `true` | Recover retained audio with the configured batch backend when streaming ends without delivering text |
+| `stop_timeout_secs` | Integer | `30` | Wait this many seconds after microphone stop for the streaming backend to finish, then tear it down and recover the dictation. Range: `1`–`120` |
+
+`VOXTYPE_STREAMING_RECOVERY` and `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` set these values for one process. The matching CLI flags are `--streaming-recovery=false` and `--streaming-stop-timeout-secs 30`.
+
+```toml
+[streaming_recovery]
+enabled = true
+stop_timeout_secs = 30
+```
+
 
 ---
 
@@ -1954,6 +2024,30 @@ Prefer the env var so the key never lands in shell history or a checked-in confi
 export SONIOX_API_KEY="your-key-here"
 ```
 
+Voxtype sends the key in the WebSocket handshake's `Authorization: Bearer` header, as Soniox requires for server-side clients from 15 January 2027. It is never part of the session's first message.
+
+### region
+
+**Type:** String
+**Default:** `"us"`
+**Required:** No
+
+The data-residency region of the Soniox project your API key belongs to: `"us"`, `"eu"`, `"jp"` or `"in"`. A Soniox project is created in one region, and its keys only work on that region's hosts, so a key from an EU project gets `401` until you set `region = "eu"`. The region applies to the realtime WebSocket (streaming and batch) and to the async REST API.
+
+| Region | Realtime WebSocket | Async REST API |
+|--------|--------------------|----------------|
+| `us` | `stt-rt.soniox.com` | `api.soniox.com` |
+| `eu` | `stt-rt.eu.soniox.com` | `api.eu.soniox.com` |
+| `jp` | `stt-rt.jp.soniox.com` | `api.jp.soniox.com` |
+| `in` | `stt-rt.in.soniox.com` | `api.in.soniox.com` |
+
+An unknown region is a config error raised when the engine is set up (at daemon startup, unless `on_demand_loading` is on), before any audio is sent. The daemon's startup log line shows the host in use (`host=stt-rt.eu.soniox.com`). See [Soniox data residency](https://docs.soniox.com/data-residency).
+
+```toml
+[soniox]
+region = "eu"
+```
+
 ### model
 
 **Type:** String
@@ -2085,6 +2179,7 @@ Maximum total wait time (seconds) for an async API job to complete. If exceeded,
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
 | `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
+| `region` | `--soniox-region` | `VOXTYPE_SONIOX_REGION` | `"us"` | Data-residency region of the key's project (`us`, `eu`, `jp`, `in`) |
 | `model` | - | - | `"stt-rt-v6"` | Soniox model (`stt-async-v6` when `async_api = true`) |
 | `language_hints` | - | - | `["hu", "en"]` | Language preference |
 | `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |
@@ -2373,10 +2468,18 @@ Also settable with `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS_TERMINAL`.
 When `true`, voxtype saves your clipboard content before transcription and restores it after the paste operation completes. This prevents your original clipboard content from being overwritten by the transcription.
 
 **How it works:**
-1. Before transcription: Save current clipboard content (including MIME type for binary data)
-2. Copy transcribed text to clipboard
-3. Simulate paste keystroke
-4. After brief delay: Restore original clipboard content
+1. Before pasting: save the current clipboard content and its MIME type
+2. Copy the transcribed text to the clipboard
+3. Simulate the paste keystroke. The dictation is done here: the OSD shows the result and the daemon accepts the next recording
+4. After `restore_clipboard_delay_ms`, in the background: if the clipboard still holds the transcription, put the original back
+
+**What is saved.** `wl-copy` can only offer one representation, so one is saved. When the clipboard offers a text representation (`text/plain;charset=utf-8`, `text/plain`, `UTF8_STRING` and so on), that one is kept, so a later plain-text paste gives the original plain text. Rich formats such as HTML are not restored alongside it. When nothing textual is offered, the first type is kept (an image, for example).
+
+**A newer copy wins.** If you copy something between the paste and the restore, the restore is skipped and your new copy stays.
+
+**When the clipboard cannot be read.** Each clipboard read gives up after 2 seconds, which only happens when the app that owns the clipboard has stopped responding. A failed read is not treated as an empty clipboard: the dictation is still pasted, a warning is logged, and the clipboard keeps the dictation, because there is nothing to restore.
+
+The `post_output_command` hook now runs right after the paste, before the restore.
 
 **Example:**
 ```toml
@@ -2454,12 +2557,16 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
 - `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
 - `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster when no per-call layout or variant hint is needed — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
+- `xdotool` - X11 typing through the XTEST extension, no daemon needed. Needs an X display (`DISPLAY` set). Under Wayland it only reaches X11 (XWayland) windows, so pick it for an X11 session or an X11-only app. Never in the default chain: name it in `driver_order` to use it.
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
+- `hyprland` - Hyprland's own shortcut dispatcher, through `hyprctl`. **Paste mode only, opt-in.** See [Hyprland-native paste](#hyprland-native-paste) below.
 
 **Default behavior (no driver_order set):**
 The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
+
+New drivers such as `xdotool` are opt-in and are never added to the default chain, so upgrading never changes which driver types your text.
 
 **Examples:**
 
@@ -2476,6 +2583,9 @@ driver_order = ["dotool", "ydotool", "xclip"]
 # Force single driver (no fallback)
 driver_order = ["ydotool"]
 
+# Plain X11 session: xdotool, then the X11 clipboard
+driver_order = ["xdotool", "xclip"]
+
 # GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
 driver_order = ["eitype", "dotool", "clipboard"]
 ```
@@ -2486,6 +2596,31 @@ voxtype --driver=ydotool,clipboard daemon
 ```
 
 **Note:** When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried.
+
+**Environment variable:** `VOXTYPE_DRIVER_ORDER`, comma-separated like `--driver` (for example `VOXTYPE_DRIVER_ORDER=hyprland,wtype`).
+
+#### Hyprland-native paste
+
+With `hyprland` in `driver_order`, paste mode sends its paste keystroke (and the Enter for `auto_submit`) through Hyprland's own dispatcher instead of a virtual keyboard. Hyprland delivers the shortcut to the focused window with the real keymap, so it needs no uinput access, no `ydotoold` and no `input` group membership.
+
+This is for apps where wtype's keystroke arrives as the wrong key. wtype uploads its own one-off keymap and puts its first key on keycode 1, which XWayland apps (Electron apps such as Codex, older Chromium builds) read as Escape. `paste_keys = "shift+insert"` then arrives as Shift+Escape, which can trigger an app shortcut instead of pasting.
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "shift+insert"
+driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
+```
+
+How it behaves:
+
+- **Opt-in.** It is never part of a default order, so nothing changes unless you add it.
+- **Hyprland only.** It is used only when `HYPRLAND_INSTANCE_SIGNATURE` is set and `hyprctl` is on `PATH`. Anywhere else it is skipped and the next driver in the list is tried. If the list names no other keystroke driver (`driver_order = ["hyprland"]`), paste mode falls back to wtype, eitype and ydotool after it.
+- **Paste mode only.** It cannot type text, so `mode = "type"` skips it.
+- **Both Hyprland config formats.** On Hyprland 0.55 and later (Lua config) voxtype runs `hyprctl dispatch 'hl.dsp.send_shortcut({ mods = "SHIFT", key = "Insert" })'`. On 0.54 and earlier it runs `hyprctl dispatch sendshortcut SHIFT, Insert`. It tries the Lua form first and remembers which one worked; the form a release doesn't understand is rejected without sending anything.
+- **Keys.** Modifiers `ctrl`, `shift`, `alt` and `super`, and keys named by their XKB keysym (`v`, `insert`, `return`, `F4`).
+
+Voxtype still owns the clipboard: it copies the text, sends the shortcut and, with `restore_clipboard = true`, restores what was there.
 
 #### Streaming performance: dotoold fast path
 
@@ -3182,6 +3317,77 @@ This is intended for LLM cleanup where you want bounded spelling or formatting
 changes without accepting unrelated generated text. Existing commands keep
 their plain-text behavior unless this option is enabled. Profile-specific
 post-process commands use the same setting.
+
+### backend
+
+**Type:** String (`"command"`, `"omarchy"`, `"openai"`)
+**Default:** `"command"`
+**Required:** No
+
+Who cleans up each dictation.
+
+- `"command"` - Runs `command`, as described above. Existing configs keep this.
+- `"omarchy"` - Sends the text to the text model Omarchy runs on this machine (`omarchy models`). Voxtype finds it through Omarchy's documented interface (`omarchy-models status --json`, the loopback address it reports and the key in `~/.config/omarchy/agent-local/key`) and never starts, installs or downloads a model. With no model running, the original text is typed and a notification says how to start one.
+- `"openai"` - Sends the text to any OpenAI-compatible server (llama-server, LM Studio, vLLM, Ollama's `/v1`), set with `url`, `model` and `api_key_file`.
+
+> **Latency warning:** the model backends add roughly 2 to 6 seconds to every dictation (measured short-prompt decode on Omarchy's supported text models is 23 to 72 tokens per second). The text is typed only once the model answers. `timeout_ms` still applies, and on a timeout or any failure the original text is typed. LARD (`[text] lard_disfluency`) removes fillers in milliseconds and is the better choice when that is all you need.
+
+The model gets a built-in prompt that fixes punctuation, capitalization, spelling and recognition errors and drops fillers without rewording, with the previous dictation (see below) as context. `prompt` replaces it. With `edit_list = true` the built-in prompt asks for an edit list instead. Thinking is turned off for Omarchy's models, and any `<think>` block in a reply is removed.
+
+Meeting transcripts are never sent to the model backends: in meeting mode only a `command` runs. Profiles keep their own `post_process_command`.
+
+```toml
+[output.post_process]
+backend = "omarchy"
+timeout_ms = 15000
+```
+
+```toml
+[output.post_process]
+backend = "openai"
+url = "http://127.0.0.1:8080/v1"
+model = "qwen3-4b"
+api_key_file = "~/.config/llama/key"
+```
+
+**CLI override:** `--post-process-backend`
+**Environment variable:** `VOXTYPE_POST_PROCESS_BACKEND`
+
+### model
+
+**Type:** String
+**Default:** unset
+
+The model id for `"openai"` (required there), or the Omarchy recipe for `"omarchy"`. Unset with `"omarchy"`, the last started text model that is running is used, the same one `omarchy agent --local` picks.
+
+**CLI override:** `--post-process-model` / **Environment variable:** `VOXTYPE_POST_PROCESS_MODEL`
+
+### url
+
+**Type:** String
+**Default:** unset
+
+The server's base URL for `"openai"`, including `/v1`.
+
+**CLI override:** `--post-process-url` / **Environment variable:** `VOXTYPE_POST_PROCESS_URL`
+
+### api_key_file
+
+**Type:** String
+**Default:** unset
+
+A file holding the bearer key for `"openai"`. It is read on every request and never logged; the key itself never goes in `config.toml`. Omarchy's key file is fixed and needs no setting.
+
+**CLI override:** `--post-process-api-key-file` / **Environment variable:** `VOXTYPE_POST_PROCESS_API_KEY_FILE`
+
+### prompt
+
+**Type:** String
+**Default:** unset (the built-in cleanup prompt)
+
+Instructions for the model backends, replacing the built-in prompt. The dictation is sent as the user message.
+
+**CLI override:** `--post-process-prompt` / **Environment variable:** `VOXTYPE_POST_PROCESS_PROMPT`
 
 ### Context from Previous Dictation
 
@@ -4400,11 +4606,14 @@ AI summarization settings for meeting transcripts.
 
 ### backend
 
-**Type:** String (`"agent"`, `"local"`, `"remote"`, `"disabled"`)
-**Default:** `"disabled"`
+**Type:** String (`"agent"`, `"local"`, `"remote"`, `"omarchy"`, `"openai"`, `"disabled"`)
+**Default:** `"disabled"`. A config that `voxtype setup` writes on an Omarchy install has `"omarchy"`; existing configs keep what they have.
 **Required:** No
 
-The summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and this setting no longer applies.
+`"omarchy"` and `"openai"` choose a chat model for summaries and, when it runs on this machine, for questions too. They come first in the order below. The other values are the summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and those values no longer apply.
+
+- `"omarchy"` - The text model Omarchy runs on this machine (`omarchy models`). It answers questions and writes summaries with no agent consent, since nothing leaves the machine. Voxtype finds it through Omarchy's documented interface and never starts, installs or downloads a model. With no model running, the log says how to start one, and questions and summaries go the way they would without it (your allowed agent, or Ollama). A summary whose model fails mid-request does the same.
+- `"openai"` - Any OpenAI-compatible server, set with `openai_url`, `openai_model` and `openai_api_key_file`. It writes summaries. It answers questions, without agent consent, only when `openai_url` is a loopback address (127.0.0.1, `localhost`, `::1`); a server elsewhere is for summaries only and is never used with `local_only`.
 
 - `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
 - `"local"` - The older Ollama summarizer (no chapters). Questions (`meeting ask`) use the same Ollama model.
@@ -4415,6 +4624,8 @@ The full order, for questions and summaries:
 
 | Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
 |-----------|-------------------------------|--------------------------------------------|
+| `backend = "omarchy"` and a model is running, no `--agent` | Omarchy's model | Omarchy's model |
+| `backend = "openai"`, no `--agent` | That server, when it is on this machine | That server (only a local one with `local_only` or `--local`) |
 | `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
 | `--agent <id>` | That agent, once allowed | That agent, once allowed |
 | The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
@@ -4447,7 +4658,33 @@ The model the local model runs, for the `"local"` summarizer and the meeting ass
 **Default:** `120`
 **Required:** No
 
-Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant uses `[meeting.assistant] timeout_secs`.
+Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant, `"omarchy"` and `"openai"` use `[meeting.assistant] timeout_secs`.
+
+### omarchy_model
+
+**Type:** String
+**Default:** unset
+
+The Omarchy recipe `"omarchy"` uses, such as `"qwen3.8-27b-gufo"`. Unset uses the last started text model that is running, then any other running text model. Image, video and music models are never used.
+
+**CLI override:** `--summary-omarchy-model` / **Environment variable:** `VOXTYPE_SUMMARY_OMARCHY_MODEL`
+
+### openai_url, openai_model, openai_api_key_file
+
+**Type:** String
+**Default:** unset
+
+The server for `"openai"`: its base URL including `/v1`, the model id, and a file holding its bearer key (read on every request, never logged, never in `config.toml`).
+
+```toml
+[meeting.summary]
+backend = "openai"
+openai_url = "http://127.0.0.1:1234/v1"
+openai_model = "qwen3-30b-a3b"
+```
+
+**CLI overrides:** `--summary-backend`, `--summary-openai-url`, `--summary-openai-model`, `--summary-openai-api-key-file`
+**Environment variables:** `VOXTYPE_SUMMARY_BACKEND`, `VOXTYPE_SUMMARY_OPENAI_URL`, `VOXTYPE_SUMMARY_OPENAI_MODEL`, `VOXTYPE_SUMMARY_OPENAI_API_KEY_FILE`
 
 ### auto
 
@@ -4561,7 +4798,7 @@ The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`)
 **Default:** `false`
 **Required:** No
 
-Never send transcripts to an agent; answer and summarize with the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
+Never send transcripts to an agent; answer and summarize with a local model: Omarchy's when `[meeting.summary] backend = "omarchy"` and one is running (or an `"openai"` server on this machine), otherwise the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
 
 **CLI override:** `--local` on `meeting ask` and `meeting summarize`
 
@@ -5147,6 +5384,14 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
 
+**Streaming recovery:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_STREAMING_RECOVERY` | bool | `streaming_recovery.enabled` |
+| `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` | integer (1-120) | `streaming_recovery.stop_timeout_secs` |
+
+
 **Audio:**
 
 | Variable | Type | Config equivalent |
@@ -5158,6 +5403,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |
 | `VOXTYPE_AUDIO_FEEDBACK` | bool | `audio.feedback.enabled` |
+| `VOXTYPE_DEAD_INPUT_DETECTION` | bool | `audio.dead_input.enabled` |
+| `VOXTYPE_DEAD_INPUT_WINDOW_MS` | integer | `audio.dead_input.window_ms` |
+| `VOXTYPE_DEAD_INPUT_THRESHOLD_DBFS` | float | `audio.dead_input.threshold_dbfs` |
 
 **Output:**
 

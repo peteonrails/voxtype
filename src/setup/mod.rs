@@ -40,6 +40,7 @@ pub mod skill;
 pub mod systemd;
 pub mod vad;
 pub mod variant_check;
+pub mod vulkan_check;
 pub mod waybar;
 
 use crate::config::Config;
@@ -85,6 +86,8 @@ pub struct OutputChainStatus {
     /// dotool sits third in the runtime fallback chain but was absent here,
     /// so `setup check` described a chain the daemon does not use (#507).
     pub dotool: OutputToolStatus,
+    /// Opt-in only, never in the default chain; reported when installed.
+    pub xdotool: OutputToolStatus,
     pub ydotool: OutputToolStatus,
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
@@ -232,6 +235,7 @@ const OUTPUT_CHAIN_TOOLS: &[&str] = &[
     "wtype",
     "eitype",
     "dotool",
+    "xdotool",
     "ydotool",
     "wl-copy",
     "xclip",
@@ -325,6 +329,19 @@ pub fn build_output_chain(
     // PATH is enough, since it writes to uinput on Wayland, X11 and TTY alike.
     let dotool_path = lookup("dotool");
     let dotool_installed = dotool_path.is_some();
+
+    // Check xdotool: it needs an X server (X11, or XWayland for X11 windows).
+    let xdotool_path = lookup("xdotool");
+    let xdotool_installed = xdotool_path.is_some();
+    let has_x_display = std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty());
+    let xdotool_available = xdotool_installed && has_x_display;
+    let xdotool_note = if xdotool_installed && !has_x_display {
+        Some("no X display (DISPLAY unset)".to_string())
+    } else if xdotool_installed && display_server == DisplayServer::Wayland {
+        Some("X11 (XWayland) windows only".to_string())
+    } else {
+        None
+    };
 
     // Check ydotool
     let ydotool_path = lookup("ydotool");
@@ -421,6 +438,13 @@ pub fn build_output_chain(
             path: dotool_path,
             note: dotool_note,
         },
+        xdotool: OutputToolStatus {
+            name: "xdotool",
+            installed: xdotool_installed,
+            available: xdotool_available,
+            path: xdotool_path,
+            note: xdotool_note,
+        },
         ydotool: OutputToolStatus {
             name: "ydotool",
             installed: ydotool_installed,
@@ -478,8 +502,15 @@ pub fn configured_primary_method(
         OutputMode::File => return Some("file".to_string()),
         OutputMode::Clipboard => return clipboard.then(|| "clipboard".to_string()),
         OutputMode::Paste => {
-            let keystroke =
-                status.wtype.available || status.eitype.available || status.ydotool.available;
+            let hyprland = output
+                .driver_order
+                .as_deref()
+                .is_some_and(|o| o.contains(&OutputDriver::Hyprland))
+                && crate::output::hyprland::available_quick();
+            let keystroke = status.wtype.available
+                || status.eitype.available
+                || status.ydotool.available
+                || hyprland;
             return (clipboard && keystroke).then(|| "paste".to_string());
         }
         OutputMode::Type => {}
@@ -497,9 +528,12 @@ pub fn configured_primary_method(
             OutputDriver::Wtype => status.wtype.available,
             OutputDriver::Eitype => status.eitype.available,
             OutputDriver::Dotool => status.dotool.available,
+            OutputDriver::Xdotool => status.xdotool.available,
             OutputDriver::Ydotool => status.ydotool.available,
             OutputDriver::Clipboard => status.wl_copy.available,
             OutputDriver::Xclip => status.xclip.available,
+            // Paste-only; type mode skips it.
+            OutputDriver::Hyprland => false,
         };
         if available {
             return Some(match driver {
@@ -554,6 +588,11 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         // KDE and GNOME where wtype cannot be.
         print_tool_status(&status.dotool, true);
 
+        // xdotool: opt-in through driver_order, so shown only when installed.
+        if status.xdotool.installed {
+            print_tool_status(&status.xdotool, true);
+        }
+
         // ydotool
         if status.ydotool.installed {
             let daemon_status = if status.ydotool_daemon {
@@ -599,6 +638,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             "wtype" => "wtype (CJK supported)",
             "eitype" => "eitype (libei, GNOME/KDE native)",
             "dotool" => "dotool (keyboard layouts via dotool_xkb_layout)",
+            "xdotool" => "xdotool (X11 via XTEST)",
             "ydotool" => "ydotool (CJK not supported)",
             "clipboard" => "clipboard (requires manual paste)",
             _ => method.as_str(),
@@ -894,7 +934,7 @@ pub async fn run_setup(
             if !quiet {
                 println!("\nCreating default config file...");
             }
-            std::fs::write(&config_path, crate::config::default_config_content())?;
+            std::fs::write(&config_path, crate::config::new_config_content())?;
             if !quiet {
                 print_success(&format!("Created: {:?}", config_path));
             }
@@ -1462,6 +1502,7 @@ mod tests {
             wtype: tool("wtype", wtype),
             eitype: tool("eitype", false),
             dotool: tool("dotool", true),
+            xdotool: tool("xdotool", false),
             ydotool: tool("ydotool", false),
             ydotool_daemon: false,
             wl_copy: tool("wl-copy", true),

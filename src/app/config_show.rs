@@ -87,6 +87,16 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
         let _ = writeln!(s, "  remote_api_key = (set)");
     }
     let _ = writeln!(s, "  timeout_secs = {}", meeting.summary.timeout_secs);
+    for (key, value) in [
+        ("omarchy_model", &meeting.summary.omarchy_model),
+        ("openai_url", &meeting.summary.openai_url),
+        ("openai_model", &meeting.summary.openai_model),
+        ("openai_api_key_file", &meeting.summary.openai_api_key_file),
+    ] {
+        if let Some(value) = value {
+            let _ = writeln!(s, "  {key} = {value:?}");
+        }
+    }
     match meeting.summary.auto {
         Some(auto) => {
             let _ = writeln!(s, "  auto = {}", auto);
@@ -142,6 +152,14 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("  enabled = {}", config.audio.feedback.enabled);
     println!("  theme = {:?}", config.audio.feedback.theme);
     println!("  volume = {}", config.audio.feedback.volume);
+
+    println!("\n[audio.dead_input]");
+    println!("  enabled = {}", config.audio.dead_input.enabled);
+    println!("  window_ms = {}", config.audio.dead_input.window_ms);
+    println!(
+        "  threshold_dbfs = {}",
+        config.audio.dead_input.threshold_dbfs
+    );
 
     // Show current engine
     println!("\n[engine]");

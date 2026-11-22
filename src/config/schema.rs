@@ -329,7 +329,9 @@ const PASTE_KEY_CHOICES: &[&str] = &["auto", "shift+insert", "ctrl+v", "ctrl+shi
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
 const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
-const SUMMARY_BACKEND_CHOICES: &[&str] = &["agent", "local", "remote", "disabled"];
+const SUMMARY_BACKEND_CHOICES: &[&str] =
+    &["agent", "local", "remote", "disabled", "omarchy", "openai"];
+const POST_PROCESS_BACKEND_CHOICES: &[&str] = &["command", "omarchy", "openai"];
 const ASSISTANT_AGENT_CHOICES: &[&str] = crate::meeting::assistant::SUPPORTED_AGENTS;
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
@@ -939,6 +941,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("soniox"),
     spec(
+        "soniox.region",
+        "soniox",
+        "region",
+        closed(super::SONIOX_REGIONS),
+        "Engine",
+        "Region",
+        "Data-residency region of the Soniox project your API key belongs to. A key only works in its own region.",
+    )
+    .for_engine("soniox"),
+    spec(
         "soniox.model",
         "soniox",
         "model",
@@ -1138,6 +1150,39 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Milliseconds to fade media volume down and back up. 0 is instant.",
     ),
     spec(
+        "audio.dead_input.enabled",
+        "audio.dead_input",
+        "enabled",
+        KeyType::Bool,
+        "Audio",
+        "Dead-input guard",
+        "Stop a capture that delivers nothing but exact digital silence.",
+    ),
+    spec(
+        "audio.dead_input.window_ms",
+        "audio.dead_input",
+        "window_ms",
+        KeyType::Int {
+            min: 300,
+            max: 30_000,
+        },
+        "Audio",
+        "Dead-input window",
+        "Milliseconds of all-zero input before the recording is stopped.",
+    ),
+    spec(
+        "audio.dead_input.threshold_dbfs",
+        "audio.dead_input",
+        "threshold_dbfs",
+        KeyType::Float {
+            min: -120.0,
+            max: 0.0,
+        },
+        "Audio",
+        "Dead-input threshold",
+        "Frame level in dBFS that ends the check early as live. It cannot stop a recording.",
+    ),
+    spec(
         "audio.feedback.enabled",
         "audio.feedback",
         "enabled",
@@ -1272,6 +1317,51 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Output",
         "Require an edit list",
         "Accept only a JSON list of exact, unambiguous edits from the post-process command.",
+    ),
+    spec(
+        "output.post_process.backend",
+        "output.post_process",
+        "backend",
+        closed(POST_PROCESS_BACKEND_CHOICES),
+        "Output",
+        "Post-process backend",
+        "Who cleans up each dictation: command (the post-process command), omarchy (the text model Omarchy runs on this machine) or openai (an OpenAI-compatible server). The model backends add roughly 2 to 6 seconds to every dictation; on failure the original text is used.",
+    ),
+    spec(
+        "output.post_process.model",
+        "output.post_process",
+        "model",
+        KeyType::String,
+        "Output",
+        "Post-process model",
+        "Model id for the openai backend, or the Omarchy recipe for the omarchy backend (unset: the last started text model that is running).",
+    ),
+    spec(
+        "output.post_process.url",
+        "output.post_process",
+        "url",
+        KeyType::String,
+        "Output",
+        "Post-process server URL",
+        "Base URL of the server for the openai backend, including /v1.",
+    ),
+    spec(
+        "output.post_process.api_key_file",
+        "output.post_process",
+        "api_key_file",
+        KeyType::String,
+        "Output",
+        "Post-process key file",
+        "A file holding the openai backend's API key. The key never goes in config.toml.",
+    ),
+    spec(
+        "output.post_process.prompt",
+        "output.post_process",
+        "prompt",
+        KeyType::String,
+        "Output",
+        "Post-process prompt",
+        "Instructions for the model backends. Unset uses a built-in prompt that fixes errors and keeps the wording.",
     ),
     // -- Text ---------------------------------------------------------------
     spec(
@@ -2282,6 +2372,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Experimental: type the best guess at once and correct it later with backspace.",
     ),
     spec(
+        "streaming_recovery.enabled",
+        "streaming_recovery",
+        "enabled",
+        KeyType::Bool,
+        "Advanced",
+        "Recover interrupted dictation",
+        "Use the configured batch backend to recover audio when any streaming backend ends without text.",
+    ),
+    spec(
+        "streaming_recovery.stop_timeout_secs",
+        "streaming_recovery",
+        "stop_timeout_secs",
+        KeyType::Int { min: 1, max: 120 },
+        "Advanced",
+        "Streaming stop timeout",
+        "Seconds to wait after stopping the microphone before recovering a streaming dictation.",
+    ),
+    spec(
         "meeting.chunk_duration_secs",
         "meeting",
         "chunk_duration_secs",
@@ -2544,7 +2652,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(SUMMARY_BACKEND_CHOICES),
         "Meeting",
         "Summary backend",
-        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama) or remote (an API). disabled, the default, also uses the assistant.",
+        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama), remote (an API), omarchy (the text model Omarchy runs on this machine, which also answers Ask without an agent) or openai (any OpenAI-compatible server). disabled, the default, also uses the assistant.",
     ),
     spec(
         "meeting.summary.ollama_url",
@@ -2581,6 +2689,42 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting",
         "Remote summary API key",
         "API key for the remote summary backend.",
+    ),
+    spec(
+        "meeting.summary.omarchy_model",
+        "meeting.summary",
+        "omarchy_model",
+        KeyType::String,
+        "Meeting",
+        "Omarchy model",
+        "Omarchy recipe the omarchy backend uses. Unset uses the last started text model that is running. Voxtype never starts a model.",
+    ),
+    spec(
+        "meeting.summary.openai_url",
+        "meeting.summary",
+        "openai_url",
+        KeyType::String,
+        "Meeting",
+        "OpenAI-compatible URL",
+        "Base URL of the server for the openai backend, including /v1, e.g. http://127.0.0.1:8080/v1. Only a server on this machine answers Ask.",
+    ),
+    spec(
+        "meeting.summary.openai_model",
+        "meeting.summary",
+        "openai_model",
+        KeyType::String,
+        "Meeting",
+        "OpenAI-compatible model",
+        "Model id the openai backend asks for.",
+    ),
+    spec(
+        "meeting.summary.openai_api_key_file",
+        "meeting.summary",
+        "openai_api_key_file",
+        KeyType::String,
+        "Meeting",
+        "OpenAI-compatible key file",
+        "A file holding the openai backend's API key. The key never goes in config.toml.",
     ),
     spec(
         "meeting.actions.remind_in_mins",
@@ -3322,6 +3466,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "openvino.streaming" => json!(ov().streaming),
 
         "soniox.api_key" => opt_str(so().api_key.as_ref()),
+        "soniox.region" => json!(so().region),
         "soniox.model" => json!(so().model),
         "soniox.language_hints_strict" => json!(so().language_hints_strict),
         "soniox.streaming" => json!(so().streaming),
@@ -3351,6 +3496,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "audio.duck_media" => json!(cfg.audio.duck_media),
         "audio.duck_media_volume_percent" => json!(cfg.audio.duck_media_volume_percent),
         "audio.duck_media_fade_ms" => json!(cfg.audio.duck_media_fade_ms),
+        "audio.dead_input.enabled" => json!(cfg.audio.dead_input.enabled),
+        "audio.dead_input.window_ms" => json!(cfg.audio.dead_input.window_ms),
+        "audio.dead_input.threshold_dbfs" => f32_json(cfg.audio.dead_input.threshold_dbfs),
         "audio.feedback.enabled" => json!(cfg.audio.feedback.enabled),
         "audio.feedback.theme" => json!(cfg.audio.feedback.theme),
         "audio.feedback.volume" => f32_json(cfg.audio.feedback.volume),
@@ -3370,6 +3518,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.post_process.trim" => json!(pp().trim),
         "output.post_process.fallback_on_empty" => json!(pp().fallback_on_empty),
         "output.post_process.edit_list" => json!(pp().edit_list),
+        "output.post_process.backend" => json!(pp().backend),
+        "output.post_process.model" => opt_str(pp().model.as_ref()),
+        "output.post_process.url" => opt_str(pp().url.as_ref()),
+        "output.post_process.api_key_file" => opt_str(pp().api_key_file.as_ref()),
+        "output.post_process.prompt" => opt_str(pp().prompt.as_ref()),
 
         "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
         "text.lard_model_path" => json!(cfg.text.lard_model_path),
@@ -3505,6 +3658,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }
         "streaming.type_partials" => json!(cfg.streaming.unwrap_or_default().type_partials),
         "streaming.revision_mode" => json!(cfg.streaming.unwrap_or_default().revision_mode),
+        "streaming_recovery.enabled" => {
+            json!(cfg.streaming_recovery.unwrap_or_default().enabled)
+        }
+        "streaming_recovery.stop_timeout_secs" => {
+            json!(cfg.streaming_recovery.unwrap_or_default().stop_timeout_secs)
+        }
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
@@ -3553,6 +3712,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.summary.ollama_model" => json!(cfg.meeting.summary.ollama_model),
         "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
         "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
+        "meeting.summary.omarchy_model" => opt_str(cfg.meeting.summary.omarchy_model.as_ref()),
+        "meeting.summary.openai_url" => opt_str(cfg.meeting.summary.openai_url.as_ref()),
+        "meeting.summary.openai_model" => opt_str(cfg.meeting.summary.openai_model.as_ref()),
+        "meeting.summary.openai_api_key_file" => {
+            opt_str(cfg.meeting.summary.openai_api_key_file.as_ref())
+        }
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
         "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
         "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {
@@ -4573,7 +4738,9 @@ mod tests {
         .iter()
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
         .collect();
-        src.push_str("[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
+        src.push_str(
+            "[streaming]\n[streaming_recovery]\n[output.post_process]\ncommand = \"cat\"\n",
+        );
         let cfg: Config = toml::from_str(&src).expect("materialized config parses");
 
         let mut leaves = Vec::new();

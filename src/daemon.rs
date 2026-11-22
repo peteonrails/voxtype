@@ -1182,6 +1182,16 @@ type TranscriberLoadTask = tokio::task::JoinHandle<
     std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
 >;
 
+/// How a streaming session ended, for `end_streaming`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamingEndReason {
+    /// The backend sent `Ended` after delivering what it had.
+    Completed,
+    /// The backend failed, closed without `Ended`, or stalled past the stop
+    /// watchdog. Carries the error to record and show, when there is one.
+    Failed(Option<String>),
+}
+
 /// Main daemon that orchestrates all components
 #[cfg(test)]
 type HistoryTestEagerLoop = (
@@ -1232,6 +1242,8 @@ pub struct Daemon {
     /// see `new_speech_tracker`). `None` when idle or not armed for this
     /// session. Read by the periodic silence check in the main loop.
     silence_tracker: Option<audio::levels::SpeechTracker>,
+    /// Receiver for the one dead-input report produced by the active capture.
+    dead_input_rx: Option<tokio::sync::mpsc::Receiver<audio::input_guard::DeadInputReport>>,
     /// Whether the currently-active recording was started via an external
     /// trigger (SIGUSR1 / `record start`) rather than the hotkey. Set in
     /// `start_recording_capture`/`start_streaming_capture`, read (and
@@ -1242,6 +1254,17 @@ pub struct Daemon {
     /// streaming session is draining server-side after the mic stopped.
     /// Aborted in `end_streaming`.
     streaming_drain_pump: Option<tokio::task::JoinHandle<()>>,
+    /// Complete capture retained for a streaming session. AudioCapture keeps
+    /// this independently of the backend tap so a failed stream can fall back
+    /// to ordinary batch transcription.
+    streaming_recovery_audio: Vec<f32>,
+    /// Deadline armed when the microphone stops while the backend drains.
+    /// An absolute deadline survives unrelated select! iterations.
+    streaming_stop_deadline: Option<tokio::time::Instant>,
+    /// File target selected when the streaming session began. Kept across the
+    /// recovery handoff because the runtime override is consumed at start.
+    streaming_recovery_file_output_path: Option<PathBuf>,
+
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
@@ -1360,6 +1383,16 @@ pub struct Daemon {
     osd_limit_reached: bool,
     osd_session_started_at_ms: u64,
     osd_session_suppressed: std::sync::atomic::AtomicBool,
+    /// When the daemon last went idle after being busy, as a trigger stamp
+    /// (nanoseconds since the epoch; 0 while it has been idle since
+    /// startup). A start request issued before this was issued while the
+    /// daemon was busy, so it is ignored like one handled while busy
+    /// (#1004). Without it, a `record toggle` sent during output waits in
+    /// the signal queue and starts a recording once output finishes.
+    idle_since: std::sync::atomic::AtomicU64,
+    /// Whether the last state written was idle, so a repeated idle write
+    /// does not move `idle_since` forward.
+    last_state_idle: std::sync::atomic::AtomicBool,
     // Whether this session's outcome has been published. The first one
     // wins: some paths report a specific outcome (no speech) and then
     // fall through a generic one (empty result) on the way to idle.
@@ -1487,11 +1520,19 @@ impl Daemon {
 
         // Initialize post-processor if configured
         let post_processor = config.output.active_post_process().map(|cfg| {
-            tracing::info!(
-                "Post-processing enabled: command={:?}, timeout={}ms",
-                cfg.command,
-                cfg.timeout_ms
-            );
+            match cfg.llm() {
+                Some(llm) => tracing::warn!(
+                    "Post-processing enabled through the {} model backend, timeout={}ms. {}",
+                    llm.provider.as_str(),
+                    cfg.timeout_ms,
+                    crate::output::post_process::LATENCY_WARNING
+                ),
+                None => tracing::info!(
+                    "Post-processing enabled: command={:?}, timeout={}ms",
+                    cfg.command,
+                    cfg.timeout_ms
+                ),
+            }
             PostProcessor::new(cfg)
         });
 
@@ -1549,8 +1590,13 @@ impl Daemon {
             meeting_hud: meeting::MeetingHudState::idle(),
             level_emitter_task: None,
             silence_tracker: None,
+            dead_input_rx: None,
             is_external_trigger: false,
             streaming_drain_pump: None,
+            streaming_recovery_audio: Vec::new(),
+            streaming_stop_deadline: None,
+            streaming_recovery_file_output_path: None,
+
             osd_supervisor_task: None,
             #[cfg(target_os = "linux")]
             tray: None,
@@ -1603,6 +1649,8 @@ impl Daemon {
             osd_limit_reached: false,
             osd_session_started_at_ms: 0,
             osd_session_suppressed: std::sync::atomic::AtomicBool::new(false),
+            idle_since: std::sync::atomic::AtomicU64::new(0),
+            last_state_idle: std::sync::atomic::AtomicBool::new(true),
             osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
             model_upgrade_pending,
             history,
@@ -1858,6 +1906,7 @@ impl Daemon {
 
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
+        self.note_idle_transition(state_name);
         #[cfg(target_os = "linux")]
         if let Some(tray) = &self.tray {
             tray.update(crate::tray::TrayState::from_state_name(state_name));
@@ -2019,6 +2068,9 @@ impl Daemon {
                 OutcomeKind::TooShort => Outcome::TooShort,
                 OutcomeKind::Empty => Outcome::Empty,
                 OutcomeKind::Cancelled => Outcome::Cancelled,
+                // A silent microphone is the history's "heard no speech",
+                // seen before transcription instead of after it.
+                OutcomeKind::NoInput => Outcome::NoSpeech,
                 OutcomeKind::Error => Outcome::TranscriptionFailed,
                 OutcomeKind::OutputFailed => Outcome::OutputFailed,
             };
@@ -2070,6 +2122,25 @@ impl Daemon {
             })
     }
 
+    /// Arm the dead-input guard for the capture about to start.
+    fn start_dead_input_guard(&mut self) -> Option<audio::input_guard::DeadInputGuard> {
+        self.dead_input_rx = None;
+        if !self.config.audio.dead_input.enabled {
+            return None;
+        }
+
+        let (guard, report_rx) = audio::input_guard::DeadInputGuard::new(
+            self.config.audio.sample_rate,
+            &self.config.audio.dead_input,
+        );
+        self.dead_input_rx = Some(report_rx);
+        Some(guard)
+    }
+
+    fn disarm_dead_input_guard(&mut self) {
+        self.dead_input_rx = None;
+    }
+
     /// Start a batch (non-streaming) audio capture. `track_silence` arms
     /// silence-based auto-stop when the session is external-trigger and the
     /// feature is configured (see `new_speech_tracker`) — pass `false` for
@@ -2101,28 +2172,27 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
+                    let guard = self.start_dead_input_guard();
+                    let sink = self.level_hub.as_ref().map(|hub| hub.frame_sink());
 
                     // Cancel any prior emitter (defensive; should be idle).
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();
                     }
-                    let handle = if let Some(hub) = &self.level_hub {
-                        Some(audio::levels::spawn_emitter_with_streaming_tap(
+                    // With no consumer, chunk_rx is dropped, as it was before
+                    // silence tracking and the dead-input guard existed.
+                    if audio::levels::needs_chunk_pump(
+                        sink.is_some(),
+                        speech_tracker.is_some(),
+                        guard.is_some(),
+                    ) {
+                        self.level_emitter_task = Some(audio::levels::spawn_chunk_pump(
                             chunk_rx,
-                            hub.frame_sink(),
+                            sink,
                             None,
                             speech_tracker,
-                        ))
-                    } else {
-                        // No OSD sink. If silence tracking is armed it still
-                        // needs a consumer for chunk_rx — otherwise it'd
-                        // just be dropped, matching the pre-tracking
-                        // behaviour when tracking isn't armed either.
-                        speech_tracker
-                            .map(|tracker| audio::levels::spawn_silence_tracker(chunk_rx, tracker))
-                    };
-                    if let Some(handle) = handle {
-                        self.level_emitter_task = Some(handle);
+                            guard,
+                        ));
                     }
                     self.capture_notices.clear();
                     Ok(capture)
@@ -2270,6 +2340,9 @@ impl Daemon {
         if transcriber.as_streaming().is_none() {
             return false;
         }
+        self.streaming_recovery_audio.clear();
+        self.streaming_stop_deadline = None;
+        self.streaming_recovery_file_output_path = None;
 
         let (capture, samples_rx) = match self.start_streaming_capture(track_silence).await {
             Ok(v) => v,
@@ -2373,10 +2446,11 @@ impl Daemon {
         &mut self,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
     ) {
+        self.disarm_dead_input_guard();
+
         // Notify an external-trigger caller that this session is ending,
         // regardless of why (stop, silence timeout, hard timeout) — it may
         // not be the one that decided to stop it — and disarm silence
@@ -2387,36 +2461,9 @@ impl Daemon {
         self.end_external_session(state.is_recording()).await;
 
         if state.is_streaming() {
-            // File-output sessions (`--file=path`) have nowhere to leak
-            // into — they accumulate text instead of typing it (see the
-            // event pump) — so the disown-on-stop protection below
-            // doesn't apply; disowning here would just silently drop
-            // whatever the backend was still draining, and end_streaming
-            // would then write an empty file. Let it drain normally so
-            // end_streaming can write the real text.
-            let file_output = matches!(
-                &*state,
-                State::Streaming {
-                    file_output_path: Some(_),
-                    ..
-                }
-            );
-            if file_output {
-                tracing::info!("Stopping streaming session (file output); closing capture");
-            } else {
-                tracing::info!("Stopping streaming session; closing capture and disowning session");
-            }
-            self.stop_streaming_capture(audio_capture).await;
-            if !file_output {
-                // Drop the typing surface synchronously so any
-                // Final/Partial events the backend emits while
-                // draining its internal buffer reach the event-pump
-                // arm with `streaming_session = None` and get
-                // discarded instead of typed into whatever window
-                // has focus by then.
-                *streaming_session = None;
-                *streaming_chain = None;
-            }
+            tracing::info!("Stopping streaming session; closing capture and disowning output");
+            self.request_streaming_stop(audio_capture, streaming_chain, true)
+                .await;
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
 
@@ -2524,15 +2571,21 @@ impl Daemon {
     }
 
     /// Early-stop the streaming capture: cut audio flow to the backend,
-    /// start the OSD silence pump so the visualizer stays alive during
-    /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
-    /// the caller to disown (or keep, to receive trailing finals).
+    /// retain the capture's complete sample buffer for recovery, start the
+    /// OSD silence pump, and stop the mic.
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+        self.disarm_dead_input_guard();
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
-        if let Some(mut c) = audio_capture.take() {
-            if let Ok(samples) = c.stop().await {
-                self.history_note(|pending| pending.entry.audio_ms = samples.len() as u64 / 16);
+        if let Some(mut capture) = audio_capture.take() {
+            match capture.stop().await {
+                Ok(samples) => {
+                    self.history_note(|pending| pending.entry.audio_ms = samples.len() as u64 / 16);
+                    // Kept for `end_streaming`, which recovers the dictation
+                    // from it if the backend fails before typing anything.
+                    self.streaming_recovery_audio = samples;
+                }
+                Err(error) => tracing::warn!("Streaming capture stop failed: {}", error),
             }
         }
         self.restore_recording_media();
@@ -2550,13 +2603,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
         tracing::error!("Streaming backend error: {}", error);
-        self.history_note(|pending| {
-            pending.outcome(
-                crate::history::Outcome::TranscriptionFailed,
-                Some(error.to_string()),
-            )
-        });
-        self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+        self.end_external_session(state.is_recording()).await;
         send_notification(
             "Streaming Error",
             &error.to_string(),
@@ -2571,10 +2618,58 @@ impl Daemon {
             streaming_handle,
             streaming_session,
             streaming_chain,
+            StreamingEndReason::Failed(Some(error.to_string())),
         )
         .await;
     }
 
+    /// Stop the microphone for a streaming session and arm the stop
+    /// watchdog. With `disown_output`, drop the typing surface so anything
+    /// the backend still sends lands in the session silently instead of
+    /// typing into whatever window has focus by then; `end_streaming`
+    /// delivers it through the batch output path if nothing was typed.
+    async fn request_streaming_stop(
+        &mut self,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        disown_output: bool,
+    ) {
+        self.stop_streaming_capture(audio_capture).await;
+        self.arm_streaming_stop_watchdog();
+        if disown_output {
+            *streaming_chain = None;
+        }
+    }
+
+    fn streaming_recovery_enabled(&self) -> bool {
+        self.config.streaming_recovery.unwrap_or_default().enabled
+    }
+
+    fn arm_streaming_stop_watchdog(&mut self) {
+        // The bound runs from the first stop request. A repeated stop while
+        // the backend drains must not push the deadline out again.
+        if self.streaming_stop_deadline.is_some() {
+            return;
+        }
+        let timeout_secs = self
+            .config
+            .streaming_recovery
+            .unwrap_or_default()
+            .stop_timeout_secs
+            .clamp(1, 120);
+        self.streaming_stop_deadline =
+            Some(tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
+    }
+
+    /// End a streaming session: after the backend's `Ended`, after an
+    /// error, or when the stop watchdog fires. Never waits on the backend
+    /// task; it is cancelled and aborted, so a backend stuck on a dead
+    /// socket cannot hold the daemon.
+    ///
+    /// A session that typed text finishes as it always has. One that typed
+    /// nothing is not thrown away: after a failure its retained audio goes
+    /// through batch transcription, and text that arrived after the stop
+    /// disowned the typing surface goes through the batch output path.
     async fn end_streaming(
         &mut self,
         state: &mut State,
@@ -2582,19 +2677,70 @@ impl Daemon {
         streaming_handle: &mut Option<StreamHandle>,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        reason: StreamingEndReason,
     ) {
-        if let Some(mut c) = audio_capture.take() {
-            if let Ok(samples) = c.stop().await {
-                self.history_note(|pending| pending.entry.audio_ms = samples.len() as u64 / 16);
-            }
-        }
-        self.restore_recording_media();
-        if let Some(h) = streaming_handle.take() {
-            // Don't error on join failure; the task may have already
-            // completed. We drop events implicitly here.
-            let _ = h.task.await;
+        self.stop_streaming_capture(audio_capture).await;
+        if let Some(handle) = streaming_handle.take() {
+            let _ = handle.cancel.send(());
+            handle.task.abort();
         }
         self.stop_streaming_drain_pump();
+        self.streaming_stop_deadline = None;
+        let samples = std::mem::take(&mut self.streaming_recovery_audio);
+
+        // Fold any leftover `partial` in first: the sliding-window engine
+        // can confirm a whole short utterance as a single Partial and leave
+        // nothing for `final_flush` to send as Final. See
+        // `finalize_pending_partial`.
+        if let Some(session) = streaming_session.as_mut() {
+            session.finalize_pending_partial();
+        }
+        let typed_chars = streaming_session
+            .as_ref()
+            .map_or(0, StreamingSession::typed_chars);
+        let buffered = streaming_session
+            .as_ref()
+            .map(|s| s.finalized_text().to_string())
+            .unwrap_or_default();
+        let file_output_path = match &*state {
+            State::Streaming {
+                file_output_path, ..
+            } => file_output_path.clone(),
+            _ => None,
+        };
+
+        let failure = match &reason {
+            StreamingEndReason::Failed(error) => Some(error.clone()),
+            StreamingEndReason::Completed => None,
+        };
+        if typed_chars == 0 {
+            if failure.is_some() && self.streaming_recovery_enabled() && !samples.is_empty() {
+                *streaming_session = None;
+                *streaming_chain = None;
+                self.recover_streaming_audio(state, file_output_path, samples)
+                    .await;
+                return;
+            }
+            // Only text the session held silently because the stop
+            // disowned the typing surface. With the chain still attached,
+            // the text already went through it, delivered or failed, and
+            // must not be sent again.
+            if file_output_path.is_none()
+                && streaming_chain.is_none()
+                && !buffered.trim().is_empty()
+            {
+                *streaming_session = None;
+                *streaming_chain = None;
+                self.deliver_buffered_streaming_text(state, buffered);
+                return;
+            }
+        }
+        if let Some(Some(error)) = failure {
+            self.history_note(|pending| {
+                pending.outcome(crate::history::Outcome::TranscriptionFailed, Some(error))
+            });
+            self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+        }
 
         if let Some(engine) = self.active_transcriber.take() {
             self.history_transcriber_metadata(engine.as_ref());
@@ -2607,26 +2753,7 @@ impl Daemon {
         // before the session is dropped below. Mirrors the classic
         // (non-streaming) path's file handling: the output hooks wrap the
         // write and a failed write falls back to the clipboard.
-        let file_output_path = match &state {
-            State::Streaming {
-                file_output_path, ..
-            } => file_output_path.clone(),
-            _ => None,
-        };
         if let Some(output_path) = file_output_path {
-            // Fold any leftover `partial` in first: the sliding-window
-            // engine can confirm a whole short utterance as a single
-            // Partial mid-session and leave nothing for `final_flush` to
-            // send as Final, which would otherwise strand that text in
-            // `partial` and write an empty file despite a correct
-            // transcription. See `finalize_pending_partial`.
-            if let Some(s) = streaming_session.as_mut() {
-                s.finalize_pending_partial();
-            }
-            let final_text = streaming_session
-                .as_ref()
-                .map(|s| s.finalized_text().to_string())
-                .unwrap_or_default();
             *streaming_session = None;
             *streaming_chain = None;
 
@@ -2639,7 +2766,7 @@ impl Daemon {
             let vocabulary = profile
                 .as_ref()
                 .and_then(|name| self.profile_vocabularies.get(name));
-            let raw_text = final_text;
+            let raw_text = buffered;
             let final_text = self
                 .text_processor
                 .process_with_vocabulary(&raw_text, vocabulary);
@@ -2695,12 +2822,6 @@ impl Daemon {
             return;
         }
 
-        // Non-file Partial events were already successfully delivered by the
-        // event pump. Commit their remaining bookkeeping without retyping or
-        // processing them, just as file completion folds its buffered tail.
-        if let Some(session) = streaming_session.as_mut() {
-            session.finalize_pending_partial();
-        }
         // Each piece went through the output chain, which changes one
         // character for another and never the count, so the whole text in
         // its delivered form is the pieces as they were delivered.
@@ -2752,6 +2873,125 @@ impl Daemon {
         self.discard_recording_overrides();
     }
 
+    /// Deliver text a streaming session buffered but never typed (it
+    /// arrived after the stop disowned the typing surface) through the
+    /// ordinary batch result path: text processing, history and the
+    /// output chain, exactly like a batch dictation.
+    fn deliver_buffered_streaming_text(&mut self, state: &mut State, text: String) {
+        tracing::info!("Delivering buffered streaming text through normal output");
+        self.history_note(|p| p.transcribing(0));
+        *state = State::Transcribing { audio: Vec::new() };
+        self.update_state("transcribing");
+        self.active_transcriber = None;
+        self.transcription_task = Some(tokio::task::spawn_blocking(move || Ok(text)));
+    }
+
+    /// Recover a streaming dictation that failed before it typed anything:
+    /// run the capture's retained audio through batch transcription and
+    /// the ordinary batch result path.
+    ///
+    /// A cloud engine (Soniox) that just lost its connection is the least
+    /// likely thing to transcribe this audio, so it recovers with the
+    /// configured `[whisper]` backend first. A local engine recovers with
+    /// its own batch path, which is already loaded. Either way the other
+    /// one is the fallback, because any transcript beats losing it.
+    async fn recover_streaming_audio(
+        &mut self,
+        state: &mut State,
+        file_output_path: Option<PathBuf>,
+        samples: Vec<f32>,
+    ) {
+        // Batch output resolves its file target from one-shot overrides
+        // that the streaming start already consumed; carry it across.
+        self.streaming_recovery_file_output_path = file_output_path;
+        self.history_note(|p| p.transcribing(samples.len()));
+
+        let audio_duration = samples.len() as f32 / 16000.0;
+        if audio_duration < 0.3 {
+            tracing::debug!(
+                "Recovered recording too short ({:.2}s), ignoring",
+                audio_duration
+            );
+            self.publish_empty_outcome();
+            self.publish_osd_outcome(osd::session::OutcomeKind::TooShort, 0);
+            self.reset_to_idle(state).await;
+            return;
+        }
+        if let Some(vad) = &self.vad {
+            match vad.detect(&samples) {
+                Ok(result) if !result.has_speech => {
+                    self.report_no_speech(&result).await;
+                    self.publish_empty_outcome();
+                    self.reset_to_idle(state).await;
+                    return;
+                }
+                Ok(result) => tracing::debug!(
+                    "Speech detected in recovered audio: {:.2}s ({:.1}%)",
+                    result.speech_duration_secs,
+                    result.speech_ratio * 100.0
+                ),
+                Err(error) => tracing::warn!(
+                    "VAD failed for recovered audio, proceeding anyway: {}",
+                    error
+                ),
+            }
+        }
+
+        let prefer_whisper = self.config.engine == crate::config::TranscriptionEngine::Soniox;
+        let fallback = if prefer_whisper { "Whisper" } else { "batch" };
+        tracing::warn!(
+            "Streaming session ended without text; recovering {:.1}s with {} transcription",
+            audio_duration,
+            fallback
+        );
+        *state = State::Transcribing {
+            audio: samples.clone(),
+        };
+        self.update_state("transcribing");
+
+        let preloaded = self.transcriber_preloaded.clone();
+        let running_config = self.config.clone();
+        let mut whisper_config = self.config.clone();
+        whisper_config.engine = crate::config::TranscriptionEngine::Whisper;
+        self.active_transcriber = None;
+        self.transcription_task = Some(tokio::task::spawn_blocking(move || {
+            let build = |whisper: bool| -> std::result::Result<
+                Arc<dyn Transcriber>,
+                crate::error::TranscribeError,
+            > {
+                match (whisper, preloaded.clone()) {
+                    (true, _) => {
+                        crate::transcribe::create_transcriber(&whisper_config).map(Arc::from)
+                    }
+                    (false, Some(running)) => Ok(running),
+                    (false, None) => {
+                        crate::transcribe::create_transcriber(&running_config).map(Arc::from)
+                    }
+                }
+            };
+            match build(prefer_whisper) {
+                Ok(transcriber) => transcriber.transcribe(&samples),
+                Err(error) => {
+                    tracing::warn!(
+                        "Recovery transcriber unavailable ({error}); trying the other one"
+                    );
+                    build(!prefer_whisper)?.transcribe(&samples)
+                }
+            }
+        }));
+        send_notification(
+            "Dictation Recovered",
+            &format!(
+                "Streaming ended before it typed anything. Transcribing the recording with {} instead.",
+                if prefer_whisper { "Whisper" } else { "batch transcription" }
+            ),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "normal",
+        )
+        .await;
+    }
+
     /// Carry out a `voxtype record cancel` trigger against whatever session is
     /// live: discard a recording (batch, eager, or streaming) or abort a
     /// transcription. The caller has already consumed the trigger file.
@@ -2765,6 +3005,8 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
     ) {
+        self.disarm_dead_input_guard();
+
         if state.is_streaming() {
             tracing::info!("Recording cancelled");
             self.end_external_session(true).await;
@@ -2872,6 +3114,9 @@ impl Daemon {
             }
             self.history_note(|pending| pending.transcribed());
             self.active_transcriber = None;
+            // A cancelled streaming recovery must not hand its file target
+            // to the next batch dictation.
+            self.streaming_recovery_file_output_path = None;
 
             self.discard_recording_overrides();
             *state = State::Idle;
@@ -2896,34 +3141,37 @@ impl Daemon {
         }
     }
 
-    /// Cancel an active streaming session: signal the backend, drop capture,
-    /// rewind any typed text, and reset to idle (with cancel feedback +
-    /// notification).
+    /// Tear down an active streaming session: signal the backend, drop
+    /// capture, rewind any typed text, and reset to idle. Callers choose the
+    /// feedback and notification.
     #[allow(clippy::too_many_arguments)]
-    async fn cancel_streaming_to_idle(
+    async fn teardown_streaming_to_idle(
         &mut self,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         streaming_handle: &mut Option<StreamHandle>,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-        notification_body: &str,
+        outcome: osd::session::OutcomeKind,
     ) {
-        let backend_task = streaming_handle.take().map(|h| {
-            let _ = h.cancel.send(());
-            h.task
-        });
+        if let Some(handle) = streaming_handle.take() {
+            let _ = handle.cancel.send(());
+            handle.task.abort();
+        }
         self.cut_streaming_audio();
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+        if let Some(mut capture) = audio_capture.take() {
+            let _ = capture.stop().await;
         }
+        self.streaming_recovery_audio.clear();
+        self.streaming_stop_deadline = None;
+        self.streaming_recovery_file_output_path = None;
+
         self.restore_recording_media();
-        if let Some(task) = backend_task {
-            let _ = task.await;
-        }
-        if let Some(s) = streaming_session.as_mut() {
-            if let Err(e) = s.rewind().await {
-                tracing::warn!("Streaming rewind failed: {}", e);
+        if streaming_chain.is_some() {
+            if let Some(session) = streaming_session.as_mut() {
+                if let Err(error) = session.rewind().await {
+                    tracing::warn!("Streaming rewind failed: {}", error);
+                }
             }
         }
         self.stop_streaming_drain_pump();
@@ -2937,8 +3185,31 @@ impl Daemon {
 
         self.discard_recording_overrides();
         *state = State::Idle;
-        self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
+        self.publish_osd_outcome(outcome, 0);
         self.update_state("idle");
+        self.disarm_dead_input_guard();
+    }
+
+    /// Cancel an active streaming session with cancellation feedback.
+    #[allow(clippy::too_many_arguments)]
+    async fn cancel_streaming_to_idle(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        notification_body: &str,
+    ) {
+        self.teardown_streaming_to_idle(
+            state,
+            audio_capture,
+            streaming_handle,
+            streaming_session,
+            streaming_chain,
+            osd::session::OutcomeKind::Cancelled,
+        )
+        .await;
         self.play_feedback(SoundEvent::Cancelled);
 
         if let Some(cmd) = &self.config.output.post_output_command {
@@ -2957,6 +3228,92 @@ impl Daemon {
             )
             .await;
         }
+    }
+
+    /// Stop a capture that delivered no audible input and explain why.
+    #[allow(clippy::too_many_arguments)]
+    async fn abort_recording_dead_input(
+        &mut self,
+        report: audio::input_guard::DeadInputReport,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
+    ) {
+        self.end_external_session(state.is_recording()).await;
+        if let Some(path) = peek_file_output_path(&self.config) {
+            write_result_sidecar(&path, &TranscriptOutcome::error("Microphone silent"));
+        }
+
+        if state.is_streaming() {
+            self.teardown_streaming_to_idle(
+                state,
+                audio_capture,
+                streaming_handle,
+                streaming_session,
+                streaming_chain,
+                osd::session::OutcomeKind::NoInput,
+            )
+            .await;
+            // Leave the compositor submap that pre_recording_command entered,
+            // as every other streaming exit does.
+            if let Some(cmd) = &self.config.output.post_output_command {
+                if let Err(error) = output::run_hook(cmd, "post_output").await {
+                    tracing::warn!(%error, "post-output hook failed");
+                }
+            }
+        } else {
+            self.stop_level_emitter();
+            if let Some(mut capture) = audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+            if let Some(task) = self.model_load_task.take() {
+                task.abort();
+            }
+            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                task.abort();
+            }
+            if let State::EagerRecording {
+                accumulated_audio,
+                chunk_results,
+                chunks_sent,
+                tasks_in_flight,
+                ..
+            } = state
+            {
+                accumulated_audio.clear();
+                chunk_results.clear();
+                *chunks_sent = 0;
+                *tasks_in_flight = 0;
+            }
+            *eager_transcriber = None;
+            self.publish_osd_outcome(osd::session::OutcomeKind::NoInput, 0);
+            self.reset_to_idle(state).await;
+        }
+
+        self.show_tray_error();
+
+        self.play_feedback(SoundEvent::Error);
+        notification::close_persistent().await;
+        let source = audio::input_guard::source_label(&self.config.audio.device).await;
+        tracing::warn!(
+            source = %source,
+            peak_dbfs = report.peak_dbfs,
+            threshold_dbfs = report.threshold_dbfs,
+            "microphone delivered no audible input; recording stopped"
+        );
+        notification::send_alert(
+            "Microphone silent",
+            &format!(
+                "No sound from {} in the first {:.1} seconds. \
+                 Check that the microphone is powered on and unmuted.",
+                source,
+                report.window_ms as f32 / 1_000.0,
+            ),
+        )
+        .await;
     }
 
     /// Start a streaming-mode audio capture.
@@ -2994,36 +3351,15 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
-                    let handle = if let Some(hub) = &self.level_hub {
-                        audio::levels::spawn_emitter_with_streaming_tap(
-                            chunk_rx,
-                            hub.frame_sink(),
-                            Some(streaming_tx),
-                            speech_tracker,
-                        )
-                    } else {
-                        // No OSD: still need to drive chunk_rx → streaming_tx,
-                        // and optionally bucket for silence tracking too.
-                        tokio::spawn(async move {
-                            let mut rx = chunk_rx;
-                            let mut bucketer = audio::levels::LevelBucketer::new();
-                            let mut out = Vec::with_capacity(8);
-                            while let Some(chunk) = rx.recv().await {
-                                if let Some(tracker) = &speech_tracker {
-                                    out.clear();
-                                    bucketer.push(&chunk, &mut out);
-                                    for frame in out.drain(..) {
-                                        tracker.observe(frame.peak_dbfs).await;
-                                    }
-                                }
-                                if let Err(e) = streaming_tx.try_send(chunk) {
-                                    // Backend slow or gone; drop and keep going.
-                                    tracing::trace!("streaming sample tap try_send failed: {}", e);
-                                }
-                            }
-                        })
-                    };
-                    self.level_emitter_task = Some(handle);
+                    let guard = self.start_dead_input_guard();
+                    let sink = self.level_hub.as_ref().map(|hub| hub.frame_sink());
+                    self.level_emitter_task = Some(audio::levels::spawn_chunk_pump(
+                        chunk_rx,
+                        sink,
+                        Some(streaming_tx),
+                        speech_tracker,
+                        guard,
+                    ));
                     self.capture_notices.clear();
                     Ok((capture, streaming_rx))
                 }
@@ -5023,8 +5359,12 @@ impl Daemon {
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&mut self, state: &mut State) {
+        self.disarm_dead_input_guard();
+
         self.discard_recording_overrides();
         self.restore_recording_media();
+        self.streaming_recovery_file_output_path = None;
+
         *state = State::Idle;
         self.update_state("idle");
 
@@ -5604,6 +5944,7 @@ impl Daemon {
                                     .post_process
                                     .as_ref()
                                     .is_some_and(|config| config.edit_list),
+                                ..Default::default()
                             };
                             let profile_name = profile_override.as_deref().unwrap_or_default();
                             let profile_processor =
@@ -5678,15 +6019,21 @@ impl Daemon {
                         );
                     }
 
-                    // Check for output mode override from CLI flags
+                    // Check for output mode override from CLI flags.
                     let output_override = read_output_mode_override();
 
                     // Check if profile specifies output mode override
                     let profile_output_mode = active_profile.and_then(|p| p.output_mode.clone());
 
-                    // Determine file output path (if file mode)
-                    let file_output_path = self
-                        .resolve_file_output_path(&output_override, profile_output_mode.clone());
+                    // A streaming recovery keeps the resolved file target from
+                    // session start, after consuming its one-shot override.
+                    let file_output_path =
+                        self.streaming_recovery_file_output_path.take().or_else(|| {
+                            self.resolve_file_output_path(
+                                &output_override,
+                                profile_output_mode.clone(),
+                            )
+                        });
 
                     // Consume the per-recording boolean overrides before any
                     // early return below. File output returns without building
@@ -6026,6 +6373,27 @@ impl Daemon {
                 self.reset_to_idle(state).await;
             }
         }
+    }
+
+    fn note_idle_transition(&self, state_name: &str) {
+        use std::sync::atomic::Ordering;
+        let idle = state_name == "idle";
+        let was_idle = self.last_state_idle.swap(idle, Ordering::Relaxed);
+        if idle && !was_idle {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            self.idle_since.store(now, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a start request stamped `issued_at` was issued while the
+    /// daemon was still busy with the previous dictation. Requests with no
+    /// stamp (a bare SIGUSR1) are taken as current.
+    fn start_request_predates_idle(&self, issued_at: Option<u128>) -> bool {
+        let idle_since = self.idle_since.load(std::sync::atomic::Ordering::Relaxed);
+        matches!(issued_at, Some(issued) if idle_since > 0 && issued < u128::from(idle_since))
     }
 
     /// Load the transcription model at startup (on_demand_loading off).
@@ -6697,14 +7065,12 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
-                                self.stop_streaming_capture(&mut audio_capture).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
+                                self.request_streaming_stop(
+                                    &mut audio_capture,
+                                    &mut streaming_chain,
+                                    true,
+                                )
+                                .await;
                             } else if let State::Recording { model_override, .. } = &state {
                                 let model_override = model_override.clone();
 
@@ -6843,8 +7209,12 @@ impl Daemon {
                                     }
                                 }
                             } else if state.is_streaming() {
-                                tracing::info!("Toggle stop while streaming; closing capture");
-                                self.stop_streaming_capture(&mut audio_capture).await;
+                                self.request_streaming_stop(
+                                    &mut audio_capture,
+                                    &mut streaming_chain,
+                                    false,
+                                )
+                                .await;
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let model_override = current_model_override.clone();
 
@@ -7045,13 +7415,7 @@ impl Daemon {
                                     self.history_note(|p| {
                                         p.entry.ended_by = crate::history::EndedBy::Silence
                                     });
-                                    self.stop_active_recording(
-                                        &mut state,
-                                        &mut audio_capture,
-                                        &mut streaming_session,
-                                        &mut streaming_chain,
-                                        &mut eager_transcriber,
-                                    )
+                                    self.stop_active_recording(&mut state, &mut audio_capture, &mut streaming_chain, &mut eager_transcriber)
                                     .await;
                                     continue;
                                 }
@@ -7095,7 +7459,12 @@ impl Daemon {
                                 "Recording timeout ({:.0}s limit) while streaming; closing capture",
                                 max_duration.as_secs_f32()
                             );
-                            self.stop_streaming_capture(&mut audio_capture).await;
+                            self.request_streaming_stop(
+                                &mut audio_capture,
+                                &mut streaming_chain,
+                                false,
+                            )
+                            .await;
                             self.notify_recording_capped(max_duration).await;
                             continue;
                         }
@@ -7187,6 +7556,13 @@ impl Daemon {
                             "Ignoring start request: daemon is {} (stop or cancel it first)",
                             state
                         );
+                    } else if self.start_request_predates_idle(start_request.issued_at) {
+                        // Sent while the last dictation was still being
+                        // typed or pasted; the event loop only got to it
+                        // now. Treat it as the busy daemon would have.
+                        tracing::info!(
+                            "Ignoring start request sent while the previous dictation was still being delivered"
+                        );
                     } else {
                         // Read model override from file (set by `voxtype record start --model X`)
                         let model_override = read_model_override();
@@ -7276,13 +7652,7 @@ impl Daemon {
                             &mut eager_transcriber,
                         ).await;
                     }
-                    self.stop_active_recording(
-                        &mut state,
-                        &mut audio_capture,
-                        &mut streaming_session,
-                        &mut streaming_chain,
-                        &mut eager_transcriber,
-                    ).await;
+                    self.stop_active_recording(&mut state, &mut audio_capture, &mut streaming_chain, &mut eager_transcriber).await;
                 }
 
                 // Handle transcription task completion
@@ -7294,6 +7664,24 @@ impl Daemon {
                 }, if self.transcription_task.is_some() => {
                     self.transcription_task = None;
                     self.handle_transcription_result(&mut state, result).await;
+                }
+
+                Some(report) = async {
+                    match self.dead_input_rx.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.dead_input_rx.is_some() && state.is_recording() => {
+                    self.abort_recording_dead_input(
+                        report,
+                        &mut state,
+                        &mut audio_capture,
+                        &mut streaming_handle,
+                        &mut streaming_session,
+                        &mut streaming_chain,
+                        &mut eager_transcriber,
+                    )
+                    .await;
                 }
 
                 // Streaming event pump (active only while State::Streaming).
@@ -7327,6 +7715,8 @@ impl Daemon {
                                     ).await {
                                         tracing::warn!("Streaming partial delta type failed: {}", e);
                                     }
+                                } else {
+                                    s.observe_partial_delta(&text);
                                 }
                                 if let State::Streaming { typed_chars, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
@@ -7355,6 +7745,8 @@ impl Daemon {
                                     ).await {
                                         tracing::error!("Streaming commit_segment failed: {}", e);
                                     }
+                                } else {
+                                    s.commit_segment_silent(&text);
                                 }
                                 // Mirror typed_chars onto the state for cancel-rewind.
                                 if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
@@ -7384,6 +7776,8 @@ impl Daemon {
                                     ).await {
                                         tracing::error!("Streaming replace_and_commit failed: {}", e);
                                     }
+                                } else {
+                                    s.replace_and_commit_silent(backspace, &text);
                                 }
                                 if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
@@ -7402,16 +7796,37 @@ impl Daemon {
                                 &mut streaming_chain,
                             ).await;
                         }
-                        Some(StreamingEvent::Ended) | None => {
+                        Some(StreamingEvent::Ended) => {
+                            self.end_streaming(&mut state, &mut audio_capture, &mut streaming_handle, &mut streaming_session, &mut streaming_chain, StreamingEndReason::Completed, ).await;
+                        }
+                        None => {
                             self.end_streaming(
                                 &mut state,
                                 &mut audio_capture,
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                StreamingEndReason::Failed(None),
                             ).await;
                         }
                     }
+                }
+
+                _ = async {
+                    match self.streaming_stop_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                }, if state.is_streaming() && self.streaming_stop_deadline.is_some() => {
+                    tracing::warn!("Streaming backend did not finish before the daemon stop deadline");
+                    self.end_streaming(
+                        &mut state,
+                        &mut audio_capture,
+                        &mut streaming_handle,
+                        &mut streaming_session,
+                        &mut streaming_chain,
+                        StreamingEndReason::Failed(None),
+                    ).await;
                 }
 
                 // Check for cancel during transcription
@@ -7621,19 +8036,18 @@ impl Daemon {
 
         // Stop any active dictation capture before shutting down and always
         // restore media that this daemon suppressed for the session.
-        let streaming_task = streaming_handle.take().map(|handle| {
+        if let Some(handle) = streaming_handle.take() {
+            // Abort rather than await: a backend stuck on a dead socket
+            // would otherwise hold shutdown until the service manager kills it.
             let _ = handle.cancel.send(());
-            handle.task
-        });
+            handle.task.abort();
+        }
         self.cut_streaming_audio();
         if let Some(mut capture) = audio_capture.take() {
             let _ = capture.stop().await;
         }
         self.restore_recording_media();
         notification::close_persistent().await;
-        if let Some(task) = streaming_task {
-            let _ = task.await;
-        }
 
         // Cleanup hotkey listener
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -7831,6 +8245,7 @@ while True:
 
     use super::*;
     use crate::config::{TranscriptionEngine, WhisperMode};
+    use crate::transcribe::StreamingTranscriber;
     use std::fs;
     use tempfile::TempDir;
 
@@ -7905,6 +8320,7 @@ while True:
             trim: true,
             fallback_on_empty: true,
             edit_list: false,
+            ..Default::default()
         });
 
         for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
@@ -7990,6 +8406,7 @@ while True:
                 trim: true,
                 fallback_on_empty: true,
                 edit_list: false,
+                ..Default::default()
             });
             config.profiles.insert(
                 "notes".to_string(),
@@ -8183,6 +8600,7 @@ while True:
                     &mut None,
                     &mut Some(session),
                     &mut Some(chain),
+                    StreamingEndReason::Completed,
                 )
                 .await;
             assert!(state.is_idle());
@@ -8210,6 +8628,7 @@ while True:
                     &mut None,
                     &mut Some(session),
                     &mut None,
+                    StreamingEndReason::Completed,
                 )
                 .await;
 
@@ -9860,5 +10279,410 @@ while True:
             let holder = std::fs::read_to_string(dir.join("voxtype.lock")).unwrap();
             assert_eq!(holder.trim(), std::process::id().to_string());
         });
+    }
+    #[derive(Clone, Copy)]
+    enum FakeStreamingMode {
+        Error,
+        NeverEndsAfterStop,
+    }
+
+    struct FakeStreamingTranscriber {
+        mode: FakeStreamingMode,
+        recovered_text: &'static str,
+        batch_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Transcriber for FakeStreamingTranscriber {
+        fn transcribe(&self, samples: &[f32]) -> TranscriptionResult {
+            assert_eq!(samples.len(), 4_800);
+            assert!(samples.iter().all(|sample| *sample == 0.25));
+            self.batch_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.recovered_text.to_string())
+        }
+
+        fn as_streaming(&self) -> Option<&dyn crate::transcribe::StreamingTranscriber> {
+            Some(self)
+        }
+    }
+
+    impl crate::transcribe::StreamingTranscriber for FakeStreamingTranscriber {
+        fn start_stream(
+            &self,
+            mut samples_rx: tokio::sync::mpsc::Receiver<Vec<f32>>,
+        ) -> std::result::Result<StreamHandle, crate::error::TranscribeError> {
+            let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
+            let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+            let task = match self.mode {
+                FakeStreamingMode::Error => tokio::spawn(async move {
+                    let _ = events_tx
+                        .send(StreamingEvent::Error(
+                            crate::error::TranscribeError::InferenceFailed(
+                                "planned failure".into(),
+                            ),
+                        ))
+                        .await;
+                    Ok(())
+                }),
+                FakeStreamingMode::NeverEndsAfterStop => tokio::spawn(async move {
+                    while samples_rx.recv().await.is_some() {}
+                    let _ = cancel_rx.await;
+                    std::future::pending::<std::result::Result<(), crate::error::TranscribeError>>()
+                        .await
+                }),
+            };
+            Ok(StreamHandle {
+                events: events_rx,
+                cancel,
+                task,
+            })
+        }
+    }
+
+    struct FakeCapture(Option<Vec<f32>>);
+
+    #[async_trait::async_trait]
+    impl AudioCapture for FakeCapture {
+        async fn start(
+            &mut self,
+        ) -> std::result::Result<tokio::sync::mpsc::Receiver<Vec<f32>>, crate::error::AudioError>
+        {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+
+        async fn stop(&mut self) -> std::result::Result<Vec<f32>, crate::error::AudioError> {
+            Ok(self.0.take().unwrap_or_default())
+        }
+
+        async fn get_samples(&mut self) -> Vec<f32> {
+            Vec::new()
+        }
+    }
+
+    fn recovery_samples() -> Vec<f32> {
+        vec![0.25; 4_800]
+    }
+
+    fn recovery_test_daemon(transcriber: Arc<dyn Transcriber>, output_path: &Path) -> Daemon {
+        let config = Config {
+            engine: TranscriptionEngine::Soniox,
+            // Recovery prefers the configured [whisper] backend over the
+            // streaming engine that failed. Point it at a model that does
+            // not exist, so building it fails on every machine and the test
+            // exercises the documented last resort: the running engine's
+            // own batch path, which is the injected fake here.
+            whisper: crate::config::WhisperConfig {
+                model: "/nonexistent/recovery-model.bin".to_string(),
+                ..Default::default()
+            },
+            audio: crate::config::AudioConfig {
+                feedback: crate::config::AudioFeedbackConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            vad: crate::config::VadConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            state_file: None,
+            output: crate::config::OutputConfig {
+                mode: OutputMode::File,
+                file_path: Some(output_path.with_file_name("configured-output.txt")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut daemon = Daemon::new(config, None);
+        daemon.transcriber_preloaded = Some(transcriber);
+        daemon
+    }
+
+    async fn assert_streaming_recovery_output(
+        daemon: &mut Daemon,
+        state: &mut State,
+        output_path: &Path,
+    ) {
+        let task = daemon
+            .transcription_task
+            .take()
+            .expect("streaming recovery must start normal batch transcription");
+        daemon.handle_transcription_result(state, task.await).await;
+        assert!(state.is_idle());
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "recovered dictation\n"
+        );
+        assert!(!output_path.with_file_name("configured-output.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn streaming_backend_error_recovers_capture_with_batch_transcription() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("recovered.txt");
+        let batch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "recovered dictation",
+            batch_calls: batch_calls.clone(),
+        });
+        let mut daemon = recovery_test_daemon(fake.clone(), &output);
+        let (_samples_tx, samples_rx) = tokio::sync::mpsc::channel(1);
+        let mut streaming_handle = Some(fake.start_stream(samples_rx).unwrap());
+        assert!(matches!(
+            streaming_handle.as_mut().unwrap().events.recv().await,
+            Some(StreamingEvent::Error(_))
+        ));
+        let mut state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: Some(output.clone()),
+        };
+        let mut capture: Option<Box<dyn AudioCapture>> =
+            Some(Box::new(FakeCapture(Some(recovery_samples()))));
+        let mut streaming_session = Some(StreamingSession::new());
+        let mut streaming_chain = Some(Vec::new());
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut capture,
+                &mut streaming_handle,
+                &mut streaming_session,
+                &mut streaming_chain,
+                StreamingEndReason::Failed(Some("planned failure".into())),
+            )
+            .await;
+
+        assert_streaming_recovery_output(&mut daemon, &mut state, &output).await;
+        assert_eq!(batch_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_stop_watchdog_recovers_when_backend_never_ends() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("recovered.txt");
+        let batch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::NeverEndsAfterStop,
+            recovered_text: "recovered dictation",
+            batch_calls: batch_calls.clone(),
+        });
+        let mut daemon = recovery_test_daemon(fake.clone(), &output);
+        let (samples_tx, samples_rx) = tokio::sync::mpsc::channel(1);
+        let mut streaming_handle = Some(fake.start_stream(samples_rx).unwrap());
+        drop(samples_tx);
+        let mut state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: Some(output.clone()),
+        };
+        let mut capture: Option<Box<dyn AudioCapture>> =
+            Some(Box::new(FakeCapture(Some(recovery_samples()))));
+        let mut streaming_session = Some(StreamingSession::new());
+        let mut streaming_chain = Some(Vec::new());
+
+        daemon
+            .request_streaming_stop(&mut capture, &mut streaming_chain, true)
+            .await;
+        assert!(capture.is_none());
+        assert!(streaming_chain.is_none());
+        assert!(daemon.streaming_stop_deadline.is_some());
+
+        let completed = tokio::time::timeout(
+            Duration::from_millis(100),
+            daemon.end_streaming(
+                &mut state,
+                &mut capture,
+                &mut streaming_handle,
+                &mut streaming_session,
+                &mut streaming_chain,
+                StreamingEndReason::Failed(None),
+            ),
+        )
+        .await;
+
+        assert!(
+            completed.is_ok(),
+            "watchdog teardown must not await a backend that accepted stop without Ended"
+        );
+        assert_streaming_recovery_output(&mut daemon, &mut state, &output).await;
+        assert_eq!(batch_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn buffered_streaming_text_uses_the_file_target_selected_at_start() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("streaming-output.txt");
+        let batch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "unused",
+            batch_calls: batch_calls.clone(),
+        });
+        let mut daemon = recovery_test_daemon(fake.clone(), &output);
+        let (_samples_tx, samples_rx) = tokio::sync::mpsc::channel(1);
+        let mut streaming_handle = Some(fake.start_stream(samples_rx).unwrap());
+        let mut state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: Some(output.clone()),
+        };
+        let mut capture = None;
+        let mut streaming_session = Some(StreamingSession::new());
+        streaming_session
+            .as_mut()
+            .unwrap()
+            .commit_segment_silent("buffered dictation");
+        let mut streaming_chain = None;
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut capture,
+                &mut streaming_handle,
+                &mut streaming_session,
+                &mut streaming_chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+        // A completed file-output session writes its own text, through the
+        // same processing and file delivery as before recovery existed.
+        assert!(daemon.transcription_task.is_none());
+        assert!(state.is_idle());
+        assert_eq!(fs::read_to_string(&output).unwrap(), "buffered dictation\n");
+        assert!(!output.with_file_name("configured-output.txt").exists());
+        assert_eq!(batch_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn non_file_streaming_state() -> State {
+        State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: None,
+        }
+    }
+
+    /// Finals that arrive after a stop disowned the typing surface are held
+    /// silently. When nothing was typed, they are the whole dictation and
+    /// go through the batch result path instead of being dropped.
+    #[tokio::test]
+    async fn disowned_late_text_is_delivered_through_the_batch_path() {
+        let dir = TempDir::new().unwrap();
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "unused",
+            batch_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let mut daemon = recovery_test_daemon(fake, &dir.path().join("out.txt"));
+        let mut state = non_file_streaming_state();
+        let mut session = Some(StreamingSession::new());
+        session
+            .as_mut()
+            .unwrap()
+            .commit_segment_silent("late words");
+        let mut chain: Option<Vec<Box<dyn TextOutput>>> = None;
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut None,
+                &mut None,
+                &mut session,
+                &mut chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+
+        assert!(matches!(state, State::Transcribing { .. }));
+        let task = daemon
+            .transcription_task
+            .take()
+            .expect("late text must reach the batch result path");
+        assert_eq!(task.await.unwrap().unwrap(), "late words");
+    }
+
+    /// With the typing surface still attached, the session's text already
+    /// went through the output chain, so a failed delivery leaves
+    /// typed_chars at zero. That text must not be sent a second time.
+    #[tokio::test]
+    async fn text_that_went_through_the_chain_is_not_redelivered() {
+        let dir = TempDir::new().unwrap();
+        let fake = Arc::new(FakeStreamingTranscriber {
+            mode: FakeStreamingMode::Error,
+            recovered_text: "unused",
+            batch_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let mut daemon = recovery_test_daemon(fake, &dir.path().join("out.txt"));
+        let mut state = non_file_streaming_state();
+        let mut session = Some(StreamingSession::new());
+        session
+            .as_mut()
+            .unwrap()
+            .commit_segment_silent("already attempted");
+        let mut chain: Option<Vec<Box<dyn TextOutput>>> = Some(Vec::new());
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut None,
+                &mut None,
+                &mut session,
+                &mut chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+
+        assert!(daemon.transcription_task.is_none());
+        assert!(state.is_idle());
+    }
+
+    /// #1004: a start sent while the last dictation was being delivered is
+    /// only handled once the event loop is free again, after the daemon has
+    /// gone idle. It must be ignored like a start handled while busy, not
+    /// start a recording late.
+    #[test]
+    fn a_start_issued_while_busy_is_ignored_once_idle() {
+        let config = Config {
+            state_file: None,
+            ..Default::default()
+        };
+        let daemon = Daemon::new(config, None);
+        let stamp = || trigger_stamp().parse::<u128>().unwrap();
+
+        // Idle since startup: every stamped start is current.
+        assert!(!daemon.start_request_predates_idle(Some(stamp())));
+
+        daemon.update_state("recording");
+        daemon.update_state("transcribing");
+        let sent_during_output = stamp();
+        std::thread::sleep(Duration::from_millis(2));
+        daemon.update_state("idle");
+        assert!(daemon.start_request_predates_idle(Some(sent_during_output)));
+
+        // A repeated idle write must not move the boundary past a start
+        // that was sent while idle.
+        std::thread::sleep(Duration::from_millis(2));
+        let sent_while_idle = stamp();
+        std::thread::sleep(Duration::from_millis(2));
+        daemon.update_state("idle");
+        assert!(!daemon.start_request_predates_idle(Some(sent_while_idle)));
+
+        // A bare SIGUSR1 carries no stamp and keeps working.
+        assert!(!daemon.start_request_predates_idle(None));
     }
 }

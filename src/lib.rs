@@ -85,6 +85,7 @@ pub mod hotkey;
 #[cfg(target_os = "macos")]
 pub mod hotkey_macos;
 pub mod language_selection;
+pub mod llm;
 pub mod logging;
 pub mod meeting;
 pub mod meeting_offer;

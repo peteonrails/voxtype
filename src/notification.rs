@@ -59,6 +59,26 @@ pub async fn send(title: &str, body: &str) {
     send_with_engine(title, body, None).await;
 }
 
+/// Send an error notification that remains visible long enough to act on.
+///
+/// It goes through the shared status slot like every other Linux
+/// notification (see `send_status`), so it replaces the recording banner
+/// instead of stacking beside it, and stays up for 15 seconds at critical
+/// urgency. Nothing else posts to the slot until the next recording, so the
+/// alert outlives the return to idle.
+pub async fn send_alert(title: &str, body: &str) {
+    #[cfg(target_os = "linux")]
+    send_status(title, body, "critical", Lifetime::Millis(15_000)).await;
+
+    #[cfg(target_os = "macos")]
+    send_macos_native(title, body, None);
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (title, body);
+    }
+}
+
 /// Send a desktop notification with optional engine icon.
 ///
 /// On macOS, when an engine is provided, the engine-specific icon is shown

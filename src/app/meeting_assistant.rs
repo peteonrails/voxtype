@@ -470,10 +470,12 @@ pub(crate) async fn run_summarize(
                 agent: args.agent.clone(),
             };
             // Ask for consent up front on a terminal, like `ask` does. The
-            // older "local"/"remote" summarizers need none.
+            // older "local"/"remote" summarizers need none, nor does a
+            // chosen "omarchy"/"openai" model.
             let legacy = matches!(
                 assistant::choose_summary_backend(&settings, &overrides),
-                Ok(assistant::SummaryBackend::Legacy(_))
+                Ok(assistant::SummaryBackend::Legacy(_)
+                    | assistant::SummaryBackend::Assistant(Backend::Llm(_)))
             );
             if interactive() && !legacy {
                 match backend_for(&settings, &overrides, true) {
@@ -495,7 +497,10 @@ pub(crate) async fn run_summarize(
             .await?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             if let Some(failed) = &outcome.fell_back_from {
-                eprintln!("{failed} failed; summarized with the local model instead.");
+                eprintln!(
+                    "{failed} failed; summarized with {} instead.",
+                    outcome.agent_name
+                );
             }
             eprintln!(
                 "Summarized by {}{}",

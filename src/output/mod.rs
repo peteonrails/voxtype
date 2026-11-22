@@ -23,10 +23,12 @@ pub mod active_window;
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
+pub(crate) mod clipboard_restore;
 pub mod deferred_notice;
 pub mod dotool;
 pub mod eitype;
 pub mod fallback;
+pub mod hyprland;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -40,6 +42,7 @@ pub mod session;
 pub mod streaming;
 pub mod wtype;
 pub mod xclip;
+pub mod xdotool;
 pub mod ydotool;
 
 pub use streaming::StreamingSession;
@@ -309,7 +312,9 @@ pub trait TextOutput: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// Default driver order for type mode
+/// Default driver order for type mode. New drivers (xdotool) are opt-in
+/// through `driver_order` and never added here, so an upgrade does not
+/// change which driver types a user's text.
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
     OutputDriver::Wtype,
@@ -326,8 +331,8 @@ fn create_driver_output(
     driver: OutputDriver,
     config: &OutputConfig,
     pre_type_delay_ms: u32,
-) -> Box<dyn TextOutput> {
-    match driver {
+) -> Option<Box<dyn TextOutput>> {
+    Some(match driver {
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
             config.append_text.clone(),
@@ -354,6 +359,12 @@ fn create_driver_output(
             config.dotool_xkb_variant.clone(),
             config.shift_enter_newlines,
         )),
+        OutputDriver::Xdotool => Box::new(xdotool::XdotoolOutput::new(
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            config.auto_submit,
+            config.append_text.clone(),
+        )),
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
             pre_type_delay_ms,
@@ -364,7 +375,28 @@ fn create_driver_output(
             Box::new(clipboard::ClipboardOutput::new(config.append_text.clone()))
         }
         OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(config.append_text.clone())),
+        // Paste-only; type_mode_driver_order drops it before this point.
+        OutputDriver::Hyprland => return None,
+    })
+}
+
+/// The drivers type mode runs. `hyprland` only sends the paste keystroke
+/// and cannot type text, so it is dropped here; an order that named nothing
+/// else falls back to the default chain rather than typing nothing.
+#[cfg(not(target_os = "macos"))]
+fn type_mode_driver_order(configured: Option<&[OutputDriver]>) -> Option<Vec<OutputDriver>> {
+    let configured = configured?;
+    let typing: Vec<OutputDriver> = configured
+        .iter()
+        .copied()
+        .filter(|d| d.types_text())
+        .collect();
+    if typing.len() < configured.len() {
+        tracing::debug!(
+            "driver_order: hyprland only applies to mode = \"paste\"; skipped for typing"
+        );
     }
+    (!typing.is_empty()).then_some(typing)
 }
 
 /// Factory function that returns a fallback chain of output methods
@@ -414,11 +446,12 @@ pub fn create_output_chain_with_override(
             #[cfg(not(target_os = "macos"))]
             {
                 // Determine driver order: CLI override > config > default
-                let driver_order: &[OutputDriver] = driver_override
-                    .or(config.driver_order.as_deref())
-                    .unwrap_or(DEFAULT_DRIVER_ORDER);
+                let custom =
+                    type_mode_driver_order(driver_override.or(config.driver_order.as_deref()));
+                let driver_order: &[OutputDriver] =
+                    custom.as_deref().unwrap_or(DEFAULT_DRIVER_ORDER);
 
-                if let Some(custom_order) = driver_override.or(config.driver_order.as_deref()) {
+                if let Some(custom_order) = custom.as_deref() {
                     tracing::info!(
                         "Using custom driver order: {}",
                         custom_order
@@ -430,7 +463,7 @@ pub fn create_output_chain_with_override(
                 }
 
                 for driver in driver_order.iter() {
-                    chain.push(create_driver_output(*driver, config, pre_type_delay_ms));
+                    chain.extend(create_driver_output(*driver, config, pre_type_delay_ms));
                 }
 
                 // If fallback_to_clipboard is true but clipboard wasn't in the custom order, add it
@@ -611,7 +644,8 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+    matches!(name, "wtype" | "eitype" | "dotool" | "xdotool" | "ydotool")
+        || name.starts_with("paste")
 }
 
 /// True when any method in the chain synthesizes keystrokes, so the
@@ -738,6 +772,34 @@ pub async fn output_with_fallback_report(
 mod tests {
     use super::*;
 
+    /// #938: hyprland can't type text, so type mode drops it, and an order
+    /// that named only hyprland types with the default chain.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn type_mode_skips_the_paste_only_hyprland_driver() {
+        assert_eq!(
+            type_mode_driver_order(Some(&[OutputDriver::Hyprland, OutputDriver::Ydotool])),
+            Some(vec![OutputDriver::Ydotool])
+        );
+        assert_eq!(
+            type_mode_driver_order(Some(&[OutputDriver::Hyprland])),
+            None
+        );
+        assert_eq!(type_mode_driver_order(None), None);
+
+        let config = OutputConfig {
+            driver_order: Some(vec![OutputDriver::Hyprland]),
+            fallback_to_clipboard: false,
+            ..Default::default()
+        };
+        let names: Vec<_> = create_output_chain(&config)
+            .iter()
+            .map(|o| o.name())
+            .collect();
+        assert!(!names.is_empty(), "typing must not be left with no driver");
+        assert!(names.iter().all(|n| !n.contains("hyprland")), "{names:?}");
+    }
+
     #[test]
     fn file_mode_warns_only_without_a_path() {
         let mut config = OutputConfig {
@@ -806,12 +868,32 @@ mod tests {
         assert_eq!(result, "Café ' emoji 😀");
     }
 
+    /// New drivers are opt-in: an upgrade must never change which driver
+    /// types a user's text.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn xdotool_is_opt_in_and_never_in_the_default_chain() {
+        assert!(!DEFAULT_DRIVER_ORDER.contains(&OutputDriver::Xdotool));
+        assert_eq!(
+            DEFAULT_DRIVER_ORDER,
+            &[
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Dotool,
+                OutputDriver::Ydotool,
+                OutputDriver::Clipboard,
+                OutputDriver::Xclip,
+            ]
+        );
+    }
+
     #[test]
     fn test_is_keystroke_method_classification() {
         assert!(is_keystroke_method("wtype"));
         assert!(is_keystroke_method("eitype"));
         assert!(is_keystroke_method("dotool"));
         assert!(is_keystroke_method("ydotool"));
+        assert!(is_keystroke_method("xdotool"));
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
         assert!(!is_keystroke_method("clipboard (xclip/xsel)"));

@@ -17,6 +17,14 @@
 # Required for `voxtype record toggle` and `voxtype status` commands.
 state_file = "auto"
 
+# Streaming recovery retains the full capture while a streaming backend runs.
+# If the backend errors or misses its stop deadline, Voxtype uses the configured
+# batch backend to deliver undelivered dictation.
+# [streaming_recovery]
+# enabled = true
+# stop_timeout_secs = 30
+
+
 [hotkey]
 # Built-in hotkey using evdev (Linux input subsystem)
 #
@@ -84,6 +92,14 @@ max_duration_secs = 60
 # the other depending on whether you want media paused or only quieter.
 # duck_media = false
 # duck_media_volume_percent = 34
+
+# [audio.dead_input]
+# Stop a recording whose input delivers only exact digital silence (every
+# sample zero) for the first 5 seconds.
+# enabled = true
+# window_ms = 5000
+# threshold_dbfs = -100.0
+
 
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)

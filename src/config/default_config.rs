@@ -98,6 +98,21 @@ max_duration_secs = 60
 # counts once a short burst sustains it, so stray noise spikes don't count.
 # external_trigger_speech_threshold_dbfs = -20.0
 
+# [audio.dead_input]
+# Stop a recording when the selected input delivers only exact digital
+# silence (every sample zero). Any sample that is not zero, however quiet,
+# counts as input, so a noise-gated microphone is only stopped if you say
+# nothing for the whole window. The daemon then plays the error cue and names
+# the source in a desktop notification.
+# enabled = true
+#
+# How long the input may stay at exact zero, after a 100 ms settling period.
+# window_ms = 5000
+#
+# A 100 ms frame at this level (after a 150 Hz high-pass filter) ends the
+# check early as live. It cannot stop a recording.
+# threshold_dbfs = -100.0
+
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)
 # enabled = true
@@ -203,6 +218,14 @@ translate = false
 # own -l setting (default "en"); enable this so "auto" is sent explicitly.
 # remote_send_auto_language = true
 
+# --- Streaming recovery ---
+#
+# Applies to every streaming backend. If a backend errors or never finishes
+# after stop, Voxtype transcribes the capture with the configured batch backend.
+# [streaming_recovery]
+# enabled = true
+# stop_timeout_secs = 30
+
 [output]
 # Primary output mode: "type" or "clipboard"
 # - type: Simulates keyboard input at cursor position (requires ydotool)
@@ -227,6 +250,10 @@ fallback_to_clipboard = true
 #   driver_order = ["wtype", "ydotool", "dotool", "clipboard"]
 # Example: use only ydotool, no fallback:
 #   driver_order = ["ydotool"]
+# Paste mode on Hyprland can send its paste keystroke through Hyprland
+# itself ("hyprland", paste mode only, skipped elsewhere), which fixes
+# Shift+Insert arriving as Shift+Escape in XWayland apps:
+#   driver_order = ["hyprland", "wtype", "eitype", "ydotool"]
 # driver_order = ["wtype", "dotool", "ydotool", "clipboard"]
 
 # Per-language XKB layout variants for multilingual dictation.
@@ -273,10 +300,10 @@ type_delay_ms = 0
 
 # Wait for modifier keys to be released before typing (default: true)
 # Prevents transcribed letters from combining with held modifiers (Ctrl/Alt/
-# Shift/Super) and triggering compositor or application keybindings. Reads
-# modifier state via evdev; requires user to be in the 'input' group.
-# Silently disabled when /dev/input is unreadable, so output proceeds as
-# before in that case.
+# Shift/Super) and triggering compositor or application keybindings. Needs to
+# read /dev/input (the 'input' group); without it the guard is skipped and
+# output proceeds as before. Compositor submaps (voxtype setup compositor)
+# avoid the problem without that access.
 # wait_for_modifier_release = true
 
 # Maximum milliseconds to wait for modifier release before falling back to
@@ -306,6 +333,17 @@ type_delay_ms = 0
 # trim = true         # Strip leading/trailing whitespace from output (default: true)
 # fallback_on_empty = true  # Use original text if command returns empty (default: true)
 # edit_list = false         # Require a JSON edit list and apply only exact matches
+#
+# Or let a chat model do the cleanup instead of a command. WARNING: this adds
+# roughly 2 to 6 seconds to every dictation, and on a timeout or any failure
+# the original text is typed.
+# backend = "omarchy"   # the text model Omarchy runs locally (`omarchy models`);
+#                       # voxtype never starts one
+# backend = "openai"    # any OpenAI-compatible server:
+# url = "http://127.0.0.1:8080/v1"
+# model = "qwen3"
+# api_key_file = "~/.config/llama/key"
+# prompt = "..."        # replaces the built-in cleanup instructions
 
 [output.notification]
 # Show notification when recording starts (hotkey pressed)
@@ -519,6 +557,42 @@ enabled = true
 "#;
 
 /// Return the default config content with platform-appropriate hotkey
+/// What the generated config adds on an Omarchy install, after `[meeting]`:
+/// summaries and Ask use Omarchy's local text model when one is running.
+const OMARCHY_SUMMARY: &str = r#"
+[meeting.summary]
+# Omarchy was found when this file was written, so meeting summaries and
+# `voxtype meeting ask` use the text model Omarchy runs on this machine
+# (`omarchy models`), with no agent consent needed since nothing leaves the
+# machine. Voxtype never starts a model. With none running, they fall back to
+# your coding agent or Ollama as before. Pin a model with omarchy_model.
+backend = "omarchy"
+"#;
+
+/// The config a new installation gets. On an Omarchy install it also
+/// chooses Omarchy's local text model for meeting summaries. Existing
+/// configs are never rewritten, so they keep whatever they chose.
+pub fn generated_config_content(omarchy: bool) -> String {
+    let content = default_config_content();
+    if !omarchy {
+        return content;
+    }
+    const ANCHOR: &str = "voxtype meeting start`, the tray, or Voxtype Meetings.\nenabled = true\n";
+    match content.find(ANCHOR) {
+        Some(at) => {
+            let end = at + ANCHOR.len();
+            format!("{}{}{}", &content[..end], OMARCHY_SUMMARY, &content[end..])
+        }
+        None => content,
+    }
+}
+
+/// The config written by `voxtype setup`, deciding Omarchy by its public
+/// commands (`omarchy-models` or `omarchy`).
+pub fn new_config_content() -> String {
+    generated_config_content(crate::llm::omarchy::is_omarchy_install())
+}
+
 pub fn default_config_content() -> String {
     #[cfg(target_os = "macos")]
     {
@@ -546,6 +620,38 @@ mod tests {
     use crate::text::TextProcessor;
 
     #[test]
+    fn an_omarchy_install_gets_omarchy_summaries_in_a_new_config() {
+        let config: Config = toml::from_str(&generated_config_content(true))
+            .expect("the Omarchy template must be valid TOML");
+        assert_eq!(config.meeting.summary.backend, "omarchy");
+        assert!(config.meeting.enabled);
+        assert!(config.meeting.summary.llm().is_some());
+        // Cleanup through the model stays off unless chosen.
+        assert!(config.output.active_post_process().is_none());
+
+        let elsewhere: Config = toml::from_str(&generated_config_content(false)).unwrap();
+        assert_eq!(elsewhere.meeting.summary.backend, "disabled");
+        assert_eq!(generated_config_content(false), default_config_content());
+    }
+
+    /// An existing config is never rewritten: one without the key keeps
+    /// the old default, on Omarchy or not.
+    #[test]
+    fn an_existing_config_keeps_its_summary_backend() {
+        for existing in [
+            "[meeting]\nenabled = true\n",
+            "[meeting.summary]\nbackend = \"local\"\n",
+            "",
+        ] {
+            let config: Config = toml::from_str(existing).unwrap();
+            assert_ne!(config.meeting.summary.backend, "omarchy", "{existing}");
+        }
+        let config: Config = toml::from_str("[meeting.summary]\nbackend = \"local\"\n").unwrap();
+        assert_eq!(config.meeting.summary.backend, "local");
+        assert!(config.meeting.summary.llm().is_none());
+    }
+
+    #[test]
     fn generated_config_enables_conservative_first_run_features() {
         let config: Config = toml::from_str(&default_config_content())
             .expect("the generated config template must be valid TOML");
@@ -569,6 +675,9 @@ mod tests {
         assert!(!config.history.paused);
         assert!(!config.history.record_window_title);
         assert_eq!(config.history.retention_days, 30);
+        assert!(config.audio.dead_input.enabled);
+        assert_eq!(config.audio.dead_input.window_ms, 5_000);
+        assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
     }
 
     #[test]
@@ -588,6 +697,9 @@ mod tests {
         assert!(!config.meeting.enabled);
         // Same reason: history must never start on an upgrade.
         assert!(!config.history.enabled);
+        assert!(config.audio.dead_input.enabled);
+        assert_eq!(config.audio.dead_input.window_ms, 5_000);
+        assert_eq!(config.audio.dead_input.threshold_dbfs, -100.0);
     }
 
     #[test]

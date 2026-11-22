@@ -224,6 +224,7 @@ fn install_backend_label(inv: &setup::binary::Inventory) -> String {
     } else if let Some(b) = setup::gpu::detect_current_backend() {
         match b {
             setup::gpu::Backend::Cpu => "CPU (legacy)",
+            setup::gpu::Backend::Baseline => "CPU (baseline x86-64-v2)",
             setup::gpu::Backend::Native => "CPU (native)",
             setup::gpu::Backend::Avx2 => "CPU (AVX2)",
             setup::gpu::Backend::Avx512 => "CPU (AVX-512)",

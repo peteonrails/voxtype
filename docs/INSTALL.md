@@ -28,16 +28,19 @@ This guide covers installing Voxtype on Linux and macOS.
 
 - **Linux:** any desktop. Optimized for Wayland, works on X11.
 - **macOS:** Apple Silicon (arm64), macOS 13 Ventura or later.
-- Architectures: x86_64 (with AVX2) and aarch64 on Linux; arm64 on macOS.
+- Architectures: x86_64 (x86-64-v2 or newer) and aarch64 on Linux; arm64 on macOS.
 
 ### CPU (prebuilt Linux binaries)
 
-Prebuilt binaries target the **x86-64-v3 baseline**: AVX2, FMA, BMI1, BMI2, F16C, MOVBE. Supported:
+The minimum for every prebuilt x86_64 binary is **x86-64-v2**: SSE4.2, POPCNT, SSSE3 and CMPXCHG16B. That means Intel Nehalem (2008) or newer, or AMD Bulldozer (2011) or newer. Intel Core 2 and older, and AMD CPUs before Bulldozer, are below this floor and no prebuilt binary runs on them, the OSD and audio bridge included.
 
-- Intel Haswell (2013) and newer
-- AMD Excavator (2015), Ryzen (any generation), EPYC
+| Binaries | Built for | Runs on |
+|----------|-----------|---------|
+| `baseline` daemon, OSD (`voxtype-osd*`), meetings window, audio bridge | x86-64-v2 | Nehalem / Bulldozer and newer |
+| `avx2`, `vulkan`, `onnx-avx2` and the GPU ONNX variants | Haswell (AVX2, FMA, BMI1/2) | Intel Haswell (2013) and newer, AMD Excavator (2015), any Ryzen or EPYC |
+| `avx512`, `onnx-avx512` | AVX-512 | CPUs with AVX-512F |
 
-Older CPUs need to [build from source](#build-from-source) with `-C target-cpu=native`. Voxtype installs a SIGILL handler at startup that prints a helpful message instead of a raw "Illegal instruction" crash when the CPU is too old.
+Packages pick the right daemon variant for your CPU. On a CPU with SSE4.2 but no AVX2 (Ivy Bridge, Sandy Bridge, early Atom), that is the `baseline` build. Below x86-64-v2, [build from source](#build-from-source) with `-C target-cpu=native`. Voxtype installs a SIGILL handler at startup that prints which case you hit instead of a raw "Illegal instruction" crash.
 
 ### glibc (Linux .deb and .rpm)
 
@@ -55,7 +58,7 @@ Older distros (Ubuntu 22.04, Debian Bookworm, Fedora 39) can [build from source]
 | Component | Required? | Purpose |
 |-----------|-----------|---------|
 | PipeWire (with `pipewire-alsa`) or PulseAudio | Yes | Audio capture |
-| `input` group membership | Yes (for evdev hotkeys) | Detecting hotkeys outside the compositor |
+| `input` group membership | No (only for the built-in evdev hotkey) | Lets voxtype read the keyboard itself. It lets every program read every keystroke, so prefer compositor keybindings ([trade-off](USER_MANUAL.md#the-input-group-trade-off)) |
 | `wtype` | Recommended (Wayland) | Best Unicode/CJK typing support |
 | `dotool` | Recommended (KDE/GNOME Wayland) | Typing on compositors that don't speak the virtual-keyboard protocol |
 | `ydotool` | Fallback (X11/TTY) | Requires a daemon |
@@ -279,7 +282,7 @@ These binaries are CPU-only. No CUDA, MIGraphX, or Vulkan support on
 arm64 because the Jetson CUDA toolchain is awkward and there
 is no mainstream consumer arm64 hardware with Vulkan GPUs yet.
 
-Once installed, the rest of the setup (input group, models, hotkey)
+Once installed, the rest of the setup (models, keybinding)
 is the same as on x86_64. Skip to [Post-Install Setup](#post-install-setup).
 
 If you run into issues, please file a GitHub issue with your hardware
@@ -357,21 +360,11 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 > Most settings can be configured interactively with `voxtype configure` (or by searching for "Voxtype Configuration" in Walker, fuzzel, rofi, KRunner, or GNOME Activities). The steps below set up the system-level pieces the TUI can't change for you.
 
-### 1. Add yourself to the input group
+### 1. Bind a key to `voxtype record`
 
-For kernel-level hotkey detection via evdev:
+Bind `voxtype record start` and `voxtype record stop` (push-to-talk) or `voxtype record toggle` in your compositor or desktop, and set `[hotkey] enabled = false`. Instructions for each desktop are in the [User Manual](USER_MANUAL.md#compositor-keybindings). This needs no extra permissions.
 
-```bash
-sudo usermod -aG input $USER
-```
-
-Log out and back in for the group change to take effect. Verify:
-
-```bash
-groups | grep input
-```
-
-If you only use compositor keybindings (Hyprland, Sway, River, KDE custom shortcuts) you can skip this step.
+The built-in evdev hotkey is a fallback for desktops where nothing can run `voxtype record`. It needs `input` group membership, which lets every program you run read every keystroke. Don't add it on Hyprland or Omarchy, which removes users from the group on purpose; see [The `input` group trade-off](USER_MANUAL.md#the-input-group-trade-off).
 
 ### 2. Download a Whisper model
 
@@ -502,7 +495,7 @@ voxtype setup
 
 Checks:
 
-- [x] User in `input` group (if evdev hotkey is enabled)
+- [x] Keyboard access for the built-in hotkey (only if it is enabled)
 - [x] Audio source accessible
 - [x] Typing backend present (`wtype` / `dotool` / `ydotool` / clipboard)
 - [x] Whisper model downloaded
@@ -560,11 +553,7 @@ systemctl --user daemon-reload
 
 For the full troubleshooting guide see [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Common quick fixes:
 
-**"Cannot open input device"** — User isn't in `input` group, or hasn't logged out/in since adding:
-
-```bash
-sudo usermod -aG input $USER  # then log out and back in
-```
+**"Cannot open input device"** or "built-in hotkey unavailable": the built-in evdev hotkey can't read the keyboard. Bind `voxtype record start/stop` in your compositor instead and set `[hotkey] enabled = false` ([how](USER_MANUAL.md#compositor-keybindings)). Granting the `input` group fixes the message too, but lets every program read every keystroke; see [the trade-off](USER_MANUAL.md#the-input-group-trade-off).
 
 **Text isn't typing (Wayland)** — Install `wtype` for wlroots compositors, or `dotool` for KDE/GNOME:
 
@@ -584,7 +573,7 @@ sudo apt install pipewire-alsa
 sudo voxtype setup gpu --enable
 ```
 
-**SIGILL ("Illegal instruction") on startup** — Your CPU is older than our Haswell baseline (AVX2 + FMA + BMI1/2). Build from source with `RUSTFLAGS="-C target-cpu=native"` or open an issue with your `lscpu` output.
+**SIGILL ("Illegal instruction") on startup**: the message says which case you hit. If the CPU has no AVX2, switch to the baseline build with `sudo voxtype setup variant --to voxtype-baseline`. If it says the CPU is below x86-64-v2 (no SSE4.2 or POPCNT, such as a Core 2), no prebuilt binary runs on it: build from source with `RUSTFLAGS="-C target-cpu=native"`, or open an issue with your `lscpu` output. See [CPU](#cpu-prebuilt-linux-binaries).
 
 ---
 

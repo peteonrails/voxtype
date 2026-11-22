@@ -7,8 +7,8 @@
 //! meeting folder.
 
 use super::{
-    build_context, choose_summary_backend, meeting_folder, AssistantError, AssistantSettings,
-    Backend, Overrides, SummaryBackend,
+    build_context, choose_summary_backend, meeting_folder, summary_backend_without_llm,
+    AssistantError, AssistantSettings, Backend, Overrides, SummaryBackend,
 };
 use crate::meeting::data::{MeetingData, MeetingId, MeetingSummary};
 use crate::meeting::storage::{MeetingStorage, StorageConfig};
@@ -72,11 +72,28 @@ fn error_for_log(error: &AssistantError) -> String {
 /// model, but only when `[meeting.summary] backend = "local"` says the user
 /// set it up, and never the other way: the local model failing never sends
 /// the transcript to an agent.
+///
+/// The chosen `omarchy` or `openai` model failing (stopped mid-request, a
+/// refused key) hands over to what the summary would have used without it,
+/// the same as when it was not running to begin with.
 fn run_summary(
     settings: &AssistantSettings,
     meeting: &MeetingData,
     backend: &SummaryBackend,
+    overrides: &Overrides,
 ) -> Result<(MeetingSummary, SummaryBackend, Option<String>), AssistantError> {
+    if let SummaryBackend::Assistant(b @ Backend::Llm(_)) = backend {
+        return match summarize_with(settings, meeting, b) {
+            Ok(s) => Ok((s, backend.clone(), None)),
+            Err(e @ (AssistantError::EmptyTranscript | AssistantError::Storage(_))) => Err(e),
+            Err(e) => {
+                tracing::warn!("{}; summarizing the usual way instead", error_for_log(&e));
+                let fallback = summary_backend_without_llm(settings, overrides)?;
+                run_summary(settings, meeting, &fallback, overrides)
+                    .map(|(s, used, _)| (s, used, Some(b.display_name())))
+            }
+        };
+    }
     match backend {
         SummaryBackend::Legacy(kind) => {
             summarize_legacy(settings, meeting, kind).map(|s| (s, backend.clone(), None))
@@ -137,7 +154,7 @@ pub fn summarize_meeting(
         .map_err(|e| AssistantError::Storage(format!("Failed to load meeting: {e}")))?;
 
     let backend = choose_summary_backend(settings, overrides)?;
-    let (mut summary, used, fell_back_from) = run_summary(settings, &meeting, &backend)?;
+    let (mut summary, used, fell_back_from) = run_summary(settings, &meeting, &backend, overrides)?;
     crate::meeting::actions::resolve_dues(&mut summary, &meeting.metadata);
     let agent_name = used.display_name(settings);
 
@@ -631,5 +648,70 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code(), "empty_transcript");
         assert_eq!(sb.claude_calls(), 0);
+    }
+
+    /// Omarchy's model writes the summary when it is chosen and running,
+    /// ahead of an allowed agent.
+    #[test]
+    fn omarchy_summarizes_when_running() {
+        use crate::llm::fake_server::{FakeServer, Reply};
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let server = FakeServer::start(vec![Reply::stream(&[REPLY])]);
+        let mut settings = sb.settings();
+        sb.use_omarchy(&mut settings, "active", &server.base_url());
+
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(outcome.agent, "omarchy:qwen-test");
+        assert_eq!(outcome.agent_name, "Omarchy (qwen-test)");
+        assert_eq!(
+            outcome.summary.summary,
+            "Steve and Pete agreed to ship Friday."
+        );
+        assert!(outcome.fell_back_from.is_none());
+        assert_eq!(sb.claude_calls(), 0);
+    }
+
+    /// The model failing mid-request hands the summary to what would have
+    /// written it without Omarchy: here the allowed agent.
+    #[test]
+    fn a_failing_omarchy_model_falls_back_to_the_agent() {
+        use crate::llm::fake_server::{FakeServer, Reply};
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], REPLY);
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let server = FakeServer::start(vec![Reply::status(
+            500,
+            r#"{"error":{"message":"out of memory"}}"#,
+        )]);
+        let mut settings = sb.settings();
+        sb.use_omarchy(&mut settings, "active", &server.base_url());
+
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(outcome.agent, "claude");
+        assert_eq!(
+            outcome.fell_back_from.as_deref(),
+            Some("Omarchy (qwen-test)")
+        );
+        assert_eq!(sb.claude_calls(), 1);
+    }
+
+    /// With no Omarchy model running, the summary goes the usual way.
+    #[test]
+    fn no_omarchy_model_summarizes_the_usual_way() {
+        let sb = Sandbox::new();
+        sb.fake_claude();
+        sb.allow("claude");
+        sb.claude_replies(&[], REPLY);
+        sb.meeting("Sync", &[(41, "Remote", "We ship on Friday.")]);
+        let mut settings = sb.settings();
+        sb.use_omarchy(&mut settings, "inactive", "http://127.0.0.1:9/v1");
+        let outcome = summarize(&settings, &sb).unwrap();
+        assert_eq!(outcome.agent, "claude");
+        assert!(outcome.fell_back_from.is_none());
     }
 }

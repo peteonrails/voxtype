@@ -408,6 +408,7 @@ mod tests {
                 consent_file: self.dir.path().join("consent.json"),
                 omarchy_command: "omarchy-default-agent".into(),
                 codex_home: self.dir.path().join("codex-home"),
+                omarchy: crate::llm::omarchy::OmarchyEnv::disabled(),
             }
         }
 

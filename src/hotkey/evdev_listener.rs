@@ -6,7 +6,9 @@
 //! Uses inotify to detect device changes (hotplug, screenlock, suspend/resume)
 //! and automatically re-enumerates devices when needed.
 //!
-//! The user must be in the 'input' group to access /dev/input/* devices.
+//! Reading /dev/input/* needs the `input` group, a grant with a real security
+//! cost (any program can then read every keystroke), so this listener is the
+//! fallback to compositor keybindings, not the default recommendation.
 
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
@@ -976,6 +978,45 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         "KEY_ESC" | "KEY_ESCAPE" => Key::KEY_ESC,
         "KEY_GRAVE" | "KEY_BACKTICK" => Key::KEY_GRAVE,
 
+        // Alphanumeric keys (from evdev scancodes: letters follow keyboard
+        // layout order, digits are KEY_1..KEY_9 then KEY_0)
+        "KEY_1" => Key::KEY_1,
+        "KEY_2" => Key::KEY_2,
+        "KEY_3" => Key::KEY_3,
+        "KEY_4" => Key::KEY_4,
+        "KEY_5" => Key::KEY_5,
+        "KEY_6" => Key::KEY_6,
+        "KEY_7" => Key::KEY_7,
+        "KEY_8" => Key::KEY_8,
+        "KEY_9" => Key::KEY_9,
+        "KEY_0" => Key::KEY_0,
+        "KEY_Q" => Key::KEY_Q,
+        "KEY_W" => Key::KEY_W,
+        "KEY_E" => Key::KEY_E,
+        "KEY_R" => Key::KEY_R,
+        "KEY_T" => Key::KEY_T,
+        "KEY_Y" => Key::KEY_Y,
+        "KEY_U" => Key::KEY_U,
+        "KEY_I" => Key::KEY_I,
+        "KEY_O" => Key::KEY_O,
+        "KEY_P" => Key::KEY_P,
+        "KEY_A" => Key::KEY_A,
+        "KEY_S" => Key::KEY_S,
+        "KEY_D" => Key::KEY_D,
+        "KEY_F" => Key::KEY_F,
+        "KEY_G" => Key::KEY_G,
+        "KEY_H" => Key::KEY_H,
+        "KEY_J" => Key::KEY_J,
+        "KEY_K" => Key::KEY_K,
+        "KEY_L" => Key::KEY_L,
+        "KEY_Z" => Key::KEY_Z,
+        "KEY_X" => Key::KEY_X,
+        "KEY_C" => Key::KEY_C,
+        "KEY_V" => Key::KEY_V,
+        "KEY_B" => Key::KEY_B,
+        "KEY_N" => Key::KEY_N,
+        "KEY_M" => Key::KEY_M,
+
         // Media keys
         "KEY_MUTE" => Key::KEY_MUTE,
         "KEY_VOLUMEDOWN" => Key::KEY_VOLUMEDOWN,
@@ -1319,6 +1360,11 @@ mod tests {
 
     #[test]
     fn poll_guard_drops_real_torn_down_evdev_device() {
+        if !crate::test_support::real_input_devices_allowed(
+            "poll_guard_drops_real_torn_down_evdev_device",
+        ) {
+            return;
+        }
         use evdev::{uinput::VirtualDevice, AttributeSet};
         use std::thread::sleep;
         use std::time::Duration;
@@ -1420,6 +1466,11 @@ mod tests {
 
     #[test]
     fn synced_fetch_recovers_multiple_held_keys_after_overflow() {
+        if !crate::test_support::real_input_devices_allowed(
+            "synced_fetch_recovers_multiple_held_keys_after_overflow",
+        ) {
+            return;
+        }
         use evdev::{uinput::VirtualDevice, AttributeSet, InputEvent};
         use std::thread::sleep;
         use std::time::Duration;

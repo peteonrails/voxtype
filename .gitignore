@@ -31,6 +31,7 @@
 !tests/fixtures/sensevoice/*.wav
 # The built-in recording announcement ships in the binary
 !assets/sounds/*.wav
+!tests/fixtures/input_guard/*.wav
 
 # Claude Code
 .claude/settings.local.json

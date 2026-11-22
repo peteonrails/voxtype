@@ -391,7 +391,10 @@ impl Default for MeetingDiarizationConfig {
 /// Meeting summary configuration (Phase 5)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingSummaryConfig {
-    /// Summarization backend: "local", "remote", or "disabled"
+    /// Summarization backend: "local" (Ollama), "remote", "omarchy" (the
+    /// text model Omarchy runs locally), "openai" (any OpenAI-compatible
+    /// server), or "disabled". "omarchy" and "openai" answer `meeting ask`
+    /// too when the server is on this machine.
     #[serde(default = "default_summary_backend")]
     pub backend: String,
 
@@ -414,6 +417,25 @@ pub struct MeetingSummaryConfig {
     /// Request timeout in seconds
     #[serde(default = "default_summary_timeout")]
     pub timeout_secs: u64,
+
+    /// Base URL of the OpenAI-compatible server for backend = "openai",
+    /// including `/v1`, e.g. "http://127.0.0.1:8080/v1".
+    #[serde(default)]
+    pub openai_url: Option<String>,
+
+    /// Model id for backend = "openai".
+    #[serde(default)]
+    pub openai_model: Option<String>,
+
+    /// File holding the API key for backend = "openai". The key itself
+    /// never goes in config.toml.
+    #[serde(default)]
+    pub openai_api_key_file: Option<String>,
+
+    /// Omarchy recipe for backend = "omarchy". Unset uses the last started
+    /// text model that is running.
+    #[serde(default)]
+    pub omarchy_model: Option<String>,
 
     /// Summarize each meeting when it stops. Unset means on once an agent
     /// has been allowed (`voxtype meeting assistant allow <agent>`), off
@@ -499,8 +521,38 @@ impl Default for MeetingSummaryConfig {
             remote_endpoint: None,
             remote_api_key: None,
             timeout_secs: default_summary_timeout(),
+            openai_url: None,
+            openai_model: None,
+            openai_api_key_file: None,
+            omarchy_model: None,
             auto: None,
         }
+    }
+}
+
+impl MeetingSummaryConfig {
+    /// The LLM client settings when `backend` is "omarchy" or "openai".
+    pub fn llm(&self) -> Option<crate::llm::LlmConfig> {
+        let provider = crate::llm::Provider::parse(&self.backend)?;
+        let model = match provider {
+            crate::llm::Provider::Omarchy => self.omarchy_model.clone(),
+            crate::llm::Provider::OpenAi => self.openai_model.clone(),
+        };
+        Some(crate::llm::LlmConfig {
+            provider,
+            url: self.openai_url.clone(),
+            model,
+            api_key_file: self
+                .openai_api_key_file
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .map(crate::llm::expand_home),
+            settings: crate::llm::SettingNames {
+                table: "meeting.summary",
+                url: "openai_url",
+                model: "openai_model",
+            },
+        })
     }
 }
 

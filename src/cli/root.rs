@@ -102,6 +102,29 @@ pub struct Cli {
     )]
     pub engine: Option<String>,
 
+    /// Recover lost streaming dictation with the configured batch backend
+    /// (enabled by default). Use --streaming-recovery=false to disable.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        help_heading = "Streaming",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub streaming_recovery: Option<bool>,
+
+    /// Maximum seconds (1-120, built-in default 30) to wait for a streaming
+    /// backend to finish after stop before recovering the dictation.
+    #[arg(
+        long,
+        value_name = "SECS",
+        help_heading = "Streaming",
+        hide_short_help = true,
+        value_parser = clap::value_parser!(u64).range(1..=120)
+    )]
+    pub streaming_stop_timeout_secs: Option<u64>,
+
     /// GGUF checkpoint path for the shared native engine
     #[arg(
         long,
@@ -250,6 +273,17 @@ pub struct Cli {
     )]
     pub soniox_api_key: Option<String>,
 
+    /// Soniox data-residency region of your API key's project: us, eu, jp, in
+    /// (or use VOXTYPE_SONIOX_REGION env var)
+    #[arg(
+        long,
+        value_name = "REGION",
+        value_parser = ["us", "eu", "jp", "in"],
+        help_heading = "Soniox",
+        hide_short_help = true
+    )]
+    pub soniox_region: Option<String>,
+
     // -- Hotkey --
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
@@ -350,6 +384,38 @@ pub struct Cli {
     )]
     pub duck_media_fade_ms: Option<u32>,
 
+    /// Stop a recording when the microphone delivers only exact digital silence
+    #[arg(long, help_heading = "Audio", hide_short_help = true)]
+    pub dead_input_check: bool,
+
+    /// Keep recording even when the microphone delivers only digital silence
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "dead_input_check"
+    )]
+    pub no_dead_input_check: bool,
+
+    /// Milliseconds of all-zero microphone input before the recording is stopped
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Audio",
+        hide_short_help = true
+    )]
+    pub dead_input_window: Option<u32>,
+
+    /// Microphone level, in dBFS, that ends the silent-input check early
+    #[arg(
+        long,
+        value_name = "DBFS",
+        help_heading = "Audio",
+        hide_short_help = true,
+        allow_hyphen_values = true
+    )]
+    pub dead_input_threshold: Option<f32>,
+
     // -- Output (delivery, timing, file output, hooks) --
     /// Force clipboard mode (don't try to type)
     #[arg(long, help_heading = "Output")]
@@ -382,9 +448,14 @@ pub struct Cli {
         long,
         value_name = "DRIVERS",
         help_heading = "Output",
-        long_help = "Output driver order for type mode (comma-separated).\n\
-        Available: wtype, dotool, ydotool, clipboard.\n\
-        Example: --driver=ydotool,wtype,clipboard"
+        long_help = "Output driver order (comma-separated).\n\
+        Available: wtype, eitype, dotool, xdotool, ydotool, clipboard, xclip, hyprland.\n\
+        Paste mode uses the keystroke drivers in this order (wtype, eitype,\n\
+        ydotool, hyprland). hyprland sends the paste keystroke through\n\
+        Hyprland's own dispatcher; it is paste-only and opt-in.\n\
+        Env: VOXTYPE_DRIVER_ORDER\n\
+        Example: --driver=ydotool,wtype,clipboard\n\
+        Example: --paste --driver=hyprland,wtype"
     )]
     pub driver: Option<String>,
 
@@ -575,8 +646,9 @@ pub struct Cli {
         hide_short_help = true,
         long_help = "Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before typing.\n\
         Prevents transcribed text from triggering compositor or application keybindings\n\
-        when the hotkey is still held. Requires user to be in the 'input' group;\n\
-        silently disabled otherwise."
+        when the hotkey is still held. Needs to read /dev/input (the 'input' group);\n\
+        without it the guard is skipped. Compositor submaps (voxtype setup compositor)\n\
+        avoid the problem without that access."
     )]
     pub wait_for_modifier_release: bool,
 
@@ -776,6 +848,123 @@ pub struct Cli {
     #[arg(long, value_name = "MS", help_heading = "VAD", hide_short_help = true)]
     pub vad_min_speech_ms: Option<u32>,
 
+    // -- Local LLM --
+    /// Dictation cleanup backend: command, omarchy or openai (models add ~2-6 s per dictation)
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        env = "VOXTYPE_POST_PROCESS_BACKEND",
+        value_parser = ["command", "omarchy", "openai"],
+        help_heading = "Output",
+        hide_short_help = true,
+        long_help = "Who cleans up each dictation before it is typed ([output.post_process] backend).\n\
+        command (default): the post-process command, as before.\n\
+        omarchy: the text model Omarchy runs on this machine (`omarchy models`). Voxtype\n\
+        never starts one; with none running, the original text is typed.\n\
+        openai: any OpenAI-compatible server (--post-process-url, --post-process-model).\n\
+        WARNING: the model backends add roughly 2 to 6 seconds to every dictation.\n\
+        On a timeout or any failure the original text is typed."
+    )]
+    pub post_process_backend: Option<String>,
+
+    /// Model for the post-process model backend (Omarchy recipe or model id)
+    #[arg(
+        long,
+        value_name = "MODEL",
+        env = "VOXTYPE_POST_PROCESS_MODEL",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_model: Option<String>,
+
+    /// Server URL for the openai post-process backend, including /v1
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "VOXTYPE_POST_PROCESS_URL",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_url: Option<String>,
+
+    /// File holding the API key for the openai post-process backend
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "VOXTYPE_POST_PROCESS_API_KEY_FILE",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_api_key_file: Option<String>,
+
+    /// Instructions for the post-process model backend (replaces the built-in prompt)
+    #[arg(
+        long,
+        value_name = "TEXT",
+        env = "VOXTYPE_POST_PROCESS_PROMPT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_prompt: Option<String>,
+
+    /// Meeting summary backend: disabled, local, remote, omarchy, openai
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        env = "VOXTYPE_SUMMARY_BACKEND",
+        value_parser = ["disabled", "agent", "local", "remote", "omarchy", "openai"],
+        help_heading = "Meeting",
+        hide_short_help = true,
+        long_help = "Backend for meeting summaries ([meeting.summary] backend).\n\
+        omarchy: the text model Omarchy runs on this machine. It also answers\n\
+        `meeting ask` with no agent consent, since nothing leaves the machine.\n\
+        Voxtype never starts a model; with none running, summaries and asks fall\n\
+        back to your agent or Ollama as before.\n\
+        openai: any OpenAI-compatible server (--summary-openai-url, --summary-openai-model).\n\
+        It answers asks only when the server is on this machine."
+    )]
+    pub summary_backend: Option<String>,
+
+    /// Omarchy recipe for the omarchy summary backend (default: last started)
+    #[arg(
+        long,
+        value_name = "RECIPE",
+        env = "VOXTYPE_SUMMARY_OMARCHY_MODEL",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_omarchy_model: Option<String>,
+
+    /// Server URL for the openai summary backend, including /v1
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "VOXTYPE_SUMMARY_OPENAI_URL",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_openai_url: Option<String>,
+
+    /// Model id for the openai summary backend
+    #[arg(
+        long,
+        value_name = "MODEL",
+        env = "VOXTYPE_SUMMARY_OPENAI_MODEL",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_openai_model: Option<String>,
+
+    /// File holding the API key for the openai summary backend
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "VOXTYPE_SUMMARY_OPENAI_API_KEY_FILE",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_openai_api_key_file: Option<String>,
+
     // -- History --
     /// Record dictations to history. Use --history=false to turn it off for
     /// this run.
@@ -863,6 +1052,27 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    /// build.rs compiles this file without the crate, so the flag lists its
+    /// regions literally. Keep it in step with the config's list.
+    #[test]
+    fn soniox_region_flag_matches_config_regions() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "soniox_region")
+            .expect("--soniox-region");
+        let values: Vec<String> = arg
+            .get_possible_values()
+            .iter()
+            .map(|v| v.get_name().to_string())
+            .collect();
+        assert_eq!(values, crate::config::SONIOX_REGIONS);
+        let cli = Cli::parse_from(["voxtype", "--soniox-region", "eu"]);
+        assert_eq!(cli.soniox_region.as_deref(), Some("eu"));
+        assert!(Cli::try_parse_from(["voxtype", "--soniox-region", "mars"]).is_err());
+    }
 
     #[test]
     fn keep_failed_recordings_flags_parse_and_conflict() {
@@ -1020,6 +1230,39 @@ mod tests {
                 assert_eq!(engine, Some("whisper".to_string()));
             }
             _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn streaming_recovery_flags_parse() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--streaming-recovery=false",
+            "--streaming-stop-timeout-secs",
+            "10",
+        ]);
+        assert_eq!(cli.streaming_recovery, Some(false));
+        assert_eq!(cli.streaming_stop_timeout_secs, Some(10));
+
+        let cli = Cli::parse_from(["voxtype", "--streaming-recovery"]);
+        assert_eq!(cli.streaming_recovery, Some(true));
+        assert_eq!(cli.streaming_stop_timeout_secs, None);
+
+        let cli = Cli::parse_from(["voxtype"]);
+        assert_eq!(cli.streaming_recovery, None);
+    }
+
+    #[test]
+    fn streaming_stop_timeout_matches_config_range() {
+        for value in ["1", "120"] {
+            let cli = Cli::parse_from(["voxtype", "--streaming-stop-timeout-secs", value]);
+            assert_eq!(cli.streaming_stop_timeout_secs, value.parse().ok());
+        }
+        for value in ["0", "121"] {
+            assert!(
+                Cli::try_parse_from(["voxtype", "--streaming-stop-timeout-secs", value]).is_err(),
+                "--streaming-stop-timeout-secs {value} was accepted"
+            );
         }
     }
 }
